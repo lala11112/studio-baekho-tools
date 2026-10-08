@@ -310,7 +310,7 @@ export function App() {
             />
           </button>
           <div className="version">
-            PROTOTYPE <span>v0.4.2</span>
+            PROTOTYPE <span>v0.5.0</span>
           </div>
         </div>
       </aside>
@@ -676,18 +676,20 @@ export function App() {
                           ))}
                       </select>
                     </Field>
-                    <Field label="후보 수">
-                      <select
-                        value={count}
-                        onChange={(e) => setCount(+e.target.value)}
-                      >
-                        {[1, 2, 3, 4].map((c) => (
-                          <option key={c} value={c}>
-                            {c}개
-                          </option>
-                        ))}
-                      </select>
-                    </Field>
+                    {!edit && (
+                      <Field label="후보 수">
+                        <select
+                          value={count}
+                          onChange={(e) => setCount(+e.target.value)}
+                        >
+                          {[1, 2, 3, 4].map((c) => (
+                            <option key={c} value={c}>
+                              {c}개
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                    )}
                   </div>
                   <div className="note">
                     <ShieldCheck size={16} />
@@ -707,7 +709,7 @@ export function App() {
                         prompt,
                         model,
                         size,
-                        count,
+                        count: edit ? 1 : count,
                         sourceId: edit ? selectedImage?.id : undefined,
                       })
                     }
@@ -1096,18 +1098,9 @@ export function App() {
                             </select>
                           </Field>
                           <div className="two-col">
-                            <Field label="후보 수">
-                              <select
-                                value={count}
-                                onChange={(e) => setCount(+e.target.value)}
-                              >
-                                {[1, 2, 3, 4].map((c) => (
-                                  <option key={c} value={c}>
-                                    {c}개
-                                  </option>
-                                ))}
-                              </select>
-                            </Field>
+                            <div className="generation-detail">
+                              모델 1개<small>프롬프트로 수정·리롤</small>
+                            </div>
                             <div className="generation-detail">
                               20k faces<small>PBR · standard</small>
                             </div>
@@ -1121,7 +1114,7 @@ export function App() {
                                 prompt: part.prompt,
                                 model: model3d,
                                 faceLimit: 20000,
-                                count,
+                                count: 1,
                                 partId: part.id,
                               })
                             }

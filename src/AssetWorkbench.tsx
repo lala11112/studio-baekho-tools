@@ -27,7 +27,9 @@ import type {
   WorkbenchRequest,
   WorkbenchRole,
   WorkbenchStep,
+  WorkbenchView,
 } from "../shared/workbench";
+import { WORKBENCH_VIEWS } from "../shared/workbench";
 import type { ProductionRun } from "../shared/production";
 import { workbenchWarningMessages } from "../shared/workbench-checks";
 import { Viewport } from "./Viewport";
@@ -35,7 +37,7 @@ import "./workbench.css";
 
 const pages = [
   { id: "concept", title: "이미지", detail: "4장 중 선택" },
-  { id: "parts", title: "파츠 모델", detail: "분리 · 4개씩 선택" },
+  { id: "parts", title: "파츠 모델", detail: "4방향 확인 · 1개씩 수정" },
   { id: "surface", title: "UV · 텍스처", detail: "선택한 파츠" },
   { id: "assembly", title: "조립 · 수정", detail: "Blender + Astra" },
   { id: "rig", title: "리깅", detail: "오브젝트별 설정" },
@@ -45,6 +47,12 @@ const pages = [
 type Page = (typeof pages)[number]["id"];
 const roles: WorkbenchRole[] = ["head", "hair", "body"];
 const roleLabels = { head: "머리", hair: "머리카락", body: "몸통" };
+const viewLabels: Record<WorkbenchView, string> = {
+  front: "정면",
+  back: "후면",
+  left: "왼쪽",
+  right: "오른쪽",
+};
 const categoryLabels = {
   body: "몸체 · 기본 연결",
   clothing: "옷",
@@ -205,6 +213,13 @@ export function AssetWorkbench({
     "reference",
   );
   const [role, setRole] = useState<WorkbenchRole>("head");
+  const [separationRole, setSeparationRole] = useState<WorkbenchRole | "all">(
+    "all",
+  );
+  const [separationView, setSeparationView] = useState<WorkbenchView | "all">(
+    "all",
+  );
+  const [surfaceRole, setSurfaceRole] = useState<WorkbenchRole | "all">("all");
   const [provider, setProvider] = useState<"gpt" | "tripo">(
     w?.jobs.find((j) => j.step === "concept")?.request.provider ?? "gpt",
   );
@@ -212,16 +227,17 @@ export function AssetWorkbench({
     w?.jobs.find((j) => j.step === "concept")?.request.prompt ?? "",
   );
   const [separationPrompt, setSeparationPrompt] = useState(
-    "원본 캐릭터의 외형을 유지하고 머리, 머리카락, 몸통을 분리해 주세요. 몸통에는 의상을 포함해 주세요.",
+    "원본 캐릭터의 외형을 유지하고 머리, 머리카락, 몸통을 정면·후면·왼쪽·오른쪽 이미지로 분리해 주세요. 몸통에는 의상을 포함해 주세요.",
   );
-  const [modelPrompt, setModelPrompt] = useState(
-    "선택한 파츠 이미지의 비율과 실루엣을 유지해 주세요.",
-  );
+  const [modelPrompt, setModelPrompt] = useState("");
+  const [modelEditScope, setModelEditScope] = useState<"all" | "part">("all");
+  const [modelEditTarget, setModelEditTarget] = useState("");
   const [surfacePrompt, setSurfacePrompt] = useState(
     "원본 캐릭터 이미지와 색상, 스타일을 맞춰 주세요.",
   );
   const [editPrompt, setEditPrompt] = useState("");
   const [rigPrompt, setRigPrompt] = useState("");
+  const [unityPrompt, setUnityPrompt] = useState("");
   const [motion, setMotion] = useState(
     w?.jobs.find((j) => j.step === "reference" || j.step === "animation")
       ?.request.motion ?? "오른손을 들어 인사하기",
@@ -268,6 +284,10 @@ export function AssetWorkbench({
     setCompareId("");
     scrollHost.current?.scrollTo({ top: 0 });
   }, [page, p.id]);
+  useEffect(() => {
+    setModelEditScope("all");
+    setModelEditTarget("");
+  }, [role]);
   useEffect(
     () => setApproved(false),
     [
@@ -278,6 +298,8 @@ export function AssetWorkbench({
       prompt,
       separationPrompt,
       modelPrompt,
+      modelEditScope,
+      modelEditTarget,
       surfacePrompt,
       motion,
       motionPrompt,
@@ -288,17 +310,39 @@ export function AssetWorkbench({
       studioLimit,
       polygonCount,
       role,
+      separationRole,
+      separationView,
+      surfaceRole,
+      viewJobId,
     ],
   );
 
   const jobs = w?.jobs ?? [];
   const currentInputs = (job?: WorkbenchJob) =>
     !!job &&
-    Object.entries(job.dependencies).every(
-      ([key, value]) =>
-        w?.selections[key]?.jobId === value.jobId &&
-        w.selections[key]?.candidateId === value.candidateId,
-    );
+    Object.entries(job.dependencies).every(([key, value]) => {
+      const current = w?.selections[key];
+      if (
+        current?.jobId === value.jobId &&
+        current.candidateId === value.candidateId
+      )
+        return true;
+      if (job.step !== "model" || key !== "separate" || !current) return false;
+      const images = (selection: { jobId: string; candidateId: string }) =>
+        jobs
+          .find((j) => j.id === selection.jobId)
+          ?.candidates.find((c) => c.id === selection.candidateId)
+          ?.artifacts.filter(
+            (a) => a.kind === "image" && a.role === job.request.role,
+          )
+          .map((a) => `${a.view ?? "front"}:${a.sha256}`)
+          .sort() ?? [];
+      const previous = images(value),
+        next = images(current);
+      return (
+        previous.length > 0 && JSON.stringify(previous) === JSON.stringify(next)
+      );
+    });
   const active =
     jobs.find((j) => j.id === w?.activeJobId && j.status === "running") ??
     jobs.find((j) => j.status === "running");
@@ -311,6 +355,22 @@ export function AssetWorkbench({
   };
   const concept = selection("concept");
   const separated = selection("separate");
+  const fourViewImagesReady = (artifacts: WorkbenchArtifact[] = []) =>
+    roles.every((r) =>
+      WORKBENCH_VIEWS.every((v) =>
+        artifacts.some(
+          (a) =>
+            a.kind === "image" && a.role === r && (a.view ?? "front") === v,
+        ),
+      ),
+    );
+  const separationReady =
+    !!separated && fourViewImagesReady(separated.candidate.artifacts);
+  const canViewModels =
+    separationReady ||
+    jobs.some(
+      (j) => j.step === "model" && j.status === "review" && currentInputs(j),
+    );
   const allModels = roles.every((r) => !!selection(`model:${r}`));
   const surface = selection("surface");
   const assembly = selection("assembly");
@@ -353,6 +413,64 @@ export function AssetWorkbench({
   const viewingCurrent = currentInputs(viewing);
   const editBase =
     viewing?.status === "review" && viewingCurrent ? viewing : undefined;
+  const separationBase =
+    step === "separate"
+      ? [viewing, ...stageJobs].find(
+          (j) =>
+            j &&
+            j.status !== "running" &&
+            currentInputs(j) &&
+            [...j.candidates, ...(j.draftCandidates ?? [])].some((c) =>
+              c.artifacts.some(
+                (a) =>
+                  a.kind === "image" && roles.includes(a.role as WorkbenchRole),
+              ),
+            ),
+        )
+      : undefined;
+  const baseSeparationImages = separationBase
+    ? [
+        ...separationBase.candidates,
+        ...(separationBase.draftCandidates ?? []),
+      ].flatMap((c) =>
+        c.artifacts.filter(
+          (a) => a.kind === "image" && roles.includes(a.role as WorkbenchRole),
+        ),
+      )
+    : [];
+  const presentSeparationPairs = new Set(
+    baseSeparationImages.map((a) => `${a.role}:${a.view ?? "front"}`),
+  );
+  const missingSeparationCount = 12 - presentSeparationPairs.size;
+  const rerollSeparationCount = separationBase
+    ? (separationRole === "all" ? 3 : 1) * (separationView === "all" ? 4 : 1)
+    : 12;
+  const modelEditBase =
+    editBase?.candidates.length === 1
+      ? editBase
+      : selection(`model:${role}`)?.job;
+  const surfaceHistoryAvailable =
+    step === "surface" &&
+    stageJobs.some((j) => j.status === "review" && j.candidates.length === 1);
+  const surfaceEditBase =
+    step === "surface"
+      ? [viewing, surface?.job, ...stageJobs].find(
+          (j) =>
+            j?.step === "surface" &&
+            j.status === "review" &&
+            j.candidates.length === 1 &&
+            (currentInputs(j) ||
+              (surfaceRole !== "all" &&
+                Object.entries(j.dependencies).every(
+                  ([slot, selection]) =>
+                    slot === `model:${surfaceRole}` ||
+                    slot === "separate" ||
+                    (w?.selections[slot]?.jobId === selection.jobId &&
+                      w.selections[slot]?.candidateId ===
+                        selection.candidateId),
+                ))),
+        )
+      : undefined;
   const candidate = viewing?.candidates[0];
   const draftImages =
     step === "separate" && !viewing?.candidates.length
@@ -454,6 +572,78 @@ export function AssetWorkbench({
       </div>
     );
   }
+  function separationGallery(images: WorkbenchArtifact[], draft = false) {
+    const count = new Set(
+      images
+        .filter((a) => roles.includes(a.role as WorkbenchRole))
+        .map((a) => `${a.role}:${a.view ?? "front"}`),
+    ).size;
+    return (
+      <div
+        className="wb-separation-matrix"
+        data-testid="workbench-separation-views"
+      >
+        <div data-testid={draft ? "workbench-draft-photos" : undefined}>
+          <p className="wb-draft-caption">
+            파츠별 4방향 이미지 · {count}/12장 준비됨
+          </p>
+          <p className="wb-muted">
+            머리·머리카락·몸통의 정면, 후면, 왼쪽, 오른쪽을 확인하세요. 저장된
+            사진은 유지하면서 없는 방향만 채우거나, 특정 사진에 수정 지시를 내릴
+            수 있습니다.
+          </p>
+          {roles.map((r) => (
+            <section
+              className="wb-separation-role"
+              key={r}
+              data-testid={`workbench-draft-${r}`}
+            >
+              <h3>{roleLabels[r]}</h3>
+              <div className="wb-four-views">
+                {WORKBENCH_VIEWS.map((v) => {
+                  const image = images.find(
+                    (a) => a.role === r && (a.view ?? "front") === v,
+                  );
+                  return (
+                    <div
+                      className={`wb-view-card ${image ? "ready" : "missing"}`}
+                      key={v}
+                      data-testid={`workbench-separation-${r}-${v}`}
+                    >
+                      {image ? (
+                        <img
+                          src={url(image)}
+                          alt={`${roleLabels[r]} ${viewLabels[v]} 분리 이미지`}
+                        />
+                      ) : (
+                        <div className="wb-draft-missing">
+                          <ImagePlus size={22} />
+                          <span>아직 없음</span>
+                        </div>
+                      )}
+                      <div className="wb-view-caption">
+                        <strong>{viewLabels[v]}</strong>
+                        <button
+                          disabled={locked || !viewingCurrent}
+                          data-testid={`workbench-edit-${r}-${v}`}
+                          onClick={() => {
+                            setSeparationRole(r);
+                            setSeparationView(v);
+                          }}
+                        >
+                          {image ? "수정" : "선택"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+        </div>
+      </div>
+    );
+  }
   function resultGallery(c?: WorkbenchCandidate) {
     const images = c?.artifacts.filter((a) => a.kind === "image") ?? [];
     const models =
@@ -462,8 +652,10 @@ export function AssetWorkbench({
       ) ?? [];
     return (
       <>
-        {step === "reference" &&
-        c?.artifacts.some((a) => a.kind === "frames") ? (
+        {step === "separate" ? (
+          separationGallery(images)
+        ) : step === "reference" &&
+          c?.artifacts.some((a) => a.kind === "frames") ? (
           <FrameSequence projectId={p.id} candidate={c} />
         ) : (
           <>
@@ -489,12 +681,9 @@ export function AssetWorkbench({
               modelView(c, step === "rig" || step === "animation")
             )}
             {images.length > 0 && (
-              <div className={step === "separate" ? "wb-parts" : "wb-frames"}>
+              <div className="wb-frames">
                 {images.map((a, i) => (
-                  <div
-                    className={step === "separate" ? "wb-part" : ""}
-                    key={a.path}
-                  >
+                  <div key={a.path}>
                     <img
                       src={url(a)}
                       alt={`${a.role ?? c?.label ?? "결과"} ${i + 1}`}
@@ -511,6 +700,39 @@ export function AssetWorkbench({
           </>
         )}
       </>
+    );
+  }
+  function singleModelGallery(c: WorkbenchCandidate) {
+    const img = c.artifacts.find((a) => a.kind === "image");
+    const previewKey = `${viewing?.id}/${c.id}`;
+    const rotating = rotatingCandidates.includes(previewKey);
+    return (
+      <div className="wb-single-model" data-testid="workbench-single-model">
+        {rotating || !img ? (
+          modelView(c)
+        ) : (
+          <img
+            className="wb-single-model-photo"
+            src={url(img)}
+            alt={`${c.label} 모델 검토 사진`}
+          />
+        )}
+        {img && modelArtifact(c) && (
+          <button
+            className="wb-preview-toggle"
+            data-testid="workbench-preview3d-single"
+            onClick={() =>
+              setRotatingCandidates((ids) =>
+                rotating
+                  ? ids.filter((id) => id !== previewKey)
+                  : [...ids, previewKey],
+              )
+            }
+          >
+            {rotating ? "사진으로 확인" : "3D로 돌려보기"}
+          </button>
+        )}
+      </div>
     );
   }
   function approvalBox() {
@@ -541,7 +763,7 @@ export function AssetWorkbench({
             {step === "concept"
               ? "이미지 후보 4장"
               : step === "separate"
-                ? "머리·머리카락·몸통 분리 이미지 3장"
+                ? `머리·머리카락·몸통 × 4방향, 총 12장. 현재 선택 범위 ${rerollSeparationCount}장 수정 또는 누락 ${missingSeparationCount}장만 생성합니다.`
                 : `정면·측면·후면 각 ${referenceFrameCount}장, 총 ${referenceFrameCount * 3}장 · ${duration}초 동작의 주요 시점`}
           </small>
         )}
@@ -559,11 +781,16 @@ export function AssetWorkbench({
       </div>
     );
   }
-  function launch(label: string, request: WorkbenchRequest, disabled = false) {
+  function launch(
+    label: string,
+    request: WorkbenchRequest,
+    disabled = false,
+    testId?: string,
+  ) {
     return (
       <button
         className="primary"
-        data-testid={`workbench-execute-${step}`}
+        data-testid={testId ?? `workbench-execute-${step}`}
         disabled={
           locked ||
           disabled ||
@@ -584,7 +811,12 @@ export function AssetWorkbench({
         <button
           className={viewingAccepted ? "" : "primary"}
           data-testid={`workbench-accept-${step}`}
-          disabled={locked || viewingAccepted || !viewingCurrent}
+          disabled={
+            locked ||
+            viewingAccepted ||
+            !viewingCurrent ||
+            (step === "separate" && !fourViewImagesReady(candidate?.artifacts))
+          }
           onClick={() =>
             action(
               { kind: "accept", jobId: viewing.id },
@@ -888,7 +1120,52 @@ export function AssetWorkbench({
                 )}
                 {partMode === "separate" ? (
                   <>
-                    <p>분리 이미지를 확인하고 수정한 뒤 모델을 만듭니다.</p>
+                    <p>
+                      세 파츠의 정면·후면·왼쪽·오른쪽을 먼저 확인하고 모델을
+                      만듭니다.
+                    </p>
+                    <div className="wb-pair">
+                      <label className="field">
+                        <span>수정할 파츠</span>
+                        <select
+                          data-testid="workbench-separate-role"
+                          value={separationBase ? separationRole : "all"}
+                          disabled={!separationBase}
+                          onChange={(e) =>
+                            setSeparationRole(
+                              e.target.value as WorkbenchRole | "all",
+                            )
+                          }
+                        >
+                          <option value="all">모든 파츠</option>
+                          {roles.map((r) => (
+                            <option value={r} key={r}>
+                              {roleLabels[r]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="field">
+                        <span>수정할 방향</span>
+                        <select
+                          data-testid="workbench-separate-view"
+                          value={separationBase ? separationView : "all"}
+                          disabled={!separationBase}
+                          onChange={(e) =>
+                            setSeparationView(
+                              e.target.value as WorkbenchView | "all",
+                            )
+                          }
+                        >
+                          <option value="all">모든 방향</option>
+                          {WORKBENCH_VIEWS.map((v) => (
+                            <option value={v} key={v}>
+                              {viewLabels[v]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
                     <label className="field">
                       <span>분리·수정 지시</span>
                       <textarea
@@ -899,16 +1176,57 @@ export function AssetWorkbench({
                       />
                     </label>
                     {approvalBox()}
+                    {separationBase && missingSeparationCount > 0 && (
+                      <>
+                        <div
+                          className="wb-note"
+                          data-testid="workbench-reuse-scope"
+                        >
+                          기존 {presentSeparationPairs.size}장은 유지합니다.
+                          없는 방향과 파츠 {missingSeparationCount}장만
+                          추가합니다.
+                        </div>
+                        {launch(
+                          `기존 사진 유지 · 없는 ${missingSeparationCount}장만 채우기`,
+                          {
+                            step: "separate",
+                            prompt: separationPrompt,
+                            provider: "gpt",
+                            views: [...WORKBENCH_VIEWS],
+                            baseJobId: separationBase.id,
+                            reuseExisting: true,
+                          },
+                          false,
+                          "workbench-fill-missing",
+                        )}
+                      </>
+                    )}
                     {launch(
-                      latestJob
-                        ? "분리 이미지 수정하기"
-                        : "파츠 이미지 분리하기",
+                      separationBase
+                        ? `선택한 ${rerollSeparationCount}장 수정 · 리롤`
+                        : "파츠 4방향 이미지 12장 만들기",
                       {
                         step: "separate",
                         prompt: separationPrompt,
                         provider: "gpt",
-                        baseJobId: editBase?.id,
+                        baseJobId: separationBase?.id,
+                        views: [...WORKBENCH_VIEWS],
+                        role:
+                          separationBase && separationRole !== "all"
+                            ? separationRole
+                            : undefined,
+                        view:
+                          separationBase && separationView !== "all"
+                            ? separationView
+                            : undefined,
+                        reuseExisting: false,
                       },
+                    )}
+                    {separationBase && (
+                      <small className="wb-muted">
+                        선택한 범위만 새로 만들고 다른 파츠·방향의 사진은 그대로
+                        사용합니다. 결과는 새 버전에 저장됩니다.
+                      </small>
                     )}
                   </>
                 ) : (
@@ -932,47 +1250,123 @@ export function AssetWorkbench({
                       </select>
                     </label>
                     <label className="field">
-                      <span>폴리곤 수</span>
+                      <span>
+                        {modelEditBase
+                          ? "기준 버전의 폴리곤 설정"
+                          : "폴리곤 수"}
+                      </span>
                       <input
                         data-testid="workbench-polygon-count"
+                        disabled={!!modelEditBase}
                         type="number"
                         min={1}
                         step={1000}
-                        value={polygonCount}
+                        value={
+                          modelEditBase
+                            ? (modelEditBase.request.polygonCount ?? "")
+                            : polygonCount
+                        }
+                        placeholder="Tripo 기본값"
                         onChange={(e) =>
                           setPolygonCount(Number(e.target.value))
                         }
                       />
                       <small>
-                        Tripo에서 허용하는 범위를 확인합니다. 범위를 벗어나면
-                        설정값을 임의로 바꾸지 않고 알려드립니다.
+                        {modelEditBase
+                          ? "기존 모델을 재생성합니다. 폴리곤 설정을 바꾸기 위한 새 생성은 실행하지 않습니다."
+                          : "Tripo에서 허용하는 범위를 확인합니다. 범위를 벗어나면 설정값을 임의로 바꾸지 않고 알려드립니다."}
                       </small>
                     </label>
+                    {modelEditBase && (
+                      <>
+                        <label className="field">
+                          <span>기존 모델 수정 범위</span>
+                          <select
+                            data-testid="workbench-model-edit-scope"
+                            value={modelEditScope}
+                            onChange={(e) =>
+                              setModelEditScope(
+                                e.target.value as "all" | "part",
+                              )
+                            }
+                          >
+                            <option value="all">전체 선택 · 전체 리롤</option>
+                            <option value="part">
+                              부분 선택 · 부분 재생성
+                            </option>
+                          </select>
+                        </label>
+                        {modelEditScope === "part" && (
+                          <label className="field">
+                            <span>수정할 영역</span>
+                            <input
+                              data-testid="workbench-model-edit-target"
+                              value={modelEditTarget}
+                              onChange={(e) =>
+                                setModelEditTarget(e.target.value)
+                              }
+                              placeholder="예: 뒷머리 아래쪽, 오른쪽 소매 끝"
+                            />
+                            <small>
+                              선택할 영역을 구체적으로 적어 주세요. 다른 부분은
+                              유지합니다.
+                            </small>
+                          </label>
+                        )}
+                      </>
+                    )}
                     <label className="field">
-                      <span>모델 생성 지시</span>
+                      <span>
+                        {modelEditBase ? "재생성 지시" : "모델 생성 지시"}
+                      </span>
                       <textarea
+                        data-testid="workbench-model-prompt"
+                        placeholder="예: 뒷머리 볼륨을 줄여 주세요"
                         rows={4}
                         value={modelPrompt}
                         onChange={(e) => setModelPrompt(e.target.value)}
                       />
                     </label>
                     <div className="wb-note">
-                      Smart Mesh P2 · 후보 4개
+                      {modelEditBase
+                        ? "기존 모델 · Tripo 부분 재생성 기능"
+                        : "Smart Mesh P2 · 최초 결과 1개"}
                       <br />
-                      현재 선택한 파츠만 생성합니다.
+                      {modelEditBase
+                        ? "사용 가능 횟수는 Tripo 화면에서 확인합니다. 횟수를 소진하면 멈춥니다. 이전 버전은 보존됩니다."
+                        : "채택한 4방향 이미지로 모델 하나를 생성한 뒤, 전체 리롤 또는 부분 재생성으로 수정합니다."}
                     </div>
+                    <small className="wb-muted">
+                      {modelEditBase
+                        ? "기존 모델의 재생성 기능을 사용합니다. 사용할 수 없으면 멈추고 안내하며 새 모델 생성으로 바꾸지 않습니다."
+                        : "처음 모델을 생성합니다. 생성 화면이 프롬프트를 지원하지 않으면 먼저 이미지에서 수정할 수 있도록 안내합니다."}
+                    </small>
                     {approvalBox()}
                     {launch(
-                      `${roleLabels[role]} 모델 후보 4개 만들기`,
+                      `${roleLabels[role]} 모델 ${modelEditBase ? (modelEditScope === "all" ? "전체 리롤" : "부분 재생성") : "1개 만들기"}`,
                       {
                         step: "model",
                         role,
-                        polygonCount,
+                        polygonCount: modelEditBase
+                          ? modelEditBase.request.polygonCount
+                          : polygonCount,
                         prompt: modelPrompt,
+                        baseJobId: modelEditBase?.id,
+                        modelEditScope: modelEditBase
+                          ? modelEditScope
+                          : undefined,
+                        modelEditTarget:
+                          modelEditBase && modelEditScope === "part"
+                            ? modelEditTarget.trim()
+                            : undefined,
                       },
-                      !separated ||
-                        !Number.isFinite(polygonCount) ||
-                        polygonCount < 1,
+                      (!modelEditBase && !separationReady) ||
+                        (!modelEditBase &&
+                          (!Number.isFinite(polygonCount) ||
+                            polygonCount < 1)) ||
+                        (!!modelEditBase &&
+                          modelEditScope === "part" &&
+                          !modelEditTarget.trim()),
                     )}
                   </>
                 )}
@@ -991,18 +1385,62 @@ export function AssetWorkbench({
                   />
                 )}
                 <label className="field">
+                  <span>수정할 파츠</span>
+                  <select
+                    data-testid="workbench-surface-role"
+                    value={surfaceHistoryAvailable ? surfaceRole : "all"}
+                    disabled={!surfaceHistoryAvailable}
+                    onChange={(e) =>
+                      setSurfaceRole(e.target.value as WorkbenchRole | "all")
+                    }
+                  >
+                    <option value="all">머리·머리카락·몸통 전체</option>
+                    {roles.map((r) => (
+                      <option key={r} value={r}>
+                        {roleLabels[r]}만 수정
+                      </option>
+                    ))}
+                  </select>
+                  {surfaceEditBase && (
+                    <small>선택하지 않은 파츠의 UV·텍스처는 유지합니다.</small>
+                  )}
+                  {surfaceHistoryAvailable &&
+                    surfaceRole !== "all" &&
+                    !surfaceEditBase && (
+                      <small className="wb-note warning">
+                        이 파츠만 수정하려면 나머지 파츠의 모델이 같은 기준
+                        버전이어야 합니다. 다른 파츠도 바뀌었다면 전체 작업을
+                        선택하세요.
+                      </small>
+                    )}
+                </label>
+                <label className="field">
                   <span>텍스처 지시</span>
                   <textarea
+                    data-testid="workbench-surface-prompt"
                     rows={5}
                     value={surfacePrompt}
                     onChange={(e) => setSurfacePrompt(e.target.value)}
                   />
                 </label>
                 {approvalBox()}
-                {launch("Smart UV + 텍스처 작업", {
-                  step: "surface",
-                  prompt: surfacePrompt,
-                })}
+                {launch(
+                  surfaceEditBase
+                    ? "선택한 UV · 텍스처 수정 · 리롤"
+                    : "Smart UV + 텍스처 작업",
+                  {
+                    step: "surface",
+                    prompt: surfacePrompt,
+                    baseJobId: surfaceEditBase?.id,
+                    role:
+                      surfaceEditBase && surfaceRole !== "all"
+                        ? surfaceRole
+                        : undefined,
+                  },
+                  surfaceHistoryAvailable &&
+                    surfaceRole !== "all" &&
+                    !surfaceEditBase,
+                )}
               </>
             )}
             {page === "assembly" && (
@@ -1139,12 +1577,13 @@ export function AssetWorkbench({
                   />
                 </label>
                 {launch(
-                  "Blender + Astra로 리깅",
+                  editBase ? "리깅 수정 · 리롤" : "Blender + Astra로 리깅",
                   {
                     step: "rig",
                     prompt:
                       rigPrompt.trim() ||
                       "Unity 게임용 기본 몸체 리깅과 선택한 오브젝트의 추가 뼈 및 웨이트를 만들고 변형을 검사해 주세요.",
+                    baseJobId: editBase?.id ?? rig?.job.id,
                     rigTargets: sourceObjects.map((o) => ({
                       objectId: o.id,
                       extraBones:
@@ -1260,7 +1699,9 @@ export function AssetWorkbench({
                   <>
                     {approvalBox()}
                     {launch(
-                      "멀티뷰 동작 이미지 한 세트 생성",
+                      editBase
+                        ? "멀티뷰 동작 이미지 수정 · 리롤"
+                        : "멀티뷰 동작 이미지 한 세트 생성",
                       {
                         step: "reference",
                         prompt: motionPrompt.trim() || motion,
@@ -1278,7 +1719,9 @@ export function AssetWorkbench({
                 ) : (
                   <>
                     {launch(
-                      "이미지를 보고 Astra로 3D 동작 제작",
+                      editBase
+                        ? "Astra로 3D 동작 수정 · 리롤"
+                        : "이미지를 보고 Astra로 3D 동작 제작",
                       {
                         step: "animation",
                         prompt: motionPrompt.trim() || motion,
@@ -1317,11 +1760,28 @@ export function AssetWorkbench({
                 <div className="wb-note">
                   내보내기 결과와 실제 Unity 검사 결과를 구분해 표시합니다.
                 </div>
-                {launch("Unity로 내보내고 검사", {
-                  step: "unity",
-                  prompt:
-                    "채택한 리깅 모델과 모든 애니메이션을 설정된 Unity 프로젝트로 내보내고 Avatar, 클립 및 재생을 검사해 주세요.",
-                })}
+                <label className="field">
+                  <span>내보내기·수정 지시</span>
+                  <textarea
+                    data-testid="workbench-unity-prompt"
+                    rows={4}
+                    value={unityPrompt}
+                    onChange={(e) => setUnityPrompt(e.target.value)}
+                    placeholder="예: 인사 동작의 클립 이름을 Wave로 정리해 주세요."
+                  />
+                </label>
+                {launch(
+                  editBase
+                    ? "내보내기 수정 · 다시 검사"
+                    : "Unity로 내보내고 검사",
+                  {
+                    step: "unity",
+                    prompt:
+                      unityPrompt.trim() ||
+                      "채택한 리깅 모델과 모든 애니메이션을 설정된 Unity 프로젝트로 내보내고 Avatar, 클립 및 재생을 검사해 주세요.",
+                    baseJobId: editBase?.id,
+                  },
+                )}
               </>
             )}
           </aside>
@@ -1350,14 +1810,14 @@ export function AssetWorkbench({
                 </button>
                 <button
                   data-testid="workbench-tab-model"
-                  disabled={!separated}
+                  disabled={!canViewModels}
                   className={partMode === "model" ? "active" : ""}
                   onClick={() => {
                     setPartMode("model");
                     setViewJobId("");
                   }}
                 >
-                  ② 파츠별 모델 선택
+                  ② 파츠별 모델 제작 · 수정
                 </button>
               </div>
             )}
@@ -1393,8 +1853,9 @@ export function AssetWorkbench({
             )}
             {viewing && !viewingCurrent && (
               <p className="wb-note warning">
-                앞 단계의 선택이 바뀌기 전 결과입니다. 기록은 보존되어 있지만
-                현재 결과로 채택하거나 수정 기준으로 사용할 수 없습니다.
+                {step === "surface" && surfaceEditBase?.id === viewing.id
+                  ? "선택한 파츠의 모델이 바뀐 이전 UV·텍스처 버전입니다. 해당 파츠를 현재 모델에 맞춰 수정하고, 나머지 파츠의 결과는 유지합니다."
+                  : "앞 단계의 선택이 바뀌기 전 결과입니다. 기록은 보존되어 있지만 현재 결과로 채택하거나 수정 기준으로 사용할 수 없습니다."}
               </p>
             )}
             {step === "separate" &&
@@ -1439,8 +1900,15 @@ export function AssetWorkbench({
             )}
             {viewing?.candidates.length ? (
               <>
-                {["concept", "model"].includes(step) ? (
+                {step === "concept" ||
+                (step === "model" && viewing.candidates.length > 1) ? (
                   <div className="wb-candidates">
+                    {step === "model" && viewing.candidates.length > 1 && (
+                      <p className="wb-note" style={{ gridColumn: "1 / -1" }}>
+                        예전 버전에서 만든 후보입니다. 새 모델 작업은 결과 1개를
+                        만들고 프롬프트로 수정·리롤합니다.
+                      </p>
+                    )}
                     {viewing.candidates.map((c, i) => {
                       const selected =
                         selectedHere?.job.id === viewing.id &&
@@ -1510,7 +1978,9 @@ export function AssetWorkbench({
                   </div>
                 ) : (
                   <>
-                    {resultGallery(candidate)}
+                    {step === "model" && candidate
+                      ? singleModelGallery(candidate)
+                      : resultGallery(candidate)}
                     {!candidate?.artifacts.some(
                       (a) => a.kind === "image" || a.kind === "model",
                     ) && <div className="wb-note">{viewing.summary}</div>}
@@ -1539,45 +2009,7 @@ export function AssetWorkbench({
                 )}
               </>
             ) : draftImages.length > 0 ? (
-              <div data-testid="workbench-draft-photos">
-                <p className="wb-draft-caption">
-                  분리 사진{" "}
-                  {
-                    roles.filter((r) => draftImages.some((a) => a.role === r))
-                      .length
-                  }
-                  /3장 준비됨
-                </p>
-                <p className="wb-muted">
-                  먼저 나온 사진부터 확인하세요. 세 파츠가 모두 준비되면 결과를
-                  채택할 수 있습니다.
-                </p>
-                <div className="wb-parts">
-                  {roles.map((r) => {
-                    const draft = draftImages.find((a) => a.role === r);
-                    return (
-                      <div
-                        className="wb-part"
-                        key={r}
-                        data-testid={`workbench-draft-${r}`}
-                      >
-                        {draft ? (
-                          <img
-                            src={url(draft)}
-                            alt={`${roleLabels[r]} 분리 사진`}
-                          />
-                        ) : (
-                          <div className="wb-draft-missing">
-                            <ImagePlus size={28} />
-                            <span>저장된 사진 없음</span>
-                          </div>
-                        )}
-                        <h3>{roleLabels[r]}</h3>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
+              separationGallery(draftImages, true)
             ) : (
               <div className="wb-empty">
                 {active?.slot === slot ? (
@@ -1594,7 +2026,7 @@ export function AssetWorkbench({
                   {step === "concept"
                     ? "후보 4장을 비교해 하나를 선택하거나 기존 이미지를 가져올 수 있습니다."
                     : step === "separate"
-                      ? "머리·머리카락·몸통의 분리 이미지를 먼저 확인합니다. 모델 생성은 분리 결과를 채택한 뒤 직접 실행합니다."
+                      ? "머리·머리카락·몸통의 정면·후면·왼쪽·오른쪽 총 12장을 확인합니다. 저장된 이미지를 유지하고 빠진 방향만 추가할 수 있습니다."
                       : step === "rig"
                         ? "채택한 조립 모델의 실제 오브젝트를 기준으로 추가 리깅을 설정합니다."
                         : "아직 검토할 결과가 없습니다. 왼쪽에서 설정하고 실행하면 결과가 여기에 표시됩니다."}
@@ -1605,19 +2037,19 @@ export function AssetWorkbench({
             {page === "parts" && partMode === "separate" && (
               <div className="wb-next">
                 <p>
-                  {separated
+                  {separationReady
                     ? "분리 결과를 채택했습니다. 파츠별 모델 설정을 시작하세요."
-                    : "세 파츠를 확인하고 결과를 채택하세요."}
+                    : "세 파츠의 4방향 이미지 12장을 확인하고 결과를 채택하세요."}
                 </p>
                 <button
                   className="primary"
-                  disabled={locked || !separated}
+                  disabled={locked || !canViewModels}
                   onClick={() => {
                     setPartMode("model");
                     setViewJobId("");
                   }}
                 >
-                  모델 후보 만들기
+                  파츠 모델 제작으로
                   <ArrowRight size={15} />
                 </button>
               </div>
@@ -1698,7 +2130,8 @@ export function AssetWorkbench({
                             비교
                           </button>
                         )}
-                      {!["concept", "model"].includes(step) &&
+                      {step !== "concept" &&
+                        j.candidates.length === 1 &&
                         j.status === "review" &&
                         selectedHere?.job.id !== j.id &&
                         currentInputs(j) && (

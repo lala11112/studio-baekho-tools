@@ -14,6 +14,9 @@ import {
   StudioLedger,
   chargedActionPattern,
   creditFromLabel,
+  meshEditTerms,
+  meshEditContextPattern,
+  canvasPoints,
   guardedPath,
   isLoginUrl,
   isStudioUrl,
@@ -34,6 +37,7 @@ type Control = {
   fileIndex?: number;
   accept?: string;
   options?: { value: string; label: string }[];
+  bounds?: { x: number; y: number; width: number; height: number };
 };
 type Snapshot = {
   snapshotId: string;
@@ -93,7 +97,7 @@ function collect(id: string) {
   );
   const nodes = Array.from(
     document.querySelectorAll(
-      'button,a,input,textarea,select,[role="button"],[role="tab"],[role="option"],[role="combobox"],[role="checkbox"],[role="radio"],summary,[contenteditable="true"],[role="menuitem"]',
+      'button,a,input,textarea,select,canvas,[role="button"],[role="tab"],[role="option"],[role="combobox"],[role="checkbox"],[role="radio"],summary,[contenteditable="true"],[role="menuitem"]',
     ),
   ).filter((el) => visible(el) || fileInputs.includes(el));
   for (const el of document.querySelectorAll("div,section,aside,main")) {
@@ -173,6 +177,16 @@ function collect(id: string) {
               value: o.value,
               label: o.text,
             })),
+          }
+        : {}),
+      ...(el instanceof HTMLCanvasElement
+        ? {
+            bounds: {
+              x: el.getBoundingClientRect().left,
+              y: el.getBoundingClientRect().top,
+              width: el.getBoundingClientRect().width,
+              height: el.getBoundingClientRect().height,
+            },
           }
         : {}),
     })),
@@ -266,6 +280,71 @@ function interact(input: {
       (input.value === "up" ? -1 : 1) * Math.max(200, el.clientHeight * 0.7),
     );
   return { x, y };
+}
+
+function inspectCanvas(input: {
+  id: string;
+  index: number;
+  bounds: { x: number; y: number; width: number; height: number };
+  points: { x: number; y: number }[];
+}) {
+  const state = (window as unknown as { __partsmithStudio?: Bound })
+    .__partsmithStudio;
+  if (!state || state.id !== input.id)
+    throw Error("Stale observation; take a new canvas snapshot");
+  const el = state.nodes[input.index];
+  if (!(el instanceof HTMLCanvasElement) || !el.isConnected)
+    throw Error("Observed attached canvas required");
+  const r = el.getBoundingClientRect(),
+    style = getComputedStyle(el);
+  if (
+    !r.width ||
+    !r.height ||
+    style.display === "none" ||
+    style.visibility === "hidden" ||
+    Number(style.opacity) === 0
+  )
+    throw Error("Canvas is hidden");
+  if (
+    Math.abs(r.left - input.bounds.x) > 0.5 ||
+    Math.abs(r.top - input.bounds.y) > 0.5 ||
+    Math.abs(r.width - input.bounds.width) > 0.5 ||
+    Math.abs(r.height - input.bounds.height) > 0.5
+  )
+    throw Error("Canvas bounds changed; reobserve");
+  const points = input.points.map((p) => ({
+    x: Math.round(r.left + Math.min(r.width - 1, Math.max(0, p.x * r.width))),
+    y: Math.round(r.top + Math.min(r.height - 1, Math.max(0, p.y * r.height))),
+  }));
+  const clear = (p: { x: number; y: number }) => {
+    if (
+      p.x < 0 ||
+      p.y < 0 ||
+      p.x >= innerWidth ||
+      p.y >= innerHeight ||
+      document.elementFromPoint(p.x, p.y) !== el
+    )
+      throw Error("Canvas drag is hidden or covered");
+  };
+  for (let i = 0; i < points.length; i++) {
+    clear(points[i]);
+    if (i) {
+      const before = points[i - 1],
+        current = points[i],
+        n = Math.ceil(
+          Math.max(
+            Math.abs(current.x - before.x),
+            Math.abs(current.y - before.y),
+          ) / 4,
+        );
+      for (let j = 1; j < n; j++)
+        clear({
+          x: before.x + ((current.x - before.x) * j) / n,
+          y: before.y + ((current.y - before.y) * j) / n,
+        });
+    }
+  }
+  return points;
 }
 
 export class StudioBrowser {
@@ -443,6 +522,13 @@ export class StudioBrowser {
     };
   }
   attachRun(context: StudioRunContext) {
+    if (
+      context.modelEdit &&
+      (!["all", "part"].includes(context.modelEdit.scope) ||
+        (context.modelEdit.scope === "part" &&
+          !context.modelEdit.target?.trim()))
+    )
+      throw Error("Approved model edit scope and partial target required");
     if (this.server)
       throw Error(
         "Close the previous worker bridge before attaching another stage",
@@ -453,7 +539,11 @@ export class StudioBrowser {
       );
     if (!fs.existsSync(context.rootDir))
       throw Error("Production workspace missing");
-    this.run = { ...context, rootDir: fs.realpathSync(context.rootDir) };
+    this.run = {
+      ...context,
+      ...(context.modelEdit ? { modelEdit: { ...context.modelEdit } } : {}),
+      rootDir: fs.realpathSync(context.rootDir),
+    };
     this.ledger = new StudioLedger(
       path.join(app.getPath("userData"), "studio-ledgers"),
       this.run,
@@ -474,9 +564,14 @@ export class StudioBrowser {
     return this.window.webContents;
   }
   private async isolated<T>(fn: Function, value: unknown): Promise<T> {
-    return this.wc().executeJavaScriptInIsolatedWorld(987, [
-      { code: `(${fn.toString()})(${JSON.stringify(value)})` },
-    ]) as Promise<T>;
+    const result = (await this.wc().executeJavaScriptInIsolatedWorld(987, [
+      {
+        code: `(()=>{try{return {ok:true,value:(${fn.toString()})(${JSON.stringify(value)})};}catch(error){return {ok:false,error:error instanceof Error ? error.message : String(error)};}})()`,
+      },
+    ])) as { ok: boolean; value?: T; error?: string };
+    if (!result.ok)
+      throw new Error(result.error ?? "Studio observation failed");
+    return result.value as T;
   }
   private async observe(saveImage: boolean): Promise<Snapshot> {
     const result = await this.isolated<Snapshot>(collect, randomUUID());
@@ -538,6 +633,10 @@ export class StudioBrowser {
     return { content };
   }
   private async click(args: Record<string, unknown>, paid: boolean) {
+    if (paid && this.run?.modelEdit)
+      throw Error(
+        "Existing-model Mesh Edit cannot use new Generate; use studio_mesh_edit_submit",
+      );
     const node = this.requireObserved(args)!;
     if (
       userActionPattern.test(node.label) ||
@@ -598,6 +697,105 @@ export class StudioBrowser {
     if (paid) this.ledger!.clicked(String(args.operationId));
     return this.imageResult(await this.observe(true));
   }
+  private async meshEditSubmit(args: Record<string, unknown>) {
+    const node = this.requireObserved(args)!;
+    if (!this.run?.modelEdit)
+      throw Error("Approved existing-model Mesh Edit context required");
+    if (
+      node.navigation ||
+      (!["button", "input"].includes(node.tag) && node.role !== "button") ||
+      userActionPattern.test(node.label)
+    )
+      throw Error("Observed mesh-edit action button required");
+    const terms = meshEditTerms(
+      node.label,
+      String(args.evidenceText ?? ""),
+      this.snapshot!.text,
+    );
+    if (terms.cost !== args.expectedCredits)
+      throw Error("Observed mesh-edit credit price must match expectedCredits");
+    const point = await this.isolated<{ x: number; y: number }>(interact, {
+      id: args.snapshotId,
+      index: args.element,
+      action: "inspect",
+    });
+    // Re-read page text immediately before reserving to reject changed quotas/context.
+    const currentText = await this.isolated<string>(
+      () => (document.body?.innerText ?? "").slice(0, 24000),
+      null,
+    );
+    const currentTerms = meshEditTerms(
+      node.label,
+      String(args.evidenceText ?? ""),
+      currentText,
+    );
+    if (JSON.stringify(currentTerms) !== JSON.stringify(terms))
+      throw Error("Mesh-edit quota changed; reobserve");
+    this.ledger!.reserve(
+      String(args.operationId),
+      terms.cost,
+      `${node.label} · ${terms.evidence}`,
+      String(args.snapshotId),
+    );
+    this.wc().sendInputEvent({
+      type: "mouseDown",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      clickCount: 1,
+    });
+    this.wc().sendInputEvent({
+      type: "mouseUp",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      clickCount: 1,
+    });
+    this.ledger!.clicked(String(args.operationId));
+    return this.imageResult(await this.observe(true));
+  }
+  private async canvasDrag(args: Record<string, unknown>) {
+    const node = this.requireObserved(args)!;
+    if (
+      !this.run?.modelEdit ||
+      !meshEditContextPattern.test(this.snapshot!.text)
+    )
+      throw Error("Approved observed Mesh Edit canvas context required");
+    if (node.tag !== "canvas" || !node.bounds)
+      throw Error(
+        "Observed canvas required; arbitrary screen coordinates are not allowed",
+      );
+    const points = canvasPoints(args.points);
+    const positions = await this.isolated<{ x: number; y: number }[]>(
+      inspectCanvas,
+      { id: args.snapshotId, index: args.element, bounds: node.bounds, points },
+    );
+    this.wc().sendInputEvent({ type: "mouseMove", ...positions[0] });
+    this.wc().sendInputEvent({
+      type: "mouseDown",
+      ...positions[0],
+      button: "left",
+      clickCount: 1,
+    });
+    try {
+      for (const point of positions.slice(1)) {
+        this.wc().sendInputEvent({
+          type: "mouseMove",
+          ...point,
+          modifiers: ["leftbuttondown"],
+        });
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+    } finally {
+      this.wc().sendInputEvent({
+        type: "mouseUp",
+        ...positions.at(-1)!,
+        button: "left",
+        clickCount: 1,
+      });
+    }
+    return this.imageResult(await this.observe(true));
+  }
   async callTool(
     name: string,
     args: Record<string, unknown> = {},
@@ -621,6 +819,8 @@ export class StudioBrowser {
     }
     if (name === "studio_click" || name === "studio_submit")
       return this.click(args, name === "studio_submit");
+    if (name === "studio_mesh_edit_submit") return this.meshEditSubmit(args);
+    if (name === "studio_canvas_drag") return this.canvasDrag(args);
     if (name === "studio_observe_submission") {
       this.requireObserved(args, false);
       const evidence = String(args.evidenceText ?? "").trim();
@@ -871,6 +1071,7 @@ export class StudioBrowser {
       maxAttempts: context.maxIterations,
       attempt: context.attempt,
       recoveryOnly: context.recoveryOnly,
+      modelEdit: context.modelEdit,
     });
     const bridge = await this.startBridge();
     return {

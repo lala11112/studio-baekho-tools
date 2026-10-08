@@ -57,17 +57,30 @@ export class CodexWorkbenchExecutor {
     const step=ctx.job.step; let count=0;
     if(step==='separate'&&!ctx.recovered) return {status:'needs_input',summary:'MOCK transient download timeout',candidates:[],checks:[],recovery:{kind:'retry',reason:'MOCK transient download timeout'}};
     const write=(name,data,kind,role)=>{fs.writeFileSync(path.join(ctx.workspace,name),data);return {path:name,kind,...(role?{role}:{})};};
-    const pic=(role)=>{count++;const bytes=Buffer.alloc(32*32*4); for(let i=0;i<bytes.length;i+=4){bytes[i]=count*17;bytes[i+1]=100;bytes[i+2]=count*11;bytes[i+3]=255;}return write('MOCK-'+count+'.png',nativeImage.createFromBitmap(bytes,{width:32,height:32}).toPNG(),'image',role);};
+    const pic=(role)=>{count++;const bytes=Buffer.alloc(32*32*4); for(let i=0;i<bytes.length;i+=4){bytes[i]=count*17;bytes[i+1]=ctx.workbench.jobs.length*13;bytes[i+2]=count*11;bytes[i+3]=255;}return write('MOCK-'+count+'.png',nativeImage.createFromBitmap(bytes,{width:32,height:32}).toPNG(),'image',role);};
     const model=(i,role)=>{const bytes=tinyGlb();bytes.writeFloatLE(i+0.2,28+bytes.readUInt32LE(12));return write('MOCK-'+i+'.glb',bytes,'model',role);};
     const objects=[{id:'body',name:'MOCK Body',category:'body',separate:true},{id:'coat',name:'MOCK Coat',category:'clothing',separate:true},{id:'hair',name:'MOCK Hair',category:'hair',separate:true}];
     let candidates;
     if(step==='concept') candidates=[0,1,2,3].map(i=>({id:'candidate-'+i,label:'MOCK image '+(i+1),artifacts:[pic()]}));
-    else if(step==='model') candidates=[0,1,2,3].map(i=>({id:'candidate-'+i,label:'MOCK model '+(i+1),artifacts:[model(i,ctx.job.request.role),pic()]}));
+    else if(step==='model') candidates=[{id:'candidate-0',label:'MOCK single model',artifacts:[model(0,ctx.job.request.role),pic()]}];
     else {
       let artifacts=[];
       if(step==='separate') {
-        artifacts=['head','hair','body'].map(pic);
-        ctx.onDraft?.({status:'completed',summary:'MOCK two photos ready',candidates:[{id:'draft',label:'MOCK saved photos',artifacts:artifacts.slice(0,2)}],checks:[{name:'original_alignment_and_scale_preserved',passed:false}]});
+        const req=ctx.job.request,base=ctx.workbench.jobs.find(j=>j.id===req.baseJobId);
+        const previous=(base?.candidates[0]??base?.draftCandidates?.[0])?.artifacts.filter(a=>a.kind==='image')??[];
+        const previousRoot=base?path.join(path.dirname(ctx.workspace),base.id):'';
+        const changed=[];
+        for(const role of ['head','hair','body']) for(const view of ['front','back','left','right']) {
+          const old=previous.find(a=>a.role===role&&(a.view??'front')===view);
+          const target=(!req.role||req.role===role)&&(!req.view||req.view===view);
+          if(old&&(!target||req.reuseExisting)) {
+            const source=path.join(previousRoot,path.basename(old.path));
+            const name='MOCK-kept-'+role+'-'+view+'.png';
+            artifacts.push({...write(name,fs.readFileSync(source),'image',role),view});
+          } else if(target) {artifacts.push({...pic(role),view});changed.push(role+':'+view);}
+        }
+        fs.appendFileSync(path.join(ctx.workspace,'MOCK-generated.jsonl'),JSON.stringify(changed)+'\\n');
+        ctx.onDraft?.({status:'completed',summary:'MOCK two photos ready',candidates:[{id:'draft',label:'MOCK saved photos',artifacts:artifacts.filter(a=>a.view==='front'&&a.role!=='body')}],checks:[{name:'original_alignment_and_scale_preserved',passed:false}]});
         const draftDeadline=Date.now()+20000;
         while(!fs.existsSync(${JSON.stringify(draftReleasePath)})&&Date.now()<draftDeadline) await new Promise(r=>setTimeout(r,50));
       }
@@ -115,7 +128,7 @@ fs.writeFileSync(
   path.join(harness, "package.json"),
   JSON.stringify({
     name: "partsmith-guided-test",
-    version: "0.4.2",
+    version: "0.5.0",
     main: "dist-electron/main.cjs",
   }),
 );
@@ -151,6 +164,36 @@ const approval = {
   studioCreditLimit: 1000,
   imageCreditLimit: 0,
 };
+async function assertImagesDecoded(testId, expected) {
+  const images = page.getByTestId(testId).locator("img");
+  assert.equal(await images.count(), expected, `${testId}: image count`);
+  const diagnostics = await images.evaluateAll(async (elements) =>
+    Promise.all(
+      elements.map(async (element) => {
+        try {
+          await element.decode();
+        } catch {}
+        if (element.naturalWidth > 0 && element.naturalHeight > 0) return null;
+        const response = await fetch(element.src);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        return {
+          src: element.src,
+          complete: element.complete,
+          width: element.naturalWidth,
+          status: response.status,
+          type: response.headers.get("content-type"),
+          length: bytes.length,
+          signature: Array.from(bytes.slice(0, 12)),
+        };
+      }),
+    ),
+  );
+  assert.deepEqual(
+    diagnostics.filter(Boolean),
+    [],
+    `${testId}: every image must decode`,
+  );
+}
 async function jobDone() {
   for (let i = 0; i < 100; i++) {
     const w = (await state()).workbenches[0];
@@ -217,20 +260,31 @@ try {
   await page.getByTestId("workbench-recovery").screenshot({
     path: "artifacts/screenshots/workbench-auto-recovery.png",
   });
-  await page.getByTestId("workbench-draft-head").locator("img").waitFor();
+  await page
+    .getByTestId("workbench-separation-head-front")
+    .locator("img")
+    .waitFor();
   assert(await page.getByTestId("workbench-tab-model").isDisabled());
   assert.equal(await page.getByTestId("workbench-accept-separate").count(), 0);
   assert.equal(
-    await page.getByTestId("workbench-draft-body").locator("img").count(),
+    await page
+      .getByTestId("workbench-separation-body-front")
+      .locator("img")
+      .count(),
     0,
   );
-  await page.getByTestId("workbench-draft-photos").screenshot({
+  await assertImagesDecoded("workbench-separation-views", 2);
+  await page.getByTestId("workbench-separation-views").screenshot({
     path: "artifacts/screenshots/workbench-partial-photos.png",
   });
-  fs.writeFileSync(draftReleasePath, "UI observed partial photos before completion");
+  fs.writeFileSync(
+    draftReleasePath,
+    "UI observed partial photos before completion",
+  );
   await jobDone();
   await page.getByTestId("workbench-visual-warnings").waitFor();
   assert(await page.getByTestId("workbench-accept-separate").isEnabled());
+  await assertImagesDecoded("workbench-separation-views", 12);
   await page.getByTestId("workbench-visual-warnings").screenshot({
     path: "artifacts/screenshots/workbench-visual-warnings.png",
   });
@@ -247,27 +301,133 @@ try {
       prompt: "MOCK",
       polygonCount: 6000,
     });
-    assert.equal(j.candidates.length, 4);
+    assert.equal(j.candidates.length, 1);
     await call({
       type: "workbench.action",
       id: project.id,
-      action: { kind: "select", jobId: j.id, candidateId: j.candidates[2].id },
+      action: { kind: "accept", jobId: j.id },
     });
   }
   await page.getByTestId("workbench-tab-model").click();
   await page.getByTestId("workbench-model-role").selectOption("head");
-  const firstModel = page.getByTestId("workbench-candidate-0");
+  const firstModel = page.getByTestId("workbench-single-model");
   await firstModel.locator("img").waitFor();
   assert.equal(await firstModel.locator(".wb-model").count(), 0);
   const callsBeforePreview = invocations().length;
-  await page.getByTestId("workbench-preview3d-0").click();
+  await page.getByTestId("workbench-preview3d-single").click();
   await firstModel.locator(".wb-model canvas").waitFor();
-  await page.getByTestId("workbench-preview3d-0").click();
+  await page.getByTestId("workbench-preview3d-single").click();
   await firstModel.locator("img").waitFor();
   assert.equal(invocations().length, callsBeforePreview);
   await page.screenshot({
     path: "artifacts/screenshots/workbench-model-photo-first.png",
   });
+  const beforeMeshEdit = (await state()).workbenches[0];
+  const headModel = beforeMeshEdit.selections["model:head"];
+  await page.getByTestId("workbench-model-edit-scope").selectOption("part");
+  await page.getByTestId("workbench-credit-limit").fill("1000");
+  await page.getByTestId("workbench-approve").check();
+  assert(await page.getByTestId("workbench-execute-model").isDisabled());
+  await page
+    .getByTestId("workbench-model-edit-target")
+    .fill("MOCK left ear region");
+  await page
+    .getByTestId("workbench-model-prompt")
+    .fill("MOCK: refine the selected region only");
+  await page.getByTestId("workbench-approve").check();
+  await page.getByTestId("workbench-execute-model").click();
+  const meshEdit = await jobDone();
+  assert.equal(meshEdit.request.baseJobId, headModel.jobId);
+  assert.equal(meshEdit.request.modelEditScope, "part");
+  assert.equal(meshEdit.request.modelEditTarget, "MOCK left ear region");
+  assert.match(meshEdit.request.prompt, /selected region/);
+  assert.equal(meshEdit.candidates.length, 1);
+  assert.deepEqual(
+    (await state()).workbenches[0].selections["model:head"],
+    headModel,
+  );
+  await page.getByTestId("workbench-accept-model").click();
+  await page.screenshot({
+    path: "artifacts/screenshots/workbench-mesh-edit.png",
+  });
+  const beforeReroll = (await state()).workbenches[0];
+  const oldSeparation = beforeReroll.jobs.find(
+    (j) => j.id === beforeReroll.selections.separate.jobId,
+  );
+  const oldImages = oldSeparation.candidates[0].artifacts.filter(
+    (a) => a.kind === "image",
+  );
+  assert.equal(oldImages.length, 12);
+  await page.getByTestId("workbench-tab-separate").click();
+  await page.getByTestId("workbench-edit-head-left").click();
+  await page
+    .getByTestId("workbench-separate-prompt")
+    .fill("MOCK: shorten only the left head view; preserve every other photo.");
+  await page.getByTestId("workbench-approve").check();
+  await page.getByTestId("workbench-execute-separate").click();
+  const rerolled = await jobDone();
+  assert.equal(rerolled.request.role, "head");
+  assert.equal(rerolled.request.view, "left");
+  assert.equal(rerolled.request.baseJobId, oldSeparation.id);
+  assert.equal(rerolled.request.reuseExisting, false);
+  assert.equal(
+    (await state()).workbenches[0].selections.separate.jobId,
+    oldSeparation.id,
+  );
+  const newImages = rerolled.candidates[0].artifacts.filter(
+    (a) => a.kind === "image",
+  );
+  for (const old of oldImages) {
+    const next = newImages.find(
+      (a) => a.role === old.role && a.view === old.view,
+    );
+    assert(next);
+    if (old.role === "head" && old.view === "left")
+      assert.notEqual(next.sha256, old.sha256);
+    else assert.equal(next.sha256, old.sha256);
+  }
+  const generated = JSON.parse(
+    fs
+      .readFileSync(
+        path.join(
+          fixture,
+          "data",
+          "projects",
+          project.id,
+          "workbench",
+          beforeReroll.id,
+          "jobs",
+          rerolled.id,
+          "MOCK-generated.jsonl",
+        ),
+        "utf8",
+      )
+      .trim(),
+  );
+  assert.deepEqual(generated, ["head:left"]);
+  await page.getByTestId("workbench-accept-separate").click();
+  const afterReroll = (await state()).workbenches[0];
+  assert.equal(afterReroll.selections["model:head"], undefined);
+  assert.deepEqual(
+    afterReroll.selections["model:hair"],
+    beforeReroll.selections["model:hair"],
+  );
+  assert.deepEqual(
+    afterReroll.selections["model:body"],
+    beforeReroll.selections["model:body"],
+  );
+  await assertImagesDecoded("workbench-separation-views", 12);
+  await page.getByTestId("workbench-separation-views").screenshot({
+    path: "artifacts/screenshots/workbench-four-view-reroll.png",
+  });
+  await accept(
+    await execute({
+      step: "model",
+      role: "head",
+      prompt: "",
+      polygonCount: 6000,
+    }),
+  );
   await accept(await execute({ step: "surface", prompt: "MOCK" }));
   const initial = await execute({ step: "assembly", prompt: "MOCK assemble" });
   await accept(initial);
@@ -373,6 +533,15 @@ try {
         visualWarningsAllowUserReview: true,
         incompletePhotosBlockModelGeneration: true,
         modelPhotoFirstAndOptional3D: true,
+        firstConceptOnlyFourCandidates: true,
+        singleModelResult: true,
+        existingModelPartialEditRequest: true,
+        fourViewsPerPart: true,
+        promptTargetsOnePartView: true,
+        rerollPreservesElevenImages: true,
+        partialAndAllTwelveImagesDecoded: true,
+        longWindowsInheritedImagePathsDecoded: true,
+        rerollKeepsOtherModelSelections: true,
         sameTimeMultiview: true,
         restartNoAutoRun: true,
         legacyAutoStartDisabled: true,

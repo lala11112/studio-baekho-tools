@@ -27,7 +27,10 @@ import { inspectWorkbenchGlb } from "../engine/glb-inspect";
 const digest = (file: string) =>
   createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 function partOutput(task: WorkerTask): WorkbenchResult {
-  const role = task.stage.id.replace("separate-", "");
+  const [role, view] = task.stage.id.replace("separate-", "").split("-") as [
+    string,
+    "front" | "back" | "left" | "right" | undefined,
+  ];
   const folder = path
     .dirname(path.relative(task.run.workspace, task.resultPath))
     .replaceAll("\\", "/");
@@ -37,7 +40,7 @@ function partOutput(task: WorkerTask): WorkbenchResult {
     path.join(task.run.workspace, image),
     Buffer.concat([
       Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-      Buffer.from(`offline fixture ${role}`),
+      Buffer.from(`offline fixture ${role} ${view ?? "front"}`),
     ]),
   );
   return {
@@ -47,7 +50,7 @@ function partOutput(task: WorkerTask): WorkbenchResult {
       {
         id: role,
         label: role,
-        artifacts: [{ path: image, kind: "image", role }],
+        artifacts: [{ path: image, kind: "image", role, view }],
         objects: [],
       },
     ],
@@ -124,6 +127,29 @@ function fixture(step: WorkbenchStep = "concept") {
       checks: [],
     },
   };
+  if (step === "model") {
+    context.job.request.role = "head";
+    for (const view of ["front", "back", "left", "right"] as const) {
+      const relative = `refs/${view}.png`;
+      const file = path.join(projectRoot, relative);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(
+        file,
+        Buffer.concat([
+          Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+          Buffer.from(view),
+        ]),
+      );
+      context.inputs.push({
+        path: relative,
+        kind: "image",
+        role: "head",
+        view,
+        sha256: digest(file),
+        bytes: fs.statSync(file).size,
+      });
+    }
+  }
   return { root, services, context };
 }
 function output(task: WorkerTask, n = 1): WorkbenchResult {
@@ -247,7 +273,7 @@ test("a saved UTF-8 BOM completed result is revalidated without regenerating can
     stage: { id: "model" },
     resultPath: path.join(folder, "result.json"),
   } as WorkerTask;
-  const result = output(task, 4);
+  const result = output(task, 1);
   fs.writeFileSync(task.resultPath, "\uFEFF" + JSON.stringify(result));
   worker.receipts.set("model", {
     charges: [{ state: "observed", cost: 100 }],
@@ -271,7 +297,7 @@ test("modifying a paid checkpoint output blocks recovery without another charge"
   const f = fixture("model"),
     worker = new Worker();
   worker.hook = (task) => {
-    const result = output(task, 4);
+    const result = output(task, 1);
     worker.receipts.set("model", {
       charges: [{ state: "observed", cost: 100 }],
       downloads: result.candidates.map((candidate) => ({
@@ -690,6 +716,586 @@ test("explicit nonrepairable or new-generation requirements stop even when they 
     assert.equal(classifyWorkbenchFailure(reason).kind, "blocked", reason);
 });
 
+const fourViews = ["front", "back", "left", "right"] as const;
+function addSeparationBase(
+  f: ReturnType<typeof fixture>,
+  pairs = ["head", "hair", "body"].flatMap((role) =>
+    fourViews.map((view) => ({
+      role,
+      view: view as (typeof fourViews)[number] | undefined,
+    })),
+  ),
+) {
+  const artifacts = pairs.map(({ role, view }) => {
+    const relative = `old-parts/${role}-${view ?? "front"}.png`;
+    const file = path.join(f.services.projectRoot("project"), relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      Buffer.concat([
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+        Buffer.from(`base saved ${role}/${view ?? "front"}`),
+      ]),
+    );
+    return {
+      path: relative,
+      kind: "image" as const,
+      role,
+      view,
+      sha256: digest(file),
+      bytes: fs.statSync(file).size,
+    };
+  });
+  const base: WorkbenchExecutionContext["job"] = {
+    ...structuredClone(f.context.job),
+    id: "base-separation",
+    status: "needs_input",
+    candidates: [],
+    draftCandidates: [{ id: "draft", label: "saved images", artifacts }],
+  };
+  f.context.workbench.jobs.push(base);
+  f.context.job.request.baseJobId = base.id;
+  f.context.job.request.baseCandidateId = "draft";
+  f.context.inputs.push(...artifacts);
+  return artifacts;
+}
+
+test("four-view separation produces twelve independent photos and references earlier directions of the same part", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  f.context.job.request.views = [...fourViews];
+  const originalFile = path.join(
+    f.services.projectRoot("project"),
+    "source-front.png",
+  );
+  fs.writeFileSync(
+    originalFile,
+    Buffer.concat([
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      Buffer.from("imported full character fixture"),
+    ]),
+  );
+  f.context.inputs.push({
+    path: "source-front.png",
+    kind: "image",
+    role: "front",
+    sha256: digest(originalFile),
+    bytes: fs.statSync(originalFile).size,
+  });
+  const drafts: number[] = [];
+  f.context.onDraft = (result) =>
+    drafts.push(
+      result.candidates[0].artifacts.filter(
+        (artifact) => artifact.kind === "image",
+      ).length,
+    );
+  worker.hook = partOutput;
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const result = await executor.execute(f.context, () => {});
+  assert.equal(result.status, "completed");
+  assert.equal(result.candidates[0].artifacts.length, 12);
+  assert.deepEqual(
+    drafts,
+    Array.from({ length: 12 }, (_, i) => i + 1),
+  );
+  assert.deepEqual(
+    worker.calls.map((task) => task.stage.id),
+    ["head", "hair", "body"].flatMap((role) =>
+      fourViews.map((view) => `separate-${role}-${view}`),
+    ),
+  );
+  assert(
+    worker.calls.every((task) =>
+      task.imagePaths?.some((file) => file.endsWith("source-front.png")),
+    ),
+  );
+  const left = worker.calls.find(
+    (task) => task.stage.id === "separate-head-left",
+  )!;
+  assert(left.imagePaths!.some((file) => file.includes("separate-head-front")));
+  assert(left.imagePaths!.some((file) => file.includes("separate-head-back")));
+  assert.match(left.prompt, /character's own sides/);
+  assert.match(left.prompt, /Never mirror-copy/);
+  worker.probe = async () => {
+    throw Error("saved inspection never probes");
+  };
+  const saved = await executor.inspectSaved(f.context);
+  assert.equal(saved.status, "completed");
+  assert.equal(saved.candidates[0].artifacts.length, 12);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("selected full-character reference remains available even when its old metadata calls it body", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  f.context.job.request = {
+    ...f.context.job.request,
+    views: [...fourViews],
+    role: "head",
+    view: "front",
+  };
+  const relative = "full-character.png",
+    file = path.join(f.services.projectRoot("project"), relative);
+  fs.writeFileSync(
+    file,
+    Buffer.concat([
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      Buffer.from("full character"),
+    ]),
+  );
+  const image = {
+    path: relative,
+    kind: "image" as const,
+    role: "body",
+    sha256: digest(file),
+    bytes: fs.statSync(file).size,
+  };
+  const concept = {
+    ...structuredClone(f.context.job),
+    id: "concept",
+    step: "concept" as const,
+    candidates: [{ id: "chosen", label: "full character", artifacts: [image] }],
+  };
+  f.context.workbench.jobs.push(concept);
+  f.context.inputs.push(image);
+  f.context.job.dependencies.concept = {
+    jobId: concept.id,
+    candidateId: "chosen",
+  };
+  worker.hook = partOutput;
+  await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(worker.calls.length, 1);
+  assert(worker.calls[0].imagePaths?.some((path) => path.endsWith(relative)));
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("one direction correction preserves eleven real base images and invokes just its targeted phase", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  f.context.job.request = {
+    ...f.context.job.request,
+    views: [...fourViews],
+    role: "hair",
+    view: "left",
+    prompt: "왼쪽 땋은 머리를 더 길게",
+  };
+  const base = addSeparationBase(f);
+  f.context.workbench.jobs[0].draftChecks = [
+    { name: "hair:clean_peripheral_alpha", passed: false, severity: "warning" },
+  ];
+  worker.hook = partOutput;
+  const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(result.status, "completed");
+  assert.deepEqual(
+    worker.calls.map((task) => task.stage.id),
+    ["separate-hair-left"],
+  );
+  assert.match(worker.calls[0].prompt, /왼쪽 땋은 머리를 더 길게/);
+  assert(
+    result.checks.some(
+      (check) => check.name === "hair:clean_peripheral_alpha" && !check.passed,
+    ),
+  );
+  assert(!result.checks.some((check) => check.name.includes("hair:hair:")));
+  for (const source of base.filter(
+    (artifact) => !(artifact.role === "hair" && artifact.view === "left"),
+  )) {
+    const retained = result.candidates[0].artifacts.find(
+      (artifact) =>
+        artifact.kind === "image" &&
+        artifact.role === source.role &&
+        artifact.view === source.view,
+    )!;
+    assert.equal(
+      digest(path.join(f.context.workspace, retained.path)),
+      source.sha256,
+    );
+    assert.equal(
+      digest(path.join(f.services.projectRoot("project"), source.path)),
+      source.sha256,
+    );
+  }
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("continue missing views preserves legacy front drafts and generates only ten missing directions", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  f.context.job.request.views = [...fourViews];
+  f.context.job.request.reuseExisting = true;
+  const original = addSeparationBase(f, [
+    { role: "head", view: undefined },
+    { role: "hair", view: undefined },
+  ]);
+  worker.hook = partOutput;
+  const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(result.status, "completed");
+  assert.equal(worker.calls.length, 10);
+  assert(
+    !worker.calls.some((task) =>
+      ["separate-head-front", "separate-hair-front"].includes(task.stage.id),
+    ),
+  );
+  for (const source of original) {
+    const artifact = result.candidates[0].artifacts.find(
+      (item) => item.role === source.role && item.view === "front",
+    )!;
+    assert.equal(
+      digest(path.join(f.context.workspace, artifact.path)),
+      source.sha256,
+    );
+  }
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("repeated inherited visual warnings stay false and bounded instead of multiplying past the result limit", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  f.context.job.request = {
+    ...f.context.job.request,
+    views: [...fourViews],
+    role: "head",
+    view: "front",
+  };
+  addSeparationBase(f);
+  f.context.workbench.jobs[0].draftChecks = Array.from({ length: 120 }, () => ({
+    name: "hair:clean_peripheral_alpha",
+    passed: false,
+    severity: "warning" as const,
+  }));
+  worker.hook = partOutput;
+  const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(result.status, "completed");
+  assert.equal(result.checks.length, 1);
+  assert.deepEqual(result.checks[0], {
+    name: "hair:clean_peripheral_alpha",
+    passed: false,
+    severity: "warning",
+  });
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("targeted correction of a partial draft stays partial without silently generating other directions", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  f.context.job.request = {
+    ...f.context.job.request,
+    views: [...fourViews],
+    role: "hair",
+    view: "front",
+  };
+  addSeparationBase(f, [{ role: "head", view: undefined }]);
+  worker.hook = partOutput;
+  const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.recovery?.kind, "blocked");
+  assert.equal(result.candidates[0].artifacts.length, 2);
+  assert.deepEqual(
+    worker.calls.map((task) => task.stage.id),
+    ["separate-hair-front"],
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("missing-only execution still respects an explicitly selected direction", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  f.context.job.request = {
+    ...f.context.job.request,
+    views: [...fourViews],
+    reuseExisting: true,
+    role: "head",
+    view: "back",
+  };
+  addSeparationBase(f, [{ role: "head", view: undefined }]);
+  worker.hook = partOutput;
+  const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.recovery?.kind, "blocked");
+  assert.deepEqual(
+    worker.calls.map((task) => task.stage.id),
+    ["separate-head-back"],
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("model requires four mapped references, one output and an observable supported correction prompt", async () => {
+  const f = fixture("model"),
+    worker = new Worker();
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const missing = f.context.inputs.pop()!;
+  const blocked = await executor.execute(f.context, () => {});
+  assert.equal(blocked.status, "needs_input");
+  assert.equal(worker.calls.length, 0);
+  f.context.inputs.push(missing);
+  f.context.job.request.prompt = "몸통보다 머리를 작게";
+  worker.hook = (task) => {
+    const result = output(task, 1);
+    worker.receipts.set("model", {
+      charges: [{ state: "observed", cost: 25 }],
+      downloads: [
+        {
+          state: "completed",
+          file: result.candidates[0].artifacts[0].path,
+          sha256: digest(
+            path.join(
+              task.run.workspace,
+              result.candidates[0].artifacts[0].path,
+            ),
+          ),
+        },
+      ],
+    });
+    return result;
+  };
+  const result = await executor.execute(f.context, () => {});
+  assert.equal(result.status, "completed");
+  assert.equal(result.candidates.length, 1);
+  assert.equal(worker.calls[0].imagePaths?.length, 4);
+  assert.match(worker.calls[0].prompt, /ONE-candidate/);
+  assert.match(worker.calls[0].prompt, /map character-left\/right correctly/);
+  assert.match(
+    worker.calls[0].prompt,
+    /before paid-submit, observe a prompt field/,
+  );
+  assert.match(
+    worker.calls[0].prompt,
+    /NEVER submit while silently ignoring the prompt/,
+  );
+  assert.match(worker.calls[0].prompt, /몸통보다 머리를 작게/);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("existing-model reroll uses only Studio regional editing, verifies allowance, and never requires fresh four-view generation", async () => {
+  for (const scope of ["all", "part"] as const) {
+    const f = fixture("model"),
+      worker = new Worker();
+    f.context.inputs = [];
+    const relative = "old-model/native.glb",
+      file = path.join(f.services.projectRoot("project"), relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, buildWorkbenchGlb());
+    const native = {
+      path: relative,
+      kind: "model" as const,
+      role: "head",
+      sha256: digest(file),
+      bytes: fs.statSync(file).size,
+    };
+    const base = {
+      ...structuredClone(f.context.job),
+      id: "old-model",
+      candidates: [
+        { id: "chosen", label: "chosen model", artifacts: [native] },
+      ],
+    };
+    f.context.workbench.jobs.push(base);
+    f.context.inputs.push(native);
+    f.context.job.request = {
+      ...f.context.job.request,
+      baseJobId: base.id,
+      baseCandidateId: "chosen",
+      modelEditScope: scope,
+      modelEditTarget: scope === "part" ? "왼쪽 귀만" : undefined,
+      prompt: "귀 끝을 둥글게",
+    };
+    await new CodexWorkbenchExecutor(worker, f.services).execute(
+      f.context,
+      () => {},
+    );
+    assert.equal(worker.calls.length, 1);
+    const prompt = worker.calls[0].prompt;
+    assert.match(
+      prompt,
+      /existing-model partial regeneration\/regional-edit feature/,
+    );
+    assert.match(prompt, /remaining partial-regeneration allowance\/count/);
+    assert.match(prompt, /free allowance is exhausted/);
+    assert.match(prompt, /Never use new-model Generate/);
+    assert.match(
+      prompt,
+      /at most ONE observed host-gated partial regeneration/,
+    );
+    assert.match(prompt, /studio_canvas_drag/);
+    assert.match(prompt, /studio_mesh_edit_submit/);
+    assert.match(prompt, /Never use ordinary studio_submit/);
+    assert.deepEqual(worker.calls[0].modelEdit, {
+      scope,
+      target: scope === "part" ? "왼쪽 귀만" : undefined,
+    });
+    assert(!prompt.includes("ONE-candidate mode"));
+    assert.match(
+      prompt,
+      scope === "part"
+        ? /Select ONLY the requested region '왼쪽 귀만'/
+        : /select the entire existing model/,
+    );
+    assert.equal(digest(file), native.sha256);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("a base Studio screenshot cannot replace or duplicate the selected separation input views", async () => {
+  const f = fixture("model"),
+    worker = new Worker();
+  const refs = [...f.context.inputs];
+  const selection = {
+    ...structuredClone(f.context.job),
+    id: "selected-parts",
+    step: "separate" as const,
+    candidates: [{ id: "parts", label: "parts", artifacts: refs }],
+  };
+  f.context.workbench.jobs.push(selection);
+  f.context.job.dependencies.separate = {
+    jobId: selection.id,
+    candidateId: "parts",
+  };
+  const previewFile = path.join(
+    f.services.projectRoot("project"),
+    "preview.png",
+  );
+  fs.copyFileSync(
+    path.join(f.services.projectRoot("project"), refs[0].path),
+    previewFile,
+  );
+  const preview = { ...refs[0], path: "preview.png" };
+  const nativeFile = path.join(f.services.projectRoot("project"), "native.glb");
+  fs.writeFileSync(nativeFile, buildWorkbenchGlb());
+  const native = {
+    path: "native.glb",
+    kind: "model" as const,
+    role: "head",
+    sha256: digest(nativeFile),
+    bytes: fs.statSync(nativeFile).size,
+  };
+  const base = {
+    ...structuredClone(f.context.job),
+    id: "prior-model",
+    candidates: [{ id: "prior", label: "prior", artifacts: [preview, native] }],
+  };
+  f.context.workbench.jobs.push(base);
+  f.context.inputs.push(preview, native);
+  f.context.job.request.baseJobId = base.id;
+  await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(worker.calls.length, 1);
+  const selectedOccurrences =
+    worker.calls[0].prompt.match(/"referenceUse":"selected-part-view"/g) ?? [];
+  assert.equal(selectedOccurrences.length, 4);
+  assert.match(worker.calls[0].prompt, /"referenceUse":"prior-version"/);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("targeted surface revision retains the other two parts and only runs selected UV and texture", async () => {
+  const f = fixture("surface"),
+    worker = new Worker();
+  f.context.job.request.role = "head";
+  const artifacts = ["head", "hair", "body"].map((role, i) => {
+    const relative = `old-surface/${role}.glb`,
+      file = path.join(f.services.projectRoot("project"), relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, buildWorkbenchGlb(i));
+    return {
+      path: relative,
+      kind: "model" as const,
+      role,
+      sha256: digest(file),
+      bytes: fs.statSync(file).size,
+    };
+  });
+  const base = {
+    ...structuredClone(f.context.job),
+    id: "base-surface",
+    candidates: [{ id: "surface", label: "base", artifacts }],
+  };
+  f.context.workbench.jobs.push(base);
+  f.context.job.request.baseJobId = base.id;
+  f.context.inputs.push(...artifacts);
+  const revisedPath = "new-selected/head.glb",
+    revisedFile = path.join(f.services.projectRoot("project"), revisedPath);
+  fs.mkdirSync(path.dirname(revisedFile), { recursive: true });
+  fs.writeFileSync(revisedFile, buildWorkbenchGlb(8));
+  const revised = {
+    path: revisedPath,
+    kind: "model" as const,
+    role: "head",
+    sha256: digest(revisedFile),
+    bytes: fs.statSync(revisedFile).size,
+  };
+  const model = {
+    ...structuredClone(f.context.job),
+    id: "new-head-model",
+    step: "model" as const,
+    candidates: [{ id: "new-model", label: "new head", artifacts: [revised] }],
+  };
+  f.context.workbench.jobs.push(model);
+  f.context.inputs.push(revised);
+  f.context.job.dependencies["model:head"] = {
+    jobId: model.id,
+    candidateId: "new-model",
+  };
+  worker.hook = (task) => {
+    if (task.stage.id === "head-uv") {
+      assert.match(task.prompt, /new-selected\/head.glb/);
+      assert(!task.prompt.includes("old-surface/head.glb"));
+    }
+    const result = output(task);
+    const file = result.candidates[0].artifacts[0].path;
+    worker.receipts.set(task.stage.id, {
+      charges: [{ state: "observed", cost: 5 }],
+      downloads: [
+        {
+          state: "completed",
+          file,
+          sha256: digest(path.join(task.run.workspace, file)),
+        },
+      ],
+    });
+    return result;
+  };
+  const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(result.status, "completed");
+  assert.deepEqual(
+    worker.calls.map((task) => task.stage.id),
+    ["head-uv", "head-texture"],
+  );
+  for (const source of artifacts.filter(
+    (artifact) => artifact.role !== "head",
+  )) {
+    const kept = result.candidates[0].artifacts.find(
+      (artifact) => artifact.role === source.role,
+    )!;
+    assert.equal(
+      digest(path.join(f.context.workspace, kept.path)),
+      source.sha256,
+    );
+  }
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
 test("failed part recovery reuses completed head and repairs hair without another image call", async () => {
   const f = fixture("separate"),
     worker = new Worker();
@@ -777,7 +1383,7 @@ test("confirmed Studio submission recovery only downloads existing results", asy
   worker.hook = (task) => {
     assert.equal(task.recoveryOnly, true);
     assert.match(task.prompt, /existing submitted task only/);
-    const result = output(task, 4);
+    const result = output(task, 1);
     worker.receipts.get("model")!.downloads = result.candidates.map(
       (candidate) => ({
         state: "completed",
@@ -927,7 +1533,7 @@ test("interrupted local repair invalidates only its old checkpoint and can resum
       );
       throw Error("network connection reset during local repair");
     }
-    const result = output(task, 4);
+    const result = output(task, 1);
     worker.receipts.set("model", {
       charges: [{ state: "observed", cost: 100 }],
       downloads: result.candidates.map((candidate) => ({

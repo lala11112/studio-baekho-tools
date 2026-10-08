@@ -4,14 +4,13 @@ import {
   dialog,
   ipcMain,
   nativeImage,
-  net,
   protocol,
   shell,
 } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { Readable } from "node:stream";
 import { z } from "zod";
 import { Store, uid } from "../engine/store";
 import { Engine } from "../engine/engine";
@@ -586,10 +585,40 @@ app.whenReady().then(async () => {
           .startsWith(fs.realpathSync(store.directory(id)) + path.sep)
       )
         return new Response("", { status: 403 });
-      const response = await net.fetch(pathToFileURL(file).toString());
-      const headers = new Headers(response.headers);
-      headers.set("Access-Control-Allow-Origin", "*");
-      return new Response(response.body, { status: response.status, headers });
+      // Chromium's file fetch can reject valid Windows paths above MAX_PATH.
+      // Node streams support those paths; retain the same allowlist and realpath checks.
+      const mime: Record<string, string> = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".svg": "image/svg+xml",
+        ".json": "application/json",
+        ".gltf": "model/gltf+json",
+        ".glb": "model/gltf-binary",
+        ".txt": "text/plain; charset=utf-8",
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+      };
+      const bytes = fs.statSync(file).size;
+      const stream = fs.createReadStream(file);
+      await new Promise<void>((resolve, reject) => {
+        stream.once("open", () => resolve());
+        stream.once("error", reject);
+      });
+      return new Response(
+        Readable.toWeb(stream) as ReadableStream<Uint8Array>,
+        {
+          headers: {
+            "Content-Type":
+              mime[path.extname(file).toLowerCase()] ??
+              "application/octet-stream",
+            "Content-Length": String(bytes),
+            "Access-Control-Allow-Origin": "*",
+          },
+        },
+      );
     } catch {
       return new Response("", { status: 404 });
     }

@@ -9,6 +9,8 @@ import {
   guardedPath,
   isStudioUrl,
   isLoginUrl,
+  meshEditTerms,
+  canvasPoints,
 } from "../electron/studio-policy";
 
 test("Studio routing rejects deceptive domains, credentials and protocols", () => {
@@ -28,6 +30,194 @@ test("Only an unambiguous cost on the actual action label is accepted", () => {
   assert.equal(creditFromLabel("P2.0"), undefined);
   assert.equal(creditFromLabel("Export 5"), 5);
   assert.equal(creditFromLabel("Generate"), undefined);
+  assert.equal(creditFromLabel("Retry Selection 3 edits remaining"), undefined);
+  assert.equal(creditFromLabel("Regenerate 2 free retries left"), undefined);
+  assert.equal(creditFromLabel("재생성 무료 3회"), undefined);
+});
+
+test("Mesh Edit accepts observed free uses or explicit paid edit price and never new Generate", () => {
+  const text = "Edit Mesh 3 free edits remaining Retry Selection";
+  assert.equal(
+    meshEditTerms("Retry Selection", "3 free edits remaining", text).cost,
+    0,
+  );
+  assert.equal(
+    meshEditTerms(
+      "Regenerate ⚡ 0",
+      "Remaining edits: 2",
+      "Edit Mesh Remaining edits: 2 Regenerate ⚡ 0",
+    ).remaining,
+    2,
+  );
+  assert.equal(
+    meshEditTerms(
+      "재생성",
+      "남은 무료 수정 2회",
+      "메시 편집 남은 무료 수정 2회 재생성",
+    ).cost,
+    0,
+  );
+  assert.equal(
+    meshEditTerms(
+      "Regenerate",
+      "Unlimited free edits",
+      "Edit Mesh Unlimited free edits Regenerate",
+    ).cost,
+    0,
+  );
+  assert.throws(
+    () =>
+      meshEditTerms(
+        "Regenerate",
+        "3 edits remaining",
+        "Edit Mesh 3 edits remaining Regenerate",
+      ),
+    /not visible/,
+  );
+  assert.throws(
+    () =>
+      meshEditTerms(
+        "Regenerate",
+        "Unlimited edits",
+        "Edit Mesh Unlimited edits Regenerate",
+      ),
+    /not visible/,
+  );
+  assert.throws(
+    () => meshEditTerms("Generate 50 credits", "3 free edits remaining", text),
+    /new Generate/,
+  );
+  assert.throws(
+    () =>
+      meshEditTerms(
+        "Regenerate",
+        "0 free edits remaining",
+        "Edit Mesh 0 free edits remaining Regenerate",
+      ),
+    /exhausted/,
+  );
+  assert.throws(
+    () =>
+      meshEditTerms(
+        "Regenerate",
+        "Balance 250",
+        "Edit Mesh Balance 250 Regenerate",
+      ),
+    /not visible/,
+  );
+  assert.throws(
+    () =>
+      meshEditTerms(
+        "Regenerate",
+        "3 free edits remaining",
+        "3 free edits remaining",
+      ),
+    /Edit Mesh context/,
+  );
+  assert.throws(
+    () =>
+      meshEditTerms(
+        "Regenerate",
+        "3 free edits remaining",
+        "Edit Mesh No quota shown",
+      ),
+    /Visible/,
+  );
+  assert.equal(
+    meshEditTerms(
+      "Regenerate ⚡ 50",
+      "Regenerate ⚡ 50",
+      "Edit Mesh 0 free edits remaining Regenerate ⚡ 50",
+    ).cost,
+    50,
+  );
+  assert.throws(
+    () =>
+      meshEditTerms(
+        "Regenerate 50",
+        "Regenerate 50",
+        "Edit Mesh Regenerate 50",
+      ),
+    /not visible/,
+  );
+  assert.throws(
+    () =>
+      meshEditTerms(
+        "Regenerate 50 credits · 3 free edits remaining",
+        "3 free edits remaining",
+        "Edit Mesh Regenerate 50 credits · 3 free edits remaining",
+      ),
+    /ambiguous/,
+  );
+});
+
+test("Canvas drag paths are bounded normalized points, not arbitrary coordinates or payloads", () => {
+  assert.deepEqual(
+    canvasPoints([
+      { x: 0, y: 0 },
+      { x: 1, y: 1 },
+    ]),
+    [
+      { x: 0, y: 0 },
+      { x: 1, y: 1 },
+    ],
+  );
+  assert.throws(
+    () =>
+      canvasPoints([
+        { x: -0.1, y: 0 },
+        { x: 1, y: 1 },
+      ]),
+    /0–1/,
+  );
+  assert.throws(
+    () =>
+      canvasPoints([
+        { x: 0, y: 0 },
+        { x: NaN, y: 1 },
+      ]),
+    /0–1/,
+  );
+  assert.throws(() => canvasPoints([{ x: 0, y: 0 }]), /2–32/);
+  assert.throws(
+    () => canvasPoints(Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5 }))),
+    /2–32/,
+  );
+});
+
+test("Free Mesh Edit uses durable one-operation journal and cannot replay after restart or recovery", () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "studio-free-edit-"));
+  const context = {
+    runId: "free-edit",
+    stageId: "model",
+    rootDir,
+    creditLimit: 0,
+    maxAttempts: 1,
+    modelEdit: { scope: "all" as const },
+  };
+  const first = new StudioLedger(rootDir, context);
+  first.reserve(
+    "free:1",
+    0,
+    "Retry Selection · 3 free edits remaining",
+    "snap1",
+  );
+  first.clicked("free:1");
+  const resumed = new StudioLedger(rootDir, context);
+  assert.equal(resumed.summary().remaining, 0);
+  assert.equal(resumed.summary().charges.length, 1);
+  assert.throws(
+    () => resumed.reserve("free:2", 0, "Retry Selection", "snap2"),
+    /already submitted/,
+  );
+  const recovery = new StudioLedger(rootDir, {
+    ...context,
+    recoveryOnly: true,
+  });
+  assert.throws(
+    () => recovery.reserve("free:2", 0, "Retry Selection", "snap2"),
+    /자동 복구/,
+  );
 });
 test("Host credit journal survives restart and rejects duplicate/ambiguous paid attempts", () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "studio-ledger-"));

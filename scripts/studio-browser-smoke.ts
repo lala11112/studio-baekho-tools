@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { StudioBrowser } from "../electron/studio-browser";
+import { STUDIO_TOOLS } from "../electron/studio-policy";
 
 // Build/run with:
 // npm run build
@@ -40,7 +41,8 @@ async function main() {
   fs.mkdirSync(workspace, { recursive: true });
   app.setPath("userData", path.join(workspace, "user-data"));
   process.env.PARTSMITH_STUDIO_TEST = "1";
-  const html = `<!doctype html><html><body><nav><a href="#smart">Smart Mesh</a></nav><h1>Local Studio adapter fixture</h1><label>Prompt<textarea aria-label="Model prompt"></textarea></label><select aria-label="Topology"><option value="tri">Triangle</option><option value="quad">Quad</option></select><input type="file" style="display:none" onchange="document.querySelector('#upload').textContent='Uploaded '+this.files[0].name"><p id="upload">No upload</p><button onclick="document.querySelector('#result').textContent='Task fixture-body-001 completed successfully';this.disabled=true">Generate100</button><button>Generate 250</button><button>Subscribe</button><a href="/model.glb" download="fixture.glb">Download model</a><a href="/login">Account</a><p id="result">Ready for local test</p></body></html>`;
+  const html = `<!doctype html><html><body><nav><a href="#smart">Smart Mesh</a></nav><h1>Local Studio adapter fixture</h1><label>Prompt<textarea aria-label="Model prompt"></textarea></label><select aria-label="Topology"><option value="tri">Triangle</option><option value="quad">Quad</option></select><input type="file" style="display:none" onchange="document.querySelector('#upload').textContent='Uploaded '+this.files[0].name"><p id="upload">No upload</p><button onclick="document.querySelector('#result').textContent='Task fixture-body-001 completed successfully';this.disabled=true">Generate100</button><button>Generate 250</button><button>Subscribe</button><a href="/model.glb" download="fixture.glb">Download model</a><a href="/edit">Mesh editor</a><a href="/login">Account</a><p id="result">Ready for local test</p></body></html>`;
+  const editHtml = `<!doctype html><html><body><h1>Edit Mesh</h1><p id="quota">3 free edits remaining</p><div style="position:relative;width:320px;height:220px"><canvas aria-label="Mesh selection canvas" width="320" height="220" style="background:#abd;display:block" onmousedown="this.dataset.down='yes'" onmousemove="if(this.dataset.down==='yes')document.querySelector('#drag').textContent='Canvas selection drag observed'" onmouseup="this.dataset.down='no'"></canvas><div id="cover" style="display:none;position:absolute;inset:0;background:#888">Covered</div></div><p id="drag">No canvas drag yet</p><button onclick="document.querySelector('#result').textContent='Mesh edit fixture completed successfully';document.querySelector('#quota').textContent='2 free edits remaining'">Retry Selection</button><button>Regenerate ⚡ 50</button><button>Generate 100</button><button onclick="document.querySelector('#quota').textContent='0 free edits remaining'">Show exhausted quota</button><button onclick="document.querySelector('#quota').textContent='No quota available'">Hide quota</button><button onclick="document.querySelector('#quota').textContent='3 free edits remaining'">Restore quota</button><button onclick="document.querySelector('#cover').style.display='block'">Cover canvas</button><button onclick="document.querySelector('#cover').style.display='none'">Uncover canvas</button><button onclick="setTimeout(()=>document.querySelector('canvas').remove(),1500)">Detach canvas soon</button><p id="result">Ready</p><a href="/login">Account</a></body></html>`;
   const model = Buffer.alloc(20);
   model.write("glTF");
   model.writeUInt32LE(2, 4);
@@ -54,12 +56,15 @@ async function main() {
         'attachment; filename="fixture.glb"',
       );
       res.end(model);
+    } else if (req.url === "/edit") {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.end(editHtml);
     } else if (req.url === "/login")
       res.end(
         '<html><body><h1>Account</h1><button>Sign up/Log in</button><input type="password"></body></html>',
       );
     else {
-      res.setHeader("Content-Type", "text/html");
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.end(html);
     }
   });
@@ -234,7 +239,7 @@ async function main() {
       headers: { Authorization: `Bearer ${bridge.token}` },
       body: JSON.stringify({ method: "tools/list" }),
     });
-    assert.equal((await accepted.json()).tools.length, 11);
+    assert.equal((await accepted.json()).tools.length, STUDIO_TOOLS.length);
     const child = spawn(mcpExecutable, [mcpEntry], {
       windowsHide: true,
       env: {
@@ -272,7 +277,10 @@ async function main() {
       messages.find((m) => m.id === 1)?.result.serverInfo.name,
       "partsmith-studio",
     );
-    assert.equal(messages.find((m) => m.id === 2)?.result.tools.length, 11);
+    assert.equal(
+      messages.find((m) => m.id === 2)?.result.tools.length,
+      STUDIO_TOOLS.length,
+    );
     child.stdin.write(
       JSON.stringify({
         jsonrpc: "2.0",
@@ -290,6 +298,192 @@ async function main() {
     checks.push(
       "Authenticated loopback and real child stdio MCP initialize/tools-list/tools-call round trip",
     );
+    await bridge.close();
+    bridge = undefined;
+    view = await snapshot();
+    view = text(
+      await browser.callTool("studio_click", observed(view, "Mesh editor")),
+    );
+    if (!view.text.includes("Edit Mesh"))
+      view = text(await browser.callTool("studio_wait", { milliseconds: 300 }));
+    const canvas = (v: View) => {
+      const node = v.controls.find((c) => c.tag === "canvas");
+      assert(node, "Observed canvas required");
+      return { snapshotId: v.snapshotId, element: node.index };
+    };
+    const points = [
+      { x: 0.2, y: 0.2 },
+      { x: 0.45, y: 0.5 },
+      { x: 0.7, y: 0.7 },
+    ];
+    await assert.rejects(
+      browser.callTool("studio_canvas_drag", { ...canvas(view), points }),
+      /context required/,
+    );
+    const editContext = {
+      ...context,
+      runId: randomUUID(),
+      stageId: "model",
+      creditLimit: 0,
+      modelEdit: { scope: "part" as const, target: "back hair volume" },
+    };
+    browser.attachRun(editContext);
+    view = await snapshot();
+    await assert.rejects(
+      browser.callTool("studio_canvas_drag", {
+        ...observed(view, "Retry Selection"),
+        points,
+      }),
+      /Observed canvas/,
+    );
+    await assert.rejects(
+      browser.callTool("studio_canvas_drag", {
+        ...canvas(view),
+        points: [
+          { x: -1, y: 0 },
+          { x: 1, y: 1 },
+        ],
+      }),
+      /0–1/,
+    );
+    const oldCanvas = canvas(view);
+    view = text(
+      await browser.callTool("studio_canvas_drag", { ...oldCanvas, points }),
+    );
+    assert(view.text.includes("Canvas selection drag observed"));
+    await assert.rejects(
+      browser.callTool("studio_canvas_drag", { ...oldCanvas, points }),
+      /Stale/,
+    );
+    view = text(
+      await browser.callTool("studio_click", observed(view, "Cover canvas")),
+    );
+    await assert.rejects(
+      browser.callTool("studio_canvas_drag", { ...canvas(view), points }),
+      /covered/,
+    );
+    view = text(
+      await browser.callTool("studio_click", observed(view, "Uncover canvas")),
+    );
+    checks.push(
+      "Mesh-edit canvas drags use real bounded Electron mouse events; missing context, non-canvas, stale, covered and invalid normalized targets are blocked",
+    );
+    await assert.rejects(
+      browser.callTool("studio_submit", {
+        ...observed(view, "Generate 100"),
+        operationId: "forbidden-generate",
+        expectedCredits: 100,
+      }),
+      /new Generate/,
+    );
+    await assert.rejects(
+      browser.callTool("studio_mesh_edit_submit", {
+        ...observed(view, "Generate 100"),
+        operationId: "forbidden-generate",
+        expectedCredits: 0,
+        evidenceText: "3 free edits remaining",
+      }),
+      /new Generate/,
+    );
+    await assert.rejects(
+      browser.callTool("studio_click", observed(view, "Retry Selection")),
+      /charged/,
+    );
+    view = text(
+      await browser.callTool(
+        "studio_click",
+        observed(view, "Show exhausted quota"),
+      ),
+    );
+    await assert.rejects(
+      browser.callTool("studio_mesh_edit_submit", {
+        ...observed(view, "Retry Selection"),
+        operationId: "free-edit",
+        expectedCredits: 0,
+        evidenceText: "0 free edits remaining",
+      }),
+      /exhausted/,
+    );
+    await assert.rejects(
+      browser.callTool("studio_mesh_edit_submit", {
+        ...observed(view, "Regenerate ⚡ 50"),
+        operationId: "paid-edit",
+        expectedCredits: 50,
+        evidenceText: "Regenerate ⚡ 50",
+      }),
+      /credit limit/,
+    );
+    view = text(
+      await browser.callTool("studio_click", observed(view, "Hide quota")),
+    );
+    await assert.rejects(
+      browser.callTool("studio_mesh_edit_submit", {
+        ...observed(view, "Retry Selection"),
+        operationId: "free-edit",
+        expectedCredits: 0,
+        evidenceText: "No quota available",
+      }),
+      /not visible/,
+    );
+    view = text(
+      await browser.callTool("studio_click", observed(view, "Restore quota")),
+    );
+    browser.attachRun({ ...editContext, recoveryOnly: true });
+    view = await snapshot();
+    await assert.rejects(
+      browser.callTool("studio_mesh_edit_submit", {
+        ...observed(view, "Retry Selection"),
+        operationId: "free-edit",
+        expectedCredits: 0,
+        evidenceText: "3 free edits remaining",
+      }),
+      /자동 복구/,
+    );
+    browser.attachRun(editContext);
+    view = await snapshot();
+    view = text(
+      await browser.callTool("studio_mesh_edit_submit", {
+        ...observed(view, "Retry Selection"),
+        operationId: "free-edit",
+        expectedCredits: 0,
+        evidenceText: "3 free edits remaining",
+      }),
+    );
+    if (!view.text.includes("Mesh edit fixture completed successfully"))
+      view = text(await browser.callTool("studio_wait", { milliseconds: 100 }));
+    assert(view.text.includes("Mesh edit fixture completed successfully"));
+    const editReceipt = browser.stageReceipt(
+      editContext.runId,
+      editContext.stageId,
+      1,
+    );
+    assert.equal(editReceipt.charges.length, 1);
+    assert.equal(editReceipt.charges[0].cost, 0);
+    await assert.rejects(
+      browser.callTool("studio_mesh_edit_submit", {
+        ...observed(view, "Retry Selection"),
+        operationId: "free-edit-again",
+        expectedCredits: 0,
+        evidenceText: "2 free edits remaining",
+      }),
+      /already submitted/,
+    );
+    checks.push(
+      "Mesh Edit enforces observed quota/price, blocks exhausted/missing quota and new Generate, journals free uses once, and refuses duplicate or recovery submissions",
+    );
+    view = text(
+      await browser.callTool(
+        "studio_click",
+        observed(view, "Detach canvas soon"),
+      ),
+    );
+    const detached = canvas(view);
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await assert.rejects(
+      browser.callTool("studio_canvas_drag", { ...detached, points }),
+      /attached canvas/,
+    );
+    checks.push("Detached observed canvas is rejected before input events");
     view = await snapshot();
     view = text(
       await browser.callTool("studio_click", observed(view, "Account")),

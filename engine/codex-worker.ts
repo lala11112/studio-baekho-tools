@@ -21,6 +21,8 @@ export type WorkerConnectionContext = {
   capability?: "studio" | "video" | "motion";
   videoUrl?: string;
   recoveryOnly?: boolean;
+  /** Host-frozen existing-model edit; cannot submit a fresh model generation. */
+  modelEdit?: { scope: "all" | "part"; target?: string };
 };
 export type WorkerConnection = {
   args?: string[];
@@ -37,6 +39,7 @@ export type WorkerTask = {
   requestedModel?: "gpt-6-astra";
   /** Recovery may inspect/download existing work, never create another paid submission. */
   recoveryOnly?: boolean;
+  modelEdit?: { scope: "all" | "part"; target?: string };
   /** Host-selected existing project folders, never supplied by worker output. */
   allowedWritePaths?: string[];
   schemaPath: string;
@@ -260,6 +263,7 @@ export class CodexWorker implements ProductionWorker {
       capability: task.stage.capability,
       videoUrl: task.run.config.videoUrl,
       recoveryOnly: task.recoveryOnly,
+      modelEdit: task.modelEdit,
     });
     if (
       task.stage.capability &&

@@ -605,6 +605,20 @@
   margin: 8px 12px 0;
   font-size: 12px;
 }
+.wb-single-model {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  padding-bottom: 12px;
+}
+.wb-single-model-photo {
+  display: block;
+  width: 100%;
+  max-height: 540px;
+  min-height: 300px;
+  object-fit: contain;
+  background: #131717;
+}
 .wb-saved-photos {
   display: flex;
   flex-wrap: wrap;
@@ -638,4 +652,58 @@
   color: var(--muted);
   border: 1px dashed var(--border);
   border-radius: 10px;
+}
+.wb-separation-role {
+  margin-top: 22px;
+}
+.wb-separation-role > h3 {
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+.wb-four-views {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.wb-view-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #131717;
+}
+.wb-view-card img {
+  display: block;
+  width: 100%;
+  height: 190px;
+  object-fit: contain;
+}
+.wb-view-card .wb-draft-missing {
+  min-height: 190px;
+  border: none;
+  border-radius: 0;
+  font-size: 11px;
+}
+.wb-view-caption {
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+}
+.wb-view-caption strong {
+  font-size: 11px;
+  font-weight: 500;
+}
+.wb-view-caption button {
+  font-size: 10px;
+  padding: 5px 7px;
+}
+.wb-controls > .primary + .primary {
+  margin-top: 8px;
+}
+@media (max-width: 1250px) {
+  .wb-four-views {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }

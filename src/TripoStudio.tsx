@@ -91,7 +91,6 @@ export function TripoStudio({
   const [inputModel, setInputModel] = useState("");
   const [selected, setSelected] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [count, setCount] = useState(1);
   const [face, setFace] = useState("12000");
   const [quad, setQuad] = useState(false);
   const [texture, setTexture] = useState(true);
@@ -227,7 +226,7 @@ export function TripoStudio({
         kind: "model",
         model,
         prompt: mode === "text" ? prompt : "",
-        count,
+        count: 1,
         inputMode: mode,
         ...(mode === "image"
           ? { sourceId: imageId }
@@ -500,18 +499,10 @@ export function TripoStudio({
                   {textureModelField}
                 </>
               )}
-              <Field label="생성 개수">
-                <select
-                  value={count}
-                  onChange={(e) => setCount(Number(e.target.value))}
-                >
-                  {[1, 2, 4].map((n) => (
-                    <option key={n} value={n}>
-                      {n}개 · 요청 {n}회
-                    </option>
-                  ))}
-                </select>
-              </Field>
+              <small>
+                모델은 한 번에 하나씩 만듭니다. 수정 지시를 바꿔 다시 요청할 수
+                있습니다.
+              </small>
             </>
           )}
           {tab === "segment" && (
@@ -811,7 +802,7 @@ export function TripoStudio({
               onClick={submit}
             >
               <Sparkles size={16} /> Tripo 요청 검토
-              {tab === "model" ? ` · ${count}개` : ""}
+              {tab === "model" ? " · 모델 1개" : ""}
             </button>
           )}
           <p className="studio-explainer">

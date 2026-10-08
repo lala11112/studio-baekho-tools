@@ -24,6 +24,7 @@ import type {
   WorkbenchStep,
   WorkbenchJob,
   WorkbenchRecovery,
+  WorkbenchView,
 } from "../shared/workbench";
 
 export type WorkbenchServices = {
@@ -38,8 +39,28 @@ export type WorkbenchServices = {
 type InputFile = WorkbenchArtifact & {
   localPath: string;
   sourceSha256?: string;
+  referenceUse?: "selected-part-view" | "prior-version";
 };
-type Phase = { kind: "uv" | "texture" | "separate"; role: string };
+type Phase = {
+  kind: "uv" | "texture" | "separate";
+  role: string;
+  view?: WorkbenchView;
+};
+type SeparatedPart = {
+  role: string;
+  view?: WorkbenchView;
+  result: WorkbenchResult;
+};
+const separationStage = (role: string, view?: WorkbenchView) =>
+  `separate-${role}${view ? `-${view}` : ""}`;
+const uniqueChecks = (checks: WorkbenchResult["checks"]) => [
+  ...new Map(
+    checks.map((check) => [
+      JSON.stringify([check.name, check.passed, check.severity]),
+      check,
+    ]),
+  ).values(),
+];
 type PhaseJournal = {
   jobId: string;
   stageId: string;
@@ -108,6 +129,11 @@ const resultSchema = z
                       .nullable()
                       .optional()
                       .transform((value) => value ?? undefined),
+                    view: z
+                      .enum(["front", "back", "left", "right"])
+                      .nullable()
+                      .optional()
+                      .transform((value) => value ?? undefined),
                   })
                   .strict(),
               )
@@ -158,9 +184,13 @@ export const workbenchResultJsonSchema = {
             items: {
               type: "object",
               additionalProperties: false,
-              required: ["path", "kind", "role"],
+              required: ["path", "kind", "role", "view"],
               properties: {
                 path: { type: "string" },
+                view: {
+                  type: ["string", "null"],
+                  enum: ["front", "back", "left", "right", null],
+                },
                 kind: {
                   type: "string",
                   enum: [
@@ -470,6 +500,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     context: WorkbenchExecutionContext,
     role: string,
     saved: unknown,
+    view?: WorkbenchView,
   ): WorkbenchResult {
     const result: WorkbenchResult = resultSchema.parse(saved);
     result.checks = normalizeWorkbenchChecks("separate", result.checks);
@@ -484,11 +515,18 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       throw Error("분리 결과 구조 검증 실패: 파츠 후보 한 개가 필요합니다.");
     const artifacts = result.candidates[0].artifacts;
     const images = artifacts.filter((artifact) => artifact.kind === "image");
-    if (images.length !== 1 || images[0].role !== role)
+    if (
+      images.length !== 1 ||
+      images[0].role !== role ||
+      (images[0].view ?? "front") !== (view ?? "front")
+    )
       throw Error(
         `분리 결과 구조 검증 실패: ${role} 이미지 한 장만 필요합니다.`,
       );
-    const folder = path.resolve(context.workspace, `outputs/separate-${role}`);
+    const folder = path.resolve(
+      context.workspace,
+      `outputs/${separationStage(role, view)}`,
+    );
     for (const artifact of artifacts) {
       const file = this.file(context.workspace, artifact.path);
       if (
@@ -524,27 +562,29 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
   private savedPart(
     context: WorkbenchExecutionContext,
     role: string,
+    view?: WorkbenchView,
   ): WorkbenchResult | undefined {
-    const stageId = `separate-${role}`;
+    const stageId = separationStage(role, view);
     // A hash-protected checkpoint is authoritative. Never fall back after tampering.
     const checkpoint = this.loadCheckpoint(context, stageId);
-    if (checkpoint) return this.inspectPart(context, role, checkpoint);
+    if (checkpoint) return this.inspectPart(context, role, checkpoint, view);
     const file = this.file(context.workspace, `outputs/${stageId}/result.json`);
     if (!fs.existsSync(file)) return undefined;
-    return this.inspectPart(context, role, readJson(file));
+    return this.inspectPart(context, role, readJson(file), view);
   }
   private separatedDraft(
-    parts: { role: string; result: WorkbenchResult }[],
+    parts: SeparatedPart[],
     completed = false,
     summary?: string,
+    expected = 3,
   ): WorkbenchResult {
     return {
       status: completed ? "completed" : "needs_input",
       summary:
         summary ??
         (completed
-          ? "세 파츠 사진이 준비됐습니다. 외형 경고와 사진을 확인한 뒤 채택하세요."
-          : `${parts.length}/3 파츠 사진을 확인할 수 있습니다. 세 장이 모두 준비된 뒤 채택할 수 있습니다.`),
+          ? `${expected}장 파츠 사진이 준비됐습니다. 외형 경고와 사진을 확인한 뒤 채택하세요.`
+          : `${parts.length}/${expected} 파츠 사진을 확인할 수 있습니다. 모든 방향이 준비된 뒤 채택할 수 있습니다.`),
       candidates: parts.length
         ? [
             {
@@ -557,11 +597,13 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
             },
           ]
         : [],
-      checks: parts.flatMap(({ role, result }) =>
-        result.checks.map((check) => ({
-          ...check,
-          name: `${role}:${check.name}`,
-        })),
+      checks: uniqueChecks(
+        parts.flatMap(({ role, result }) =>
+          result.checks.map((check) => ({
+            ...check,
+            name: `${role}:${check.name}`,
+          })),
+        ),
       ),
     };
   }
@@ -572,31 +614,40 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       throw Error(
         "저장된 사진 확인은 파츠 분리 단계에서만 사용할 수 있습니다.",
       );
-    const parts: { role: string; result: WorkbenchResult }[] = [];
+    const parts: SeparatedPart[] = [];
     const issues: string[] = [];
     const hashes = new Set<string>();
-    for (const role of ["head", "hair", "body"]) {
-      if (context.signal.aborted) break;
-      try {
-        const result = this.savedPart(context, role);
-        if (!result) continue;
-        const image = result.candidates[0].artifacts.find(
-          (artifact) => artifact.kind === "image",
-        )!;
-        const digest = hash(this.file(context.workspace, image.path));
-        if (hashes.has(digest))
-          throw Error("서로 다른 파츠에 같은 이미지가 등록됐습니다.");
-        hashes.add(digest);
-        parts.push({ role, result });
-      } catch (error) {
-        issues.push(
-          `${role}: ${error instanceof Error ? error.message : "저장된 파일 확인 실패"}`,
-        );
+    const views = context.job.request.views ?? [undefined];
+    for (const role of ["head", "hair", "body"])
+      for (const view of views) {
+        if (context.signal.aborted) break;
+        try {
+          const result = this.savedPart(context, role, view);
+          if (!result) continue;
+          const image = result.candidates[0].artifacts.find(
+            (artifact) => artifact.kind === "image",
+          )!;
+          const digest = hash(this.file(context.workspace, image.path));
+          if (hashes.has(digest))
+            throw Error("서로 다른 파츠에 같은 이미지가 등록됐습니다.");
+          hashes.add(digest);
+          parts.push({ role, view, result });
+        } catch (error) {
+          issues.push(
+            `${role}/${view ?? "front"}: ${error instanceof Error ? error.message : "저장된 파일 확인 실패"}`,
+          );
+        }
       }
-    }
     const complete =
-      parts.length === 3 && !issues.length && !context.signal.aborted;
-    const result = this.separatedDraft(parts, complete);
+      parts.length === 3 * views.length &&
+      !issues.length &&
+      !context.signal.aborted;
+    const result = this.separatedDraft(
+      parts,
+      complete,
+      undefined,
+      3 * views.length,
+    );
     if (issues.length) result.summary += ` 확인 필요: ${issues.join(" / ")}`;
     if (!complete)
       result.recovery = {
@@ -649,6 +700,8 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       context.job.step === "reference" ||
       (context.job.step === "concept" &&
         context.job.request.provider !== "tripo");
+    const separated =
+      /^separate-(head|hair|body)(?:-(front|back|left|right))?$/.exec(stageId);
     return [
       "Recover ONLY the existing action using existing files. This is NOT permission to generate again. Built-in image generation and paid submissions are disabled by the host. Do not bypass through shell, network, another provider or account. Never change Codex configuration or read credentials.",
       `Workspace: ${context.workspace}. Phase: ${stageId}. Write artifacts and strict result JSON under '${folder}/'. Inputs are immutable: ${JSON.stringify(inputs)}. Original user request: ${JSON.stringify(context.job.request)}.`,
@@ -657,10 +710,93 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         ? "The host retains the original Studio receipt. Inspect the existing submitted task only, wait/recheck its result or download the existing native outputs. Never press generate, retry, UV, texture or any other paid action. Retain unchanged native downloads for receipt verification. If task identity or submission is ambiguous, return submission_unknown."
         : "Recover actual files already produced by the previous attempt. You may copy known completed generated files mentioned in its log, repair JSON/BOM/paths, and inspect/repackage existing outputs. Do not fabricate missing outputs or alter the requested character through procedural replacements. If a required generated image does not exist or its invocation is ambiguous, return needs_input with that exact reason.",
       imagePhase
-        ? `Return the existing real image artifacts. ${context.job.step === "separate" ? `Exactly ONE candidate and ONE image, role '${stageId.slice("separate-".length)}'. A valid existing image is ready for user review even when its position, scale, alignment, alpha edge or appearance is imperfect. Report those aesthetic concerns as failed warning checks, then return completed with the image unchanged. Do not repair aesthetic issues or withhold the image for exact original-canvas alignment.` : "Preserve the requested candidate/frame count."} Never create a composite as a substitute.`
+        ? `Return the existing real image artifacts. ${context.job.step === "separate" ? `Exactly ONE candidate and ONE image, role '${separated?.[1]}', view '${separated?.[2] ?? "front"}'. A valid existing image is ready for user review even when its position, scale, alignment, alpha edge or appearance is imperfect. Report those aesthetic concerns as failed warning checks, then return completed with the image unchanged. Do not repair aesthetic issues or withhold the image for exact original-canvas alignment.` : "Preserve the requested candidate/frame count."} Never create a composite as a substitute.`
         : `For local preview/geometry/rig repair use configured Blender ${JSON.stringify(this.services.blenderPath())}, actual prior native assets and bpy. Preserve object IDs, intended materials and user-requested rig targets. Return editable .blend when the stage requires it. ${["assembly", "rig", "animation"].includes(context.job.step) ? "Use gpt-6-astra for the actual local scene correction." : ""}`,
       "Return strict JSON with status, summary, candidates and checks. completed means the repaired actual files are ready for host verification. Do not accept results or advance stages on the user's behalf.",
     ].join("\n\n");
+  }
+  private baseInputs(context: WorkbenchExecutionContext, inputs: InputFile[]) {
+    const base = context.workbench.jobs.find(
+      (job) => job.id === context.job.request.baseJobId,
+    );
+    if (!base) return [];
+    const selected = Object.values(context.workbench.selections).find(
+      (selection) => selection.jobId === base.id,
+    );
+    const candidates = [...base.candidates, ...(base.draftCandidates ?? [])];
+    const frozenId = context.job.request.baseCandidateId;
+    const candidate = frozenId
+      ? candidates.find((item) => item.id === frozenId)
+      : (candidates.find((item) => item.id === selected?.candidateId) ??
+        candidates[0]);
+    if (frozenId && !candidate)
+      throw Error("기준 버전의 고정 후보를 찾을 수 없습니다.");
+    const artifacts = candidate?.artifacts ?? [];
+    return inputs.filter((input) =>
+      artifacts.some(
+        (artifact) =>
+          artifact.path === input.path && artifact.sha256 === input.sha256,
+      ),
+    );
+  }
+  private selectedInputs(
+    context: WorkbenchExecutionContext,
+    inputs: InputFile[],
+    slot: string,
+  ) {
+    const selection =
+      context.job.dependencies[slot] ?? context.workbench.selections[slot];
+    if (!selection) return undefined;
+    const candidate = context.workbench.jobs
+      .find((job) => job.id === selection.jobId)
+      ?.candidates.find((item) => item.id === selection.candidateId);
+    if (!candidate) throw Error("선택한 입력 후보를 찾을 수 없습니다.");
+    return inputs.filter((input) =>
+      candidate.artifacts.some(
+        (artifact) =>
+          artifact.path === input.path && artifact.sha256 === input.sha256,
+      ),
+    );
+  }
+  private inheritedChecks(context: WorkbenchExecutionContext, role: string) {
+    const base = context.workbench.jobs.find(
+      (job) => job.id === context.job.request.baseJobId,
+    );
+    const checks = base?.candidates.length
+      ? base.checks
+      : (base?.draftChecks ?? base?.checks ?? []);
+    return uniqueChecks(
+      checks
+        .filter(
+          (check) =>
+            !check.passed &&
+            (!/^(?:head|hair|body):/.test(check.name) ||
+              check.name.startsWith(role + ":")),
+        )
+        .map((check) => ({
+          ...check,
+          name: check.name.replace(new RegExp("^" + role + ":"), ""),
+        })),
+    );
+  }
+  private preserveInput(
+    context: WorkbenchExecutionContext,
+    input: InputFile,
+    folder: string,
+  ) {
+    const source = this.file(context.workspace, input.localPath);
+    if (hash(source) !== input.sha256)
+      throw Error("보존할 입력 파일이 변경됐습니다.");
+    const relative = `${folder}/preserved-${input.kind}-${path.basename(input.localPath)}`;
+    const destination = this.file(context.workspace, relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(source, destination);
+    return {
+      path: relative,
+      kind: input.kind,
+      role: input.role,
+      view: input.view,
+    };
   }
   private inputs(context: WorkbenchExecutionContext): InputFile[] {
     const root = this.services.projectRoot(context.workbench.projectId);
@@ -731,8 +867,14 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         request.provider === "tripo"
           ? "Use the visible Tripo Studio image generation workspace to create exactly FOUR genuine image candidates from the user prompt. Observe the available model and four-result count UI; do not assume a price or unsupported batch option. A single observed approved charge is allowed. Download all four actual image results. If the site requires four independent paid submissions, report needs_input instead of submitting multiple times."
           : `Create exactly FOUR distinct front-view full-body character image candidates from the user's prompt with consistent useful framing. ${imageRules} Use FOUR separate built-in calls. Save each candidate immediately; report candidly if fewer than four finish. Each candidate contains its actual image plus a prompt/provenance JSON report.`,
-      separate: `Current semantic isolation target ONLY: '${phase?.role}'. ${phase?.role === "head" ? "Isolate the face and skull without hair or body." : phase?.role === "hair" ? "Isolate the complete matching hair mass without face or body." : "Isolate the neck-down body including outfit, without head or hair."} Aim to preserve the selected full-character image's identity, design and useful relative proportions with a transparent background. Exact canvas dimensions, original pixel position/scale and perfect alpha edges are NOT completion requirements. Fill only occluded surfaces needed for usable input. Apply requested corrections. Once a real part image exists and is readable, return completed so the user can review it. Report imperfect alignment as original_alignment_and_scale_preserved=false, imperfect alpha edges as clean_peripheral_alpha=false and other aesthetic concerns as visual_quality=false, each with severity warning. Preserve truthful failed checks; do not regenerate, repair or block for those aesthetic concerns. The user decides whether to accept or request a correction. ${imageRules} Make exactly ONE built-in image generation call for this ONE part. Return ONE candidate containing exactly ONE image artifact with role '${phase?.role}' and an alignment/provenance report. The host separately generates and checkpoints the other parts, then combines all three for user review. Do not try to produce all three parts in this call.`,
-      model: `Use visible Tripo Studio Smart Mesh P2, the selected '${request.role}' image, ${request.polygonCount === undefined ? "the Studio polygon default (observe and report its value)" : `requested polygon count ${request.polygonCount}`}, and its FOUR-candidate generation mode. Read the actual allowed polygon controls/range before setting them; if unsupported do not clamp silently, return needs_input with observed options. Confirm actual selected P2, polygon setting, count FOUR and visible total credit cost before the sole gated paid click. Do not assume cost=100. Download FOUR distinct real model assets and preserve each native file unchanged as an export artifact for host receipt verification. Capture each candidate's actual Studio preview with studio_snapshot, copy its returned screenshot path from studio-evidence into the output folder as an image artifact, and record the matching candidate ID. Use these Studio images for review; do not render review images in Blender. If a native file is already an uncompressed self-contained geometry GLB accepted by the app, copy it to a separate model artifact without invoking Blender. Only unsupported formats such as FBX, compressed GLB or external-resource glTF require Blender conversion to a compatible GLB; retain native originals unchanged. Return four candidates, not four renders/copies of one model. Report observed UI settings and remote IDs. Never fall back to API/HD/P1 or retry an ambiguous click.`,
+      separate: `Current semantic isolation target ONLY: '${phase?.role}', direction '${phase?.view ?? "front"}'. Generate the character's ${phase?.view ?? "front"} view; left/right refer to the character's own sides. Never mirror-copy the opposite side. Use the selected original full character and supplied real images of this SAME part from other views to preserve geometry, identity, outfit, asymmetry and camera consistency. ${phase?.role === "head" ? "Isolate the face and skull without hair or body." : phase?.role === "hair" ? "Isolate the complete matching hair mass without face or body." : "Isolate the neck-down body including outfit, without head or hair."} Aim to preserve the selected full-character image's identity, design and useful relative proportions with a transparent background. Exact canvas dimensions, original pixel position/scale and perfect alpha edges are NOT completion requirements. Fill only occluded surfaces needed for usable input. Apply requested corrections. Once a real part image exists and is readable, return completed so the user can review it. Report imperfect alignment as original_alignment_and_scale_preserved=false, imperfect alpha edges as clean_peripheral_alpha=false and other aesthetic concerns as visual_quality=false, each with severity warning. Preserve truthful failed checks; do not regenerate, repair or block for those aesthetic concerns. The user decides whether to accept or request a correction. ${imageRules} Make exactly ONE built-in image generation call for this ONE part. Return ONE candidate containing exactly ONE image artifact with role '${phase?.role}' and view '${phase?.view ?? "front"}' and an alignment/provenance report. The host separately generates and checkpoints the other parts, then combines every requested part/direction for user review. Do not produce a contact sheet or another part/direction in this call.`,
+      model: `${
+        request.baseJobId
+          ? `Use ONLY Tripo Studio's existing-model partial regeneration/regional-edit feature. This is an edit of the exact supplied base model, NOT new model generation. Locate and open the matching existing Studio model using its native download and observed remote identity/provenance; verify the editor target before any action. If that exact model cannot be identified/opened, return needs_input. Requested edit scope: '${request.modelEditScope ?? "all"}'. ${request.modelEditScope === "part" ? `Select ONLY the requested region '${request.modelEditTarget}' using the actual regional selector; verify the selected region visibly. If reliable region selection is unavailable, return needs_input.` : "Inside the partial-regeneration feature select the entire existing model as the edit target, and visibly verify the all-model region. Do not substitute the new Generate feature."} Use the observed Edit Mesh canvas and its region box handles. Use studio_canvas_drag with the current snapshot element and normalized points to adjust the actual selection, then capture a fresh snapshot to verify it. Observe the actual remaining partial-regeneration allowance/count (or explicit unlimited label) and actual paid-button price when relevant. Never invent the maximum, reset rule or price. If free allowance is exhausted, a paid edit is allowed only when its actual credit price is visibly explicit and inside the frozen approved budget; otherwise return needs_input. If neither valid allowance nor price is observable, or the feature is unsupported, return needs_input. Execute at most ONE observed host-gated partial regeneration using studio_mesh_edit_submit(snapshotId, element, operationId, expectedCredits, evidenceText); expectedCredits is zero only for observed available free/unlimited allowance, otherwise the actual visible price. evidenceText must quote the current allowance/price evidence. Never use ordinary studio_submit for this edit. Never auto-loop. Never use new-model Generate, a fresh image-to-model task, API fallback or another model as a substitute.`
+          : `Use visible Tripo Studio Smart Mesh P2 with the selected '${request.role}' FOUR real views (front, back, character-left, character-right), ${request.polygonCount === undefined ? "the observed Studio polygon default" : `requested polygon count ${request.polygonCount}`}, and ONE-candidate mode. Use only inputs tagged referenceUse='selected-part-view' for the four input slots. Observe P2's actual multi-view slot labels and map character-left/right correctly. Confirm P2, all four inputs, count ONE and actual total credit cost before the sole gated submission. If P2 multi-view or count ONE is unavailable, return needs_input. Read actual allowed polygon controls/range; never silently clamp. Do not assume any fixed price. Never fall back to another model/API or single-view generation.`
+      }
+        ${request.baseJobId ? "Use the requested target and user text to select the existing mesh region when the instruction only identifies an area. Region-only guidance may use the visible selection handles without a text prompt field. If the request instead requires a specific shape/appearance correction, inspect whether this operation has a supported prompt field or explicit setting that can apply it; enter and verify the actual requested correction where supported. If unsupported, return needs_input, clearly explain the limitation, and never pretend a stochastic region regeneration applies a precise requested shape. Do not generate new reference images." : request.prompt.trim() ? "The non-empty user prompt is a real requested correction: before paid-submit, observe a prompt field supported by this exact operation, enter the requested text and verify it visibly. If no supported field can apply the correction, return needs_input and explain that the part reference images or supported edit settings must first be revised; NEVER submit while silently ignoring the prompt." : "No extra text correction was requested; preserve the selected inputs and requested scope."}
+        Download exactly ONE real resulting model version. Preserve each native file unchanged as an export artifact for host receipt verification. Capture the candidate's actual Studio preview with studio_snapshot, copy its returned screenshot path from studio-evidence into the output folder as an image artifact, and record its matching remote model/version ID, operation and observed allowance/settings. Use the Studio image for review; do not render review images in Blender. If the native file is an uncompressed self-contained geometry GLB accepted by the app, copy it as a separate model artifact without invoking Blender. Only unsupported formats such as FBX, compressed GLB or external-resource glTF require Blender conversion; retain native originals unchanged. Return exactly ONE candidate, preserve earlier versions, and never retry an ambiguous click.`,
       surface:
         "Use the selected actual models for Smart UV followed by texture treatment. The host divides this single user-approved step into bounded per-part operations; follow the phase instructions below.",
       assembly: `You are the requested Codex gpt-6-astra author. ${commonBlender} ${request.baseJobId ? "Open the prior accepted .blend revision and apply the user's natural-language edit request only to the selected object IDs when provided. Keep unspecified proportions, materials and objects stable." : "Assemble the THREE selected textured parts into one character scene. Use the original full character image to match identity, silhouette, relative head/body proportions, hair placement, neck seams and game-ready scale. Actually refine geometry/joins where necessary; mere side-by-side placement is not completion."} Record changes, review renders and unresolved quality concerns. Return ONE candidate version for the user to accept, refine or restore. Never start rigging automatically.`,
@@ -753,6 +895,9 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         ? `Approved Studio credit cap for this action: ${context.job.approval.studioCreditLimit}. Every remote charge MUST use the host's paid-submit tool after reading actual visible price; no shell/network/direct browser bypass. This phase permits at most ONE charge. Never retry uncertain submission. If any required UI/cost/model/count is missing, return needs_input. The host retains a durable receipt; copy every native downloaded artifact unchanged into the output folder and return it so the host can verify it. ${context.job.step === "concept" ? "Keep the native downloaded images unchanged." : "Keep unchanged native model downloads as artifact kind 'export'. For kind 'model', use a separate unchanged copy if the native GLB is already uncompressed and self-contained. Only convert incompatible formats to uncompressed self-contained geometry GLB with Blender. Capture review images directly from the actual Studio candidate previews using studio_snapshot; no local render is required."}`
         : "",
       instructions[context.job.step],
+      request.baseJobId
+        ? "This is a user-requested revision of the supplied baseJobId version. Inspect its actual artifacts, apply this request's natural-language corrections and preserve everything not targeted. Rig revisions edit the existing rig; reference revisions use the prior actual frames/manifest as reference; animation revisions edit the prior actual action and accepted rig, preserving stable IDs. Do not substitute a fresh default asset or preset motion."
+        : "",
       phase && phase.kind !== "separate"
         ? `Current surface phase ONLY: '${phase.kind}' for '${phase.role}'. ${phase.kind === "uv" ? "Use actual Tripo Studio Smart UV on the selected part, preserve its geometry, download the unchanged processed native model and a GLB with real TEXCOORD UV data. Do not apply texturing yet." : "Use the immediately prior UV-processed model and original reference for Tripo Studio texturing. Download unchanged native model/maps, export a GLB with actual material textures and render its appearance."} Return ONE candidate; all its artifacts have role '${phase.role}'. Stop before the next phase.`
         : "",
@@ -774,7 +919,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         context.job.request.provider === "tripo");
     const stageId = phase
       ? phase.kind === "separate"
-        ? `separate-${phase.role}`
+        ? separationStage(phase.role, phase.view)
         : `${phase.role}-${phase.kind}`
       : context.job.step;
     const folder = `outputs/${stageId}`;
@@ -852,6 +997,14 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       stage,
       prompt,
       requestedModel,
+      ...(context.job.step === "model" && context.job.request.baseJobId
+        ? {
+            modelEdit: {
+              scope: context.job.request.modelEditScope ?? "all",
+              target: context.job.request.modelEditTarget,
+            },
+          }
+        : {}),
       imagePaths: inputs
         .filter((input) => input.kind === "image")
         .slice(0, 12)
@@ -897,7 +1050,12 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       }
       if (phase?.kind === "separate" && existing && !checkpointMalformed) {
         try {
-          const saved = this.inspectPart(context, phase.role, existing);
+          const saved = this.inspectPart(
+            context,
+            phase.role,
+            existing,
+            phase.view,
+          );
           this.saveCheckpoint(context, stageId, saved);
           onProgress(
             `${stageId} · 저장된 파츠 사진을 바로 표시합니다. 외형은 사용자가 확인합니다.`,
@@ -992,7 +1150,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
               blocksWorkbenchCheck("separate", check),
             )))
       )
-        result = this.inspectPart(context, phase.role, result);
+        result = this.inspectPart(context, phase.role, result, phase.view);
       if (result.status !== "completed")
         return {
           ...result,
@@ -1005,8 +1163,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         for (const candidate of result.candidates)
           for (const artifact of candidate.artifacts)
             artifact.role = context.job.request.role;
-      const expected =
-        !phase && ["concept", "model"].includes(context.job.step) ? 4 : 1;
+      const expected = !phase && context.job.step === "concept" ? 4 : 1;
       if (result.candidates.length !== expected)
         throw Error(`실제 후보 ${expected}개가 모두 필요합니다.`);
       for (const candidate of result.candidates) {
@@ -1016,7 +1173,11 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
           const images = candidate.artifacts.filter(
             (artifact) => artifact.kind === "image",
           );
-          if (images.length !== 1 || images[0].role !== phase.role)
+          if (
+            images.length !== 1 ||
+            images[0].role !== phase.role ||
+            (images[0].view ?? "front") !== (phase.view ?? "front")
+          )
             throw Error(
               `분리 결과 구조 검증 실패: ${phase.role} 이미지 한 장만 필요합니다.`,
             );
@@ -1152,61 +1313,238 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       };
     const inputs = this.inputs(context);
     let result: WorkbenchResult;
+    let selectedModelViews: InputFile[] = [];
+    if (context.job.step === "model") {
+      const base = this.baseInputs(context, inputs);
+      const separationInputs =
+        this.selectedInputs(context, inputs, "separate") ??
+        inputs.filter((input) => !base.includes(input));
+      const selectedViews = separationInputs.filter(
+        (input) =>
+          input.kind === "image" &&
+          input.role === context.job.request.role &&
+          input.view &&
+          ["front", "back", "left", "right"].includes(input.view),
+      );
+      selectedModelViews = selectedViews;
+      if (
+        context.job.request.baseJobId &&
+        !base.some(
+          (input) =>
+            ["model", "export"].includes(input.kind) &&
+            [".glb", ".fbx", ".obj", ".gltf", ".zip"].includes(
+              path.extname(input.path).toLowerCase(),
+            ),
+        )
+      )
+        return {
+          status: "needs_input",
+          summary:
+            "부분 재생성할 기존 모델 파일이 없습니다. Studio의 정확한 기존 모델을 먼저 연결해야 합니다.",
+          candidates: [],
+          checks: [],
+          recovery: {
+            kind: "blocked",
+            reason: "기존 모델 없이 신규 생성으로 대체하지 않습니다.",
+          },
+        };
+      if (
+        !context.job.request.baseJobId &&
+        (["front", "back", "left", "right"].some(
+          (view) =>
+            selectedViews.filter((input) => input.view === view).length !== 1,
+        ) ||
+          new Set(selectedViews.map((input) => input.sha256)).size !== 4)
+      )
+        return {
+          status: "needs_input",
+          summary:
+            "선택한 파츠의 정면·후면·캐릭터 왼쪽·오른쪽 사진 네 장을 먼저 채택해야 합니다.",
+          candidates: [],
+          checks: [],
+          recovery: {
+            kind: "blocked",
+            reason: "모델 생성용 네 방향 사진이 부족하거나 중복됐습니다.",
+          },
+        };
+    }
     if (context.job.step === "separate") {
-      const parts: { role: string; result: WorkbenchResult }[] = [];
-      for (const [index, role] of ["head", "hair", "body"].entries()) {
+      const request = context.job.request;
+      const originalConcept =
+        this.selectedInputs(context, inputs, "concept") ?? [];
+      const views = request.views ?? [undefined];
+      const expected = 3 * views.length;
+      const pairs = ["head", "hair", "body"].flatMap((role) =>
+        views.map((view) => ({ role, view })),
+      );
+      const parts: SeparatedPart[] = [];
+      const draft = (completed = false, summary?: string) =>
+        this.separatedDraft(parts, completed, summary, expected);
+      const base = this.baseInputs(context, inputs);
+      const targeted = (role: string, view?: WorkbenchView) =>
+        (!request.role || request.role === role) &&
+        (!request.view || request.view === (view ?? "front"));
+      // Preserve all unaffected role/direction photos before any new invocation.
+      for (const { role, view } of pairs) {
+        if (!request.reuseExisting && targeted(role, view)) continue;
+        const previous = this.loadCheckpoint(
+          context,
+          separationStage(role, view),
+        );
+        if (previous) {
+          parts.push({
+            role,
+            view,
+            result: this.inspectPart(context, role, previous, view),
+          });
+          continue;
+        }
+        const input = base.find(
+          (item) =>
+            item.kind === "image" &&
+            item.role === role &&
+            (item.view ?? "front") === (view ?? "front"),
+        );
+        if (!input) continue;
+        const artifact = this.preserveInput(
+          context,
+          input,
+          "outputs/" + separationStage(role, view),
+        );
+        artifact.view = view ?? input.view;
+        const output: WorkbenchResult = {
+          status: "completed",
+          summary: "기준 버전의 기존 사진을 그대로 보존했습니다.",
+          candidates: [
+            {
+              id: role + "-" + (view ?? "front"),
+              label: role,
+              artifacts: [artifact],
+              objects: [],
+            },
+          ],
+          checks: this.inheritedChecks(context, role),
+        };
+        this.inspectPart(context, role, output, view);
+        this.saveCheckpoint(context, separationStage(role, view), output);
+        parts.push({ role, view, result: output });
+      }
+      if (parts.length) context.onDraft?.(draft());
+      for (const { role, view } of pairs) {
+        if (parts.some((part) => part.role === role && part.view === view))
+          continue;
+        if (!targeted(role, view)) continue;
         if (context.signal.aborted)
           return {
-            ...this.separatedDraft(
-              parts,
+            ...draft(
               false,
               "사용자가 파츠 분리를 중지했습니다. 저장된 사진은 계속 확인할 수 있습니다.",
             ),
             recovery: { kind: "blocked", reason: "사용자 취소" },
           };
+        const generatedReferences: InputFile[] = parts
+          .filter((part) => part.role === role)
+          .flatMap((part) =>
+            part.result.candidates[0].artifacts
+              .filter((artifact) => artifact.kind === "image")
+              .map((artifact) => ({
+                ...artifact,
+                localPath: artifact.path,
+                sha256: hash(this.file(context.workspace, artifact.path)),
+                bytes: fs.statSync(this.file(context.workspace, artifact.path))
+                  .size,
+              })),
+          );
+        const phaseInputs = [
+          ...inputs.filter(
+            (input) =>
+              originalConcept.includes(input) ||
+              input.kind !== "image" ||
+              !["head", "hair", "body"].includes(input.role ?? "") ||
+              input.role === role,
+          ),
+          ...generatedReferences,
+        ];
         onProgress(
-          `${index + 1}/3 · ${role === "head" ? "머리" : role === "hair" ? "머리카락" : "몸통"} 이미지 한 장 분리 중`,
+          parts.length +
+            1 +
+            "/" +
+            expected +
+            " · " +
+            role +
+            " / " +
+            (view ?? "front") +
+            " 사진 생성 중",
         );
-        const output = await this.phase(context, inputs, onProgress, {
+        const output = await this.phase(context, phaseInputs, onProgress, {
           kind: "separate",
           role,
+          view,
         });
         if (output.status !== "completed") {
-          const draft = this.separatedDraft(parts, false, output.summary);
+          const current = draft(false, output.summary);
           return {
             ...output,
-            candidates: draft.candidates,
-            checks: [...draft.checks, ...output.checks],
+            candidates: current.candidates,
+            checks: [...current.checks, ...output.checks],
           };
         }
-        parts.push({ role, result: output });
-        context.onDraft?.(this.separatedDraft(parts));
+        parts.push({ role, view, result: output });
+        context.onDraft?.(draft());
       }
-      const draft = this.separatedDraft(parts);
-      const artifacts = draft.candidates[0].artifacts;
-      const imageHashes = artifacts
-        .filter((artifact) => artifact.kind === "image")
-        .map((artifact) => hash(this.file(context.workspace, artifact.path)));
-      if (new Set(imageHashes).size !== 3)
+      const imageHashes = parts.flatMap((part) =>
+        part.result.candidates[0].artifacts
+          .filter((artifact) => artifact.kind === "image")
+          .map((artifact) => hash(this.file(context.workspace, artifact.path))),
+      );
+      // Subsequent view workers may only read earlier images; verify the host hashes again.
+      for (const part of parts)
+        this.loadCheckpoint(context, separationStage(part.role, part.view));
+      if (new Set(imageHashes).size !== imageHashes.length)
         return {
           status: "needs_input",
-          summary:
-            "세 파츠가 같은 이미지입니다. 실제 분리 결과를 확인해야 합니다.",
+          summary: "서로 다른 파츠·방향에 같은 이미지가 등록됐습니다.",
           candidates: [],
-          checks: draft.checks,
+          checks: draft().checks,
           recovery: {
             kind: "blocked",
-            reason: "생성된 파츠가 중복되어 사용자 확인이 필요합니다.",
+            reason: "중복 사진을 직접 확인해야 합니다.",
           },
         };
-      result = this.separatedDraft(parts, true);
+      const complete = parts.length === expected;
+      result = draft(complete);
+      if (!complete)
+        result.recovery = {
+          kind: "blocked",
+          reason:
+            "요청한 사진 수정만 완료했습니다. 나머지 방향 사진은 사용자가 실행해야 합니다.",
+        };
     } else if (context.job.step === "surface") {
       const artifacts: WorkbenchResult["candidates"][number]["artifacts"] = [];
       const checks: WorkbenchResult["checks"] = [];
-      for (const role of ["head", "hair", "body"]) {
-        let current = inputs.filter(
-          (input) => input.role === role || input.kind === "image",
-        );
+      const targetRole = context.job.request.role;
+      const base = this.baseInputs(context, inputs);
+      if (targetRole)
+        for (const input of base.filter(
+          (item) => item.role && item.role !== targetRole,
+        ))
+          artifacts.push(
+            this.preserveInput(
+              context,
+              input,
+              "outputs/surface-preserved/" + input.role,
+            ),
+          );
+      for (const role of targetRole ? [targetRole] : ["head", "hair", "body"]) {
+        const primary =
+          this.selectedInputs(context, inputs, `model:${role}`) ??
+          inputs.filter((input) => input.role === role);
+        let current = [
+          ...primary,
+          ...inputs.filter(
+            (input) => input.kind === "image" && !primary.includes(input),
+          ),
+        ];
         for (const kind of ["uv", "texture"] as const) {
           if (context.signal.aborted)
             return {
@@ -1255,7 +1593,31 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         ],
         checks,
       };
-    } else result = await this.phase(context, inputs, onProgress);
+    } else
+      result = await this.phase(
+        context,
+        context.job.step === "model"
+          ? [
+              ...selectedModelViews.map((input) => ({
+                ...input,
+                referenceUse: "selected-part-view" as const,
+              })),
+              ...inputs
+                .filter(
+                  (input) =>
+                    !selectedModelViews.includes(input) &&
+                    (input.kind !== "image" ||
+                      !["head", "hair", "body"].includes(input.role ?? "") ||
+                      input.role === context.job.request.role),
+                )
+                .map((input) => ({
+                  ...input,
+                  referenceUse: "prior-version" as const,
+                })),
+            ]
+          : inputs,
+        onProgress,
+      );
     if (
       result.status === "completed" &&
       ["assembly", "rig", "animation"].includes(context.job.step)

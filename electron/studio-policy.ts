@@ -31,10 +31,17 @@ export function isLoginUrl(value: string): boolean {
 export const userActionPattern =
   /password|passcode|captcha|recaptcha|hcaptcha|sign\s*(in|up)|log\s*in|checkout|purchase|subscribe|buy\b|payment|delete|remove permanently|accept.*terms|로그인|가입|비밀번호|인증|결제|구독|구매|삭제|약관/i;
 export const chargedActionPattern =
-  /generat|remesh|retopologi[sz]|unwrap|auto.?rig|animate|\brig\b|retexture|apply|submit|process|enhance|\bstart\b|\bcontinue\b|\bconfirm\b|\brun\b|생성|리깅|실행|시작|적용|제출|보완|재질.*만들|확인/i;
+  /generat|retry\s*selection|reroll|remesh|retopologi[sz]|unwrap|auto.?rig|animate|\brig\b|retexture|apply|submit|process|enhance|\bstart\b|\bcontinue\b|\bconfirm\b|\brun\b|생성|리롤|리깅|실행|시작|적용|제출|보완|재질.*만들|확인/i;
+export const meshEditContextPattern =
+  /\bedit\s*mesh\b|\bmesh\s*edit\b|부분\s*재생성|메시\s*(?:편집|수정)/i;
+export const meshEditActionPattern =
+  /^(?:retry\s*selection|regenerate(?:\s*selection)?|부분\s*재생성|선택(?:한)?\s*(?:영역\s*)?재생성|재생성)(?:\s|[⚡(\d]|$)/i;
+const quotaWords =
+  /\b(?:remaining|left|free|edits?|retries|attempts?)\b|횟수|\d\s*회|남은|잔여|무료/i;
 export function creditFromLabel(label: string): number | undefined {
   // Only a price on the actual action control counts; nearby account balances do not.
   const clean = label.replace(/,/g, "").trim();
+  if (quotaWords.test(clean)) return;
   if (
     !chargedActionPattern.test(clean) &&
     !/credits?|크레딧|⚡|export|download|내보내기|다운로드/i.test(clean)
@@ -44,6 +51,83 @@ export function creditFromLabel(label: string): number | undefined {
   if (numbers?.length !== 1) return;
   const n = Number(numbers[0]);
   return Number.isFinite(n) && n >= 0 && n <= 100000 ? n : undefined;
+}
+/** Free edit allowances are uses, never credit prices. No account-plan quotas are assumed. */
+export function meshEditTerms(
+  buttonLabel: string,
+  evidenceText: string,
+  pageText: string,
+) {
+  if (!meshEditContextPattern.test(pageText))
+    throw Error("Observed Edit Mesh context required");
+  if (!meshEditActionPattern.test(buttonLabel.trim()))
+    throw Error(
+      "Only Retry Selection or Regenerate is allowed; new Generate is blocked",
+    );
+  const evidence = evidenceText.trim();
+  if (!evidence || evidence.length > 600 || !pageText.includes(evidence))
+    throw Error("Visible mesh-edit quota or price evidence required");
+  const explicitPrice = /credits?|크레딧|⚡/i.test(buttonLabel)
+    ? creditFromLabel(buttonLabel)
+    : undefined;
+  if (/credits?|크레딧|⚡/i.test(buttonLabel) && explicitPrice === undefined)
+    throw Error(
+      "The displayed mesh-edit credit price is ambiguous; free-use text cannot override a price",
+    );
+  if (explicitPrice !== undefined && explicitPrice > 0)
+    return { cost: explicitPrice, evidence, paid: true };
+  if (
+    explicitPrice !== 0 &&
+    !/\bfree\b|무료/i.test(`${buttonLabel} ${evidence}`)
+  )
+    throw Error(
+      "Actual free-use or zero-credit price is not visible; remaining or unlimited uses alone are not a price",
+    );
+  if (
+    /(?:unlimited\s*(?:free\s*)?(?:edits?|retries|regenerations?)|(?:edits?|retries|regenerations?)\s*:?\s*unlimited|(?:수정|재생성|편집)\s*(?:횟수\s*)?무제한|무제한\s*(?:수정|재생성|편집))/i.test(
+      evidence,
+    )
+  )
+    return { cost: 0, evidence, paid: false, unlimited: true };
+  const patterns = [
+    /(\d+)\s*(?:free\s*)?(?:edits?|retries|rerolls?|regenerations?|attempts?)\s*(?:left|remaining|available)/i,
+    /(?:remaining|available)\s*(?:free\s*)?(?:edits?|retries|rerolls?|regenerations?|attempts?)\s*[:：]?\s*(\d+)/i,
+    /(?:free\s*)?(?:edits?|retries|regenerations?)\s*(?:remaining|left)\s*[:：]?\s*(\d+)/i,
+    /(?:남은|잔여)\s*(?:무료\s*)?(?:수정|재생성|리롤|편집)?\s*(?:횟수)?\s*[:：]?\s*(\d+)\s*회?/i,
+    /(?:무료\s*)?(?:수정|재생성|리롤|편집)\s*(?:가능|잔여|남은)?\s*[:：]?\s*(\d+)\s*회/i,
+  ];
+  const values = patterns.flatMap((pattern) => {
+    const m = evidence.match(pattern);
+    return m ? [Number(m[1])] : [];
+  });
+  const unique = [...new Set(values)];
+  if (unique.length !== 1 || !Number.isSafeInteger(unique[0]))
+    throw Error(
+      "Actual remaining mesh-edit uses are not visible; do not guess or generate a new model",
+    );
+  if (unique[0] <= 0)
+    throw Error(
+      "Mesh-edit uses are exhausted; stop unless an explicit credit-priced edit action is offered within the approved budget",
+    );
+  return { cost: 0, evidence, paid: false, remaining: unique[0] };
+}
+export function canvasPoints(value: unknown): { x: number; y: number }[] {
+  if (!Array.isArray(value) || value.length < 2 || value.length > 32)
+    throw Error("Canvas drag requires 2–32 observed normalized points");
+  return value.map((p) => {
+    if (
+      !p ||
+      typeof p !== "object" ||
+      !Number.isFinite(p.x) ||
+      !Number.isFinite(p.y) ||
+      p.x < 0 ||
+      p.x > 1 ||
+      p.y < 0 ||
+      p.y > 1
+    )
+      throw Error("Canvas points must stay inside normalized bounds 0–1");
+    return { x: p.x, y: p.y };
+  });
 }
 export function guardedPath(root: string, relative: string, mustExist = true) {
   if (!relative || path.isAbsolute(relative))
@@ -78,6 +162,7 @@ export type StudioRunContext = {
   maxAttempts: number;
   attempt?: number;
   recoveryOnly?: boolean;
+  modelEdit?: { scope: "all" | "part"; target?: string };
 };
 export type StudioCharge = {
   id: string;
@@ -295,6 +380,49 @@ export const STUDIO_TOOLS = [
         expectedCredits: { type: "number", minimum: 0 },
       },
       ["snapshotId", "element", "operationId", "expectedCredits"],
+    ),
+  },
+  {
+    name: "studio_mesh_edit_submit",
+    description:
+      "Submit an observed existing-model Retry Selection/Regenerate action only in an approved Mesh Edit context. evidenceText must quote visible remaining edit uses or a displayed explicit credit price. Free edits reserve a zero-credit durable receipt too. Never substitute new Generate or retry an ambiguous submission.",
+    inputSchema: objectSchema(
+      {
+        ...observed,
+        operationId: string,
+        expectedCredits: { type: "number", minimum: 0 },
+        evidenceText: string,
+      },
+      [
+        "snapshotId",
+        "element",
+        "operationId",
+        "expectedCredits",
+        "evidenceText",
+      ],
+    ),
+  },
+  {
+    name: "studio_canvas_drag",
+    description:
+      "Drag only inside an observed visible canvas for existing-model selection-box handles or camera adjustment. Requires approved modelEdit context and fresh snapshotId. points are 2–32 normalized canvas coordinates between 0 and 1, grounded in its screenshot/bounds. Never raw JS, selectors, network or arbitrary screen coordinates.",
+    inputSchema: objectSchema(
+      {
+        ...observed,
+        points: {
+          type: "array",
+          minItems: 2,
+          maxItems: 32,
+          items: objectSchema(
+            {
+              x: { type: "number", minimum: 0, maximum: 1 },
+              y: { type: "number", minimum: 0, maximum: 1 },
+            },
+            ["x", "y"],
+          ),
+        },
+      },
+      ["snapshotId", "element", "points"],
     ),
   },
   {

@@ -10,6 +10,7 @@ export type WorkbenchStep =
   | "animation"
   | "unity";
 export type WorkbenchRole = "head" | "hair" | "body";
+export type WorkbenchView = "front" | "back" | "left" | "right";
 export type WorkbenchObject = {
   id: string;
   name: string;
@@ -21,6 +22,7 @@ export type WorkbenchArtifact = {
   path: string;
   kind: "image" | "model" | "blend" | "report" | "frames" | "export";
   role?: string;
+  view?: WorkbenchView;
   sha256: string;
   bytes: number;
 };
@@ -35,8 +37,19 @@ export type WorkbenchRequest = {
   prompt: string;
   provider?: "gpt" | "tripo";
   role?: WorkbenchRole;
+  /** New separation jobs always freeze all four views; absent on legacy jobs. */
+  views?: WorkbenchView[];
+  /** Optional one-view correction within the frozen separation set. */
+  view?: WorkbenchView;
+  /** Preserve every existing image and generate only missing role/view pairs. */
+  reuseExisting?: boolean;
   polygonCount?: number;
   baseJobId?: string;
+  /** Host-frozen candidate ID, including selected legacy multi-candidate history. */
+  baseCandidateId?: string;
+  /** Existing Tripo model regeneration scope; never a replacement new-model submission. */
+  modelEditScope?: "all" | "part";
+  modelEditTarget?: string;
   objectIds?: string[];
   rigTargets?: WorkbenchRigTarget[];
   motion?: string;
@@ -165,6 +178,12 @@ export const WORKBENCH_STEPS: { id: WorkbenchStep; title: string }[] = [
   { id: "unity", title: "Unity 내보내기" },
 ];
 export const WORKBENCH_ROLES: WorkbenchRole[] = ["head", "hair", "body"];
+export const WORKBENCH_VIEWS: WorkbenchView[] = [
+  "front",
+  "back",
+  "left",
+  "right",
+];
 export function workbenchSlot(request: WorkbenchRequest): string {
   if (request.step === "model") return `model:${request.role}`;
   if (request.step === "reference" || request.step === "animation")

@@ -12,6 +12,12 @@
 
 ## 기능별 문서
 
+### Studio 4방향 입력과 0.5.0 선택 방식
+
+2026-10-08 확인한 공식 [Smart Mesh Studio 사용 안내](https://www.tripo3d.ai/blog/smart-mesh-tutorial)는 정면·좌측·우측·후면 이미지를 넣는 멀티뷰 입력을 설명합니다. 문서 제목과 본문은 P1.0 기준이므로 P2의 해당 계정 권한·가격·수량·프롬프트 입력 지원을 증명하지 않습니다. 0.5.0 제작 작업자는 실제 Studio에서 P2, 방향별 입력 칸, 모델 1개, 폴리곤 설정과 실제 비용을 확인한 뒤 진행하도록 연결했습니다. 사용자 수정 프롬프트를 받을 수 없는 화면에서는 전달했다고 간주하거나 다른 모델/API로 전환하지 않습니다. 공개 API의 [P 시리즈 멀티뷰 문서](https://developers.tripo3d.ai/en/docs/generation-multiview-to-model/p)는 별도 참고이며 Studio 대신 API를 호출하는 근거가 아닙니다.
+
+공식 [P2.0 안내](https://www.tripo3d.ai/blog/tripo-p2-0-preview)는 네 방향 입력과 **Mesh Edit**를 명시합니다. 기존 모델에서 Edit Mesh를 열고 선택 상자의 핸들을 움직인 뒤 Retry Selection/Regenerate로 해당 영역을 수정합니다. 같은 문서는 Pro에 모델당 무료 수정 3회, Max·Team에 무제한, 무료 범위 이후 회당 50크레딧을 안내합니다. 이는 확인일의 문서 설명이며 실제 계정 횟수·요금을 하드코딩하지 않습니다. 앱의 모델 리롤은 이 기존 모델 편집에 연결하고 전체/부분 범위를 지정합니다. 횟수·비용·선택 범위를 확인하지 못하면 새 모델 생성으로 대체하지 않습니다. 공식 안내에는 Mesh Edit의 자유 텍스트 형상 지시 지원이 명시되지 않아 실제 입력란이 없으면 프롬프트를 전달했다고 주장하지 않습니다.
+
 | 기능 | 공식 근거 | 구현 선택 |
 |---|---|---|
 | 이미지 생성 | https://developers.tripo3d.ai/en/docs/generation-text-to-image | `/generation/text-to-image`; 문서에 명시된 모델·해상도 조합 일부 제공 |
