@@ -77,6 +77,7 @@ export type StudioRunContext = {
   creditLimit: number;
   maxAttempts: number;
   attempt?: number;
+  recoveryOnly?: boolean;
 };
 export type StudioCharge = {
   id: string;
@@ -138,6 +139,10 @@ export class StudioLedger {
     };
   }
   reserve(id: string, cost: number, label: string, snapshotId: string) {
+    if (this.context.recoveryOnly)
+      throw Error(
+        "자동 복구에서는 새 유료 요청을 제출할 수 없습니다. 기존 결과만 확인하세요.",
+      );
     if (!/^[a-zA-Z0-9_.:-]{1,100}$/.test(id))
       throw Error("Invalid operation ID");
     const attempt = this.context.attempt ?? 1;

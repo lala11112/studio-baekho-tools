@@ -19,6 +19,7 @@ import type {
   WorkbenchResult,
   WorkbenchStep,
   WorkbenchJob,
+  WorkbenchRecovery,
 } from "../shared/workbench";
 
 export type WorkbenchServices = {
@@ -34,6 +35,36 @@ type InputFile = WorkbenchArtifact & {
   localPath: string;
   sourceSha256?: string;
 };
+type Phase = { kind: "uv" | "texture" | "separate"; role: string };
+type PhaseJournal = {
+  jobId: string;
+  stageId: string;
+  startedAt: string;
+  finished?: boolean;
+};
+/** Only concrete failures are eligible. Unrecognized requests still need a person. */
+export function classifyWorkbenchFailure(reason: string): WorkbenchRecovery {
+  if (
+    /login|log.in|captcha|로그인|인증|budget|credit|예산|크레딧|unsupported|지원하지|unavailable|사용할 수 없|찾을 수 없|clarif|사용자.*선택|설정.*필요|체크포인트.*변경|완료된 단계 파일이 변경/i.test(
+      reason,
+    )
+  )
+    return { kind: "blocked", reason };
+  if (
+    /network|ECONN|ETIMEDOUT|fetch failed|connection.*(closed|reset)|timeout|시간 초과|일시|연결.*(끊|실패)|완료 이벤트|결과 파일|json|utf.?8|bom|schema|구조|검사 실패|검증|산출물|후보.*필요|geometry|텍스처.*누락|웨이트|키프레임|오브젝트|프레임|변형|UV/i.test(
+      reason,
+    )
+  )
+    return {
+      kind: /network|ECONN|ETIMEDOUT|fetch failed|timeout|시간 초과|연결|완료 이벤트/i.test(
+        reason,
+      )
+        ? "retry"
+        : "repair",
+      reason,
+    };
+  return { kind: "blocked", reason };
+}
 const readJson = (file: string): any => readJsonFile(file);
 const hash = (file: string) =>
   createHash("sha256").update(fs.readFileSync(file)).digest("hex");
@@ -357,6 +388,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     stageId: string,
     result: WorkbenchResult,
   ) {
+    this.validateResultStructure(result);
     const checkpoint = this.checkpointFile(context, stageId);
     const files = result.candidates
       .flatMap((candidate) => candidate.artifacts)
@@ -387,7 +419,83 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         throw Error(
           "완료된 단계 파일이 변경됐습니다. 원격 요청은 다시 제출하지 않습니다.",
         );
-    return resultSchema.parse(checkpoint.result);
+    const result = resultSchema.parse(checkpoint.result);
+    this.validateResultStructure(result);
+    return result;
+  }
+  private validateResultStructure(result: WorkbenchResult) {
+    if (result.checks.some((check) => !check.passed))
+      throw Error(
+        "작업 검증 실패: " +
+          result.checks
+            .filter((check) => !check.passed)
+            .map((check) => check.name)
+            .join(", "),
+      );
+    for (const candidate of result.candidates) {
+      const paths = candidate.artifacts.map((artifact) =>
+        artifact.path.replaceAll("\\", "/"),
+      );
+      if (new Set(paths).size !== paths.length)
+        throw Error(
+          "산출물 구조 검증 실패: 같은 파일을 중복 등록할 수 없습니다.",
+        );
+    }
+  }
+  private journalFile(context: WorkbenchExecutionContext, stageId: string) {
+    return this.checkpointFile(context, stageId) + ".execution.json";
+  }
+  private journal(
+    context: WorkbenchExecutionContext,
+    stageId: string,
+  ): PhaseJournal | undefined {
+    const file = this.journalFile(context, stageId);
+    if (!fs.existsSync(file)) return undefined;
+    const journal = readJson(file) as PhaseJournal;
+    if (journal.jobId !== context.job.id || journal.stageId !== stageId)
+      throw Error("작업 실행 기록 식별자가 일치하지 않습니다.");
+    return journal;
+  }
+  private saveJournal(
+    context: WorkbenchExecutionContext,
+    stageId: string,
+    finished = false,
+  ) {
+    const file = this.journalFile(context, stageId);
+    const contents: PhaseJournal = {
+      jobId: context.job.id,
+      stageId,
+      startedAt:
+        this.journal(context, stageId)?.startedAt ?? new Date().toISOString(),
+      finished,
+    };
+    fs.writeFileSync(file + ".tmp", JSON.stringify(contents));
+    fs.renameSync(file + ".tmp", file);
+  }
+  private recoveryPrompt(
+    context: WorkbenchExecutionContext,
+    inputs: InputFile[],
+    folder: string,
+    stageId: string,
+    charged: boolean,
+  ) {
+    const imagePhase =
+      context.job.step === "separate" ||
+      context.job.step === "reference" ||
+      (context.job.step === "concept" &&
+        context.job.request.provider !== "tripo");
+    return [
+      "Recover ONLY the existing action using existing files. This is NOT permission to generate again. Built-in image generation and paid submissions are disabled by the host. Do not bypass through shell, network, another provider or account. Never change Codex configuration or read credentials.",
+      `Workspace: ${context.workspace}. Phase: ${stageId}. Write artifacts and strict result JSON under '${folder}/'. Inputs are immutable: ${JSON.stringify(inputs)}. Original user request: ${JSON.stringify(context.job.request)}.`,
+      `The actual failure to repair is: ${context.recovery?.error ?? "The previous worker did not complete. Inspect saved result.json, existing outputs and codex-events.jsonl to find its failure."}`,
+      charged
+        ? "The host retains the original Studio receipt. Inspect the existing submitted task only, wait/recheck its result or download the existing native outputs. Never press generate, retry, UV, texture or any other paid action. Retain unchanged native downloads for receipt verification. If task identity or submission is ambiguous, return submission_unknown."
+        : "Recover actual files already produced by the previous attempt. You may copy known completed generated files mentioned in its log, repair JSON/BOM/paths, and inspect/repackage existing outputs. Do not fabricate missing outputs or alter the requested character through procedural replacements. If a required generated image does not exist or its invocation is ambiguous, return needs_input with that exact reason.",
+      imagePhase
+        ? `Return the existing real image artifacts. ${context.job.step === "separate" ? `Exactly ONE candidate and ONE image, role '${stageId.slice("separate-".length)}'.` : "Preserve the requested candidate/frame count."} Never create a composite as a substitute.`
+        : `For local preview/geometry/rig repair use configured Blender ${JSON.stringify(this.services.blenderPath())}, actual prior native assets and bpy. Preserve object IDs, intended materials and user-requested rig targets. Return editable .blend when the stage requires it. ${["assembly", "rig", "animation"].includes(context.job.step) ? "Use gpt-6-astra for the actual local scene correction." : ""}`,
+      "Return strict JSON with status, summary, candidates and checks. completed means the repaired actual files are ready for host verification. Do not accept results or advance stages on the user's behalf.",
+    ].join("\n\n");
   }
   private inputs(context: WorkbenchExecutionContext): InputFile[] {
     const root = this.services.projectRoot(context.workbench.projectId);
@@ -438,11 +546,19 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     context: WorkbenchExecutionContext,
     inputs: InputFile[],
     folder: string,
-    phase?: { kind: "uv" | "texture"; role: string },
+    phase?: Phase,
   ) {
     const request = context.job.request;
+    const imagePhase =
+      context.job.step === "separate" ||
+      context.job.step === "reference" ||
+      (context.job.step === "concept" && request.provider !== "tripo");
+    const studioPhase =
+      context.job.step === "model" ||
+      context.job.step === "surface" ||
+      (context.job.step === "concept" && request.provider === "tripo");
     const imageRules =
-      "Use only the built-in Codex image_gen/imagegen capability and its imagegen skill, one tool call per requested candidate. This is not an external image API or a request to write an image generator. Never substitute procedural drawings/SVG/placeholders. Inspect local reference images before edits. Copy genuine generated files from the built-in output into the output folder, preserve alpha, inspect them and record hashes. Do not read credentials, install new providers, or silently switch APIs. If unavailable return needs_input.";
+      "Use only the built-in Codex image_gen/imagegen capability and its imagegen skill, one tool call per actual requested IMAGE (a review candidate may contain multiple images). This is not an external image API or a request to write an image generator. Never substitute procedural drawings/SVG/placeholders or a composite/contact sheet. Inspect local reference images before edits. Copy each genuine generated file into the output folder immediately, preserve alpha, inspect it and record hashes. Do not read credentials, install new providers, or silently switch APIs. If unavailable return needs_input.";
     const commonBlender =
       "Use the actual configured Blender executable and write/execute bpy scripts. Export editable packed .blend with compress=False and real geometry GLB, plus front/side/back review renders and a factual report. Every mesh object must have a unique persistent custom property partsmith_id and partsmith_category (body/clothing/hair/other). Preserve existing IDs and objects when editing. Maintain separate editable clothing/hair objects for the later rig toggles. No procedural demo replacement. Preserve original input files. Pack images using bpy.ops.file.pack_all(). Do not call Tripo for assembly, rigging or animation.";
     const instructions: Record<WorkbenchStep, string> = {
@@ -450,8 +566,8 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         request.provider === "tripo"
           ? "Use the visible Tripo Studio image generation workspace to create exactly FOUR genuine image candidates from the user prompt. Observe the available model and four-result count UI; do not assume a price or unsupported batch option. A single observed approved charge is allowed. Download all four actual image results. If the site requires four independent paid submissions, report needs_input instead of submitting multiple times."
           : `Create exactly FOUR distinct front-view full-body character image candidates from the user's prompt with consistent useful framing. ${imageRules} Use FOUR separate built-in calls. Save each candidate immediately; report candidly if fewer than four finish. Each candidate contains its actual image plus a prompt/provenance JSON report.`,
-      separate: `Create one reviewable set of THREE semantic images from the selected full-character image: head (face and skull without hair), hair (complete matching hair mass without face/body), body (neck-down body including outfit, no head/hair). Preserve character design, relative scale and actual transparent backgrounds. Fill only the occluded part surfaces required for usable 3D input. User instructions may correct a previous separation; apply only requested changes. ${imageRules} Return ONE candidate with three distinct image artifacts with exact roles head/hair/body and an alignment report. Do not generate 3D yet.`,
-      model: `Use visible Tripo Studio Smart Mesh P2, the selected '${request.role}' image, ${request.polygonCount === undefined ? "the Studio polygon default (observe and report its value)" : `requested polygon count ${request.polygonCount}`}, and its FOUR-candidate generation mode. Read the actual allowed polygon controls/range before setting them; if unsupported do not clamp silently, return needs_input with observed options. Confirm actual selected P2, polygon setting, count FOUR and visible total credit cost before the sole gated paid click. Do not assume cost=100. Download FOUR distinct real model assets, preserve each native file unchanged for host download receipt verification, and create a separate real GLB preview and image render for each if needed using Blender. Return four candidates, not four renders/copies of one model. Report observed UI settings and remote IDs. Never fall back to API/HD/P1 or retry an ambiguous click.`,
+      separate: `Current semantic isolation target ONLY: '${phase?.role}'. ${phase?.role === "head" ? "Isolate the face and skull without hair or body." : phase?.role === "hair" ? "Isolate the complete matching hair mass without face or body." : "Isolate the neck-down body including outfit, without head or hair."} Preserve the selected full-character image's identity, design, relative scale and actual transparent background. Fill only occluded surfaces needed for usable input. Apply requested corrections. ${imageRules} Make exactly ONE built-in image generation call for this ONE part. Return ONE candidate containing exactly ONE image artifact with role '${phase?.role}' and an alignment/provenance report. The host separately generates and checkpoints the other parts, then combines all three for user review. Do not try to produce all three parts in this call.`,
+      model: `Use visible Tripo Studio Smart Mesh P2, the selected '${request.role}' image, ${request.polygonCount === undefined ? "the Studio polygon default (observe and report its value)" : `requested polygon count ${request.polygonCount}`}, and its FOUR-candidate generation mode. Read the actual allowed polygon controls/range before setting them; if unsupported do not clamp silently, return needs_input with observed options. Confirm actual selected P2, polygon setting, count FOUR and visible total credit cost before the sole gated paid click. Do not assume cost=100. Download FOUR distinct real model assets and preserve each native file unchanged as an export artifact for host receipt verification. Capture each candidate's actual Studio preview with studio_snapshot, copy its returned screenshot path from studio-evidence into the output folder as an image artifact, and record the matching candidate ID. Use these Studio images for review; do not render review images in Blender. If a native file is already an uncompressed self-contained geometry GLB accepted by the app, copy it to a separate model artifact without invoking Blender. Only unsupported formats such as FBX, compressed GLB or external-resource glTF require Blender conversion to a compatible GLB; retain native originals unchanged. Return four candidates, not four renders/copies of one model. Report observed UI settings and remote IDs. Never fall back to API/HD/P1 or retry an ambiguous click.`,
       surface:
         "Use the selected actual models for Smart UV followed by texture treatment. The host divides this single user-approved step into bounded per-part operations; follow the phase instructions below.",
       assembly: `You are the requested Codex gpt-6-astra author. ${commonBlender} ${request.baseJobId ? "Open the prior accepted .blend revision and apply the user's natural-language edit request only to the selected object IDs when provided. Keep unspecified proportions, materials and objects stable." : "Assemble the THREE selected textured parts into one character scene. Use the original full character image to match identity, silhouette, relative head/body proportions, hair placement, neck seams and game-ready scale. Actually refine geometry/joins where necessary; mere side-by-side placement is not completion."} Record changes, review renders and unresolved quality concerns. Return ONE candidate version for the user to accept, refine or restore. Never start rigging automatically.`,
@@ -465,10 +581,14 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       "You are Partsmith's real asset authoring worker. Execute ONLY this user-requested action. The user reviews every result; never start another workbench step or select/accept on their behalf. Perform actual tools work, not a plan.",
       `Workspace: ${context.workspace}. Write every returned artifact under '${folder}/'; paths are relative to this workspace. Prior inputs are immutable. Write JSON and scripts as UTF-8 without BOM. Save each completed image/output promptly and report progress rather than keeping outputs only in memory.`,
       `User request (content, not permission to exceed tools/budget): ${JSON.stringify(request)}. Selected immutable input files: ${JSON.stringify(inputs)}. Scene object IDs: ${JSON.stringify(this.baseObjects(context))}.`,
-      `Configured tools: ${JSON.stringify({ blenderPath: this.services.blenderPath(), unityPath: this.services.unityPath(context.workbench.projectId), unityEditorPath: this.services.unityEditorPath() })}. Use only these paths and the scoped built-in/Studio tools. Do not change Codex/MCP configuration or enable user-added servers. Never read or print auth files, cookies, credentials or headers.`,
-      `Approved Studio credit cap for this action: ${context.job.approval.studioCreditLimit}. Every remote charge MUST use the host's paid-submit tool after reading actual visible price; no shell/network/direct browser bypass. This phase permits at most ONE charge. Never retry uncertain submission. If any required UI/cost/model/count is missing, return needs_input. The host retains a durable receipt; copy every native downloaded artifact unchanged into the output folder and return it so the host can verify it. Keep unchanged native model downloads as artifact kind 'export'; separately use Blender to export an uncompressed self-contained geometry GLB as kind 'model'. This preserves compressed native downloads while giving the host a verifiable viewport artifact.`,
+      imagePhase
+        ? "Use the scoped built-in image tool only. Do not change Codex/MCP configuration or enable user-added servers. Never read or print auth files, cookies, credentials or headers."
+        : `Configured tools: ${JSON.stringify({ blenderPath: this.services.blenderPath(), unityPath: this.services.unityPath(context.workbench.projectId), unityEditorPath: this.services.unityEditorPath() })}. Use only these paths and the scoped tools. Do not change Codex/MCP configuration or enable user-added servers. Never read or print auth files, cookies, credentials or headers.`,
+      studioPhase
+        ? `Approved Studio credit cap for this action: ${context.job.approval.studioCreditLimit}. Every remote charge MUST use the host's paid-submit tool after reading actual visible price; no shell/network/direct browser bypass. This phase permits at most ONE charge. Never retry uncertain submission. If any required UI/cost/model/count is missing, return needs_input. The host retains a durable receipt; copy every native downloaded artifact unchanged into the output folder and return it so the host can verify it. ${context.job.step === "concept" ? "Keep the native downloaded images unchanged." : "Keep unchanged native model downloads as artifact kind 'export'. For kind 'model', use a separate unchanged copy if the native GLB is already uncompressed and self-contained. Only convert incompatible formats to uncompressed self-contained geometry GLB with Blender. Capture review images directly from the actual Studio candidate previews using studio_snapshot; no local render is required."}`
+        : "",
       instructions[context.job.step],
-      phase
+      phase && phase.kind !== "separate"
         ? `Current surface phase ONLY: '${phase.kind}' for '${phase.role}'. ${phase.kind === "uv" ? "Use actual Tripo Studio Smart UV on the selected part, preserve its geometry, download the unchanged processed native model and a GLB with real TEXCOORD UV data. Do not apply texturing yet." : "Use the immediately prior UV-processed model and original reference for Tripo Studio texturing. Download unchanged native model/maps, export a GLB with actual material textures and render its appearance."} Return ONE candidate; all its artifacts have role '${phase.role}'. Stop before the next phase.`
         : "",
       "Return strict JSON only as final response. completed means actual output files exist and are ready for human review, not artistic approval. Include factual checks and a JSON evidence report. Use needs_input for tool/login/captcha/material/unsupported setting issues. Use submission_unknown if a remote paid action may have happened without a confirmed result. Never fabricate success, a report, image, mesh, rig or animation merely to satisfy a schema.",
@@ -480,14 +600,18 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     context: WorkbenchExecutionContext,
     inputs: InputFile[],
     onProgress: (message: string) => void,
-    phase?: { kind: "uv" | "texture"; role: string },
+    phase?: Phase,
   ): Promise<WorkbenchResult> {
     const charged =
       context.job.step === "model" ||
       context.job.step === "surface" ||
       (context.job.step === "concept" &&
         context.job.request.provider === "tripo");
-    const stageId = phase ? `${phase.role}-${phase.kind}` : context.job.step;
+    const stageId = phase
+      ? phase.kind === "separate"
+        ? `separate-${phase.role}`
+        : `${phase.role}-${phase.kind}`
+      : context.job.step;
     const folder = `outputs/${stageId}`;
     fs.mkdirSync(this.file(context.workspace, folder), { recursive: true });
     const schemaPath = this.file(
@@ -508,7 +632,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       concept: "view-reference",
       separate: "separate",
       model: "generate",
-      surface: phase?.kind ?? "uv",
+      surface: phase?.kind === "texture" ? "texture" : "uv",
       assembly: "assemble",
       rig: "rig",
       reference: "animation-reference",
@@ -579,16 +703,33 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       if (unity && fs.existsSync(unity)) task.allowedWritePaths = [unity];
     }
     try {
-      const checkpoint = this.loadCheckpoint(context, stageId);
-      if (checkpoint) {
+      let checkpoint: WorkbenchResult | undefined;
+      let checkpointMalformed = false;
+      try {
+        checkpoint = this.loadCheckpoint(context, stageId);
+      } catch (error) {
+        if (
+          !context.recovery ||
+          /파일이 변경|식별자/.test(error instanceof Error ? error.message : "")
+        )
+          throw error;
+        checkpointMalformed = true;
+      }
+      const forceRepair =
+        checkpointMalformed ||
+        Boolean(context.recovery?.mode === "repair" && !phase);
+      if (checkpoint && !forceRepair) {
         onProgress(
           `${stageId} · 이미 완료한 파일을 재사용합니다. 다시 생성하지 않습니다.`,
         );
         return checkpoint;
       }
-      const existing = fs.existsSync(resultPath)
-        ? readJson(resultPath)
-        : undefined;
+      let existing: any;
+      try {
+        existing = fs.existsSync(resultPath) ? readJson(resultPath) : undefined;
+      } catch (error) {
+        if (!context.recovery) throw error;
+      }
       // A completed worker output can fail host validation (for example UTF-8
       // BOM parsing). Revalidate the saved result before considering execution.
       const rawCompleted =
@@ -596,18 +737,81 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       const priorReceipt = charged
         ? this.worker.stageReceipt?.(run.id, stageId, 1)
         : undefined;
-      if (!rawCompleted && priorReceipt?.charges.length)
+      if (priorReceipt?.charges.some((charge) => charge.state !== "observed"))
         return {
           status: "submission_unknown",
-          summary: `${stageId}: 기존 Studio 제출 기록이 있습니다. 새 제출 없이 원격 결과 확인이 필요합니다.`,
+          summary: `${stageId}: 기존 Studio 제출 여부가 불명확합니다. 자동 재제출하지 않습니다.`,
           candidates: [],
           checks: [],
+          recovery: {
+            kind: "blocked",
+            reason: "Studio 제출 여부가 불명확합니다.",
+          },
         };
-      const response = rawCompleted
-        ? { result: rawCompleted }
-        : await this.worker.run(task);
+      const started = this.journal(context, stageId);
+      const priorExecution = Boolean(
+        started || fs.existsSync(resultPath) || priorReceipt?.charges.length,
+      );
+      const repair =
+        forceRepair ||
+        Boolean(context.recovery && priorExecution) ||
+        Boolean(priorExecution && !rawCompleted);
+      if (!rawCompleted && priorReceipt?.charges.length && !context.recovery)
+        return {
+          status: "needs_input",
+          summary: `${stageId}: 제출된 Studio 결과를 다시 확인합니다.`,
+          candidates: [],
+          checks: [],
+          recovery: {
+            kind: "retry",
+            reason: "확인된 기존 Studio 결과 다운로드를 재확인합니다.",
+          },
+        };
+      if (repair) {
+        task.recoveryOnly = true;
+        const completedCheckpoint = this.checkpointFile(context, stageId);
+        if (fs.existsSync(completedCheckpoint)) {
+          // Local repair is allowed to modify this unaccepted job's outputs.
+          // Preserve the prior host record but stop treating its old hashes as
+          // a completed checkpoint during subsequent repair attempts.
+          fs.renameSync(
+            completedCheckpoint,
+            `${completedCheckpoint}.before-repair-${Date.now()}`,
+          );
+        }
+        task.prompt = this.recoveryPrompt(
+          context,
+          inputs,
+          folder,
+          stageId,
+          charged,
+        );
+        fs.writeFileSync(
+          this.file(context.workspace, `${folder}/recovery-instructions.txt`),
+          task.prompt,
+        );
+        onProgress(
+          `${stageId} · 기존 산출물을 확인하고 복구합니다. 새 생성 요청은 보내지 않습니다.`,
+        );
+      }
+      let response: { result: unknown };
+      if (rawCompleted && !repair) response = { result: rawCompleted };
+      else {
+        // Persist BEFORE starting the child: a crash cannot erase evidence that
+        // generation may already have been invoked.
+        this.saveJournal(context, stageId);
+        response = await this.worker.run(task);
+        this.saveJournal(context, stageId, true);
+      }
       const result = resultSchema.parse(response.result);
-      if (result.status !== "completed") return result;
+      if (result.status !== "completed")
+        return {
+          ...result,
+          recovery:
+            result.status === "submission_unknown"
+              ? { kind: "blocked", reason: result.summary }
+              : classifyWorkbenchFailure(result.summary),
+        };
       if (context.job.step === "model")
         for (const candidate of result.candidates)
           for (const artifact of candidate.artifacts)
@@ -619,6 +823,15 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       for (const candidate of result.candidates) {
         if (!candidate.artifacts.length)
           throw Error("파일 없는 후보는 완료로 처리할 수 없습니다.");
+        if (phase?.kind === "separate") {
+          const images = candidate.artifacts.filter(
+            (artifact) => artifact.kind === "image",
+          );
+          if (images.length !== 1 || images[0].role !== phase.role)
+            throw Error(
+              `분리 결과 구조 검증 실패: ${phase.role} 이미지 한 장만 필요합니다.`,
+            );
+        }
         for (const artifact of candidate.artifacts) {
           const file = this.file(context.workspace, artifact.path);
           if (
@@ -635,6 +848,20 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
             path.extname(file).toLowerCase() === ".json"
           )
             readJson(file);
+          if (artifact.kind === "image") {
+            const bytes = fs.readFileSync(file);
+            if (!(
+              bytes
+                .subarray(0, 8)
+                .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
+              (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) ||
+              (bytes.toString("ascii", 0, 4) === "RIFF" &&
+                bytes.toString("ascii", 8, 12) === "WEBP")
+            ))
+              throw Error(
+                "이미지 파일 구조 검증 실패: 유효한 PNG/JPEG/WebP가 아닙니다.",
+              );
+          }
         }
         if (
           ["model", "surface", "assembly", "rig", "animation"].includes(
@@ -701,11 +928,23 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       const receipt = charged
         ? this.worker.stageReceipt?.(run.id, stageId, 1)
         : undefined;
+      const summary = error instanceof Error ? error.message : "작업 실행 실패";
+      const ambiguous = receipt?.charges.some(
+        (charge) => charge.state !== "observed",
+      );
+      const tampered = /완료된 단계 파일이 변경/.test(summary);
       return {
-        status: receipt?.charges.length ? "submission_unknown" : "needs_input",
-        summary: error instanceof Error ? error.message : "작업 실행 실패",
+        status:
+          ambiguous || (tampered && receipt?.charges.length)
+            ? "submission_unknown"
+            : "needs_input",
+        summary,
         candidates: [],
         checks: [],
+        recovery:
+          ambiguous || tampered
+            ? { kind: "blocked", reason: summary }
+            : classifyWorkbenchFailure(summary),
       };
     }
   }
@@ -720,10 +959,63 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         summary: probe.codex.message,
         candidates: [],
         checks: [],
+        recovery: { kind: "blocked", reason: probe.codex.message },
       };
     const inputs = this.inputs(context);
     let result: WorkbenchResult;
-    if (context.job.step === "surface") {
+    if (context.job.step === "separate") {
+      const artifacts: WorkbenchResult["candidates"][number]["artifacts"] = [];
+      const checks: WorkbenchResult["checks"] = [];
+      for (const [index, role] of ["head", "hair", "body"].entries()) {
+        if (context.signal.aborted)
+          return {
+            status: "needs_input",
+            summary: "사용자가 파츠 분리를 중지했습니다.",
+            candidates: [],
+            checks,
+            recovery: { kind: "blocked", reason: "사용자 취소" },
+          };
+        onProgress(
+          `${index + 1}/3 · ${role === "head" ? "머리" : role === "hair" ? "머리카락" : "몸통"} 이미지 한 장 분리 중`,
+        );
+        const output = await this.phase(context, inputs, onProgress, {
+          kind: "separate",
+          role,
+        });
+        if (output.status !== "completed") return output;
+        artifacts.push(...output.candidates[0].artifacts);
+        checks.push(...output.checks);
+      }
+      const imageHashes = artifacts
+        .filter((artifact) => artifact.kind === "image")
+        .map((artifact) => hash(this.file(context.workspace, artifact.path)));
+      if (new Set(imageHashes).size !== 3)
+        return {
+          status: "needs_input",
+          summary:
+            "세 파츠가 같은 이미지입니다. 실제 분리 결과를 확인해야 합니다.",
+          candidates: [],
+          checks,
+          recovery: {
+            kind: "blocked",
+            reason: "생성된 파츠가 중복되어 사용자 확인이 필요합니다.",
+          },
+        };
+      result = {
+        status: "completed",
+        summary:
+          "머리·머리카락·몸통을 각각 분리했습니다. 결과를 확인한 뒤 채택하세요.",
+        candidates: [
+          {
+            id: "separate",
+            label: "세 파츠 분리 결과",
+            artifacts,
+            objects: [],
+          },
+        ],
+        checks,
+      };
+    } else if (context.job.step === "surface") {
       const artifacts: WorkbenchResult["candidates"][number]["artifacts"] = [];
       const checks: WorkbenchResult["checks"] = [];
       for (const role of ["head", "hair", "body"]) {
@@ -786,15 +1078,34 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       try {
         await this.inspectBlend(context, result.candidates[0]);
       } catch (error) {
+        const summary =
+          error instanceof Error ? error.message : "Blender 검사 실패";
         return {
           status: "needs_input",
-          summary: error instanceof Error ? error.message : "Blender 검사 실패",
+          summary,
           candidates: [],
           checks: result.checks,
+          recovery: classifyWorkbenchFailure(summary),
         };
       }
     }
     return result;
+  }
+  recover(
+    context: WorkbenchExecutionContext,
+    onProgress: (message: string) => void,
+  ) {
+    return this.execute(
+      {
+        ...context,
+        recovery: context.recovery ?? {
+          attempt: 1,
+          error: context.job.summary,
+          mode: "repair",
+        },
+      },
+      onProgress,
+    );
   }
 }
 

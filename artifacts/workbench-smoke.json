@@ -8,9 +8,12 @@
   "rigToggles": true,
   "versionRevert": true,
   "referenceGate": true,
+  "automaticRecoveryWithoutClick": true,
+  "modelPhotoFirstAndOptional3D": true,
+  "sameTimeMultiview": true,
   "restartNoAutoRun": true,
   "legacyAutoStartDisabled": true,
-  "workerCalls": 11,
+  "workerCalls": 12,
   "paidRequests": 0,
   "actualCharacterQualityVerified": false,
   "errors": []

@@ -1,0 +1,14 @@
+{
+  "date": "2026-10-08",
+  "source": "read-only inspection of the user's cancelled separation job",
+  "elapsedSeconds": 1665.834,
+  "workerThreadStarts": 7,
+  "workerCompletedTurns": 6,
+  "completedTurnsNeedingInput": 6,
+  "recurringFailure": "Composite image returned instead of three independent semantic part images; proportions and separation checks failed.",
+  "instructionConflict": "One review candidate containing three images was combined with one image-generation call per candidate and an unrelated Studio one-charge instruction.",
+  "userArtifactsChanged": false,
+  "userJobRestarted": false,
+  "credentialsInspected": false,
+  "generationQualityVerified": false
+}

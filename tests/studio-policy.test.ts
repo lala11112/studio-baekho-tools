@@ -115,3 +115,35 @@ test("Workspace file boundary rejects traversal and linked files outside run", (
     /outside/,
   );
 });
+
+test("recovery connection can read existing receipts but cannot reserve any new paid operation", () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "studio-recovery-"));
+  const context = {
+    runId: "recovery-test",
+    stageId: "head-model",
+    rootDir,
+    creditLimit: 200,
+    maxAttempts: 3,
+    attempt: 1,
+  };
+  const initial = new StudioLedger(rootDir, context);
+  initial.reserve("first", 100, "Generate100", "observed-1");
+  initial.observe("first", "Existing result is ready");
+  const recovering = new StudioLedger(rootDir, {
+    ...context,
+    stageId: "new-stage",
+    attempt: 2,
+    recoveryOnly: true,
+  });
+  assert.equal(recovering.summary().charges.length, 1);
+  assert.equal(recovering.summary().remaining, 100);
+  assert.throws(
+    () => recovering.reserve("second", 100, "Generate100", "observed-2"),
+    /자동 복구/,
+  );
+  assert.throws(
+    () => recovering.reserve("zero-cost", 0, "Generate0", "observed-3"),
+    /자동 복구/,
+  );
+  assert.equal(StudioLedger.readCharges(rootDir, context.runId).length, 1);
+});

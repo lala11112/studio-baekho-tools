@@ -12,9 +12,11 @@ import {
   type WorkbenchApproval,
   type WorkbenchArtifact,
   type WorkbenchCandidate,
+  type WorkbenchExecutionContext,
   type WorkbenchExecutor,
   type WorkbenchJob,
   type WorkbenchRequest,
+  type WorkbenchRecovery,
   type WorkbenchResult,
   type WorkbenchSelection,
 } from "../shared/workbench";
@@ -42,16 +44,42 @@ const safeRelative = (root: string, relative: string) => {
   return resolved;
 };
 
-/** Persistent user-driven workflow. Only execute() starts work; no completion callback advances it. */
+const MAX_RECOVERY_ATTEMPTS = 3;
+const DEFAULT_RECOVERY_DELAYS_MS = [2000, 5000, 10000] as const;
+const messageOf = (error: unknown) =>
+  (error instanceof Error ? error.message : String(error)).slice(0, 4000);
+const waitForRecovery = (milliseconds: number, signal: AbortSignal) =>
+  new Promise<boolean>((resolve) => {
+    if (signal.aborted) return resolve(false);
+    const finish = (ready: boolean) => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", aborted);
+      resolve(ready);
+    };
+    const aborted = () => finish(false);
+    const timer = setTimeout(() => finish(true), milliseconds);
+    signal.addEventListener("abort", aborted, { once: true });
+  });
+
+/** Persistent user-driven workflow. Recovery only continues the current job, never another stage. */
 export class WorkbenchEngine {
   private active = new Map<
     string,
     { controller: AbortController; promise: Promise<void> }
   >();
+  private readonly recoveryDelaysMs: readonly number[];
   constructor(
     private store: Store,
     private executor: WorkbenchExecutor,
+    options: { recoveryDelaysMs?: readonly number[] } = {},
   ) {
+    const delays = options.recoveryDelaysMs ?? DEFAULT_RECOVERY_DELAYS_MS;
+    if (
+      delays.length !== MAX_RECOVERY_ATTEMPTS ||
+      delays.some((value) => !Number.isFinite(value) || value < 0)
+    )
+      throw new Error("자동 복구 대기 시간은 0 이상인 세 값이어야 합니다.");
+    this.recoveryDelaysMs = [...delays];
     for (const w of this.list()) {
       let changed = false;
       for (const j of w.jobs)
@@ -61,6 +89,11 @@ export class WorkbenchEngine {
             ? "앱이 종료되어 제출 여부를 확인해야 합니다. 중복 생성하지 않습니다."
             : "앱 종료로 작업이 중단되었습니다. 기존 버전과 파일은 보존되었습니다.";
           j.updatedAt = now();
+          if (j.recovery) {
+            j.recovery.state = "blocked";
+            j.recovery.reason = j.summary;
+            delete j.recovery.nextAttemptAt;
+          }
           changed = true;
         }
       if (changed || w.activeJobId) {
@@ -420,61 +453,165 @@ export class WorkbenchEngine {
     inputs: WorkbenchArtifact[],
     controller: AbortController,
   ) {
+    let recovery: WorkbenchExecutionContext["recovery"];
+    let recoveryAttempts = 0;
+    let invocation = 0;
     try {
-      let w = this.get(id),
+      const snapshot = structuredClone(this.get(id));
+      const initialJob = structuredClone(this.job(snapshot, jobId));
+      while (!controller.signal.aborted) {
+        let w = this.get(id),
+          job = this.job(w, jobId);
+        if (job.status !== "running") return;
+        // Inputs and spending scope stay identical throughout this entire job.
+        this.verifyArtifacts(w, inputs);
+        const token = ++invocation;
+        let result: WorkbenchResult;
+        try {
+          const context: WorkbenchExecutionContext = {
+            workbench: structuredClone(snapshot),
+            job: {
+              ...structuredClone(initialJob),
+              summary: job.summary,
+              validationPending: job.validationPending,
+              recovery: structuredClone(job.recovery),
+            },
+            workspace,
+            inputs: structuredClone(inputs),
+            signal: controller.signal,
+            ...(recovery ? { recovery: structuredClone(recovery) } : {}),
+          };
+          const progress = (message: string) => {
+            if (controller.signal.aborted || token !== invocation) return;
+            const latest = this.get(id),
+              current = this.job(latest, jobId);
+            if (current.status !== "running") return;
+            current.summary = String(message).slice(0, 4000);
+            current.updatedAt = now();
+            this.save(latest);
+          };
+          // Never turn a recovery into an unclassified execute() replay.
+          result = recovery
+            ? await this.executor.recover!(context, progress)
+            : await this.executor.execute(context, progress);
+        } finally {
+          invocation++;
+        }
+        w = this.get(id);
         job = this.job(w, jobId);
-      const result = await this.executor.execute(
-        {
-          workbench: structuredClone(w),
-          job: structuredClone(job),
-          workspace,
-          inputs: structuredClone(inputs),
-          signal: controller.signal,
-        },
-        (message) => {
-          const latest = this.get(id),
-            current = this.job(latest, jobId);
-          if (current.status !== "running" || controller.signal.aborted) return;
-          current.summary = String(message).slice(0, 4000);
-          current.updatedAt = now();
-          this.save(latest);
-        },
-      );
-      w = this.get(id);
-      job = this.job(w, jobId);
-      if (controller.signal.aborted || job.status !== "running") return;
-      fs.writeFileSync(
-        path.join(workspace, ".worker-result.json"),
-        JSON.stringify(result, null, 2),
-      );
-      if (result.status === "completed") {
-        job.validationPending = true;
+        if (controller.signal.aborted || job.status !== "running") return;
+        this.verifyArtifacts(w, inputs);
+        let decision: WorkbenchRecovery | undefined;
+        let failureStatus: WorkbenchJob["status"] = "needs_input";
+        if (result.status === "completed") {
+          fs.writeFileSync(
+            path.join(workspace, ".worker-result.json"),
+            JSON.stringify(result, null, 2),
+          );
+          job.validationPending = true;
+          this.save(w);
+          try {
+            this.applyResult(w, job, result);
+            if (recoveryAttempts)
+              job.summary += ` 자동 복구 ${recoveryAttempts}회 후 완료했습니다. 결과를 확인해 주세요.`;
+            delete job.recovery;
+            job.updatedAt = now();
+            delete w.activeJobId;
+            w.message = job.summary;
+            this.save(w);
+            return;
+          } catch (error) {
+            decision = { kind: "repair", reason: messageOf(error) };
+            failureStatus = "failed";
+          }
+        } else if (
+          result.status === "needs_input" ||
+          result.status === "submission_unknown"
+        ) {
+          failureStatus = result.status;
+          decision =
+            result.status === "submission_unknown"
+              ? { kind: "blocked", reason: result.summary }
+              : result.recovery;
+          if (
+            !decision ||
+            !["retry", "repair", "blocked"].includes(decision.kind)
+          )
+            decision = { kind: "blocked", reason: result.summary };
+          decision.reason = messageOf(decision.reason || result.summary);
+        } else {
+          throw new Error("작업자가 유효한 완료 상태를 반환하지 않았습니다.");
+        }
+        if (
+          decision.kind === "blocked" ||
+          !this.executor.recover ||
+          recoveryAttempts >= MAX_RECOVERY_ATTEMPTS
+        ) {
+          const exhausted =
+            decision.kind !== "blocked" &&
+            !!this.executor.recover &&
+            recoveryAttempts >= MAX_RECOVERY_ATTEMPTS;
+          job.status = failureStatus;
+          job.summary = exhausted
+            ? `${decision.reason} 자동 복구 ${MAX_RECOVERY_ATTEMPTS}회 후에도 해결되지 않아 확인이 필요합니다.`
+            : decision.reason;
+          job.recovery = {
+            attempt: recoveryAttempts,
+            maxAttempts: MAX_RECOVERY_ATTEMPTS,
+            state: exhausted ? "exhausted" : "blocked",
+            reason: decision.reason,
+          };
+          job.updatedAt = now();
+          delete w.activeJobId;
+          w.message = job.summary;
+          this.save(w);
+          return;
+        }
+        recoveryAttempts++;
+        const delay = this.recoveryDelaysMs[recoveryAttempts - 1];
+        recovery = {
+          attempt: recoveryAttempts,
+          error: decision.reason,
+          mode: decision.kind,
+        };
+        job.recovery = {
+          attempt: recoveryAttempts,
+          maxAttempts: MAX_RECOVERY_ATTEMPTS,
+          state: "waiting",
+          reason: decision.reason,
+          nextAttemptAt: new Date(Date.now() + delay).toISOString(),
+        };
+        job.summary = `자동 복구 ${recoveryAttempts}/${MAX_RECOVERY_ATTEMPTS} 대기 중: ${decision.reason}`;
+        job.updatedAt = now();
+        w.message = job.summary;
+        this.save(w);
+        if (!(await waitForRecovery(delay, controller.signal))) return;
+        w = this.get(id);
+        job = this.job(w, jobId);
+        if (controller.signal.aborted || job.status !== "running") return;
+        job.recovery!.state = "running";
+        delete job.recovery!.nextAttemptAt;
+        job.summary = `자동 복구 ${recoveryAttempts}/${MAX_RECOVERY_ATTEMPTS} 진행 중: ${decision.reason}`;
+        job.updatedAt = now();
+        w.message = job.summary;
         this.save(w);
       }
-      this.verifyArtifacts(w, inputs);
-      if (result.status === "completed") this.applyResult(w, job, result);
-      else if (
-        result.status === "needs_input" ||
-        result.status === "submission_unknown"
-      ) {
-        job.status = result.status;
-        job.summary = result.summary;
-      } else
-        throw new Error("작업자가 유효한 완료 상태를 반환하지 않았습니다.");
-      job.updatedAt = now();
-      delete w.activeJobId;
-      w.message = job.summary;
-      this.save(w);
     } catch (error) {
       const w = this.get(id),
         job = this.job(w, jobId);
-      if (job.status === "running") {
+      if (job.status === "running" && !controller.signal.aborted) {
         job.status = job.validationPending
           ? "failed"
           : external(job)
             ? "submission_unknown"
             : "failed";
-        job.summary = `${error instanceof Error ? error.message : String(error)}${job.validationPending ? " 기존 결과를 다시 검사할 수 있으며 재생성하지 않습니다." : ""}`;
+        job.summary = `${messageOf(error)}${job.validationPending ? " 기존 결과를 다시 검사할 수 있으며 재생성하지 않습니다." : ""}`;
+        job.recovery = {
+          attempt: recoveryAttempts,
+          maxAttempts: MAX_RECOVERY_ATTEMPTS,
+          state: "blocked",
+          reason: messageOf(error),
+        };
         job.updatedAt = now();
       }
       delete w.activeJobId;
@@ -836,6 +973,7 @@ export class WorkbenchEngine {
         path.join(this.workspace(w, job), ".worker-result.json"),
       ),
     );
+    delete job.recovery;
     job.updatedAt = now();
     w.message =
       "기존 결과 검사가 완료되었습니다. 외부 생성 요청은 실행하지 않았습니다.";
@@ -883,6 +1021,7 @@ export class WorkbenchEngine {
     if (!fs.existsSync(workspace))
       throw new Error("기존 작업 폴더가 없어 안전하게 재개할 수 없습니다.");
     job.status = "running";
+    delete job.recovery;
     job.updatedAt = now();
     job.summary = "기존 제출·완료 기록을 확인하여 남은 작업만 처리합니다.";
     w.activeJobId = job.id;
@@ -906,6 +1045,11 @@ export class WorkbenchEngine {
         ? "작업을 중지했습니다. 외부 서비스의 제출 여부를 먼저 확인하세요."
         : "작업을 중지했습니다. 기존 버전은 유지됩니다.";
       j.updatedAt = now();
+      if (j.recovery) {
+        j.recovery.state = "blocked";
+        j.recovery.reason = j.summary;
+        delete j.recovery.nextAttemptAt;
+      }
     }
     active?.controller.abort();
     delete w.activeJobId;
@@ -1074,6 +1218,11 @@ export class WorkbenchEngine {
           job.status = external(job) ? "submission_unknown" : "failed";
           job.summary =
             "백업 복원으로 중단된 작업입니다. 자동 재실행하지 않습니다.";
+          if (job.recovery) {
+            job.recovery.state = "blocked";
+            job.recovery.reason = job.summary;
+            delete job.recovery.nextAttemptAt;
+          }
         }
       }
       w.projectId = projectId;
@@ -1112,6 +1261,11 @@ export class WorkbenchEngine {
           job.status = external(job) ? "submission_unknown" : "failed";
           job.summary =
             "백업 복원으로 중단된 작업입니다. 자동 재실행하지 않습니다.";
+          if (job.recovery) {
+            job.recovery.state = "blocked";
+            job.recovery.reason = job.summary;
+            delete job.recovery.nextAttemptAt;
+          }
         }
         for (const candidate of job.candidates)
           this.verifyArtifacts(w, candidate.artifacts);

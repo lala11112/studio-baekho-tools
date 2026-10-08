@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   CodexWorkbenchExecutor,
+  classifyWorkbenchFailure,
   type WorkbenchServices,
 } from "../engine/workbench-executor";
 import {
@@ -25,6 +26,34 @@ import { inspectWorkbenchGlb } from "../engine/glb-inspect";
 
 const digest = (file: string) =>
   createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+function partOutput(task: WorkerTask): WorkbenchResult {
+  const role = task.stage.id.replace("separate-", "");
+  const folder = path
+    .dirname(path.relative(task.run.workspace, task.resultPath))
+    .replaceAll("\\", "/");
+  const image = `${folder}/${role}.png`;
+  // Explicit signature fixture only; no generated-image quality assertion.
+  fs.writeFileSync(
+    path.join(task.run.workspace, image),
+    Buffer.concat([
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      Buffer.from(`offline fixture ${role}`),
+    ]),
+  );
+  return {
+    status: "completed",
+    summary: "Offline part fixture",
+    candidates: [
+      {
+        id: role,
+        label: role,
+        artifacts: [{ path: image, kind: "image", role }],
+        objects: [],
+      },
+    ],
+    checks: [],
+  };
+}
 class Worker implements ProductionWorker {
   calls: WorkerTask[] = [];
   receipts = new Map<string, StageReceipt>();
@@ -426,4 +455,317 @@ test("GLB inspection rejects broken UV accessors, inflated weights and static an
     () => inspectWorkbenchGlb(still, { animation: true }),
     /정지 포즈/,
   );
+});
+
+test("separation uses one image call per part without Studio or Blender instructions", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  worker.hook = partOutput;
+  const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(result.status, "completed");
+  assert.deepEqual(
+    worker.calls.map((task) => task.stage.id),
+    ["separate-head", "separate-hair", "separate-body"],
+  );
+  assert.equal(result.candidates.length, 1);
+  assert.deepEqual(
+    result.candidates[0].artifacts.map((artifact) => artifact.role),
+    ["head", "hair", "body"],
+  );
+  for (const task of worker.calls) {
+    assert.match(task.prompt, /exactly ONE built-in image generation call/);
+    assert(!/Blender|Studio|paid-submit|at most ONE charge/i.test(task.prompt));
+    assert(!task.recoveryOnly);
+  }
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("failed part recovery reuses completed head and repairs hair without another image call", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  worker.hook = (task) => {
+    const result = partOutput(task);
+    if (task.stage.id === "separate-hair" && !task.recoveryOnly)
+      throw Error("network connection reset after generated image was saved");
+    return result;
+  };
+  const first = await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(first.status, "needs_input");
+  assert.equal(first.recovery?.kind, "retry");
+  const headFile = path.join(
+    f.context.workspace,
+    "outputs/separate-head/head.png",
+  );
+  const original = digest(headFile);
+  const retry = await new CodexWorkbenchExecutor(worker, f.services).recover(
+    {
+      ...f.context,
+      recovery: { attempt: 1, error: first.summary, mode: "retry" },
+    },
+    () => {},
+  );
+  assert.equal(retry.status, "completed");
+  assert.equal(
+    worker.calls.filter((task) => task.stage.id === "separate-head").length,
+    1,
+  );
+  const hairCalls = worker.calls.filter(
+    (task) => task.stage.id === "separate-hair",
+  );
+  assert.equal(hairCalls.length, 2);
+  assert.equal(hairCalls[1].recoveryOnly, true);
+  assert.match(
+    hairCalls[1].prompt,
+    /generation and paid submissions are disabled/,
+  );
+  assert.equal(
+    worker.calls.find((task) => task.stage.id === "separate-body")
+      ?.recoveryOnly,
+    undefined,
+  );
+  assert.equal(digest(headFile), original);
+  assert.equal(
+    fs
+      .readdirSync(f.services.checkpointRoot!)
+      .filter((name) => name.endsWith(".execution.json")).length,
+    3,
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("malformed completed metadata is repaired locally instead of reparsing forever", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  const folder = path.join(f.context.workspace, "outputs/separate-head");
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, "result.json"), "{invalid json");
+  worker.hook = partOutput;
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const result = await executor.recover(
+    {
+      ...f.context,
+      recovery: { attempt: 1, error: "JSON parse error", mode: "repair" },
+    },
+    () => {},
+  );
+  assert.equal(result.status, "completed");
+  assert.equal(worker.calls[0].recoveryOnly, true);
+  assert.equal(worker.calls[1].recoveryOnly, undefined);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("confirmed Studio submission recovery only downloads existing results", async () => {
+  const f = fixture("model"),
+    worker = new Worker();
+  worker.receipts.set("model", {
+    charges: [{ state: "observed", cost: 100 }],
+    downloads: [],
+  });
+  worker.hook = (task) => {
+    assert.equal(task.recoveryOnly, true);
+    assert.match(task.prompt, /existing submitted task only/);
+    const result = output(task, 4);
+    worker.receipts.get("model")!.downloads = result.candidates.map(
+      (candidate) => ({
+        state: "completed",
+        file: candidate.artifacts[0].path,
+        sha256: digest(
+          path.join(task.run.workspace, candidate.artifacts[0].path),
+        ),
+      }),
+    );
+    return result;
+  };
+  const result = await new CodexWorkbenchExecutor(worker, f.services).recover(
+    {
+      ...f.context,
+      recovery: { attempt: 1, error: "network download failed", mode: "retry" },
+    },
+    () => {},
+  );
+  assert.equal(result.status, "completed");
+  assert.equal(worker.calls.length, 1);
+  assert.equal(worker.receipts.get("model")!.charges.length, 1);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("ambiguous Studio receipt blocks automatic recovery; unknown and user-required failures stay blocked", async () => {
+  const f = fixture("model"),
+    worker = new Worker();
+  worker.receipts.set("model", {
+    charges: [{ state: "clicked", cost: 100 }],
+    downloads: [],
+  });
+  const result = await new CodexWorkbenchExecutor(worker, f.services).recover(
+    f.context,
+    () => {},
+  );
+  assert.equal(result.status, "submission_unknown");
+  assert.equal(result.recovery?.kind, "blocked");
+  assert.equal(worker.calls.length, 0);
+  for (const reason of [
+    "Login required",
+    "CAPTCHA",
+    "credit budget exceeded",
+    "unsupported model",
+    "unknown artistic decision",
+  ])
+    assert.equal(classifyWorkbenchFailure(reason).kind, "blocked");
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("failed part checks never poison the checkpoint or loop without a repair worker", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  worker.hook = (task) => {
+    const result = partOutput(task);
+    if (task.stage.id === "separate-hair" && !task.recoveryOnly)
+      result.checks = [{ name: "image alignment", passed: false }];
+    return result;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const first = await executor.execute(f.context, () => {});
+  assert.equal(first.recovery?.kind, "repair");
+  const repaired = await executor.recover(
+    {
+      ...f.context,
+      recovery: { attempt: 1, error: first.summary, mode: "repair" },
+    },
+    () => {},
+  );
+  assert.equal(repaired.status, "completed");
+  assert.equal(
+    worker.calls.filter((call) => call.stage.id === "separate-head").length,
+    1,
+  );
+  assert.equal(
+    worker.calls.filter((call) => call.stage.id === "separate-hair")[1]
+      .recoveryOnly,
+    true,
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("legacy invalid phase checkpoint is repaired while sound phase checkpoints are reused", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  worker.hook = partOutput;
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  assert.equal(
+    (await executor.execute(f.context, () => {})).status,
+    "completed",
+  );
+  const checkpoint = fs
+    .readdirSync(f.services.checkpointRoot!)
+    .filter((name) => !name.endsWith(".execution.json"))
+    .map((name) => path.join(f.services.checkpointRoot!, name))
+    .find(
+      (file) =>
+        JSON.parse(fs.readFileSync(file, "utf8")).stageId === "separate-hair",
+    )!;
+  const saved = JSON.parse(fs.readFileSync(checkpoint, "utf8"));
+  saved.result.checks = [{ name: "legacy invalid check", passed: false }];
+  fs.writeFileSync(checkpoint, JSON.stringify(saved));
+  const repaired = await executor.recover(
+    {
+      ...f.context,
+      recovery: { attempt: 1, error: "작업 검증 실패", mode: "repair" },
+    },
+    () => {},
+  );
+  assert.equal(repaired.status, "completed");
+  assert.equal(worker.calls.length, 4);
+  assert.equal(worker.calls[3].stage.id, "separate-hair");
+  assert.equal(worker.calls[3].recoveryOnly, true);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("part model review uses actual Studio snapshots and converts only incompatible native files", async () => {
+  const f = fixture("model"),
+    worker = new Worker();
+  await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.match(
+    worker.calls[0].prompt,
+    /actual Studio preview with studio_snapshot/,
+  );
+  assert.match(worker.calls[0].prompt, /without invoking Blender/);
+  assert.match(worker.calls[0].prompt, /Only unsupported formats/);
+  assert(
+    !worker.calls[0].prompt.includes(
+      "create a separate real GLB preview and image render for each if needed using Blender",
+    ),
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("interrupted local repair invalidates only its old checkpoint and can resume without a paid replay", async () => {
+  const f = fixture("model"),
+    worker = new Worker();
+  let repairInterrupted = false;
+  worker.hook = (task) => {
+    if (task.recoveryOnly && !repairInterrupted) {
+      repairInterrupted = true;
+      fs.appendFileSync(
+        path.join(task.run.workspace, "outputs/model/model-0.glb"),
+        "partial local repair",
+      );
+      throw Error("network connection reset during local repair");
+    }
+    const result = output(task, 4);
+    worker.receipts.set("model", {
+      charges: [{ state: "observed", cost: 100 }],
+      downloads: result.candidates.map((candidate) => ({
+        state: "completed",
+        file: candidate.artifacts[0].path,
+        sha256: digest(
+          path.join(task.run.workspace, candidate.artifacts[0].path),
+        ),
+      })),
+    });
+    return result;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  assert.equal(
+    (await executor.execute(f.context, () => {})).status,
+    "completed",
+  );
+  const interrupted = await executor.recover(
+    {
+      ...f.context,
+      recovery: {
+        attempt: 1,
+        error: "host geometry 검증 실패",
+        mode: "repair",
+      },
+    },
+    () => {},
+  );
+  assert.equal(interrupted.status, "needs_input");
+  assert.equal(interrupted.recovery?.kind, "retry");
+  const repaired = await executor.recover(
+    {
+      ...f.context,
+      recovery: { attempt: 2, error: interrupted.summary, mode: "retry" },
+    },
+    () => {},
+  );
+  assert.equal(repaired.status, "completed");
+  assert.equal(worker.calls.length, 3);
+  assert.equal(worker.calls[1].recoveryOnly, true);
+  assert.equal(worker.calls[2].recoveryOnly, true);
+  assert(
+    fs
+      .readdirSync(f.services.checkpointRoot!)
+      .some((name) => name.includes(".before-repair-")),
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
 });

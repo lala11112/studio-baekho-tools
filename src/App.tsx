@@ -310,7 +310,7 @@ export function App() {
             />
           </button>
           <div className="version">
-            PROTOTYPE <span>v0.4.0</span>
+            PROTOTYPE <span>v0.4.1</span>
           </div>
         </div>
       </aside>

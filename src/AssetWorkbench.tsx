@@ -244,6 +244,7 @@ export function AssetWorkbench({
   const [approved, setApproved] = useState(false);
   const [viewJobId, setViewJobId] = useState("");
   const [compareId, setCompareId] = useState("");
+  const [rotatingCandidates, setRotatingCandidates] = useState<string[]>([]);
   const [objectIds, setObjectIds] = useState<string[]>([]);
   const [extraRigIds, setExtraRigIds] = useState<string[]>(
     w?.jobs
@@ -373,6 +374,13 @@ export function AssetWorkbench({
   const currentStatus =
     active ??
     (latestJob && latestJob.status !== "review" ? latestJob : undefined);
+  const recovery = currentStatus?.recovery;
+  const recoveryAt = recovery?.nextAttemptAt
+    ? Date.parse(recovery.nextAttemptAt)
+    : NaN;
+  const recoveryDelay = Number.isFinite(recoveryAt)
+    ? Math.max(0, Math.ceil((recoveryAt - now) / 1000))
+    : undefined;
   const elapsed = active
     ? Math.max(0, Math.floor((now - Date.parse(active.createdAt)) / 1000))
     : 0;
@@ -667,6 +675,49 @@ export function AssetWorkbench({
               {currentStatus.summary ||
                 "작업자가 현재 단계의 결과를 준비하고 있습니다."}
             </p>
+            {recovery && (
+              <div
+                className={`wb-recovery ${recovery.state}`}
+                data-testid="workbench-recovery"
+              >
+                <div className="wb-recovery-heading">
+                  <RefreshCw
+                    size={13}
+                    className={recovery.state === "running" ? "spin" : ""}
+                  />
+                  <strong>
+                    {recovery.state === "blocked"
+                      ? "사용자 확인 필요"
+                      : recovery.state === "exhausted"
+                        ? `자동 복구 ${recovery.attempt}/${recovery.maxAttempts}회 후 중지`
+                        : `자동 복구 ${recovery.attempt}/${recovery.maxAttempts}`}
+                  </strong>
+                  {recovery.state === "waiting" && (
+                    <span
+                      data-testid="workbench-recovery-countdown"
+                      aria-live="off"
+                    >
+                      {recoveryDelay === undefined
+                        ? "다시 확인할 준비 중"
+                        : recoveryDelay > 0
+                          ? `${recoveryDelay}초 후 다시 확인`
+                          : "다시 확인하는 중…"}
+                    </span>
+                  )}
+                  {recovery.state === "running" && (
+                    <span>원인 확인 · 복구 중</span>
+                  )}
+                </div>
+                <p>{recovery.reason}</p>
+                <small>
+                  {recovery.state === "blocked"
+                    ? "안내된 확인을 마치면 기존 작업을 이어서 확인할 수 있습니다."
+                    : recovery.state === "exhausted"
+                      ? "기존 결과와 오류 기록을 보존했습니다. 원인을 확인한 뒤 기존 작업을 다시 확인할 수 있습니다."
+                      : "현재 단계의 설정과 기존 결과를 유지하며 복구합니다. 완료 후 결과를 직접 확인해 주세요."}
+                </small>
+              </div>
+            )}
             <small>
               마지막 활동{" "}
               {new Date(currentStatus.updatedAt).toLocaleTimeString("ko-KR")}
@@ -1340,15 +1391,32 @@ export function AssetWorkbench({
                         selectedHere?.job.id === viewing.id &&
                         selectedHere.candidate.id === c.id;
                       const img = c.artifacts.find((a) => a.kind === "image");
+                      const previewKey = `${viewing.id}/${c.id}`;
+                      const rotating = rotatingCandidates.includes(previewKey);
                       return (
                         <article
                           className={`wb-candidate ${selected ? "selected" : ""}`}
                           key={c.id}
                           data-testid={`workbench-candidate-${i}`}
                         >
-                          {step === "model"
+                          {step === "model" && (rotating || !img)
                             ? modelView(c)
                             : img && <img src={url(img)} alt={c.label} />}
+                          {step === "model" && img && modelArtifact(c) && (
+                            <button
+                              data-testid={`workbench-preview3d-${i}`}
+                              className="wb-preview-toggle"
+                              onClick={() =>
+                                setRotatingCandidates((ids) =>
+                                  rotating
+                                    ? ids.filter((id) => id !== previewKey)
+                                    : [...ids, previewKey],
+                                )
+                              }
+                            >
+                              {rotating ? "사진으로 비교" : "3D로 돌려보기"}
+                            </button>
+                          )}
                           <div className="wb-candidate-footer">
                             <strong>{c.label || `후보 ${i + 1}`}</strong>
                             <button

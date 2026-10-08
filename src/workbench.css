@@ -355,6 +355,35 @@
 .wb-status button {
   font-size: 11px;
 }
+.wb-recovery {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid #44634c;
+  border-radius: 7px;
+  background: #23392a;
+}
+.wb-recovery.blocked,
+.wb-recovery.exhausted {
+  background: #372d21;
+  border-color: #75603f;
+}
+.wb-recovery-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.wb-recovery-heading strong {
+  color: #d5eacc;
+}
+.wb-recovery-heading > span {
+  color: #c6d6c8;
+  font-size: 11px;
+}
+.wb-recovery.blocked .wb-recovery-heading strong,
+.wb-recovery.exhausted .wb-recovery-heading strong {
+  color: #ecd3a7;
+}
 .wb-next {
   border-top: 1px solid var(--border);
   margin-top: 20px;
@@ -571,4 +600,8 @@
   .wb-part img {
     height: 180px;
   }
+}
+.wb-preview-toggle {
+  margin: 8px 12px 0;
+  font-size: 12px;
 }

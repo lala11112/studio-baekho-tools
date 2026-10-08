@@ -20,6 +20,7 @@ export type WorkerConnectionContext = {
   charged: boolean;
   capability?: "studio" | "video" | "motion";
   videoUrl?: string;
+  recoveryOnly?: boolean;
 };
 export type WorkerConnection = {
   args?: string[];
@@ -34,6 +35,8 @@ export type WorkerTask = {
   imagePaths: string[];
   /** Host-selected model for a specific user-requested authoring action. */
   requestedModel?: "gpt-6-astra";
+  /** Recovery may inspect/download existing work, never create another paid submission. */
+  recoveryOnly?: boolean;
   /** Host-selected existing project folders, never supplied by worker output. */
   allowedWritePaths?: string[];
   schemaPath: string;
@@ -99,6 +102,10 @@ export function codexArguments(task: WorkerTask, extraArgs: string[] = []) {
   ];
   if (task.requestedModel || task.stage.kind === "motion-transfer")
     args.push("--model", task.requestedModel ?? "gpt-6-astra");
+  // A local repair can inspect existing images but must not consume another
+  // image-generation request. This override applies only to this child process.
+  if (task.recoveryOnly)
+    args.push("--config", "features.image_generation=false");
   for (const directory of task.allowedWritePaths ?? [])
     args.push("--add-dir", directory);
   for (const file of task.imagePaths) args.push("--image", file);
@@ -252,6 +259,7 @@ export class CodexWorker implements ProductionWorker {
       charged: task.stage.charged,
       capability: task.stage.capability,
       videoUrl: task.run.config.videoUrl,
+      recoveryOnly: task.recoveryOnly,
     });
     if (
       task.stage.capability &&

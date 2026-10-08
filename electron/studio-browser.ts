@@ -870,6 +870,7 @@ export class StudioBrowser {
       creditLimit: context.studioCreditLimit,
       maxAttempts: context.maxIterations,
       attempt: context.attempt,
+      recoveryOnly: context.recoveryOnly,
     });
     const bridge = await this.startBridge();
     return {

@@ -44,11 +44,17 @@ function tinyGlb(){
 export class CodexWorkbenchExecutor {
   constructor() {} shutdown() {}
   async probe(){return {codex:{available:true,authenticated:true},capabilities:{studio:true},message:'MOCK ONLY'};}
+  async recover(ctx,onProgress){
+    onProgress('MOCK: preserved files are being checked automatically');
+    await new Promise(r=>setTimeout(r,1800));
+    return this.execute({...ctx,recovered:true},onProgress);
+  }
   async execute(ctx,onProgress){
     fs.appendFileSync(${JSON.stringify(invocationPath)},JSON.stringify(ctx.job.request)+'\\n');
     onProgress('UI TEST: synthetic fixtures, no real generation');
     await new Promise(r=>setTimeout(r,100));
     const step=ctx.job.step; let count=0;
+    if(step==='separate'&&!ctx.recovered) return {status:'needs_input',summary:'MOCK transient download timeout',candidates:[],checks:[],recovery:{kind:'retry',reason:'MOCK transient download timeout'}};
     const write=(name,data,kind,role)=>{fs.writeFileSync(path.join(ctx.workspace,name),data);return {path:name,kind,...(role?{role}:{})};};
     const pic=(role)=>{count++;const bytes=Buffer.alloc(32*32*4); for(let i=0;i<bytes.length;i+=4){bytes[i]=count*17;bytes[i+1]=100;bytes[i+2]=count*11;bytes[i+3]=255;}return write('MOCK-'+count+'.png',nativeImage.createFromBitmap(bytes,{width:32,height:32}).toPNG(),'image',role);};
     const model=(i,role)=>{const bytes=tinyGlb();bytes.writeFloatLE(i+0.2,28+bytes.readUInt32LE(12));return write('MOCK-'+i+'.glb',bytes,'model',role);};
@@ -103,7 +109,7 @@ fs.writeFileSync(
   path.join(harness, "package.json"),
   JSON.stringify({
     name: "partsmith-guided-test",
-    version: "0.4.0",
+    version: "0.4.1",
     main: "dist-electron/main.cjs",
   }),
 );
@@ -197,11 +203,19 @@ try {
   await page.getByTestId("workbench-step-parts").click();
   await page.getByTestId("workbench-approve").check();
   await page.getByTestId("workbench-execute-separate").click();
+  await page.getByTestId("workbench-recovery").waitFor();
+  assert.match(
+    await page.getByTestId("workbench-recovery").textContent(),
+    /자동 복구/,
+  );
+  await page.getByTestId("workbench-recovery").screenshot({
+    path: "artifacts/screenshots/workbench-auto-recovery.png",
+  });
   await jobDone();
   await page.getByTestId("workbench-accept-separate").click();
   assert.equal(
     invocations().length,
-    2,
+    3,
     "Selecting separation must not generate models",
   );
   for (const role of ["head", "hair", "body"]) {
@@ -218,6 +232,20 @@ try {
       action: { kind: "select", jobId: j.id, candidateId: j.candidates[2].id },
     });
   }
+  await page.getByTestId("workbench-tab-model").click();
+  await page.getByTestId("workbench-model-role").selectOption("head");
+  const firstModel = page.getByTestId("workbench-candidate-0");
+  await firstModel.locator("img").waitFor();
+  assert.equal(await firstModel.locator(".wb-model").count(), 0);
+  const callsBeforePreview = invocations().length;
+  await page.getByTestId("workbench-preview3d-0").click();
+  await firstModel.locator(".wb-model canvas").waitFor();
+  await page.getByTestId("workbench-preview3d-0").click();
+  await firstModel.locator("img").waitFor();
+  assert.equal(invocations().length, callsBeforePreview);
+  await page.screenshot({
+    path: "artifacts/screenshots/workbench-model-photo-first.png",
+  });
   await accept(await execute({ step: "surface", prompt: "MOCK" }));
   const initial = await execute({ step: "assembly", prompt: "MOCK assemble" });
   await accept(initial);
@@ -281,8 +309,13 @@ try {
   await page.getByTestId("workbench-sequence").waitFor();
   await page.getByLabel("참조 동작 시점").fill("1");
   await page.getByAltText("정면 1.00초 동작").waitFor();
-  assert.equal(await page.getByTestId("workbench-sequence").locator("img").count(), 3);
-  await page.screenshot({ path: "artifacts/screenshots/workbench-mock-reference.png" });
+  assert.equal(
+    await page.getByTestId("workbench-sequence").locator("img").count(),
+    3,
+  );
+  await page.screenshot({
+    path: "artifacts/screenshots/workbench-mock-reference.png",
+  });
   await accept(
     await execute({ step: "animation", motion: "wave", prompt: "MOCK author" }),
   );
@@ -313,6 +346,9 @@ try {
         rigToggles: true,
         versionRevert: true,
         referenceGate: true,
+        automaticRecoveryWithoutClick: true,
+        modelPhotoFirstAndOptional3D: true,
+        sameTimeMultiview: true,
         restartNoAutoRun: true,
         legacyAutoStartDisabled: true,
         workerCalls: count,

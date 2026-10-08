@@ -27,6 +27,8 @@ function glb(_label: string) {
 }
 class MockExecutor implements WorkbenchExecutor {
   calls: WorkbenchExecutionContext[] = [];
+  progressCallbacks: ((message: string) => void)[] = [];
+  recover?: WorkbenchExecutor["recover"];
   submitted = new Set<string>();
   hasSubmission(job: { id: string }) {
     return this.submitted.has(job.id);
@@ -35,8 +37,12 @@ class MockExecutor implements WorkbenchExecutor {
     ctx: WorkbenchExecutionContext,
     result: WorkbenchResult,
   ) => WorkbenchResult | Promise<WorkbenchResult>;
-  async execute(ctx: WorkbenchExecutionContext) {
+  async execute(
+    ctx: WorkbenchExecutionContext,
+    onProgress = (_message: string) => {},
+  ) {
     this.calls.push(ctx);
+    this.progressCallbacks.push(onProgress);
     const result = this.fixture(ctx);
     return this.hook ? this.hook(ctx, result) : result;
   }
@@ -156,7 +162,11 @@ class MockExecutor implements WorkbenchExecutor {
     };
   }
 }
-async function setup(t: TestContext, source = true) {
+async function setup(
+  t: TestContext,
+  source = true,
+  recoveryDelaysMs = [0, 0, 0],
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "partsmith-guided-test-"));
   const store = new Store(root);
   await store.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));
@@ -170,7 +180,7 @@ async function setup(t: TestContext, source = true) {
   } as any);
   store.save(project);
   const executor = new MockExecutor(),
-    engine = new WorkbenchEngine(store, executor),
+    engine = new WorkbenchEngine(store, executor, { recoveryDelaysMs }),
     w = engine.create(project.id);
   t.after(() => {
     engine.shutdown();
@@ -692,4 +702,258 @@ test("files outside an immutable job workspace cannot be registered by worker ou
   assert.equal(result.status, "failed");
   assert.match(result.summary, /밖 파일/);
   assert.deepEqual(result.candidates, []);
+});
+
+test("classified transient failure recovers the same frozen job and waits for user review", async (t) => {
+  const x = await setup(t, false);
+  const recoveries: WorkbenchExecutionContext[] = [];
+  x.executor.hook = (ctx, result) => {
+    // The worker's context is a disposable copy, never the next retry's budget.
+    ctx.job.request.prompt = "worker-mutated prompt";
+    ctx.job.approval.studioCreditLimit = 99999;
+    return {
+      ...result,
+      status: "needs_input",
+      summary: "Temporary download unavailable",
+      candidates: [],
+      recovery: { kind: "retry", reason: "Resume confirmed download" },
+    };
+  };
+  x.executor.recover = async (ctx) => {
+    recoveries.push(ctx);
+    return x.executor.fixture(ctx);
+  };
+  const job = await x.execute({ step: "concept", prompt: "approved hero" });
+  assert.equal(
+    x.executor.calls.length,
+    1,
+    "execute is never replayed automatically",
+  );
+  assert.equal(recoveries.length, 1);
+  assert.equal(recoveries[0].job.id, job.id);
+  assert.equal(recoveries[0].workspace, x.executor.calls[0].workspace);
+  assert.equal(recoveries[0].job.request.prompt, "approved hero");
+  assert.equal(recoveries[0].job.approval.studioCreditLimit, 1000);
+  assert.deepEqual(recoveries[0].recovery, {
+    attempt: 1,
+    error: "Resume confirmed download",
+    mode: "retry",
+  });
+  assert.equal(job.status, "review");
+  assert.equal(job.recovery, undefined);
+  assert.match(job.summary, /자동 복구 1회/);
+  assert.equal(x.engine.get(x.w.id).jobs.length, 1);
+  assert.deepEqual(x.engine.get(x.w.id).selections, {});
+  assert.equal(x.engine.get(x.w.id).activeJobId, undefined);
+});
+
+test("automatic recovery is bounded to three calls and retains an actionable exhaustion reason", async (t) => {
+  const x = await setup(t);
+  let recoveries = 0;
+  const failure: WorkbenchResult = {
+    status: "needs_input",
+    summary: "Local inspection could not open the saved asset",
+    candidates: [],
+    checks: [],
+    recovery: { kind: "repair", reason: "Repair saved inspection script" },
+  };
+  x.executor.hook = () => failure;
+  x.executor.recover = async (ctx) => {
+    recoveries++;
+    assert.equal(ctx.recovery?.attempt, recoveries);
+    assert.equal(ctx.job.recovery?.state, "running");
+    assert.equal(ctx.job.recovery?.nextAttemptAt, undefined);
+    return failure;
+  };
+  const job = await x.execute({ step: "separate", prompt: "split" });
+  assert.equal(x.executor.calls.length, 1);
+  assert.equal(recoveries, 3);
+  assert.equal(job.status, "needs_input");
+  assert.deepEqual(job.recovery, {
+    attempt: 3,
+    maxAttempts: 3,
+    state: "exhausted",
+    reason: "Repair saved inspection script",
+  });
+  assert.match(job.summary, /3회 후에도/);
+  assert.equal(x.engine.get(x.w.id).activeJobId, undefined);
+  x.executor.hook = undefined;
+  x.engine.retry(x.w.id, job.id);
+  const manuallyResumed = await x.engine.wait(x.w.id);
+  assert.equal(manuallyResumed.jobs[0].status, "review");
+  assert.equal(manuallyResumed.jobs[0].recovery, undefined);
+  assert.equal(x.executor.calls.length, 2);
+});
+
+test("human input, ambiguous submission and unclassified exceptions never trigger automatic recovery", async (t) => {
+  for (const kind of ["human", "ambiguous", "exception"] as const) {
+    await t.test(kind, async (t) => {
+      const x = await setup(t, false);
+      let recoveries = 0;
+      x.executor.recover = async (ctx) => {
+        recoveries++;
+        return x.executor.fixture(ctx);
+      };
+      x.executor.hook = () => {
+        if (kind === "exception")
+          throw new Error("Unknown worker transport failure");
+        return {
+          status: kind === "ambiguous" ? "submission_unknown" : "needs_input",
+          summary:
+            kind === "ambiguous"
+              ? "Submission receipt unknown"
+              : "User login required",
+          candidates: [],
+          checks: [],
+          recovery: {
+            kind: kind === "ambiguous" ? "retry" : "blocked",
+            reason: "Do not automatically spend again",
+          },
+        };
+      };
+      const job = await x.execute({ step: "concept", prompt: "hero" });
+      assert.equal(recoveries, 0);
+      assert.equal(x.executor.calls.length, 1);
+      assert.equal(job.recovery?.state, "blocked");
+      assert.equal(job.recovery?.attempt, 0);
+      assert.equal(
+        job.status,
+        kind === "human" ? "needs_input" : "submission_unknown",
+      );
+    });
+  }
+});
+
+test("completed result validation failures use local repair and preserve frozen inputs", async (t) => {
+  const x = await setup(t);
+  let recoveries = 0;
+  x.executor.hook = (_ctx, result) => {
+    result.candidates[0].artifacts = result.candidates[0].artifacts.filter(
+      (a) => a.role !== "hair",
+    );
+    return result;
+  };
+  x.executor.recover = async (ctx) => {
+    recoveries++;
+    assert.equal(ctx.recovery?.mode, "repair");
+    assert.match(ctx.recovery!.error, /머리·머리카락·몸통/);
+    assert.equal(ctx.job.validationPending, true);
+    assert.deepEqual(ctx.inputs, x.executor.calls[0].inputs);
+    const retained = JSON.parse(
+      fs.readFileSync(path.join(ctx.workspace, ".worker-result.json"), "utf8"),
+    );
+    assert.equal(retained.status, "completed");
+    return x.executor.fixture(ctx);
+  };
+  const job = await x.execute({ step: "separate", prompt: "split" });
+  assert.equal(job.status, "review", job.summary);
+  assert.equal(recoveries, 1);
+  assert.equal(x.executor.calls.length, 1);
+  assert.equal(job.validationPending, false);
+  assert.equal(x.engine.get(x.w.id).selections.separate, undefined);
+});
+
+test("cancel interrupts recovery backoff, preserves saved work and ignores late progress", async (t) => {
+  const x = await setup(t, true, [30000, 30000, 30000]);
+  let recoveries = 0;
+  x.executor.hook = (_ctx, result) => ({
+    ...result,
+    status: "needs_input",
+    candidates: [],
+    recovery: { kind: "retry", reason: "Transient read timeout" },
+  });
+  x.executor.recover = async (ctx) => {
+    recoveries++;
+    return x.executor.fixture(ctx);
+  };
+  x.engine.execute(x.w.id, { step: "separate", prompt: "split" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const pending = x.engine.get(x.w.id);
+  assert.equal(pending.jobs[0].status, "running");
+  assert.equal(pending.jobs[0].recovery?.state, "waiting");
+  assert.ok(pending.jobs[0].recovery?.nextAttemptAt);
+  x.executor.progressCallbacks[0](
+    "Late callback from finished initial invocation",
+  );
+  assert.equal(x.engine.get(x.w.id).jobs[0].summary, pending.jobs[0].summary);
+  assert.throws(
+    () => x.engine.execute(x.w.id, { step: "separate", prompt: "duplicate" }),
+    /현재 작업/,
+  );
+  const started = Date.now();
+  x.engine.cancel(x.w.id);
+  const stopped = await x.engine.wait(x.w.id);
+  assert.ok(
+    Date.now() - started < 1000,
+    "cancel must not wait for the entire backoff",
+  );
+  assert.equal(recoveries, 0);
+  assert.equal(stopped.jobs[0].status, "cancelled");
+  assert.equal(stopped.jobs[0].recovery?.state, "blocked");
+  assert.equal(stopped.jobs[0].recovery?.nextAttemptAt, undefined);
+  x.executor.progressCallbacks[0]("Late callback after cancellation");
+  assert.equal(x.engine.get(x.w.id).jobs[0].summary, stopped.jobs[0].summary);
+  assert.equal(
+    x.engine.get(x.w.id).selections.concept.jobId,
+    pending.selections.concept.jobId,
+  );
+});
+
+test("shutdown during a running repair ignores its eventual completion and never starts a stage", async (t) => {
+  const x = await setup(t);
+  let repairStarted!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    repairStarted = resolve;
+  });
+  let finishRepair!: () => void;
+  let lateProgress!: (message: string) => void;
+  x.executor.hook = (_ctx, result) => ({
+    ...result,
+    status: "needs_input",
+    candidates: [],
+    recovery: { kind: "repair", reason: "Repair local output" },
+  });
+  x.executor.recover = async (ctx, progress) => {
+    lateProgress = progress;
+    repairStarted();
+    await new Promise<void>((resolve) => {
+      finishRepair = resolve;
+    });
+    return x.executor.fixture(ctx);
+  };
+  x.engine.execute(x.w.id, { step: "separate", prompt: "split" });
+  await ready;
+  x.engine.shutdown();
+  lateProgress("Worker returned after shutdown");
+  finishRepair();
+  const stopped = await x.engine.wait(x.w.id);
+  assert.equal(stopped.jobs[0].status, "cancelled");
+  assert.equal(stopped.jobs[0].candidates.length, 0);
+  assert.equal(stopped.selections.separate, undefined);
+  assert.equal(x.executor.calls.length, 1);
+});
+
+test("restarting with pending recovery never restarts a worker or its timer", async (t) => {
+  const x = await setup(t);
+  const job = await x.execute({ step: "separate", prompt: "split" });
+  const snapshot = x.engine.get(x.w.id);
+  snapshot.jobs[0].status = "running";
+  snapshot.jobs[0].recovery = {
+    attempt: 2,
+    maxAttempts: 3,
+    state: "waiting",
+    reason: "Saved transient failure",
+    nextAttemptAt: new Date().toISOString(),
+  };
+  snapshot.activeJobId = job.id;
+  x.store.put("workbench", x.w.id, snapshot);
+  const restored = new WorkbenchEngine(x.store, x.executor, {
+    recoveryDelaysMs: [0, 0, 0],
+  });
+  const recovered = restored.get(x.w.id);
+  assert.equal(recovered.jobs[0].status, "failed");
+  assert.equal(recovered.jobs[0].recovery?.state, "blocked");
+  assert.equal(recovered.jobs[0].recovery?.nextAttemptAt, undefined);
+  assert.equal(recovered.activeJobId, undefined);
+  assert.equal(x.executor.calls.length, 1);
 });

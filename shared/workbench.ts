@@ -50,6 +50,10 @@ export type WorkbenchApproval = {
   studioCreditLimit: number;
   imageCreditLimit: number;
 };
+export type WorkbenchRecovery = {
+  kind: "retry" | "repair" | "blocked";
+  reason: string;
+};
 export type WorkbenchJob = {
   id: string;
   step: WorkbenchStep;
@@ -71,6 +75,13 @@ export type WorkbenchJob = {
   candidates: WorkbenchCandidate[];
   checks: { name: string; passed: boolean }[];
   validationPending?: boolean;
+  recovery?: {
+    attempt: number;
+    maxAttempts: number;
+    state: "waiting" | "running" | "exhausted" | "blocked";
+    reason: string;
+    nextAttemptAt?: string;
+  };
 };
 export type WorkbenchSelection = { jobId: string; candidateId: string };
 export type Workbench = {
@@ -94,6 +105,8 @@ export type WorkbenchResult = {
     objects?: WorkbenchObject[];
   }[];
   checks: { name: string; passed: boolean }[];
+  /** Host-approved recovery classification; never authorizes another generation. */
+  recovery?: WorkbenchRecovery;
 };
 export type WorkbenchExecutionContext = {
   workbench: Workbench;
@@ -101,9 +114,15 @@ export type WorkbenchExecutionContext = {
   workspace: string;
   inputs: WorkbenchArtifact[];
   signal: AbortSignal;
+  recovery?: { attempt: number; error: string; mode: "retry" | "repair" };
 };
 export interface WorkbenchExecutor {
   execute(
+    context: WorkbenchExecutionContext,
+    onProgress: (message: string) => void,
+  ): Promise<WorkbenchResult>;
+  /** Resume/repair this exact job without replaying an ambiguous paid submission. */
+  recover?(
     context: WorkbenchExecutionContext,
     onProgress: (message: string) => void,
   ): Promise<WorkbenchResult>;
