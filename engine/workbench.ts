@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 import { Store, uid } from "./store";
 import { inspectWorkbenchGlb } from "./glb-inspect";
 import {
+  blocksWorkbenchCheck,
+  normalizeWorkbenchChecks,
+} from "../shared/workbench-checks";
+import {
   WORKBENCH_ROLES,
   WORKBENCH_STEPS,
   workbenchSlot,
@@ -167,6 +171,8 @@ export class WorkbenchEngine {
         return this.retryValidation(w.id, action.jobId);
       case "retry":
         return this.retry(w.id, action.jobId);
+      case "inspect-saved":
+        return this.inspectSaved(w.id, action.jobId);
       case "resolve-submission": {
         this.idle(w);
         if (action.confirmedNotSubmitted !== true)
@@ -479,6 +485,17 @@ export class WorkbenchEngine {
             workspace,
             inputs: structuredClone(inputs),
             signal: controller.signal,
+            onDraft: (draft) => {
+              if (controller.signal.aborted || token !== invocation) return;
+              const latest = this.get(id),
+                current = this.job(latest, jobId);
+              if (current.status !== "running" || current.step !== "separate")
+                return;
+              this.verifyArtifacts(latest, inputs);
+              this.applyDraft(latest, current, draft);
+              current.updatedAt = now();
+              this.save(latest);
+            },
             ...(recovery ? { recovery: structuredClone(recovery) } : {}),
           };
           const progress = (message: string) => {
@@ -647,11 +664,27 @@ export class WorkbenchEngine {
       throw new Error("후보 ID가 중복되었습니다.");
     if (
       !Array.isArray(result.checks) ||
-      result.checks.some((c) => c.passed !== true)
+      result.checks.some((c) => blocksWorkbenchCheck(job.step, c))
     )
       throw new Error("통과하지 못한 검사가 있습니다. 결과를 확인해야 합니다.");
     const workspace = this.workspace(w, job);
-    const candidates: WorkbenchCandidate[] = result.candidates.map((c) => {
+    const candidates = this.registerCandidates(w, job, result.candidates);
+    this.checkOutputs(job, candidates, result, workspace);
+    job.candidates = candidates;
+    job.checks = normalizeWorkbenchChecks(job.step, result.checks);
+    delete job.draftCandidates;
+    delete job.draftChecks;
+    job.status = "review";
+    job.validationPending = false;
+    job.summary = result.summary || "결과를 확인하고 선택 또는 채택해 주세요.";
+  }
+  private registerCandidates(
+    w: Workbench,
+    job: WorkbenchJob,
+    raw: WorkbenchResult["candidates"],
+  ): WorkbenchCandidate[] {
+    const workspace = this.workspace(w, job);
+    return raw.map((c) => {
       if (
         !c.id ||
         !c.label ||
@@ -685,12 +718,39 @@ export class WorkbenchEngine {
         ...(c.objects ? { objects: c.objects } : {}),
       };
     });
-    this.checkOutputs(job, candidates, result, workspace);
-    job.candidates = candidates;
-    job.checks = result.checks;
-    job.status = "review";
-    job.validationPending = false;
-    job.summary = result.summary || "결과를 확인하고 선택 또는 채택해 주세요.";
+  }
+  private applyDraft(w: Workbench, job: WorkbenchJob, result: WorkbenchResult) {
+    if (job.step !== "separate" || !this.current(w, job))
+      throw new Error(
+        "현재 파츠 분리 작업에만 중간 이미지를 표시할 수 있습니다.",
+      );
+    if (
+      !Array.isArray(result.candidates) ||
+      result.candidates.length !== 1 ||
+      !Array.isArray(result.checks)
+    )
+      throw new Error("파츠 분리 중간 결과가 올바르지 않습니다.");
+    if (result.checks.some((check) => blocksWorkbenchCheck(job.step, check)))
+      throw new Error("중간 이미지에 통과하지 못한 파일 검사가 있습니다.");
+    const candidates = this.registerCandidates(w, job, result.candidates);
+    const artifacts = candidates[0].artifacts;
+    const images = artifacts.filter((a) => a.kind === "image");
+    if (
+      !images.length ||
+      images.length > 3 ||
+      artifacts.some((a) => !["image", "report"].includes(a.kind)) ||
+      images.some(
+        (a) =>
+          !WORKBENCH_ROLES.includes(a.role as (typeof WORKBENCH_ROLES)[number]),
+      ) ||
+      new Set(images.map((a) => a.role)).size !== images.length ||
+      new Set(images.map((a) => a.sha256)).size !== images.length
+    )
+      throw new Error(
+        "중간 결과에는 서로 다른 머리·머리카락·몸통 이미지와 보고서만 사용할 수 있습니다.",
+      );
+    job.draftCandidates = candidates;
+    job.draftChecks = normalizeWorkbenchChecks(job.step, result.checks);
   }
   private verifyFormat(file: string, kind: WorkbenchArtifact["kind"]) {
     const data = fs.readFileSync(file),
@@ -775,7 +835,8 @@ export class WorkbenchEngine {
     }
     if (
       job.step === "separate" &&
-      WORKBENCH_ROLES.some((role) => !has(c, "image", role))
+      (WORKBENCH_ROLES.some((role) => !has(c, "image", role)) ||
+        c.artifacts.filter((a) => a.kind === "image").length !== 3)
     )
       throw new Error("머리·머리카락·몸통 분리 이미지가 모두 필요합니다.");
     if (
@@ -1035,6 +1096,88 @@ export class WorkbenchEngine {
     this.active.set(w.id, { controller, promise });
     return w;
   }
+  /** Explicit user action: inspect saved bytes, without starting a production worker. */
+  inspectSaved(id: string, jobId: string) {
+    const w = this.get(id);
+    this.idle(w);
+    this.workerIdle();
+    const job = this.job(w, jobId);
+    if (
+      job.step !== "separate" ||
+      !["failed", "needs_input", "cancelled"].includes(job.status)
+    )
+      throw new Error(
+        "중지된 파츠 분리 작업에서만 저장된 이미지를 확인할 수 있습니다.",
+      );
+    if (!this.executor.inspectSaved)
+      throw new Error("저장된 이미지 확인 기능을 사용할 수 없습니다.");
+    if (!this.current(w, job))
+      throw new Error(
+        "기준 이미지가 바뀌어 기존 분리 작업을 표시할 수 없습니다.",
+      );
+    const inputs = Object.keys(job.dependencies).flatMap(
+      (slot) => this.chosen(w, slot).candidate.artifacts,
+    );
+    const uniqueInputs = [...new Map(inputs.map((a) => [a.path, a])).values()];
+    const workspace = this.workspace(w, job);
+    if (!fs.existsSync(workspace))
+      throw new Error("저장된 작업 폴더가 없습니다.");
+    const originalStatus = job.status;
+    job.status = "running";
+    job.summary =
+      "저장된 파츠 이미지를 확인합니다. 새 이미지는 생성하지 않습니다.";
+    delete job.recovery;
+    job.updatedAt = now();
+    w.activeJobId = job.id;
+    this.save(w);
+    const controller = new AbortController();
+    const snapshot = structuredClone(w);
+    const promise = Promise.resolve().then(async () => {
+      try {
+        this.verifyArtifacts(snapshot, uniqueInputs);
+        const result = await this.executor.inspectSaved!({
+          workbench: snapshot,
+          job: structuredClone(job),
+          workspace,
+          inputs: structuredClone(uniqueInputs),
+          signal: controller.signal,
+        });
+        const latest = this.get(id),
+          current = this.job(latest, jobId);
+        if (controller.signal.aborted || current.status !== "running") return;
+        this.verifyArtifacts(latest, uniqueInputs);
+        if (result.status === "completed") {
+          this.applyResult(latest, current, result);
+        } else {
+          if (result.candidates.length)
+            this.applyDraft(latest, current, result);
+          current.status =
+            originalStatus === "cancelled" ? "cancelled" : "needs_input";
+          current.summary =
+            result.summary ||
+            "저장된 이미지를 확인했습니다. 남은 파츠는 직접 이어서 실행하세요.";
+        }
+        current.updatedAt = now();
+        delete latest.activeJobId;
+        latest.message = current.summary;
+        this.save(latest);
+      } catch (error) {
+        const latest = this.get(id),
+          current = this.job(latest, jobId);
+        if (controller.signal.aborted || current.status !== "running") return;
+        current.status = originalStatus;
+        current.summary = `저장된 이미지 확인 실패: ${messageOf(error)}`;
+        current.updatedAt = now();
+        delete latest.activeJobId;
+        latest.message = current.summary;
+        this.save(latest);
+      } finally {
+        this.active.delete(id);
+      }
+    });
+    this.active.set(id, { controller, promise });
+    return w;
+  }
   cancel(id: string) {
     const w = this.get(id);
     const active = this.active.get(id);
@@ -1192,7 +1335,7 @@ export class WorkbenchEngine {
       for (const job of w.jobs) {
         if (!/^[a-zA-Z0-9_-]+$/.test(job.id) || !Array.isArray(job.candidates))
           throw new Error("잘못된 백업 작업입니다.");
-        for (const c of job.candidates)
+        for (const c of [...job.candidates, ...(job.draftCandidates ?? [])])
           for (const artifact of c.artifacts) {
             if (!artifact.path.startsWith(`workbench/${w.id}/jobs/${job.id}/`))
               throw new Error("백업 산출물이 소유한 작업 폴더 밖에 있습니다.");
@@ -1267,7 +1410,10 @@ export class WorkbenchEngine {
             delete job.recovery.nextAttemptAt;
           }
         }
-        for (const candidate of job.candidates)
+        for (const candidate of [
+          ...job.candidates,
+          ...(job.draftCandidates ?? []),
+        ])
           this.verifyArtifacts(w, candidate.artifacts);
       }
       this.save(w);

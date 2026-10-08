@@ -29,6 +29,7 @@ class MockExecutor implements WorkbenchExecutor {
   calls: WorkbenchExecutionContext[] = [];
   progressCallbacks: ((message: string) => void)[] = [];
   recover?: WorkbenchExecutor["recover"];
+  inspectSaved?: WorkbenchExecutor["inspectSaved"];
   submitted = new Set<string>();
   hasSubmission(job: { id: string }) {
     return this.submitted.has(job.id);
@@ -956,4 +957,238 @@ test("restarting with pending recovery never restarts a worker or its timer", as
   assert.equal(recovered.jobs[0].recovery?.nextAttemptAt, undefined);
   assert.equal(recovered.activeJobId, undefined);
   assert.equal(x.executor.calls.length, 1);
+});
+
+test("separation visual observations stay false warnings and permit user review without repair", async (t) => {
+  const x = await setup(t);
+  let recoveries = 0;
+  x.executor.hook = (_, result) => ({
+    ...result,
+    checks: [
+      { name: "original_position_and_scale_preserved", passed: false },
+      { name: "hair:original_alignment_and_scale_preserved", passed: false },
+      { name: "clean_peripheral_alpha", passed: false },
+    ],
+  });
+  x.executor.recover = async (ctx) => {
+    recoveries++;
+    return x.executor.fixture(ctx);
+  };
+  const job = await x.execute({ step: "separate", prompt: "split" });
+  assert.equal(job.status, "review", job.summary);
+  assert.equal(recoveries, 0);
+  assert.ok(
+    job.checks.every((c) => c.passed === false && c.severity === "warning"),
+  );
+  assert.equal(x.engine.get(x.w.id).selections.separate, undefined);
+  assert.throws(
+    () =>
+      x.engine.execute(
+        x.w.id,
+        {
+          step: "model",
+          prompt: "model",
+          role: "head",
+          polygonCount: 10000,
+        },
+        { accepted: true, studioCreditLimit: 1000, imageCreditLimit: 0 },
+      ),
+    /separate/,
+  );
+  x.engine.accept(x.w.id, job.id);
+  assert.equal(x.engine.get(x.w.id).selections.separate.jobId, job.id);
+});
+
+test("unknown failures and visual failures outside separation remain blocking despite worker severity", async (t) => {
+  for (const [step, name] of [
+    ["separate", "source_hash_matches"],
+    ["concept", "clean_peripheral_alpha"],
+  ] as const) {
+    const x = await setup(t);
+    x.executor.hook = (_, result) => ({
+      ...result,
+      checks: [{ name, passed: false, severity: "warning" }],
+    });
+    const job = await x.execute({ step, prompt: "test" });
+    assert.equal(job.status, "failed");
+    assert.equal(job.candidates.length, 0);
+  }
+});
+
+test("validated separation drafts appear before completion, cannot be selected, and survive cancellation", async (t) => {
+  const x = await setup(t);
+  let release!: () => void;
+  let draft!: WorkbenchResult;
+  x.executor.hook = async (ctx, result) => {
+    draft = {
+      ...result,
+      candidates: [
+        {
+          ...result.candidates[0],
+          artifacts: result.candidates[0].artifacts.filter(
+            (a) => a.kind === "report" || a.role === "head",
+          ),
+        },
+      ],
+      checks: [{ name: "clean_peripheral_alpha", passed: false }],
+    };
+    ctx.onDraft!(draft);
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return result;
+  };
+  x.engine.execute(x.w.id, { step: "separate", prompt: "split" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const live = x.engine.get(x.w.id).jobs[0];
+  assert.equal(live.status, "running");
+  assert.equal(live.candidates.length, 0);
+  assert.equal(
+    live.draftCandidates?.[0].artifacts.filter((a) => a.kind === "image")
+      .length,
+    1,
+  );
+  assert.equal(live.draftChecks?.[0].severity, "warning");
+  assert.match(live.draftCandidates![0].artifacts[0].sha256, /^[a-f0-9]{64}$/);
+  assert.throws(
+    () => x.engine.select(x.w.id, live.id, live.draftCandidates![0].id),
+    /현재 작업/,
+  );
+  x.engine.cancel(x.w.id);
+  x.executor.calls[0].onDraft!({ ...draft, checks: [] });
+  release();
+  const stopped = (await x.engine.wait(x.w.id)).jobs[0];
+  assert.equal(stopped.status, "cancelled");
+  assert.deepEqual(stopped.draftCandidates, live.draftCandidates);
+  assert.deepEqual(stopped.draftChecks, live.draftChecks);
+  assert.equal(stopped.candidates.length, 0);
+  assert.throws(() => x.engine.accept(x.w.id, live.id), /후보/);
+  assert.throws(
+    () =>
+      x.engine.execute(
+        x.w.id,
+        {
+          step: "model",
+          prompt: "model",
+          role: "head",
+          polygonCount: 10000,
+        },
+        { accepted: true, studioCreditLimit: 1000, imageCreditLimit: 0 },
+      ),
+    /separate/,
+  );
+});
+
+test("draft registration rejects escaped paths, invalid images, duplicate roles and integrity failures", async (t) => {
+  for (const fault of ["path", "format", "role", "integrity"] as const) {
+    const x = await setup(t);
+    x.executor.hook = (ctx, result) => {
+      const artifacts = result.candidates[0].artifacts;
+      if (fault === "path")
+        artifacts.find((a) => a.kind === "image")!.path =
+          "../../../../assets/front.png";
+      if (fault === "format")
+        fs.writeFileSync(
+          path.join(
+            ctx.workspace,
+            artifacts.find((a) => a.kind === "image")!.path,
+          ),
+          "not an image",
+        );
+      if (fault === "role")
+        artifacts.find((a) => a.role === "hair")!.role = "head";
+      if (fault === "integrity")
+        result.checks = [
+          { name: "file_hash_matches", passed: false, severity: "warning" },
+        ];
+      ctx.onDraft!(result);
+      return result;
+    };
+    const job = await x.execute({ step: "separate", prompt: "split" });
+    assert.equal(job.status, "failed", fault);
+    assert.equal(job.draftCandidates, undefined, fault);
+    assert.equal(job.candidates.length, 0, fault);
+  }
+});
+
+test("late draft from a completed invocation cannot overwrite the next recovery state", async (t) => {
+  const x = await setup(t, true, [30000, 30000, 30000]);
+  let retained!: WorkbenchResult;
+  x.executor.hook = (_ctx, result) => {
+    retained = result;
+    return {
+      ...result,
+      status: "needs_input",
+      candidates: [],
+      recovery: { kind: "retry", reason: "Temporary local read" },
+    };
+  };
+  x.executor.recover = async (ctx) => x.executor.fixture(ctx);
+  x.engine.execute(x.w.id, { step: "separate", prompt: "split" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(x.engine.get(x.w.id).jobs[0].recovery?.state, "waiting");
+  x.executor.calls[0].onDraft!(retained);
+  assert.equal(x.engine.get(x.w.id).jobs[0].draftCandidates, undefined);
+  x.engine.cancel(x.w.id);
+  await x.engine.wait(x.w.id);
+});
+
+test("explicit inspect-saved loads partial and complete images without worker execution or stage advancement", async (t) => {
+  const x = await setup(t);
+  let saved!: WorkbenchResult;
+  x.executor.hook = (_, result) => {
+    saved = result;
+    return {
+      ...result,
+      status: "needs_input",
+      candidates: [],
+      summary: "Saved visual review awaiting user",
+    };
+  };
+  const stopped = await x.execute({ step: "separate", prompt: "split" });
+  const calls = x.executor.calls.length;
+  let inspections = 0;
+  x.executor.inspectSaved = async (ctx) => {
+    inspections++;
+    assert.equal(ctx.job.id, stopped.id);
+    assert.deepEqual(ctx.inputs, x.executor.calls[0].inputs);
+    return {
+      ...saved,
+      status: "needs_input",
+      candidates: [
+        {
+          ...saved.candidates[0],
+          artifacts: saved.candidates[0].artifacts.filter(
+            (a) => a.kind === "report" || a.role === "head",
+          ),
+        },
+      ],
+      checks: [
+        { name: "original_alignment_and_scale_preserved", passed: false },
+      ],
+    };
+  };
+  x.engine.action(x.project.id, { kind: "inspect-saved", jobId: stopped.id });
+  const partial = (await x.engine.wait(x.w.id)).jobs[0];
+  assert.equal(partial.status, "needs_input");
+  assert.equal(
+    partial.draftCandidates?.[0].artifacts.filter((a) => a.kind === "image")
+      .length,
+    1,
+  );
+  assert.equal(partial.candidates.length, 0);
+  assert.equal(inspections, 1);
+  assert.equal(x.executor.calls.length, calls);
+  x.executor.inspectSaved = async () => ({
+    ...saved,
+    checks: [{ name: "clean_peripheral_alpha", passed: false }],
+  });
+  x.engine.action(x.project.id, { kind: "inspect-saved", jobId: stopped.id });
+  const full = (await x.engine.wait(x.w.id)).jobs[0];
+  assert.equal(full.status, "review", full.summary);
+  assert.equal(full.checks[0].passed, false);
+  assert.equal(full.draftCandidates, undefined);
+  assert.equal(full.draftChecks, undefined);
+  assert.equal(x.executor.calls.length, calls);
+  assert.equal(x.engine.get(x.w.id).selections.separate, undefined);
 });

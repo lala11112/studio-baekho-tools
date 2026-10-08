@@ -392,7 +392,7 @@ export class CodexWorker implements ProductionWorker {
                 if (item?.type === "mcp_tool_call")
                   lastActivity = `도구 실행 중: ${String(item.tool ?? item.tool_name ?? "연결 도구").slice(0, 100)}`;
                 else if (item?.type === "command_execution")
-                  lastActivity = "로컬 파일·Blender 작업을 실행하고 있습니다.";
+                  lastActivity = "파일을 확인·처리하고 있습니다.";
                 else if (item?.type === "image_generation")
                   lastActivity = "이미지를 생성하고 있습니다.";
                 else lastActivity = "작업자가 현재 단계를 처리하고 있습니다.";

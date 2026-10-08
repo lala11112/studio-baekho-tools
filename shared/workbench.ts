@@ -54,6 +54,12 @@ export type WorkbenchRecovery = {
   kind: "retry" | "repair" | "blocked";
   reason: string;
 };
+export type WorkbenchCheck = {
+  name: string;
+  passed: boolean;
+  /** Advisory visual observations remain false; the host decides whether a check blocks. */
+  severity?: "warning" | "error";
+};
 export type WorkbenchJob = {
   id: string;
   step: WorkbenchStep;
@@ -73,7 +79,10 @@ export type WorkbenchJob = {
   dependencies: Record<string, WorkbenchSelection>;
   approval: WorkbenchApproval;
   candidates: WorkbenchCandidate[];
-  checks: { name: string; passed: boolean }[];
+  checks: WorkbenchCheck[];
+  /** Verified partial separation images, visible but never selectable. */
+  draftCandidates?: WorkbenchCandidate[];
+  draftChecks?: WorkbenchCheck[];
   validationPending?: boolean;
   recovery?: {
     attempt: number;
@@ -104,7 +113,7 @@ export type WorkbenchResult = {
     artifacts: Omit<WorkbenchArtifact, "sha256" | "bytes">[];
     objects?: WorkbenchObject[];
   }[];
-  checks: { name: string; passed: boolean }[];
+  checks: WorkbenchCheck[];
   /** Host-approved recovery classification; never authorizes another generation. */
   recovery?: WorkbenchRecovery;
 };
@@ -114,6 +123,7 @@ export type WorkbenchExecutionContext = {
   workspace: string;
   inputs: WorkbenchArtifact[];
   signal: AbortSignal;
+  onDraft?: (result: WorkbenchResult) => void;
   recovery?: { attempt: number; error: string; mode: "retry" | "repair" };
 };
 export interface WorkbenchExecutor {
@@ -126,6 +136,8 @@ export interface WorkbenchExecutor {
     context: WorkbenchExecutionContext,
     onProgress: (message: string) => void,
   ): Promise<WorkbenchResult>;
+  /** Read existing separation outputs only; no worker, generation, or paid submission. */
+  inspectSaved?(context: WorkbenchExecutionContext): Promise<WorkbenchResult>;
   hasSubmission?(job: WorkbenchJob): boolean;
   probe?(): Promise<unknown>;
   shutdown?(): void;
@@ -138,6 +150,7 @@ export type WorkbenchAction =
   | { kind: "cancel" }
   | { kind: "retry-validation"; jobId: string }
   | { kind: "retry"; jobId: string }
+  | { kind: "inspect-saved"; jobId: string }
   | { kind: "import-source"; assetId: string }
   | { kind: "resolve-submission"; jobId: string; confirmedNotSubmitted: true };
 export const WORKBENCH_STEPS: { id: WorkbenchStep; title: string }[] = [

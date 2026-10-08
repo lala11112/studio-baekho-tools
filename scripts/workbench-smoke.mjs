@@ -14,6 +14,7 @@ const fixture = path.resolve(
 );
 const harness = path.join(fixture, "harness");
 const invocationPath = path.join(fixture, "calls.jsonl");
+const draftReleasePath = path.join(fixture, "draft-reviewed.txt");
 fs.mkdirSync(path.join(harness, "dist-electron"), { recursive: true });
 fs.mkdirSync("artifacts/screenshots", { recursive: true });
 const old = fs.readFileSync("scripts/production-smoke.mjs", "utf8");
@@ -64,14 +65,19 @@ export class CodexWorkbenchExecutor {
     else if(step==='model') candidates=[0,1,2,3].map(i=>({id:'candidate-'+i,label:'MOCK model '+(i+1),artifacts:[model(i,ctx.job.request.role),pic()]}));
     else {
       let artifacts=[];
-      if(step==='separate') artifacts=['head','hair','body'].map(pic);
+      if(step==='separate') {
+        artifacts=['head','hair','body'].map(pic);
+        ctx.onDraft?.({status:'completed',summary:'MOCK two photos ready',candidates:[{id:'draft',label:'MOCK saved photos',artifacts:artifacts.slice(0,2)}],checks:[{name:'original_alignment_and_scale_preserved',passed:false}]});
+        const draftDeadline=Date.now()+20000;
+        while(!fs.existsSync(${JSON.stringify(draftReleasePath)})&&Date.now()<draftDeadline) await new Promise(r=>setTimeout(r,50));
+      }
       else if(step==='surface') artifacts=['head','hair','body'].map((r,i)=>model(i,r));
       else if(['assembly','rig','animation'].includes(step)) artifacts=[model(5),pic(),write('MOCK.blend',Buffer.from('BLENDER-MOCK-UI-ONLY'),'blend')];
       else if(step==='reference') {const frames=[0,1,2].map(time=>{const entries={time};for(const view of ['front','side','back']){const a=pic(view);artifacts.push(a);entries[view]=a.path;}return entries;});artifacts.push(write('frames.json',JSON.stringify({schemaVersion:1,motion:ctx.job.request.motion,duration:2,fps:12,camera:'fixed',frames}),'frames'));}
       else artifacts=[write('export.fbx',Buffer.from('MOCK EXPORT'),'export'),write('report.json','{}','report')];
       candidates=[{id:'version',label:'MOCK '+step,artifacts,objects}];
     }
-    return {status:'completed',summary:'Explicit synthetic UI fixture: human review required.',candidates,checks:[{name:'MOCK fixture only',passed:true}]};
+    return {status:'completed',summary:'Explicit synthetic UI fixture: human review required.',candidates,checks:[{name:'MOCK fixture only',passed:true},...(step==='separate'?[{name:'original_position_and_scale_preserved',passed:false},{name:'clean_peripheral_alpha',passed:false}]:[])]};
   }
 }`,
 );
@@ -109,7 +115,7 @@ fs.writeFileSync(
   path.join(harness, "package.json"),
   JSON.stringify({
     name: "partsmith-guided-test",
-    version: "0.4.1",
+    version: "0.4.2",
     main: "dist-electron/main.cjs",
   }),
 );
@@ -211,7 +217,23 @@ try {
   await page.getByTestId("workbench-recovery").screenshot({
     path: "artifacts/screenshots/workbench-auto-recovery.png",
   });
+  await page.getByTestId("workbench-draft-head").locator("img").waitFor();
+  assert(await page.getByTestId("workbench-tab-model").isDisabled());
+  assert.equal(await page.getByTestId("workbench-accept-separate").count(), 0);
+  assert.equal(
+    await page.getByTestId("workbench-draft-body").locator("img").count(),
+    0,
+  );
+  await page.getByTestId("workbench-draft-photos").screenshot({
+    path: "artifacts/screenshots/workbench-partial-photos.png",
+  });
+  fs.writeFileSync(draftReleasePath, "UI observed partial photos before completion");
   await jobDone();
+  await page.getByTestId("workbench-visual-warnings").waitFor();
+  assert(await page.getByTestId("workbench-accept-separate").isEnabled());
+  await page.getByTestId("workbench-visual-warnings").screenshot({
+    path: "artifacts/screenshots/workbench-visual-warnings.png",
+  });
   await page.getByTestId("workbench-accept-separate").click();
   assert.equal(
     invocations().length,
@@ -347,6 +369,9 @@ try {
         versionRevert: true,
         referenceGate: true,
         automaticRecoveryWithoutClick: true,
+        partialPhotosBeforeCompletion: true,
+        visualWarningsAllowUserReview: true,
+        incompletePhotosBlockModelGeneration: true,
         modelPhotoFirstAndOptional3D: true,
         sameTimeMultiview: true,
         restartNoAutoRun: true,

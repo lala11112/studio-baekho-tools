@@ -605,3 +605,37 @@
   margin: 8px 12px 0;
   font-size: 12px;
 }
+.wb-saved-photos {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 18px;
+}
+.wb-saved-photos small {
+  color: var(--muted);
+}
+.wb-visual-warnings {
+  margin-bottom: 18px;
+}
+.wb-visual-warnings p {
+  margin: 8px 0;
+}
+.wb-visual-warnings ul {
+  padding-left: 20px;
+  margin: 8px 0 0;
+}
+.wb-draft-caption {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.wb-draft-missing {
+  min-height: 230px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}

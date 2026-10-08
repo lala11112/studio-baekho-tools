@@ -483,6 +483,213 @@ test("separation uses one image call per part without Studio or Blender instruct
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
+test("separation publishes each image before the next call and keeps aesthetic failures as review warnings", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  const drafts: WorkbenchResult[] = [];
+  f.context.onDraft = (result) => drafts.push(structuredClone(result));
+  worker.hook = (task) => {
+    assert.equal(drafts.length, worker.calls.length - 1);
+    const result = partOutput(task);
+    result.checks = [
+      { name: "original_alignment_and_scale_preserved", passed: false },
+      { name: "clean_peripheral_alpha", passed: false },
+      { name: "immutable_input_hash_verified", passed: true },
+    ];
+    if (task.stage.id === "separate-hair") {
+      result.status = "needs_input";
+      result.summary = "Original canvas alignment could not be recovered";
+    }
+    return result;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const result = await executor.execute(f.context, () => {});
+  assert.equal(result.status, "completed");
+  assert.equal(worker.calls.length, 3);
+  assert(worker.calls.every((task) => !task.recoveryOnly));
+  assert.deepEqual(
+    drafts.map((draft) => draft.candidates[0].artifacts.length),
+    [1, 2, 3],
+  );
+  assert(drafts.every((draft) => draft.status === "needs_input"));
+  assert.equal(
+    result.checks.filter(
+      (check) => !check.passed && check.severity === "warning",
+    ).length,
+    6,
+  );
+  assert.match(worker.calls[0].prompt, /NOT completion requirements/);
+  assert.match(worker.calls[0].prompt, /user decides whether to accept/);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+function savedPartFixture(
+  f: ReturnType<typeof fixture>,
+  role: string,
+  status: "completed" | "needs_input" = "completed",
+) {
+  const folder = path.join(f.context.workspace, `outputs/separate-${role}`);
+  fs.mkdirSync(folder, { recursive: true });
+  const task = {
+    run: { workspace: f.context.workspace },
+    stage: { id: `separate-${role}` },
+    resultPath: path.join(folder, "result.json"),
+  } as WorkerTask;
+  const result = partOutput(task);
+  result.status = status;
+  result.checks = [
+    { name: "original_alignment_and_scale_preserved", passed: false },
+  ];
+  fs.writeFileSync(task.resultPath, JSON.stringify(result));
+  return { result, file: task.resultPath };
+}
+
+test("saved separation inspection restores available photos read-only without worker, probe or generation", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  worker.probe = async () => {
+    throw Error("probe must not run");
+  };
+  const head = savedPartFixture(f, "head"),
+    hair = savedPartFixture(f, "hair", "needs_input");
+  const files = [
+    head.file,
+    hair.file,
+    ...[head, hair].map(({ result }) =>
+      path.join(f.context.workspace, result.candidates[0].artifacts[0].path),
+    ),
+  ];
+  const before = files.map((file) => [digest(file), fs.statSync(file).mtimeMs]);
+  const result = await new CodexWorkbenchExecutor(
+    worker,
+    f.services,
+  ).inspectSaved(f.context);
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.recovery?.kind, "blocked");
+  assert.deepEqual(
+    result.candidates[0].artifacts.map((artifact) => artifact.role),
+    ["head", "hair"],
+  );
+  assert(
+    result.checks.every(
+      (check) => !check.passed && check.severity === "warning",
+    ),
+  );
+  assert.equal(worker.calls.length, 0);
+  assert.equal(fs.existsSync(f.services.checkpointRoot!), false);
+  assert.equal(fs.existsSync(path.join(f.context.workspace, "inputs")), false);
+  assert.deepEqual(
+    files.map((file) => [digest(file), fs.statSync(file).mtimeMs]),
+    before,
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("saved inspection offers all three photos for review but rejects damaged and unregistered files", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  const records = ["head", "hair", "body"].map((role) =>
+    savedPartFixture(f, role),
+  );
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  assert.equal((await executor.inspectSaved(f.context)).status, "completed");
+  const hair = records[1];
+  hair.result.checks.push({
+    name: "immutable_input_hash_verified",
+    passed: false,
+    severity: "warning",
+  });
+  fs.writeFileSync(hair.file, JSON.stringify(hair.result));
+  let result = await executor.inspectSaved(f.context);
+  assert.equal(result.status, "needs_input");
+  assert.deepEqual(
+    result.candidates[0].artifacts.map((artifact) => artifact.role),
+    ["head", "body"],
+  );
+  assert.match(result.summary, /immutable_input_hash_verified/);
+  records[2].result.candidates[0].artifacts[0].path = "../outside.png";
+  fs.writeFileSync(records[2].file, JSON.stringify(records[2].result));
+  fs.writeFileSync(
+    path.join(
+      f.context.workspace,
+      records[0].result.candidates[0].artifacts[0].path,
+    ),
+    "not an image",
+  );
+  result = await executor.inspectSaved(f.context);
+  assert.equal(result.candidates.length, 0);
+  assert.equal(worker.calls.length, 0);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("an explicitly continued separation reuses saved warning photos and only generates the untouched part", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  const saved = [
+    savedPartFixture(f, "head"),
+    savedPartFixture(f, "hair", "needs_input"),
+  ];
+  const hashes = saved.map(({ file }) => digest(file));
+  worker.hook = partOutput;
+  const result = await new CodexWorkbenchExecutor(worker, f.services).recover(
+    {
+      ...f.context,
+      recovery: {
+        attempt: 1,
+        error: "original alignment validation",
+        mode: "repair",
+      },
+    },
+    () => {},
+  );
+  assert.equal(result.status, "completed");
+  assert.deepEqual(
+    worker.calls.map((task) => task.stage.id),
+    ["separate-body"],
+  );
+  assert.equal(worker.calls[0].recoveryOnly, undefined);
+  assert.deepEqual(
+    saved.map(({ file }) => digest(file)),
+    hashes,
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("saved inspection never bypasses a changed checkpoint using otherwise valid result metadata", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  worker.hook = partOutput;
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  await executor.execute(f.context, () => {});
+  fs.appendFileSync(
+    path.join(f.context.workspace, "outputs/separate-head/head.png"),
+    "changed after checkpoint",
+  );
+  const calls = worker.calls.length;
+  worker.probe = async () => {
+    throw Error("no probe during saved inspection");
+  };
+  const result = await executor.inspectSaved(f.context);
+  assert.equal(result.status, "needs_input");
+  assert.match(result.summary, /완료된 단계 파일이 변경/);
+  assert.deepEqual(
+    result.candidates[0].artifacts.map((artifact) => artifact.role),
+    ["hair", "body"],
+  );
+  assert.equal(worker.calls.length, calls);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("explicit nonrepairable or new-generation requirements stop even when they mention validation", () => {
+  for (const reason of [
+    "검증 실패: 기존 파일만으로 복구 불가능, 새 이미지 생성 필요",
+    "JSON validation failed; cannot repair the missing generated image",
+    "Geometry validation: a new image generation is required",
+    "검증 결과 사용자 판단이 필요합니다",
+  ])
+    assert.equal(classifyWorkbenchFailure(reason).kind, "blocked", reason);
+});
+
 test("failed part recovery reuses completed head and repairs hair without another image call", async () => {
   const f = fixture("separate"),
     worker = new Worker();

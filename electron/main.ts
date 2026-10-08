@@ -566,10 +566,11 @@ app.whenReady().then(async () => {
         .list(id)
         .some((session) =>
           session.jobs.some((job) =>
-            job.candidates.some((candidate) =>
-              candidate.artifacts.some(
-                (artifact) => store.file(id, artifact.path) === file,
-              ),
+            [...job.candidates, ...(job.draftCandidates ?? [])].some(
+              (candidate) =>
+                candidate.artifacts.some(
+                  (artifact) => store.file(id, artifact.path) === file,
+                ),
             ),
           ),
         );

@@ -29,6 +29,7 @@ import type {
   WorkbenchStep,
 } from "../shared/workbench";
 import type { ProductionRun } from "../shared/production";
+import { workbenchWarningMessages } from "../shared/workbench-checks";
 import { Viewport } from "./Viewport";
 import "./workbench.css";
 
@@ -353,6 +354,18 @@ export function AssetWorkbench({
   const editBase =
     viewing?.status === "review" && viewingCurrent ? viewing : undefined;
   const candidate = viewing?.candidates[0];
+  const draftImages =
+    step === "separate" && !viewing?.candidates.length
+      ? (viewing?.draftCandidates ?? []).flatMap((c) =>
+          c.artifacts.filter((a) => a.kind === "image"),
+        )
+      : [];
+  const visualWarnings = viewing
+    ? workbenchWarningMessages(
+        viewing.step,
+        draftImages.length ? (viewing.draftChecks ?? []) : viewing.checks,
+      )
+    : [];
   const selectedHere = selection(slot);
   const viewingAccepted = !!viewing && selectedHere?.job.id === viewing.id;
   const sourceObjects =
@@ -762,7 +775,9 @@ export function AssetWorkbench({
                 }
               >
                 <RefreshCw size={13} />
-                기존 작업 이어서 확인
+                {currentStatus.step === "separate"
+                  ? "저장된 파츠를 재사용해 이어서 만들기"
+                  : "기존 작업 이어서 확인"}
               </button>
             )}
         </div>
@@ -1382,6 +1397,46 @@ export function AssetWorkbench({
                 현재 결과로 채택하거나 수정 기준으로 사용할 수 없습니다.
               </p>
             )}
+            {step === "separate" &&
+              viewing &&
+              viewing.status !== "running" &&
+              viewing.status !== "review" && (
+                <div className="wb-saved-photos">
+                  <button
+                    data-testid="workbench-inspect-saved"
+                    disabled={locked || !viewingCurrent}
+                    onClick={() =>
+                      action(
+                        { kind: "inspect-saved", jobId: viewing.id },
+                        "저장된 사진을 확인합니다. 새 이미지는 생성하지 않습니다.",
+                      )
+                    }
+                  >
+                    <ImagePlus size={15} /> 저장된 사진 보기
+                  </button>
+                  <small>
+                    이미 만들어진 사진만 불러옵니다. 생성 요청은 보내지
+                    않습니다.
+                  </small>
+                </div>
+              )}
+            {visualWarnings.length > 0 && (
+              <div
+                className="wb-note warning wb-visual-warnings"
+                data-testid="workbench-visual-warnings"
+              >
+                <strong>사진을 보고 확인해 주세요</strong>
+                <p>
+                  외형에 관한 참고 사항입니다. 사진을 검토한 뒤 수정하거나
+                  채택할 수 있습니다.
+                </p>
+                <ul>
+                  {visualWarnings.map((warning, i) => (
+                    <li key={`${warning}-${i}`}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {viewing?.candidates.length ? (
               <>
                 {["concept", "model"].includes(step) ? (
@@ -1483,6 +1538,46 @@ export function AssetWorkbench({
                   </div>
                 )}
               </>
+            ) : draftImages.length > 0 ? (
+              <div data-testid="workbench-draft-photos">
+                <p className="wb-draft-caption">
+                  분리 사진{" "}
+                  {
+                    roles.filter((r) => draftImages.some((a) => a.role === r))
+                      .length
+                  }
+                  /3장 준비됨
+                </p>
+                <p className="wb-muted">
+                  먼저 나온 사진부터 확인하세요. 세 파츠가 모두 준비되면 결과를
+                  채택할 수 있습니다.
+                </p>
+                <div className="wb-parts">
+                  {roles.map((r) => {
+                    const draft = draftImages.find((a) => a.role === r);
+                    return (
+                      <div
+                        className="wb-part"
+                        key={r}
+                        data-testid={`workbench-draft-${r}`}
+                      >
+                        {draft ? (
+                          <img
+                            src={url(draft)}
+                            alt={`${roleLabels[r]} 분리 사진`}
+                          />
+                        ) : (
+                          <div className="wb-draft-missing">
+                            <ImagePlus size={28} />
+                            <span>저장된 사진 없음</span>
+                          </div>
+                        )}
+                        <h3>{roleLabels[r]}</h3>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             ) : (
               <div className="wb-empty">
                 {active?.slot === slot ? (
