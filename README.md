@@ -6,11 +6,11 @@
 
 Windows용 개인 제작 도구 프로토타입. Electron + React + TypeScript + Three.js, SQLite(sql.js), Tripo v3 API, Blender Python, Unity Editor C#으로 구성했습니다.
 
-**실제 API 생성 성공과 로컬 데모 검증을 구분합니다.** API 키와 크레딧은 사용자 설정에서 입력하며, 이 개발 과정에서 유료 생성은 실행하지 않았습니다. 자동 이미지 분할, 가려진 면 복원, 표면 용접·리토폴로지·자동 UV 재제작은 구현 범위 밖입니다.
+**앱에서 입력 → Tripo에서 처리 → 결과를 앱으로 다운로드**하는 Windows 클라이언트입니다. 실제 API 생성 성공과 로컬 데모 검증을 구분합니다. API 키와 크레딧은 사용자 설정에서 입력하며, 이 개발 과정에서 유료 생성은 실행하지 않았습니다. 생성·분할·보완·리토폴로지·텍스처·리깅은 Tripo에 요청하며, Blender는 형식 변환·조립·Unity 출력을 담당합니다.
 
 ## 실행
 
-현재 수정본은 `release/0.1.1/win-unpacked/Partsmith.exe`입니다. 이전 앱을 닫고 이 파일을 실행하세요. 저장한 프로젝트와 키를 그대로 사용합니다. 0.1.1은 국제 Tripo 서버 주소 오류를 수정하고 연결 지역 선택을 추가했습니다. 폴더 전체를 함께 보관해야 합니다. 코드 서명·설치 프로그램은 제공하지 않는 로컬 테스트 빌드입니다.
+현재 수정본은 `release/0.2.0/win-unpacked/Partsmith.exe`입니다. 이전 앱을 닫고 이 파일을 실행하세요. 저장한 프로젝트와 키를 그대로 사용합니다. 0.2.0은 Tripo 작업실과 후처리 요청을 추가하며 0.1.1의 국제 서버 주소·지역 선택 수정을 포함합니다. 폴더 전체를 함께 보관해야 합니다. 코드 서명·설치 프로그램은 제공하지 않는 로컬 테스트 빌드입니다.
 
 ```powershell
 cd 'C:\Users\김민준\Desktop\3D tool'
@@ -41,6 +41,9 @@ npm run package
 ## 실제 캐릭터 제작
 
 - **연결 설정**: 마스킹 입력, DPAPI 암호화 저장, 키 교체·삭제, 연결·API 잔액 확인. 보안 저장을 사용할 수 없으면 세션 한정으로 처리합니다.
+- **Tripo 작업실 → 모델 생성**: Smart Mesh P2 Preview / P1 / HD, 텍스트·이미지·멀티뷰 입력, 삼각면·P2 사각면, 폴리곤 수·UV·텍스처·PBR·후보 수를 선택합니다. P2는 공식 v3 문서 지원이며 이 계정의 실제 생성 권한은 미검증입니다. 다른 모델로 자동 변경하거나 재결제하지 않습니다.
+- **Tripo 후처리**: 메시 분할·스마트 분할·분할 부위 보완·리토폴로지·UV 패킹·텍스처·리깅·Idle/Walk·형식 변환을 원격 요청합니다. **Smart UV 영역은 공개 API에서 확인한 UV 패킹 범위**이며 Studio 전체 기능과 동일하지 않습니다.
+- **결과 보관함**: 결과 선택·3D 재생·파츠 후보 적용·후속 Tripo 처리·Unity용 출력을 지원합니다. FBX 원본은 보존하고 Blender로 미리보기 GLB를 별도로 만듭니다. ZIP/OBJ/STL/USDZ/3MF 등은 원본 보관까지 지원하며 내장 미리보기나 바로 다음 단계 입력은 제한됩니다.
 - **이미지 스튜디오**: 프롬프트, 모델·해상도·후보 수 선택, 유료 요청 검토, 생성 후보 선택, 선택 이미지를 추가 프롬프트로 수정, 이전 후보로 복귀. PNG/JPEG 가져오기도 지원합니다.
 - **파츠 준비**: 전체 원본을 유지하고 드래그 crop 또는 클릭 다각형 마스크로 파츠 PNG를 만듭니다. 잘라낸 파츠는 가려진 면 복원 필요 상태로 표시됩니다.
 - **조립 작업실**: 파츠별 이미지→3D 요청, 여러 후보 비교·선택·고정, 특정 파츠 재생성, GLB 가져오기, 숨기기·분리 보기, 변환 조작기와 수치 입력, 조합 저장·복원.
@@ -58,7 +61,8 @@ userData/
   tripo.key                    Windows DPAPI 암호화 데이터만
   projects/<UUID>/
     project.json               저장 형식 v1; 키 없음
-    assets/<UUID>.png|glb      원본·수정본·파츠·후보
+    assets/<UUID>.*            Tripo 원본·수정본·파츠·후보
+    previews/<ID>/model.glb    FBX 원본과 분리한 미리보기
     builds/<UUID>/             FBX, GLB, blend, textures, 검사 보고서
 ```
 
@@ -71,6 +75,7 @@ Electron은 `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`�
 - [메인 툴 연동 규격](docs/INTEGRATION.md)
 - [검증 결과와 제한](docs/VERIFICATION.md)
 - [공식 문서 근거](docs/API-SOURCES.md)
+- [Tripo 기능·API 대응표와 지원 범위](docs/TRIPO-CAPABILITIES.md)
 - [Figma 조립 작업실](https://www.figma.com/design/sBk7h2NHssstvG6KXWJuyP/3D-Tool?node-id=6-217)
 
 Figma: 7개 1440×900 화면, Auto Layout, 색상 별칭·간격·글꼴 변수, 한국어 텍스트 스타일, 재사용 버튼과 7가지 상태. 앱 UI의 기본 색상·정보 구조를 공유합니다.

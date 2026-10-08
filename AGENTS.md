@@ -4,7 +4,7 @@
 - This checkout is `https://github.com/lala11112/studio-baekho-tools`.
 - Continue this project on branch `Auto-3D-Tool`. Preserve other branches and unrelated work.
 - Partsmith is the Windows client for Tripo production tasks. The client collects inputs/options, submits to official Tripo APIs, tracks existing jobs, downloads results, and connects them to Blender/Unity. Do not present local demo models or substitute algorithms as Tripo output.
-- Treat Smart Mesh P2 as the requested default. Verify endpoint support before claiming parity with a Tripo Studio feature.
+- Treat Smart Mesh P2 as the requested default. It is Preview in the official v3 API; keep account entitlement and actual paid-generation verification distinct from documented support. Offer P1/HD as manual alternatives, never silently resubmit using another model. Verify endpoint support before claiming parity with a Tripo Studio feature.
 
 ## Development record — explicit user instruction
 - At the end of every completed work item, update the existing Notion page **게임 개발(종합) → Auto-3D-Tool 개발 기록**.

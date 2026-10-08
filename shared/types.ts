@@ -8,10 +8,14 @@ export const identity = (): Transform => ({
 export type Asset = {
   id: string;
   file: string;
+  /** Original Tripo output when file is a separate GLB preview. */
+  nativeFile?: string;
+  format?: string;
   kind: "image" | "model";
   label: string;
   origin: "import" | "tripo" | "demo" | "crop" | "blender";
   parentId?: string;
+  parentIds?: string[];
   jobId?: string;
   createdAt: string;
   prompt?: string;
@@ -30,7 +34,19 @@ export type Part = {
   occluded: boolean;
 };
 export type JobKind =
-  "image" | "edit" | "model" | "rig-check" | "rig" | "animate";
+  | "image"
+  | "edit"
+  | "model"
+  | "rig-check"
+  | "rig"
+  | "animate"
+  | "segment"
+  | "smartsegment"
+  | "complete"
+  | "retopology"
+  | "uv-pack"
+  | "texture"
+  | "convert";
 export type JobStatus =
   | "queued"
   | "submitting"
@@ -51,6 +67,26 @@ export type Generation = {
   sourceId?: string;
   sourceTaskId?: string;
   animation?: string;
+  inputMode?: "image" | "text" | "multiview";
+  /** Fixed view slots: front, left, back, right. Empty optional slots are allowed. */
+  sourceIds?: string[];
+  faceLimit?: number;
+  quad?: boolean;
+  texture?: boolean;
+  pbr?: boolean;
+  exportUv?: boolean;
+  textureQuality?: "fast" | "standard" | "detailed" | "extreme";
+  textureVersion?: string;
+  segmentationGranularity?: "simple" | "balanced" | "detailed";
+  splitByConnectivity?: boolean;
+  smartGranularity?: "coarse" | "medium" | "fine";
+  segType?: "image" | "model";
+  completionMode?: "ai_completion" | "quick_cap";
+  partNames?: string[];
+  bake?: boolean;
+  textureSize?: number;
+  format?: "GLTF" | "FBX" | "OBJ" | "STL" | "USDZ" | "3MF";
+  rigType?: "biped" | "quadruped";
 };
 export type Job = {
   id: string;
@@ -65,6 +101,9 @@ export type Job = {
   credits?: number;
   output?: Record<string, unknown>;
   assetId?: string;
+  assetIds?: string[];
+  /** Downloaded originals remain recoverable even if GLB preview conversion fails. */
+  nativeFiles?: string[];
   revision: number;
 };
 export type Assembly = {
@@ -170,6 +209,7 @@ export type Command =
   | { type: "image.select"; id: string; assetId: string }
   | { type: "part.add"; id: string; name: string }
   | { type: "part.delete"; id: string; partId: string }
+  | { type: "part.assign"; id: string; partId: string; assetId: string }
   | {
       type: "part.update";
       id: string;

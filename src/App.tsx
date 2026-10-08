@@ -49,7 +49,14 @@ import type {
 import { Viewport } from "./Viewport";
 import { CropEditor } from "./CropEditor";
 import { catalog } from "../shared/catalog";
+import {
+  TripoStudio,
+  RequestOptions,
+  operationLabels,
+  canPreview,
+} from "./TripoStudio";
 const steps = [
+  ["studio", "Tripo 작업실", Sparkles],
   ["image", "이미지 스튜디오", ImagePlus],
   ["parts", "파츠 준비", Scissors],
   ["assembly", "조립 작업실", Boxes],
@@ -178,7 +185,7 @@ export function App() {
   function open(p: Project) {
     setId(p.id);
     setPartId(p.parts[0]?.id ?? "");
-    setTab("assembly");
+    setTab(p.demo ? "assembly" : "studio");
     setPreview("");
   }
   async function request(r: Generation) {
@@ -286,7 +293,7 @@ export function App() {
             />
           </button>
           <div className="version">
-            PROTOTYPE <span>v0.1.1</span>
+            PROTOTYPE <span>v0.2.0</span>
           </div>
         </div>
       </aside>
@@ -498,6 +505,16 @@ export function App() {
                 )}
               </div>
             </div>
+            {tab === "studio" && (
+              <TripoStudio
+                key={p.id}
+                project={p}
+                request={request}
+                run={run}
+                busy={busy}
+                navigate={setTab}
+              />
+            )}
             {tab === "image" && (
               <main className="image-layout">
                 <section className="image-main">
@@ -1072,6 +1089,7 @@ export function App() {
                                 kind: "model",
                                 prompt: part.prompt,
                                 model: model3d,
+                                faceLimit: 20000,
                                 count,
                                 partId: part.id,
                               })
@@ -1174,13 +1192,11 @@ export function App() {
                       onChange={(e) => setPreview(e.target.value)}
                     >
                       <option value="">모델 선택</option>
-                      {p.assets
-                        .filter((a) => a.kind === "model")
-                        .map((a) => (
-                          <option key={a.id} value={a.id}>
-                            {a.label}
-                          </option>
-                        ))}
+                      {p.assets.filter(canPreview).map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.label}
+                        </option>
+                      ))}
                     </select>
                   </Field>
                   {p.demo && (
@@ -1595,7 +1611,11 @@ export function App() {
         <div className="modal-backdrop">
           <section className="modal" role="dialog" aria-modal="true">
             <div className="section-title">
-              <h2>유료 요청 검토</h2>
+              <h2>
+                {quote.request.kind === "rig-check"
+                  ? "무료 검사 요청 검토"
+                  : "유료 요청 검토"}
+              </h2>
               <button onClick={() => setQuote(undefined)}>
                 <X size={20} />
               </button>
@@ -1603,7 +1623,9 @@ export function App() {
             <Badge tone="amber">Tripo API · 계정 접근 미검증</Badge>
             <dl className="quote-details">
               <dt>단계</dt>
-              <dd>{quote.request.kind}</dd>
+              <dd>
+                {operationLabels[quote.request.kind] ?? quote.request.kind}
+              </dd>
               <dt>모델</dt>
               <dd>{quote.request.model}</dd>
               <dt>후보 수</dt>
@@ -1616,9 +1638,12 @@ export function App() {
               <dd>{quote.inputSummary}</dd>
               <dt>예상 비용</dt>
               <dd className="warning-text">
-                확인 불가 · 임의 금액을 표시하지 않습니다
+                {quote.estimatedCredits === 0
+                  ? "0 credits · 무료 검사"
+                  : "계정별 비용 확인 불가 · 승인 시 과금될 수 있습니다"}
               </dd>
             </dl>
+            <RequestOptions request={quote.request} />
             <div className="note amber">
               <AlertTriangle size={18} />
               <span>
@@ -1632,7 +1657,9 @@ export function App() {
                 checked={accepted}
                 onChange={(e) => setAccepted(e.target.checked)}
               />{" "}
-              비용이 미확인임을 이해하며 표시된 요청만 실행합니다.
+              {quote.estimatedCredits === 0
+                ? "입력 모델 전송에 동의하며 무료 검사를 실행합니다."
+                : "비용이 미확인임을 이해하며 표시된 요청만 실행합니다."}
             </label>
             <button
               className="primary full"
@@ -1704,7 +1731,7 @@ function JobPanel({
                   {labels[j.status]}
                 </Badge>
                 <strong>
-                  {j.kind} · {j.request.model}
+                  {operationLabels[j.kind] ?? j.kind} · {j.request.model}
                 </strong>
                 <small>{j.remoteId ?? j.id}</small>
                 <p>{j.message}</p>

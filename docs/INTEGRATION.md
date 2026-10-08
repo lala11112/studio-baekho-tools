@@ -14,7 +14,7 @@ React UI → window.desktop.call(Command)
              └ Vault / native dialogs / local image adapter
 ```
 
-React를 제거해도 Store·Engine·Tripo·LocalPipeline을 그대로 사용할 수 있습니다. 앱 호스트에서 `new Store(root); await store.open(wasmPath)` 후 `new Engine(store,new Tripo(getKey))`로 초기화합니다. crop·파일 대화상자·Vault는 플랫폼 어댑터입니다. 이미지 파일을 프로그램에서 가져오려면 `engine.importFile`을 사용합니다.
+React를 제거해도 Store·Engine·Tripo·LocalPipeline을 그대로 사용할 수 있습니다. 앱 호스트에서 `new Store(root); await store.open(wasmPath)` 후 `new Engine(store,new Tripo(getKey), (id,file) => local.previewModel(id,file))`로 초기화합니다. 세 번째 콜백은 P2 사각면 등 FBX 결과의 GLB 미리보기를 만드는 로컬 어댑터입니다. crop·파일 대화상자·Vault는 플랫폼 어댑터입니다. 이미지 파일을 프로그램에서 가져오려면 `engine.importFile`을 사용합니다.
 
 ## 호출과 응답
 
@@ -27,6 +27,7 @@ IPC 응답 envelope는 `{ok:true,value}` 또는 `{ok:false,error}`입니다. pre
 | `asset.import` | native 파일 선택, 프로젝트 내부 복사, Asset 반환 |
 | `image.select` | 현재 참조 이미지 선택; 이전 버전은 유지 |
 | `part.add/update/delete/crop` | 파츠 구성·후보 선택·위치·마스크 |
+| `part.assign` | 보관함의 GLB 결과를 선택한 파츠 후보로 추가·선택; 고정된 파츠는 거부 |
 | `assembly.save/restore` | 파츠 목록·선택·변환의 버전 스냅샷 |
 | `generation.quote` | 실행 없는 요청 검증·만료되는 Quote 생성 |
 | `generation.approve` | Quote 소비 후 한정된 개수의 Job 생성·비동기 제출 |
@@ -72,7 +73,9 @@ UI가 구체적인 입력·모델·단계·개수·비용 미확인 상태를 �
 {"type":"generation.approve","quoteId":"<quote UUID>","unknownCostAccepted":true}
 ```
 
-같은 Quote는 한 번만 소비됩니다. 10분 만료, 프로젝트 revision 변경 시 재검토가 필요합니다. 반복 클릭으로 동일 요청이 다시 과금되지 않습니다. `count`는 1–4이며 후보를 순차 제출합니다. 한 후보가 제출 실패/불명확이면 나머지 미제출 후보를 중지합니다. 해당 승인은 후속 리깅·애니메이션을 자동 승인하지 않습니다.
+같은 Quote는 한 번만 소비됩니다. 10분 만료, 프로젝트 revision 변경 시 재검토가 필요합니다. 반복 클릭으로 동일 요청이 다시 과금되지 않습니다. `count`는 1–4이며 후보를 순차 제출합니다. 이미지 생성·편집은 동시 작업 한도를 지키기 위해 이전 원격 작업 완료까지 대기합니다. 한 후보가 제출 실패/불명확이면 나머지 미제출 후보를 중지합니다. 해당 승인은 후속 리깅·애니메이션을 자동 승인하지 않습니다.
+
+0.2.0은 `model`의 `inputMode=image|text|multiview`, 폴리곤·토폴로지·텍스처·UV 옵션과 `segment`, `smartsegment`, `complete`, `retopology`, `uv-pack`, `texture`, `convert`를 같은 승인 계약으로 확장했습니다. 멀티뷰 `sourceIds` 순서는 `[front,left,back,right]`이며 선택하지 않은 뷰는 빈 문자열입니다. 완료된 분할 작업은 `sourceTaskId`로 보완에 연결합니다. 요청별 공개 API 대응표는 `docs/TRIPO-CAPABILITIES.md`를 따릅니다.
 
 ### 진행·결과·후보 선택
 
@@ -90,6 +93,8 @@ UI가 구체적인 입력·모델·단계·개수·비용 미확인 상태를 �
 ```
 
 성공 시 `status:success`, `assetId`, `credits`(실제 API 응답이 제공하는 경우), `output`을 기록합니다. 앱 데이터에는 원격 결과 URL이 들어갈 수 있으므로 백업은 개인 파일로 취급하세요. API 키는 들어가지 않습니다. `state`에서 Asset과 Job을 함께 조회합니다.
+
+여러 결과는 `Job.assetIds`로 보관합니다. `Asset.nativeFile`은 다운로드 원본이며 `Asset.file`은 표시 파일입니다. FBX 원본과 GLB 미리보기는 서로 다를 수 있습니다. GLB 이외의 다운로드 형식은 원본 저장에 성공해도 내장 미리보기를 지원하지 않을 수 있습니다. FBX 변환 실패 시 `Job.nativeFiles`, 원격 ID, 실제 사용량을 보존하고 기존 작업 조회로 변환만 재시도합니다. 새 생성 POST는 하지 않습니다.
 
 ```json
 {"type":"part.update","id":"<project UUID>","partId":"<part UUID>","patch":{"selectedId":"<asset UUID>","locked":true}}

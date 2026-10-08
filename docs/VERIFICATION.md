@@ -47,8 +47,8 @@ Unity 최종 결과는 `complete_review_required`, `avatarValid=true`, `avatarHu
 
 **실제 Tripo 인증·잔액 조회: 성공. 실제 유료 생성: 미검증.** 키를 채팅으로 받거나 코드에 넣지 않았습니다. 계정별 지원 모델, 가격, 이미지 생성·수정, 파츠 3D 생성, 자동 리깅·리타게팅의 성공 여부는 API 크레딧 충전과 사용자 비용 승인 후 별도로 검증해야 합니다. 현재 목록은 공식 endpoint 문서 기반이며 계정 사용 가능 여부를 보증하지 않습니다. 예상 비용을 확인할 수 없으면 숫자를 만들지 않고 별도 승인을 받습니다.
 
-- 자동 이미지 분할과 가려진 면 복원은 미구현이며 수동 crop·마스크·이미지 수정 경로를 제공합니다.
-- Blender 조립은 상대 배치와 목표 키 정규화입니다. 표면 용접, 리토폴로지, UV 재생성, 메시 변경 후 자동 재텍스처는 미구현입니다.
+- 0.2.0에서 Tripo 원격 분할·보완·리토폴로지·텍스처·UV 패킹 요청 경로를 추가했습니다. 실제 계정의 유료 처리 성공·품질은 미검증입니다. 기존 수동 crop·마스크는 별도 기능입니다.
+- Blender 조립은 상대 배치와 목표 키 정규화입니다. 로컬 표면 용접·리토폴로지·UV 재생성은 구현하지 않습니다. 메시 변경 뒤 텍스처 처리는 사용자가 별도 Tripo 요청으로 승인합니다.
 - Tripo의 기본 동작은 각각 별도 결과 후보입니다. 서로 다른 리타게팅 결과를 하나의 다중 클립 캐릭터에 자동 병합하는 기능은 없습니다. Blender에서 수동으로 병합한 GLB를 가져올 수 있습니다.
 - 실제 복잡한 캐릭터의 헤어 연결·관절 웨이트·접합부·PBR 맵 정확성은 육안 검수해야 합니다. 로컬 데모 재질은 색상 중심이며 실제 API 텍스처 세트를 검증하지 않았습니다.
 - 원격 취소 API를 확인하지 못해 앱의 중지는 추적 중지로 표시합니다. 모호한 제출은 기존 작업 ID를 확인해 연결하며 자동으로 재과금하지 않습니다.
@@ -57,12 +57,34 @@ Unity 최종 결과는 `complete_review_required`, `avatarValid=true`, `avatarHu
 
 ## 재현
 
+### 0.2.0 — Tripo 클라이언트 확장 (2026-10-08)
+
+- `npm test`: **25/25 통과**. P2·멀티뷰·후처리 payload, 미지원 조합 사전 차단, 스마트 분할의 마스크·하위 작업 연결, 단일 승인·중복 결제 차단, 이미지 후보 순차 처리, 다운로드 오류 복구를 모의 API로 검증했습니다.
+- `npm run build`: TypeScript·Vite·Electron 번들 생성 통과. Windows x64 `release/0.2.0/win-unpacked/Partsmith.exe` 폴더 빌드를 생성했습니다.
+- `npm run test:ui`, `node scripts/data-smoke.mjs`: 기존 Electron·Blender·클립 미리보기·재시작·키 암호화·마스크·백업·stale 출력 검증 통과.
+- `scripts/tripo-studio-smoke.mjs`: 실제 UI → IPC → SQLite의 **14개 미제출 견적**으로 입력·옵션 전달, P2 기본값·Preview 안내, H 옵션 분리, 분할·리토폴로지·UV 패킹·텍스처·무료 리깅 검사·변환 화면을 검증했습니다. 실행 승인은 0회, 생성 Job은 0개, API 키 없음, renderer 오류 0개입니다. 완료된 원격 분할·리깅 작업이 없는 상태에서 보완·리깅·동작 요청이 차단되는 것도 확인했습니다.
+- 결과를 파츠에 적용하고 고정하면 UI와 IPC에서 모두 변경을 차단합니다. FBX 원본이 포함된 백업 복원 후 SHA가 같고, 별도의 GLB 미리보기가 다시 표시됩니다.
+- 최종 **0.2.0 패키지 EXE**에서도 동일한 14개 요청 검토·파츠 고정·원본 백업 복원·GLB 애니메이션 검증을 통과했습니다. 보고서: `artifacts/tripo-studio-smoke-packaged.json`. 개발 번들 보고서는 `artifacts/tripo-studio-smoke-development.json`이며 각 실행의 스크린샷을 별도 보관합니다.
+- `artifacts/fbx-preview-smoke.json`: 실제 로컬 Blender에서 FBX → GLB 미리보기 변환, 원본 SHA 보존, 메시 16개·스킨 1개·Idle/Walk, 중복 요청 재사용·경로 이탈 차단을 확인했습니다. 입력은 로컬 절차적 마네킹으로, Tripo 출력 검증은 아닙니다.
+
+P2는 [공식 변경 이력](https://developers.tripo3d.ai/en/docs/changelog)과 [이미지 P-series API](https://developers.tripo3d.ai/en/docs/generation-image-to-model/p)에 `P2-20260801` Preview로 등재되어 있습니다. **계정별 P2 권한·유료 생성 성공은 미검증**입니다. 무료 모델 권한 조회 API는 확인하지 못했습니다. 앞선 실제 잔액 조회는 0이었고 이번 확장에서 유료 API를 호출하지 않았습니다.
+
+Smart UV 탭은 `/models/convert`의 UV 패킹 요청을 제공합니다. 웹 Studio의 Smart UV 전체 기능과 동등성을 보장하지 않습니다. ZIP·GLTF와 외부 리소스 묶음은 원본 보관까지만 지원하며 압축 해제·외부 텍스처 수집·자동 재임포트는 제공하지 않습니다. GLB 및 별도 변환한 FBX 미리보기만 내장 뷰포트·조립 입력으로 사용합니다. 실제 AI 메시·쿼드·UV·재질·리깅 품질은 비용 승인 후 별도 검증이 필요합니다.
+
+### 명령
+
 ```powershell
 npm ci
 npm run build
 npm test
 npm run test:ui
 node scripts/data-smoke.mjs
+npx tsx scripts/fbx-preview-smoke.ts
+node scripts/tripo-studio-smoke.mjs
+# 0.2.0 실행 파일 검증 (폴더 빌드 생성 후)
+$env:PARTSMITH_EXE = 'release/0.2.0/win-unpacked/Partsmith.exe'
+node scripts/tripo-studio-smoke.mjs
+Remove-Item Env:PARTSMITH_EXE
 npx tsx scripts/unity-smoke.ts --rebuild
 # Unity 브리지 컴파일 후, 최초 임포트가 처리될 때까지 기다립니다.
 npx tsx scripts/reimport-smoke.ts

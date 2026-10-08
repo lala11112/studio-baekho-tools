@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { Store, uid } from "./store";
 import type { BuildResult, Project, UnityResult } from "../shared/types";
 export function runProcess(
@@ -37,10 +38,85 @@ export function runProcess(
 }
 export class LocalPipeline {
   private busy = new Set<string>();
+  private previews = new Map<string, Promise<string>>();
   constructor(
     private store: Store,
     private resources: string,
   ) {}
+  /** Keep Tripo's native FBX intact; this GLB is only a viewport derivative. */
+  async previewModel(id: string, nativeRelative: string): Promise<string> {
+    this.store.project(id);
+    const source = this.store.file(id, nativeRelative);
+    if (path.extname(source).toLowerCase() !== ".fbx")
+      throw new Error("미리보기 변환은 FBX 결과만 지원합니다.");
+    if (!fs.existsSync(source) || !fs.statSync(source).isFile())
+      throw new Error("변환할 FBX 원본이 없습니다.");
+    const digest = createHash("sha256")
+      .update(path.relative(this.store.directory(id), source))
+      .digest("hex")
+      .slice(0, 12);
+    const name =
+      path
+        .basename(source, path.extname(source))
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .slice(0, 60) || "model";
+    const folder = `previews/${name}-${digest}`;
+    const relative = `${folder}/model.glb`;
+    const output = this.store.file(id, `${folder}/model`);
+    const validOutput = () => {
+      if (!fs.existsSync(output + ".glb")) return false;
+      const fd = fs.openSync(output + ".glb", "r");
+      try {
+        const header = Buffer.alloc(12);
+        return (
+          fs.readSync(fd, header, 0, 12, 0) === 12 &&
+          header.subarray(0, 4).toString("ascii") === "glTF" &&
+          header.readUInt32LE(4) === 2 &&
+          header.readUInt32LE(8) === fs.fstatSync(fd).size
+        );
+      } finally {
+        fs.closeSync(fd);
+      }
+    };
+    if (validOutput()) return relative;
+    const key = `${id}/${folder}`;
+    const pending = this.previews.get(key);
+    if (pending) return pending;
+    const work = (async () => {
+      const input = this.store.write(
+        id,
+        `${folder}/input.json`,
+        JSON.stringify({
+          schemaVersion: 1,
+          projectId: id,
+          mode: "convert",
+          previewOnly: true,
+          source,
+          output,
+        }),
+      );
+      const log = await runProcess(this.store.settings.blenderPath, [
+        "--background",
+        "--factory-startup",
+        "--python",
+        path.join(this.resources, "blender/pipeline.py"),
+        "--",
+        input,
+      ]);
+      this.store.write(id, `${folder}/blender.log`, log);
+      if (!validOutput())
+        throw new Error(
+          "FBX 미리보기 GLB를 검증하지 못했습니다. 원본은 보존됩니다.",
+        );
+      return relative;
+    })();
+    this.previews.set(key, work);
+    try {
+      return await work;
+    } finally {
+      this.previews.delete(key);
+    }
+  }
   async probe() {
     const s = this.store.settings;
     const read = (f: string) =>
@@ -102,7 +178,9 @@ export class LocalPipeline {
       mode,
       height: p.height,
       parts,
-      source: selected ? this.store.file(id, selected.file) : undefined,
+      source: selected
+        ? this.store.file(id, selected.nativeFile ?? selected.file)
+        : undefined,
       output: out,
     };
     const input = this.store.write(

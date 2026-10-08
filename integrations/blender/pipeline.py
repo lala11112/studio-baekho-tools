@@ -65,7 +65,13 @@ def demo_character():
 def import_model(file):
     before=set(bpy.data.objects)
     # Viewport-only bone shape helpers must not become exported character meshes.
-    bpy.ops.import_scene.gltf(filepath=file,disable_bone_shape=True)
+    extension=os.path.splitext(file)[1].lower()
+    if extension=='.fbx':
+        bpy.ops.import_scene.fbx(filepath=file,use_image_search=False)
+    elif extension in ('.glb','.gltf'):
+        bpy.ops.import_scene.gltf(filepath=file,disable_bone_shape=True)
+    else:
+        raise ValueError('Supported import formats are GLB, glTF and FBX')
     objects=[o for o in bpy.data.objects if o not in before]
     # glTF import stashes non-active clips in muted NLA tracks. FBX's NLA
     # exporter omits those tracks unless enabled, silently dropping animations.
@@ -119,16 +125,21 @@ def main(config):
         detached=[o.name for o in meshes if not any(m.type=='ARMATURE' for m in o.modifiers) and not (o.parent and o.parent.type=='ARMATURE')]
         if detached:warnings.append('Check detached meshes: '+', '.join(detached))
     out=config['output'];os.makedirs(os.path.dirname(out),exist_ok=True)
-    # Export material textures to a sibling directory for Unity's persistent material remap.
-    texture_dir=os.path.join(os.path.dirname(out),'textures');os.makedirs(texture_dir,exist_ok=True)
-    for image in bpy.data.images:
-        if image.type=='IMAGE' and image.size[0]>0:
-            safe=''.join(c if c.isalnum() or c in '-_' else '_' for c in image.name)
-            image.filepath_raw=os.path.join(texture_dir,safe+'.png');image.file_format='PNG';image.save()
-    bpy.ops.wm.save_as_mainfile(filepath=out+'.blend')
-    bpy.ops.export_scene.gltf(filepath=out+'.glb',export_format='GLB',export_animations=True,export_animation_mode='NLA_TRACKS')
-    bpy.ops.export_scene.fbx(filepath=out+'.fbx',use_selection=False,object_types={'MESH','ARMATURE','EMPTY'},axis_forward='-Z',axis_up='Y',add_leaf_bones=False,bake_anim=True,bake_anim_use_all_actions=False,bake_anim_use_nla_strips=True,path_mode='COPY',embed_textures=True)
-    report={'schemaVersion':1,'mode':mode,'meshes':len(meshes),'vertices':sum(len(o.data.vertices) for o in meshes),'hasRig':has_rig,'clips':clips,'warnings':warnings,'surfaceWelded':False,'textureRebuildRequired':False,'sourceHeight':original_height,'normalizationScale':normalization_scale}
+    preview_only=config.get('previewOnly',False)
+    if not preview_only:
+        # Export material textures to a sibling directory for Unity's persistent material remap.
+        texture_dir=os.path.join(os.path.dirname(out),'textures');os.makedirs(texture_dir,exist_ok=True)
+        for image in bpy.data.images:
+            if image.type=='IMAGE' and image.size[0]>0:
+                safe=''.join(c if c.isalnum() or c in '-_' else '_' for c in image.name)
+                image.filepath_raw=os.path.join(texture_dir,safe+'.png');image.file_format='PNG';image.save()
+        bpy.ops.wm.save_as_mainfile(filepath=out+'.blend')
+    # FBX import stores clips as actions, whereas glTF import uses NLA tracks.
+    animation_mode='ACTIONS' if mode=='convert' and os.path.splitext(config['source'])[1].lower()=='.fbx' else 'NLA_TRACKS'
+    bpy.ops.export_scene.gltf(filepath=out+'.glb',export_format='GLB',export_animations=True,export_animation_mode=animation_mode)
+    if not preview_only:
+        bpy.ops.export_scene.fbx(filepath=out+'.fbx',use_selection=False,object_types={'MESH','ARMATURE','EMPTY'},axis_forward='-Z',axis_up='Y',add_leaf_bones=False,bake_anim=True,bake_anim_use_all_actions=animation_mode=='ACTIONS',bake_anim_use_nla_strips=True,path_mode='COPY',embed_textures=True)
+    report={'schemaVersion':1,'mode':mode,'previewOnly':preview_only,'meshes':len(meshes),'vertices':sum(len(o.data.vertices) for o in meshes),'hasRig':has_rig,'clips':clips,'warnings':warnings,'surfaceWelded':False,'textureRebuildRequired':False,'sourceHeight':original_height,'normalizationScale':normalization_scale}
     with open(out+'.report.json','w',encoding='utf8') as f:json.dump(report,f,ensure_ascii=False,indent=2)
     print('PARTSMITH_OK '+json.dumps(report))
 

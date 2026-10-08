@@ -110,7 +110,7 @@ test("poll downloads once, creates image lineage and records actual cost", async
     }),
     download: async () => {
       downloads++;
-      return Buffer.from("fake test bytes");
+      return Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
     },
   });
   engine.approve(engine.quote(p.id, input).id, true);

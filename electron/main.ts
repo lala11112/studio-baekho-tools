@@ -139,6 +139,10 @@ async function dispatch(c: Command): Promise<unknown> {
         );
       const base = path.dirname(source);
       const files = new Set(p.assets.map((a) => a.file));
+      for (const asset of p.assets)
+        if (asset.nativeFile) files.add(asset.nativeFile);
+      for (const job of p.jobs)
+        for (const file of job.nativeFiles ?? []) files.add(file);
       for (const b of p.builds) {
         files.add(b.glb);
         files.add(b.fbx);
@@ -157,7 +161,9 @@ async function dispatch(c: Command): Promise<unknown> {
         const src = path.resolve(base, f);
         if (
           !src.startsWith(base + path.sep) ||
-          !/\.(png|jpe?g|glb|fbx|blend|json)$/i.test(src)
+          !/\.(png|jpe?g|webp|glb|gltf|fbx|obj|stl|usdz|3mf|zip|blend|json)$/i.test(
+            src,
+          )
         )
           throw new Error("잘못된 에셋 경로");
         if (fs.existsSync(src)) store.write(p.id, f, fs.readFileSync(src));
@@ -176,7 +182,8 @@ async function dispatch(c: Command): Promise<unknown> {
         filters: [
           {
             name: c.kind === "image" ? "이미지" : "GLB 모델",
-            extensions: c.kind === "image" ? ["png", "jpg", "jpeg"] : ["glb"],
+            extensions:
+              c.kind === "image" ? ["png", "jpg", "jpeg", "webp"] : ["glb"],
           },
         ],
       });
@@ -200,6 +207,20 @@ async function dispatch(c: Command): Promise<unknown> {
       if (p.parts.find((x) => x.id === c.partId)?.locked)
         throw new Error("고정을 해제하세요.");
       p.parts = p.parts.filter((x) => x.id !== c.partId);
+      return engine.touch(p);
+    }
+    case "part.assign": {
+      const p = store.project(c.id);
+      const part = p.parts.find((x) => x.id === c.partId);
+      const asset = p.assets.find(
+        (a) =>
+          a.id === c.assetId && a.kind === "model" && /\.glb$/i.test(a.file),
+      );
+      if (!part || !asset)
+        throw new Error("파츠와 미리보기 가능한 GLB 모델을 선택하세요.");
+      if (part.locked) throw new Error("파츠 고정을 해제하세요.");
+      if (!part.candidates.includes(asset.id)) part.candidates.push(asset.id);
+      part.selectedId = asset.id;
       return engine.touch(p);
     }
     case "part.update": {
@@ -395,6 +416,12 @@ app.whenReady().then(async () => {
     path.join(app.getAppPath(), "node_modules/sql.js/dist/sql-wasm.wasm"),
   );
   vault = new Vault(root);
+  local = new LocalPipeline(
+    store,
+    app.isPackaged
+      ? path.join(process.resourcesPath, "integrations")
+      : path.join(app.getAppPath(), "integrations"),
+  );
   engine = new Engine(
     store,
     new Tripo(
@@ -402,12 +429,8 @@ app.whenReady().then(async () => {
       fetch,
       () => store.settings.tripoRegion,
     ),
-  );
-  local = new LocalPipeline(
-    store,
-    app.isPackaged
-      ? path.join(process.resourcesPath, "integrations")
-      : path.join(app.getAppPath(), "integrations"),
+    (projectId, nativeRelative) =>
+      local.previewModel(projectId, nativeRelative),
   );
   protocol.handle("asset", async (request) => {
     try {
