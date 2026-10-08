@@ -21,6 +21,7 @@
   "rerollPreservesElevenImages": true,
   "partialAndAllTwelveImagesDecoded": true,
   "longWindowsInheritedImagePathsDecoded": true,
+  "aligned2048PreviewsAndLocalOnlyAlignment": true,
   "rerollKeepsOtherModelSelections": true,
   "sameTimeMultiview": true,
   "restartNoAutoRun": true,

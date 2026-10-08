@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { Readable } from "node:stream";
+import { prepareSeparationImages } from "./separation-preview";
 import { z } from "zod";
 import { Store, uid } from "../engine/store";
 import { Engine } from "../engine/engine";
@@ -539,6 +540,7 @@ app.whenReady().then(async () => {
         ? path.join(process.resourcesPath, "integrations")
         : path.join(app.getAppPath(), "integrations"),
     }),
+    { prepareSeparationImages },
   );
   protocol.handle("asset", async (request) => {
     try {
@@ -568,7 +570,10 @@ app.whenReady().then(async () => {
             [...job.candidates, ...(job.draftCandidates ?? [])].some(
               (candidate) =>
                 candidate.artifacts.some(
-                  (artifact) => store.file(id, artifact.path) === file,
+                  (artifact) =>
+                    store.file(id, artifact.path) === file ||
+                    (!!artifact.normalized &&
+                      store.file(id, artifact.normalized.path) === file),
                 ),
             ),
           ),

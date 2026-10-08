@@ -57,7 +57,7 @@ export class CodexWorkbenchExecutor {
     const step=ctx.job.step; let count=0;
     if(step==='separate'&&!ctx.recovered) return {status:'needs_input',summary:'MOCK transient download timeout',candidates:[],checks:[],recovery:{kind:'retry',reason:'MOCK transient download timeout'}};
     const write=(name,data,kind,role)=>{fs.writeFileSync(path.join(ctx.workspace,name),data);return {path:name,kind,...(role?{role}:{})};};
-    const pic=(role)=>{count++;const bytes=Buffer.alloc(32*32*4); for(let i=0;i<bytes.length;i+=4){bytes[i]=count*17;bytes[i+1]=ctx.workbench.jobs.length*13;bytes[i+2]=count*11;bytes[i+3]=255;}return write('MOCK-'+count+'.png',nativeImage.createFromBitmap(bytes,{width:32,height:32}).toPNG(),'image',role);};
+    const pic=(role)=>{count++;const bytes=Buffer.alloc(32*32*4); for(let i=0;i<bytes.length;i+=4){bytes[i]=count*17;bytes[i+1]=ctx.workbench.jobs.length*13;bytes[i+2]=count*11;const pixel=i/4,x=pixel%32,y=Math.floor(pixel/32);bytes[i+3]=(x>=4&&x<28&&y>=4&&y<28)?255:0;}return write('MOCK-'+count+'.png',nativeImage.createFromBitmap(bytes,{width:32,height:32}).toPNG(),'image',role);};
     const model=(i,role)=>{const bytes=tinyGlb();bytes.writeFloatLE(i+0.2,28+bytes.readUInt32LE(12));return write('MOCK-'+i+'.glb',bytes,'model',role);};
     const objects=[{id:'body',name:'MOCK Body',category:'body',separate:true},{id:'coat',name:'MOCK Coat',category:'clothing',separate:true},{id:'hair',name:'MOCK Hair',category:'hair',separate:true}];
     let candidates;
@@ -128,7 +128,7 @@ fs.writeFileSync(
   path.join(harness, "package.json"),
   JSON.stringify({
     name: "partsmith-guided-test",
-    version: "0.5.0",
+    version: "0.5.1",
     main: "dist-electron/main.cjs",
   }),
 );
@@ -285,6 +285,11 @@ try {
   await page.getByTestId("workbench-visual-warnings").waitFor();
   assert(await page.getByTestId("workbench-accept-separate").isEnabled());
   await assertImagesDecoded("workbench-separation-views", 12);
+  const alignedImages = await page.getByTestId("workbench-separation-views").locator("img").evaluateAll(nodes => nodes.map(n => ({width:n.naturalWidth,height:n.naturalHeight,src:n.getAttribute("src")})));
+  assert(alignedImages.every(n => n.width === 2048 && n.height === 2048 && n.src.includes("/normalized/")), "All part previews must use the same normalized 2048 canvas");
+  const beforeAlignmentCalls = invocations().length;
+  await page.getByTestId("workbench-normalize-images").click();
+  assert.equal(invocations().length,beforeAlignmentCalls,"Local alignment must not invoke generation");
   await page.getByTestId("workbench-visual-warnings").screenshot({
     path: "artifacts/screenshots/workbench-visual-warnings.png",
   });
@@ -541,6 +546,7 @@ try {
         rerollPreservesElevenImages: true,
         partialAndAllTwelveImagesDecoded: true,
         longWindowsInheritedImagePathsDecoded: true,
+        aligned2048PreviewsAndLocalOnlyAlignment: true,
         rerollKeepsOtherModelSelections: true,
         sameTimeMultiview: true,
         restartNoAutoRun: true,

@@ -536,7 +536,8 @@ export function AssetWorkbench({
   function go(next: Page) {
     if (ready[next]) setPage(next);
   }
-  const url = (a: WorkbenchArtifact) => window.desktop.assetUrl(p.id, a.path);
+  const url = (a: WorkbenchArtifact) =>
+    window.desktop.assetUrl(p.id, a.normalized?.path ?? a.path);
   const modelArtifact = (c?: WorkbenchCandidate) =>
     c?.artifacts.find((a) => a.kind === "model" && /\.glb$/i.test(a.path));
   function modelView(c?: WorkbenchCandidate, animated = false) {
@@ -592,6 +593,23 @@ export function AssetWorkbench({
             사진은 유지하면서 없는 방향만 채우거나, 특정 사진에 수정 지시를 내릴
             수 있습니다.
           </p>
+          <p className="wb-muted">
+            2048×2048 캔버스 · 같은 파츠의 정면 기준 높이와 중심을 맞춥니다.
+            원본 비율과 파일은 보존하며, 맞춘 사진을 Tripo에 전달합니다.
+          </p>
+          {viewing && !locked && images.length > 0 && (
+            <button
+              data-testid="workbench-normalize-images"
+              onClick={() =>
+                action(
+                  { kind: "normalize-images", jobId: viewing.id },
+                  "저장된 사진의 크기와 중심을 맞췄습니다. 새 이미지 생성은 없습니다.",
+                )
+              }
+            >
+              <RefreshCw size={14} /> 저장된 사진 크기·중심 맞추기
+            </button>
+          )}
           {roles.map((r) => (
             <section
               className="wb-separation-role"
@@ -634,6 +652,18 @@ export function AssetWorkbench({
                           {image ? "수정" : "선택"}
                         </button>
                       </div>
+                      {image && (
+                        <small className="wb-image-size">
+                          {image.normalized
+                            ? "2048 × 2048 · 정면 기준 정렬"
+                            : "원본 · 크기 맞춤 전"}
+                        </small>
+                      )}
+                      {image?.normalizationIssue && (
+                        <p className="wb-image-issue">
+                          {image.normalizationIssue}
+                        </p>
+                      )}
                     </div>
                   );
                 })}

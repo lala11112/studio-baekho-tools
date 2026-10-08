@@ -699,6 +699,18 @@
   font-size: 10px;
   padding: 5px 7px;
 }
+.wb-image-size {
+  display: block;
+  padding: 0 8px 10px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.wb-image-issue {
+  margin: 0;
+  padding: 0 8px 10px;
+  color: #dcc58d;
+  font-size: 11px;
+}
 .wb-controls > .primary + .primary {
   margin-top: 8px;
 }

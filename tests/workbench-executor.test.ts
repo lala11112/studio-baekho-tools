@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { PNG } from "pngjs";
 import {
   CodexWorkbenchExecutor,
   classifyWorkbenchFailure,
@@ -611,6 +612,133 @@ test("saved separation inspection restores available photos read-only without wo
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
+test("a saved rear-view geometry observation is shown without a worker and an explicit retry only generates untouched views", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  f.context.job.request.views = [...fourViews];
+  const front = savedPartFixture(f, "head-front"),
+    back = savedPartFixture(f, "head-back");
+  back.result.checks = [
+    { name: "back_view_geometry_convincing", passed: false },
+  ];
+  fs.writeFileSync(back.file, JSON.stringify(back.result));
+  const files = [
+    front.file,
+    back.file,
+    ...[front, back].map(({ result }) =>
+      path.join(f.context.workspace, result.candidates[0].artifacts[0].path),
+    ),
+  ];
+  const before = files.map((file) => [digest(file), fs.statSync(file).mtimeMs]);
+  const probe = worker.probe;
+  worker.probe = async () => {
+    throw Error("read-only inspection cannot probe");
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const saved = await executor.inspectSaved(f.context);
+  assert.equal(saved.candidates[0].artifacts.length, 2);
+  assert(
+    saved.checks.some(
+      (check) =>
+        check.name === "head:back_view_geometry_convincing" &&
+        !check.passed &&
+        check.severity === "warning",
+    ),
+  );
+  assert.equal(worker.calls.length, 0);
+  assert.deepEqual(
+    files.map((file) => [digest(file), fs.statSync(file).mtimeMs]),
+    before,
+  );
+  worker.probe = probe;
+  worker.hook = partOutput;
+  const continued = await executor.recover(
+    {
+      ...f.context,
+      recovery: {
+        attempt: 1,
+        error: "back_view_geometry_convincing",
+        mode: "repair",
+      },
+    },
+    () => {},
+  );
+  assert.equal(continued.status, "completed");
+  assert.equal(worker.calls.length, 10);
+  assert(
+    !worker.calls.some((task) =>
+      ["separate-head-front", "separate-head-back"].includes(task.stage.id),
+    ),
+  );
+  assert(worker.calls.every((task) => !task.recoveryOnly));
+  assert.deepEqual(
+    files.map((file) => [digest(file), fs.statSync(file).mtimeMs]),
+    before,
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("canonical aesthetic categories and distinct details survive checkpoints without overriding technical integrity", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  worker.hook = (task) => ({
+    ...partOutput(task),
+    checks: [
+      {
+        name: "visual_quality",
+        passed: false,
+        severity: "warning",
+        visualCategory: "view_consistency",
+        detail: "Rear silhouette needs user review",
+      },
+      {
+        name: "visual_quality",
+        passed: false,
+        severity: "warning",
+        visualCategory: "alignment",
+        detail: "Part is slightly left of center",
+      },
+      {
+        name: "visual_quality",
+        passed: false,
+        severity: "warning",
+        visualCategory: "alignment",
+        detail: "Part scale differs between directions",
+      },
+    ],
+  });
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const result = await executor.execute(f.context, () => {});
+  assert.equal(result.status, "completed");
+  assert.equal(result.checks.length, 9);
+  assert.equal((await executor.inspectSaved(f.context)).checks.length, 9);
+  assert.match(worker.calls[0].prompt, /canonical check name visual_quality/);
+  assert.match(worker.calls[0].prompt, /Genuine file, hash, path/);
+  const invalid = fixture("separate"),
+    badWorker = new Worker();
+  badWorker.hook = (task) => ({
+    ...partOutput(task),
+    checks: [
+      {
+        name: "immutable_input_hash_verified",
+        passed: false,
+        severity: "warning",
+        visualCategory: "appearance",
+        detail: "Should never downgrade integrity",
+      },
+    ],
+  });
+  const blocked = await new CodexWorkbenchExecutor(
+    badWorker,
+    invalid.services,
+  ).execute(invalid.context, () => {});
+  assert.equal(blocked.status, "needs_input");
+  assert.match(blocked.summary, /immutable_input_hash_verified/);
+  assert.equal(badWorker.calls.length, 1);
+  fs.rmSync(f.root, { recursive: true, force: true });
+  fs.rmSync(invalid.root, { recursive: true, force: true });
+});
+
 test("saved inspection offers all three photos for review but rejects damaged and unregistered files", async () => {
   const f = fixture("separate"),
     worker = new Worker();
@@ -1081,6 +1209,77 @@ test("model requires four mapped references, one output and an observable suppor
     /NEVER submit while silently ignoring the prompt/,
   );
   assert.match(worker.calls[0].prompt, /몸통보다 머리를 작게/);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("model uploads verified normalized canvases while preserving raw image lineage and rejecting stale derivatives", async () => {
+  const f = fixture("model"),
+    worker = new Worker();
+  const rawHashes = f.context.inputs.map((input) => input.sha256);
+  const anchor = f.context.inputs[0].sha256;
+  for (const [index, input] of f.context.inputs.entries()) {
+    // Actual PNG container fixture only; no claim of generated-image quality.
+    const png = new PNG({ width: 2048, height: 2048 });
+    png.data.fill(0);
+    const pixel = (1024 * 2048 + 1024) * 4;
+    png.data[pixel] = index + 1;
+    png.data[pixel + 3] = 255;
+    const relative = `normalized/${input.view}.png`,
+      file = path.join(f.services.projectRoot("project"), relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, PNG.sync.write(png));
+    input.normalized = {
+      path: relative,
+      sha256: digest(file),
+      bytes: fs.statSync(file).size,
+      width: 2048,
+      height: 2048,
+      sourceSha256: input.sha256,
+      anchorSha256: anchor,
+    };
+  }
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  await executor.execute(f.context, () => {});
+  assert.equal(worker.calls.length, 1);
+  assert.equal(worker.calls[0].imagePaths?.length, 4);
+  for (const [index, file] of worker.calls[0].imagePaths!.entries()) {
+    assert.match(file, /model-view-head-/);
+    assert.equal(digest(file), f.context.inputs[index].normalized!.sha256);
+  }
+  assert.match(
+    worker.calls[0].prompt,
+    /2048x2048 PNG with common canvas, part scale and center/,
+  );
+  assert.deepEqual(
+    f.context.inputs.map((input) =>
+      digest(path.join(f.services.projectRoot("project"), input.path)),
+    ),
+    rawHashes,
+  );
+  const target = f.context.inputs[1],
+    valid = { ...target.normalized! };
+  for (const patch of [
+    { sourceSha256: "wrong" },
+    { anchorSha256: "wrong" },
+    { sha256: "wrong" },
+    { bytes: 1 },
+    { width: 1024 },
+    { path: "../outside.png" },
+  ]) {
+    target.normalized = { ...valid, ...patch };
+    const result = await executor.execute(f.context, () => {});
+    assert.equal(result.status, "needs_input");
+    assert.equal(result.recovery?.kind, "blocked");
+    assert.equal(worker.calls.length, 1);
+  }
+  target.normalized = valid;
+  fs.appendFileSync(
+    path.join(f.services.projectRoot("project"), valid.path),
+    "changed derivative",
+  );
+  const changed = await executor.execute(f.context, () => {});
+  assert.equal(changed.recovery?.kind, "blocked");
+  assert.equal(worker.calls.length, 1);
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 

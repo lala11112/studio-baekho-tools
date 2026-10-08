@@ -25,6 +25,17 @@ export type WorkbenchArtifact = {
   view?: WorkbenchView;
   sha256: string;
   bytes: number;
+  /** Host-created display/Tripo derivative. Raw source bytes and lineage stay unchanged. */
+  normalized?: {
+    path: string;
+    sha256: string;
+    bytes: number;
+    width: number;
+    height: number;
+    sourceSha256: string;
+    anchorSha256: string;
+  };
+  normalizationIssue?: string;
 };
 export type WorkbenchCandidate = {
   id: string;
@@ -72,6 +83,15 @@ export type WorkbenchCheck = {
   passed: boolean;
   /** Advisory visual observations remain false; the host decides whether a check blocks. */
   severity?: "warning" | "error";
+  /** New aesthetic observations use the stable name visual_quality and this finite category. */
+  visualCategory?:
+    | "alignment"
+    | "alpha_edges"
+    | "appearance"
+    | "view_consistency"
+    | "semantic_isolation";
+  /** Plain-language observation, at most 600 characters; never changes file safety gates. */
+  detail?: string;
 };
 export type WorkbenchJob = {
   id: string;
@@ -164,6 +184,7 @@ export type WorkbenchAction =
   | { kind: "retry-validation"; jobId: string }
   | { kind: "retry"; jobId: string }
   | { kind: "inspect-saved"; jobId: string }
+  | { kind: "normalize-images"; jobId: string }
   | { kind: "import-source"; assetId: string }
   | { kind: "resolve-submission"; jobId: string; confirmedNotSubmitted: true };
 export const WORKBENCH_STEPS: { id: WorkbenchStep; title: string }[] = [

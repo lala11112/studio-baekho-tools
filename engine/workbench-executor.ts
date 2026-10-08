@@ -56,7 +56,13 @@ const separationStage = (role: string, view?: WorkbenchView) =>
 const uniqueChecks = (checks: WorkbenchResult["checks"]) => [
   ...new Map(
     checks.map((check) => [
-      JSON.stringify([check.name, check.passed, check.severity]),
+      JSON.stringify([
+        check.name,
+        check.passed,
+        check.severity,
+        check.visualCategory,
+        check.detail,
+      ]),
       check,
     ]),
   ).values(),
@@ -154,6 +160,23 @@ const resultSchema = z
               .nullable()
               .optional()
               .transform((value) => value ?? undefined),
+            visualCategory: z
+              .enum([
+                "alignment",
+                "alpha_edges",
+                "appearance",
+                "view_consistency",
+                "semantic_isolation",
+              ])
+              .nullable()
+              .optional()
+              .transform((value) => value ?? undefined),
+            detail: z
+              .string()
+              .max(600)
+              .nullable()
+              .optional()
+              .transform((value) => value ?? undefined),
           })
           .strict(),
       )
@@ -231,7 +254,7 @@ export const workbenchResultJsonSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["name", "passed", "severity"],
+        required: ["name", "passed", "severity", "visualCategory", "detail"],
         properties: {
           name: { type: "string" },
           passed: { type: "boolean" },
@@ -239,6 +262,18 @@ export const workbenchResultJsonSchema = {
             type: ["string", "null"],
             enum: ["warning", "error", null],
           },
+          visualCategory: {
+            type: ["string", "null"],
+            enum: [
+              "alignment",
+              "alpha_edges",
+              "appearance",
+              "view_consistency",
+              "semantic_isolation",
+              null,
+            ],
+          },
+          detail: { type: ["string", "null"], maxLength: 600 },
         },
       },
     },
@@ -710,7 +745,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         ? "The host retains the original Studio receipt. Inspect the existing submitted task only, wait/recheck its result or download the existing native outputs. Never press generate, retry, UV, texture or any other paid action. Retain unchanged native downloads for receipt verification. If task identity or submission is ambiguous, return submission_unknown."
         : "Recover actual files already produced by the previous attempt. You may copy known completed generated files mentioned in its log, repair JSON/BOM/paths, and inspect/repackage existing outputs. Do not fabricate missing outputs or alter the requested character through procedural replacements. If a required generated image does not exist or its invocation is ambiguous, return needs_input with that exact reason.",
       imagePhase
-        ? `Return the existing real image artifacts. ${context.job.step === "separate" ? `Exactly ONE candidate and ONE image, role '${separated?.[1]}', view '${separated?.[2] ?? "front"}'. A valid existing image is ready for user review even when its position, scale, alignment, alpha edge or appearance is imperfect. Report those aesthetic concerns as failed warning checks, then return completed with the image unchanged. Do not repair aesthetic issues or withhold the image for exact original-canvas alignment.` : "Preserve the requested candidate/frame count."} Never create a composite as a substitute.`
+        ? `Return the existing real image artifacts. ${context.job.step === "separate" ? `Exactly ONE candidate and ONE image, role '${separated?.[1]}', view '${separated?.[2] ?? "front"}'. A valid existing image is ready for user review even when its position, scale, alignment, alpha edge or appearance is imperfect. For EVERY aesthetic observation use ONLY the canonical check name visual_quality, a visualCategory chosen from alignment / alpha_edges / appearance / view_consistency / semantic_isolation, severity warning, truthful passed=false, and a concrete detail (maximum 600 characters) identifying the direction and concern. Never invent a new technical-sounding visual check such as back_view_geometry_convincing. Return completed with the existing image unchanged. File readability, missing output, role/view identity, source hash and path/integrity checks remain separate blocking errors and must never be relabeled visual_quality. Do not repair aesthetic issues or withhold the image for exact original-canvas alignment.` : "Preserve the requested candidate/frame count."} Never create a composite as a substitute.`
         : `For local preview/geometry/rig repair use configured Blender ${JSON.stringify(this.services.blenderPath())}, actual prior native assets and bpy. Preserve object IDs, intended materials and user-requested rig targets. Return editable .blend when the stage requires it. ${["assembly", "rig", "animation"].includes(context.job.step) ? "Use gpt-6-astra for the actual local scene correction." : ""}`,
       "Return strict JSON with status, summary, candidates and checks. completed means the repaired actual files are ready for host verification. Do not accept results or advance stages on the user's behalf.",
     ].join("\n\n");
@@ -798,6 +833,54 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       view: input.view,
     };
   }
+  private modelViewInput(
+    context: WorkbenchExecutionContext,
+    input: InputFile,
+    anchorSha256?: string,
+  ): InputFile {
+    const normalized = input.normalized;
+    if (!normalized) return input;
+    if (
+      normalized.sourceSha256 !== input.sha256 ||
+      !anchorSha256 ||
+      normalized.anchorSha256 !== anchorSha256 ||
+      normalized.width !== 2048 ||
+      normalized.height !== 2048
+    )
+      throw Error(
+        "모델 입력 보정 사진의 원본·기준 사진 또는 캔버스 정보가 일치하지 않습니다.",
+      );
+    const source = this.file(
+      this.services.projectRoot(context.workbench.projectId),
+      normalized.path,
+    );
+    if (!fs.existsSync(source) || !fs.statSync(source).isFile())
+      throw Error("모델 입력 보정 사진 파일이 없습니다.");
+    const bytes = fs.readFileSync(source);
+    if (
+      bytes.length !== normalized.bytes ||
+      createHash("sha256").update(bytes).digest("hex") !== normalized.sha256
+    )
+      throw Error("모델 입력 보정 사진의 파일 무결성이 일치하지 않습니다.");
+    if (
+      bytes.length < 24 ||
+      !bytes
+        .subarray(0, 8)
+        .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
+      bytes.readUInt32BE(16) !== 2048 ||
+      bytes.readUInt32BE(20) !== 2048
+    )
+      throw Error("모델 입력 보정 사진은 실제 2048×2048 PNG여야 합니다.");
+    const localPath = `inputs/model-view-${input.role}-${input.view}.png`;
+    fs.writeFileSync(this.file(context.workspace, localPath), bytes);
+    return {
+      ...input,
+      localPath,
+      sha256: normalized.sha256,
+      bytes: normalized.bytes,
+      sourceSha256: input.sha256,
+    };
+  }
   private inputs(context: WorkbenchExecutionContext): InputFile[] {
     const root = this.services.projectRoot(context.workbench.projectId);
     fs.mkdirSync(path.join(context.workspace, "inputs"), { recursive: true });
@@ -867,11 +950,11 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         request.provider === "tripo"
           ? "Use the visible Tripo Studio image generation workspace to create exactly FOUR genuine image candidates from the user prompt. Observe the available model and four-result count UI; do not assume a price or unsupported batch option. A single observed approved charge is allowed. Download all four actual image results. If the site requires four independent paid submissions, report needs_input instead of submitting multiple times."
           : `Create exactly FOUR distinct front-view full-body character image candidates from the user's prompt with consistent useful framing. ${imageRules} Use FOUR separate built-in calls. Save each candidate immediately; report candidly if fewer than four finish. Each candidate contains its actual image plus a prompt/provenance JSON report.`,
-      separate: `Current semantic isolation target ONLY: '${phase?.role}', direction '${phase?.view ?? "front"}'. Generate the character's ${phase?.view ?? "front"} view; left/right refer to the character's own sides. Never mirror-copy the opposite side. Use the selected original full character and supplied real images of this SAME part from other views to preserve geometry, identity, outfit, asymmetry and camera consistency. ${phase?.role === "head" ? "Isolate the face and skull without hair or body." : phase?.role === "hair" ? "Isolate the complete matching hair mass without face or body." : "Isolate the neck-down body including outfit, without head or hair."} Aim to preserve the selected full-character image's identity, design and useful relative proportions with a transparent background. Exact canvas dimensions, original pixel position/scale and perfect alpha edges are NOT completion requirements. Fill only occluded surfaces needed for usable input. Apply requested corrections. Once a real part image exists and is readable, return completed so the user can review it. Report imperfect alignment as original_alignment_and_scale_preserved=false, imperfect alpha edges as clean_peripheral_alpha=false and other aesthetic concerns as visual_quality=false, each with severity warning. Preserve truthful failed checks; do not regenerate, repair or block for those aesthetic concerns. The user decides whether to accept or request a correction. ${imageRules} Make exactly ONE built-in image generation call for this ONE part. Return ONE candidate containing exactly ONE image artifact with role '${phase?.role}' and view '${phase?.view ?? "front"}' and an alignment/provenance report. The host separately generates and checkpoints the other parts, then combines every requested part/direction for user review. Do not produce a contact sheet or another part/direction in this call.`,
+      separate: `Current semantic isolation target ONLY: '${phase?.role}', direction '${phase?.view ?? "front"}'. Generate the character's ${phase?.view ?? "front"} view; left/right refer to the character's own sides. Never mirror-copy the opposite side. Use the selected original full character and supplied real images of this SAME part from other views to preserve geometry, identity, outfit, asymmetry and camera consistency. ${phase?.role === "head" ? "Isolate the face and skull without hair or body." : phase?.role === "hair" ? "Isolate the complete matching hair mass without face or body." : "Isolate the neck-down body including outfit, without head or hair."} Aim to preserve the selected full-character image's identity, design and useful relative proportions with a transparent background. Exact canvas dimensions, original pixel position/scale and perfect alpha edges are NOT completion requirements. Fill only occluded surfaces needed for usable input. Apply requested corrections. Once a real part image exists and is readable, return completed so the user can review it. For EVERY aesthetic concern return the canonical check name visual_quality with truthful passed=false and severity warning. Select the appropriate visualCategory: alignment, alpha_edges, appearance, view_consistency or semantic_isolation; add a concrete detail of at most 600 characters identifying the direction and visual concern. Use these structured fields for imperfect framing, part scale, center, alpha edges, silhouette, rear-view anatomy and cross-view consistency. Never invent a new technical-sounding aesthetic check such as back_view_geometry_convincing. Genuine file, hash, path, missing-output and role/view validity checks stay separate blocking technical checks; never relabel them visual_quality. Preserve truthful failed checks; do not regenerate, repair or block for those aesthetic concerns. The user decides whether to accept or request a correction. ${imageRules} Make exactly ONE built-in image generation call for this ONE part. Return ONE candidate containing exactly ONE image artifact with role '${phase?.role}' and view '${phase?.view ?? "front"}' and an alignment/provenance report. The host separately generates and checkpoints the other parts, then combines every requested part/direction for user review. Do not produce a contact sheet or another part/direction in this call.`,
       model: `${
         request.baseJobId
-          ? `Use ONLY Tripo Studio's existing-model partial regeneration/regional-edit feature. This is an edit of the exact supplied base model, NOT new model generation. Locate and open the matching existing Studio model using its native download and observed remote identity/provenance; verify the editor target before any action. If that exact model cannot be identified/opened, return needs_input. Requested edit scope: '${request.modelEditScope ?? "all"}'. ${request.modelEditScope === "part" ? `Select ONLY the requested region '${request.modelEditTarget}' using the actual regional selector; verify the selected region visibly. If reliable region selection is unavailable, return needs_input.` : "Inside the partial-regeneration feature select the entire existing model as the edit target, and visibly verify the all-model region. Do not substitute the new Generate feature."} Use the observed Edit Mesh canvas and its region box handles. Use studio_canvas_drag with the current snapshot element and normalized points to adjust the actual selection, then capture a fresh snapshot to verify it. Observe the actual remaining partial-regeneration allowance/count (or explicit unlimited label) and actual paid-button price when relevant. Never invent the maximum, reset rule or price. If free allowance is exhausted, a paid edit is allowed only when its actual credit price is visibly explicit and inside the frozen approved budget; otherwise return needs_input. If neither valid allowance nor price is observable, or the feature is unsupported, return needs_input. Execute at most ONE observed host-gated partial regeneration using studio_mesh_edit_submit(snapshotId, element, operationId, expectedCredits, evidenceText); expectedCredits is zero only for observed available free/unlimited allowance, otherwise the actual visible price. evidenceText must quote the current allowance/price evidence. Never use ordinary studio_submit for this edit. Never auto-loop. Never use new-model Generate, a fresh image-to-model task, API fallback or another model as a substitute.`
-          : `Use visible Tripo Studio Smart Mesh P2 with the selected '${request.role}' FOUR real views (front, back, character-left, character-right), ${request.polygonCount === undefined ? "the observed Studio polygon default" : `requested polygon count ${request.polygonCount}`}, and ONE-candidate mode. Use only inputs tagged referenceUse='selected-part-view' for the four input slots. Observe P2's actual multi-view slot labels and map character-left/right correctly. Confirm P2, all four inputs, count ONE and actual total credit cost before the sole gated submission. If P2 multi-view or count ONE is unavailable, return needs_input. Read actual allowed polygon controls/range; never silently clamp. Do not assume any fixed price. Never fall back to another model/API or single-view generation.`
+          ? `Use ONLY Tripo Studio's existing-model partial regeneration/regional-edit feature. This is an edit of the exact supplied base model, NOT new model generation. Locate and open the matching existing Studio model using its native download and observed remote identity/provenance; verify the editor target before any action. If that exact model cannot be identified/opened, return needs_input. Requested edit scope: '${request.modelEditScope ?? "all"}'. ${request.modelEditScope === "part" ? `Select ONLY the requested region '${request.modelEditTarget}' using the actual regional selector; verify the selected region visibly. If reliable region selection is unavailable, return needs_input.` : "Inside the partial-regeneration feature select the entire existing model as the edit target, and visibly verify the all-model region. Do not substitute the new Generate feature."} Use the observed Edit Mesh canvas and its region box handles. Use studio_canvas_drag with the current snapshot element and normalized points to adjust the actual selection, then capture a fresh snapshot to verify it. Observe the actual remaining partial-regeneration allowance/count (or explicit unlimited label) and actual paid-button price when relevant. Never invent the maximum, reset rule or price. If free allowance is exhausted, a paid edit is allowed only when its actual credit price is visibly explicit and inside the frozen approved budget; otherwise return needs_input. If neither valid allowance nor price is observable, or the feature is unsupported, return needs_input. Execute at most ONE observed host-gated partial regeneration using studio_mesh_edit_submit(snapshotId, element, operationId, expectedCredits, evidenceText); expectedCredits is zero only when explicit free/무료 wording or an explicit zero-credit button is visible AND remaining allowance is positive or unlimited; never infer zero cost merely from a remaining-use count or unlimited label. Otherwise use the actual visible price. evidenceText must quote the current allowance/price evidence. Never use ordinary studio_submit for this edit. Never auto-loop. Never use new-model Generate, a fresh image-to-model task, API fallback or another model as a substitute.`
+          : `Use visible Tripo Studio Smart Mesh P2 with the selected '${request.role}' FOUR real views (front, back, character-left, character-right), ${request.polygonCount === undefined ? "the observed Studio polygon default" : `requested polygon count ${request.polygonCount}`}, and ONE-candidate mode. Use only inputs tagged referenceUse='selected-part-view' for the four input slots. When normalized metadata/sourceSha256 is present, their localPath is the host-verified 2048x2048 PNG with common canvas, part scale and center; upload that localPath, not the raw provenance path. Do not regenerate, recrop or resize those prepared inputs. Observe P2's actual multi-view slot labels and map character-left/right correctly. Confirm P2, all four inputs, count ONE and actual total credit cost before the sole gated submission. If P2 multi-view or count ONE is unavailable, return needs_input. Read actual allowed polygon controls/range; never silently clamp. Do not assume any fixed price. Never fall back to another model/API or single-view generation.`
       }
         ${request.baseJobId ? "Use the requested target and user text to select the existing mesh region when the instruction only identifies an area. Region-only guidance may use the visible selection handles without a text prompt field. If the request instead requires a specific shape/appearance correction, inspect whether this operation has a supported prompt field or explicit setting that can apply it; enter and verify the actual requested correction where supported. If unsupported, return needs_input, clearly explain the limitation, and never pretend a stochastic region regeneration applies a precise requested shape. Do not generate new reference images." : request.prompt.trim() ? "The non-empty user prompt is a real requested correction: before paid-submit, observe a prompt field supported by this exact operation, enter the requested text and verify it visibly. If no supported field can apply the correction, return needs_input and explain that the part reference images or supported edit settings must first be revised; NEVER submit while silently ignoring the prompt." : "No extra text correction was requested; preserve the selected inputs and requested scope."}
         Download exactly ONE real resulting model version. Preserve each native file unchanged as an export artifact for host receipt verification. Capture the candidate's actual Studio preview with studio_snapshot, copy its returned screenshot path from studio-evidence into the output folder as an image artifact, and record its matching remote model/version ID, operation and observed allowance/settings. Use the Studio image for review; do not render review images in Blender. If the native file is an uncompressed self-contained geometry GLB accepted by the app, copy it as a separate model artifact without invoking Blender. Only unsupported formats such as FBX, compressed GLB or external-resource glTF require Blender conversion; retain native originals unchanged. Return exactly ONE candidate, preserve earlier versions, and never retry an ambiguous click.`,
@@ -1314,6 +1397,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     const inputs = this.inputs(context);
     let result: WorkbenchResult;
     let selectedModelViews: InputFile[] = [];
+    let modelViewSources: InputFile[] = [];
     if (context.job.step === "model") {
       const base = this.baseInputs(context, inputs);
       const separationInputs =
@@ -1327,6 +1411,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
           ["front", "back", "left", "right"].includes(input.view),
       );
       selectedModelViews = selectedViews;
+      modelViewSources = selectedViews;
       if (
         context.job.request.baseJobId &&
         !base.some(
@@ -1348,6 +1433,26 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
             reason: "기존 모델 없이 신규 생성으로 대체하지 않습니다.",
           },
         };
+      try {
+        const anchor = selectedViews.find(
+          (input) => input.view === "front",
+        )?.sha256;
+        selectedModelViews = selectedViews.map((input) =>
+          this.modelViewInput(context, input, anchor),
+        );
+      } catch (error) {
+        const summary =
+          error instanceof Error
+            ? error.message
+            : "모델 입력 보정 사진 확인 실패";
+        return {
+          status: "needs_input",
+          summary,
+          candidates: [],
+          checks: [],
+          recovery: { kind: "blocked", reason: summary },
+        };
+      }
       if (
         !context.job.request.baseJobId &&
         (["front", "back", "left", "right"].some(
@@ -1605,7 +1710,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
               ...inputs
                 .filter(
                   (input) =>
-                    !selectedModelViews.includes(input) &&
+                    !modelViewSources.includes(input) &&
                     (input.kind !== "image" ||
                       !["head", "hair", "body"].includes(input.role ?? "") ||
                       input.role === context.job.request.role),

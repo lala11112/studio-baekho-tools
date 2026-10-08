@@ -73,10 +73,22 @@ export class WorkbenchEngine {
     { controller: AbortController; promise: Promise<void> }
   >();
   private readonly recoveryDelaysMs: readonly number[];
+  private readonly prepareSeparationImages?: (
+    artifacts: WorkbenchArtifact[],
+    workspace: string,
+    projectRoot: string,
+  ) => WorkbenchArtifact[];
   constructor(
     private store: Store,
     private executor: WorkbenchExecutor,
-    options: { recoveryDelaysMs?: readonly number[] } = {},
+    options: {
+      recoveryDelaysMs?: readonly number[];
+      prepareSeparationImages?: (
+        artifacts: WorkbenchArtifact[],
+        workspace: string,
+        projectRoot: string,
+      ) => WorkbenchArtifact[];
+    } = {},
   ) {
     const delays = options.recoveryDelaysMs ?? DEFAULT_RECOVERY_DELAYS_MS;
     if (
@@ -85,6 +97,7 @@ export class WorkbenchEngine {
     )
       throw new Error("자동 복구 대기 시간은 0 이상인 세 값이어야 합니다.");
     this.recoveryDelaysMs = [...delays];
+    this.prepareSeparationImages = options.prepareSeparationImages;
     for (const w of this.list()) {
       let changed = false;
       for (const j of w.jobs)
@@ -174,6 +187,8 @@ export class WorkbenchEngine {
         return this.retry(w.id, action.jobId);
       case "inspect-saved":
         return this.inspectSaved(w.id, action.jobId);
+      case "normalize-images":
+        return this.normalizeImages(w.id, action.jobId);
       case "resolve-submission": {
         this.idle(w);
         if (action.confirmedNotSubmitted !== true)
@@ -483,6 +498,31 @@ export class WorkbenchEngine {
     const inputs: WorkbenchArtifact[] = [];
     for (const dep of this.dependencySlots(w, r)) {
       const selected = this.chosen(w, dep);
+      if (
+        r.step === "model" &&
+        !r.baseJobId &&
+        dep === "separate" &&
+        this.prepareSeparationImages
+      ) {
+        this.prepareCandidates(w, selected.job, [selected.candidate]);
+        this.save(w);
+        if (
+          WORKBENCH_VIEWS.some(
+            (view) =>
+              !selected.candidate.artifacts.some(
+                (a) =>
+                  a.kind === "image" &&
+                  a.role === r.role &&
+                  a.view === view &&
+                  a.normalized &&
+                  !a.normalizationIssue,
+              ),
+          )
+        )
+          throw new Error(
+            "모델링 전에 선택한 파츠 네 방향 사진의 크기·배경 정리를 완료하세요. 표시된 사진별 사유를 확인해 주세요.",
+          );
+      }
       dependencies[dep] = selected.selected;
       inputs.push(...selected.candidate.artifacts);
       if (
@@ -769,12 +809,124 @@ export class WorkbenchEngine {
     }
   }
   private verifyArtifacts(w: Workbench, artifacts: WorkbenchArtifact[]) {
-    for (const a of artifacts) {
-      const file = safeRelative(this.store.directory(w.projectId), a.path);
-      if (fs.statSync(file).size !== a.bytes || hash(file) !== a.sha256)
+    for (const a of artifacts)
+      this.verifyArtifactFiles(this.store.directory(w.projectId), a);
+  }
+  private verifyArtifactFiles(projectRoot: string, a: WorkbenchArtifact) {
+    const file = safeRelative(projectRoot, a.path);
+    if (fs.statSync(file).size !== a.bytes || hash(file) !== a.sha256)
+      throw new Error(
+        "기준 산출물이 변경되었습니다. 보존된 파일을 복원한 뒤 다시 확인하세요.",
+      );
+    if (a.normalized) {
+      const n = a.normalized;
+      const jobPrefix = a.path
+        .replaceAll("\\", "/")
+        .match(/^(.*\/jobs\/[^/]+\/)/)?.[1];
+      if (
+        a.kind !== "image" ||
+        n.sourceSha256 !== a.sha256 ||
+        !/^[a-f0-9]{64}$/.test(n.anchorSha256) ||
+        !Number.isSafeInteger(n.width) ||
+        !Number.isSafeInteger(n.height) ||
+        n.width < 1 ||
+        n.height < 1 ||
+        !jobPrefix ||
+        !n.path.replaceAll("\\", "/").startsWith(jobPrefix)
+      )
         throw new Error(
-          "기준 산출물이 변경되었습니다. 보존된 파일을 복원한 뒤 다시 확인하세요.",
+          "정리된 사진의 원본·작업 폴더 정보가 일치하지 않습니다.",
         );
+      const normalized = safeRelative(projectRoot, n.path);
+      if (
+        fs.statSync(normalized).size !== n.bytes ||
+        hash(normalized) !== n.sha256
+      )
+        throw new Error(
+          "정리된 사진 파일이 변경되었거나 손상되었습니다. 사진 크기 정리를 다시 실행하세요.",
+        );
+      this.verifyFormat(normalized, "image");
+    }
+  }
+  private prepareCandidates(
+    w: Workbench,
+    job: WorkbenchJob,
+    candidates: WorkbenchCandidate[],
+  ) {
+    if (job.step !== "separate" || !this.prepareSeparationImages) return;
+    for (const candidate of candidates) {
+      const original = structuredClone(candidate.artifacts);
+      const raw = original.map(
+        ({ normalized: _normalized, normalizationIssue: _issue, ...a }) => a,
+      );
+      this.verifyArtifacts(w, raw);
+      let prepared: WorkbenchArtifact[];
+      try {
+        prepared = this.prepareSeparationImages(
+          structuredClone(original),
+          this.workspace(w, job),
+          this.store.directory(w.projectId),
+        );
+      } catch (error) {
+        this.verifyArtifacts(w, raw);
+        candidate.artifacts = raw.map((a) =>
+          a.kind === "image"
+            ? { ...a, normalizationIssue: messageOf(error) }
+            : a,
+        );
+        continue;
+      }
+      this.verifyArtifacts(w, raw);
+      if (
+        !Array.isArray(prepared) ||
+        prepared.length !== raw.length ||
+        new Set(prepared.map((a) => a.path)).size !== raw.length
+      ) {
+        candidate.artifacts = raw.map((a) =>
+          a.kind === "image"
+            ? {
+                ...a,
+                normalizationIssue:
+                  "사진 정리 서비스가 원본 산출물 목록을 변경했습니다.",
+              }
+            : a,
+        );
+        continue;
+      }
+      candidate.artifacts = raw.map((a) => {
+        const output = prepared.find((p) => p.path === a.path);
+        if (
+          !output ||
+          output.sha256 !== a.sha256 ||
+          output.bytes !== a.bytes ||
+          output.kind !== a.kind ||
+          output.role !== a.role ||
+          output.view !== a.view
+        )
+          return {
+            ...a,
+            normalizationIssue:
+              "사진 정리 서비스가 원본 산출물 정보를 변경했습니다.",
+          };
+        const combined = {
+          ...a,
+          ...(output.normalized ? { normalized: output.normalized } : {}),
+          ...(output.normalizationIssue
+            ? {
+                normalizationIssue: String(output.normalizationIssue).slice(
+                  0,
+                  4000,
+                ),
+              }
+            : {}),
+        };
+        try {
+          this.verifyArtifactFiles(this.store.directory(w.projectId), combined);
+          return combined;
+        } catch (error) {
+          return { ...a, normalizationIssue: messageOf(error) };
+        }
+      });
     }
   }
   private applyResult(
@@ -801,6 +953,7 @@ export class WorkbenchEngine {
     const candidates = this.registerCandidates(w, job, result.candidates);
     this.checkOutputs(job, candidates, result, workspace);
     this.checkPreservedBase(w, job, candidates[0]);
+    this.prepareCandidates(w, job, candidates);
     job.candidates = candidates;
     job.checks = normalizeWorkbenchChecks(job.step, result.checks);
     delete job.draftCandidates;
@@ -870,7 +1023,12 @@ export class WorkbenchEngine {
           .split(path.sep)
           .join("/");
         this.verifyFormat(file, a.kind);
-        return { ...a, path: relative, sha256: hash(file), bytes };
+        const {
+          normalized: _normalized,
+          normalizationIssue: _normalizationIssue,
+          ...rawArtifact
+        } = a;
+        return { ...rawArtifact, path: relative, sha256: hash(file), bytes };
       });
       if (new Set(artifacts.map((a) => a.path)).size !== artifacts.length)
         throw new Error("같은 파일을 중복 등록할 수 없습니다.");
@@ -916,6 +1074,7 @@ export class WorkbenchEngine {
       throw new Error(
         "중간 결과에는 서로 다른 머리·머리카락·몸통 이미지와 보고서만 사용할 수 있습니다.",
       );
+    this.prepareCandidates(w, job, candidates);
     job.draftCandidates = candidates;
     job.draftChecks = normalizeWorkbenchChecks(job.step, result.checks);
   }
@@ -1262,6 +1421,38 @@ export class WorkbenchEngine {
     this.active.set(w.id, { controller, promise });
     return w;
   }
+  /** Explicit local image preparation; never invokes a worker or changes accepted raw versions. */
+  normalizeImages(id: string, jobId: string) {
+    const w = this.get(id);
+    this.idle(w);
+    this.workerIdle();
+    const job = this.job(w, jobId);
+    if (
+      job.step !== "separate" ||
+      !["review", "needs_input", "cancelled"].includes(job.status)
+    )
+      throw new Error(
+        "완료하거나 중지한 파츠 사진만 크기를 정리할 수 있습니다.",
+      );
+    if (!this.prepareSeparationImages)
+      throw new Error("사진 크기 정리 기능을 사용할 수 없습니다.");
+    if (!this.current(w, job))
+      throw new Error("현재 기준 이미지와 다른 파츠 사진입니다.");
+    const candidates = job.candidates.length
+      ? job.candidates
+      : (job.draftCandidates ?? []);
+    if (!candidates.length)
+      throw new Error("먼저 저장된 파츠 사진을 확인하세요.");
+    this.prepareCandidates(w, job, candidates);
+    const issues = candidates
+      .flatMap((c) => c.artifacts)
+      .filter((a) => a.normalizationIssue);
+    w.message = issues.length
+      ? "사진은 보존했습니다. 크기·배경을 정리하지 못한 사진의 사유를 확인하세요."
+      : "파츠 사진의 크기를 정리했습니다. 원본과 선택 상태는 유지됩니다.";
+    job.updatedAt = now();
+    return this.save(w);
+  }
   /** Explicit user action: inspect saved bytes, without starting a production worker. */
   inspectSaved(id: string, jobId: string) {
     const w = this.get(id);
@@ -1512,10 +1703,18 @@ export class WorkbenchEngine {
             )
               throw new Error("백업 산출물이 변경되었거나 손상되었습니다.");
             this.verifyFormat(file, artifact.kind);
+            this.verifyArtifactFiles(sourceDirectory, artifact);
             files.push({
               relative: artifact.path,
               bytes: fs.readFileSync(file),
             });
+            if (artifact.normalized)
+              files.push({
+                relative: artifact.normalized.path,
+                bytes: fs.readFileSync(
+                  safeRelative(sourceDirectory, artifact.normalized.path),
+                ),
+              });
           }
         if (job.validationPending) {
           // Unregistered/invalid output paths are intentionally not copied from a backup.

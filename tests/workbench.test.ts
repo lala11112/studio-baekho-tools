@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { Store } from "../engine/store";
 import { Engine } from "../engine/engine";
 import { WorkbenchEngine } from "../engine/workbench";
+import { workbenchWarningMessages } from "../shared/workbench-checks";
 import { buildWorkbenchGlb } from "./fixtures/workbench-glb";
 import type {
   WorkbenchExecutionContext,
@@ -13,6 +15,7 @@ import type {
   WorkbenchRequest,
   WorkbenchResult,
   WorkbenchView,
+  WorkbenchArtifact,
 } from "../shared/workbench";
 
 // These are synthetic fixtures for host state-machine validation, not generation-quality evidence.
@@ -176,6 +179,11 @@ async function setup(
   t: TestContext,
   source = true,
   recoveryDelaysMs = [0, 0, 0],
+  prepareSeparationImages?: (
+    artifacts: WorkbenchArtifact[],
+    workspace: string,
+    projectRoot: string,
+  ) => WorkbenchArtifact[],
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "partsmith-guided-test-"));
   const store = new Store(root);
@@ -190,7 +198,10 @@ async function setup(
   } as any);
   store.save(project);
   const executor = new MockExecutor(),
-    engine = new WorkbenchEngine(store, executor, { recoveryDelaysMs }),
+    engine = new WorkbenchEngine(store, executor, {
+      recoveryDelaysMs,
+      prepareSeparationImages,
+    }),
     w = engine.create(project.id);
   t.after(() => {
     engine.shutdown();
@@ -977,6 +988,16 @@ test("separation visual observations stay false warnings and permit user review 
       { name: "original_position_and_scale_preserved", passed: false },
       { name: "hair:original_alignment_and_scale_preserved", passed: false },
       { name: "clean_peripheral_alpha", passed: false },
+      {
+        name: "back_view_geometry_convincing",
+        passed: false,
+        severity: "warning",
+      },
+      { name: "head:left_view_silhouette_consistent", passed: false },
+      {
+        name: "separate-body-right:right_view_proportions_matches_reference",
+        passed: false,
+      },
     ],
   });
   x.executor.recover = async (ctx) => {
@@ -1011,7 +1032,11 @@ test("separation visual observations stay false warnings and permit user review 
 test("unknown failures and visual failures outside separation remain blocking despite worker severity", async (t) => {
   for (const [step, name] of [
     ["separate", "source_hash_matches"],
+    ["separate", "back_view_geometry_valid"],
+    ["separate", "back_view_file_integrity_convincing"],
+    ["separate", "unknown_visual_evaluation"],
     ["concept", "clean_peripheral_alpha"],
+    ["concept", "back_view_geometry_convincing"],
   ] as const) {
     const x = await setup(t);
     x.executor.hook = (_, result) => ({
@@ -1021,6 +1046,94 @@ test("unknown failures and visual failures outside separation remain blocking de
     const job = await x.execute({ step, prompt: "test" });
     assert.equal(job.status, "failed");
     assert.equal(job.candidates.length, 0);
+  }
+});
+
+test("stable visual observation categories retain truthful failures and details without recovery", async (t) => {
+  const x = await setup(t);
+  let recoveries = 0;
+  x.executor.hook = (_, result) => ({
+    ...result,
+    checks: [
+      {
+        name: "visual_quality",
+        visualCategory: "view_consistency",
+        detail: "후면 머리 형태가 원본보다 둥글어 보입니다.",
+        passed: false,
+      },
+      {
+        name: "hair:visual_quality",
+        visualCategory: "alpha_edges",
+        detail: "머리카락 끝의 투명 가장자리를 확인하세요.",
+        passed: false,
+      },
+    ],
+  });
+  x.executor.recover = async (ctx) => {
+    recoveries++;
+    return x.executor.fixture(ctx);
+  };
+  const job = await x.execute({ step: "separate", prompt: "split" });
+  assert.equal(job.status, "review", job.summary);
+  assert.equal(recoveries, 0);
+  assert.ok(
+    job.checks.every(
+      (check) => check.passed === false && check.severity === "warning",
+    ),
+  );
+  assert.equal(job.checks[0].visualCategory, "view_consistency");
+  assert.equal(
+    job.checks[0].detail,
+    "후면 머리 형태가 원본보다 둥글어 보입니다.",
+  );
+  assert.ok(
+    workbenchWarningMessages("separate", job.checks).some((text) =>
+      text.includes(job.checks[0].detail!),
+    ),
+  );
+  assert.equal(x.engine.get(x.w.id).selections.separate, undefined);
+});
+
+test("visual categories cannot rename integrity failures or bypass image structure gates", async (t) => {
+  for (const fault of [
+    "integrity-name",
+    "unknown-category",
+    "too-long-detail",
+    "duplicate-image",
+    "missing-direction",
+  ] as const) {
+    const x = await setup(t);
+    x.executor.hook = (_, result) => {
+      result.checks = [
+        {
+          name: "visual_quality",
+          visualCategory: "appearance",
+          detail: "외형 검토가 필요합니다.",
+          passed: false,
+        },
+      ];
+      if (fault === "integrity-name")
+        result.checks[0].name = "source_hash_matches";
+      if (fault === "unknown-category")
+        result.checks[0].visualCategory = "file_integrity" as any;
+      if (fault === "too-long-detail")
+        result.checks[0].detail = "x".repeat(601);
+      if (fault === "duplicate-image") {
+        const images = result.candidates[0].artifacts.filter(
+          (a) => a.kind === "image",
+        );
+        images[1].path = images[0].path;
+      }
+      if (fault === "missing-direction")
+        result.candidates[0].artifacts = result.candidates[0].artifacts.filter(
+          (a) => a.view !== "back",
+        );
+      return result;
+    };
+    const job = await x.execute({ step: "separate", prompt: "split" });
+    assert.equal(job.status, "failed", fault);
+    assert.equal(job.candidates.length, 0, fault);
+    assert.equal(x.engine.get(x.w.id).selections.separate, undefined, fault);
   }
 });
 
@@ -1520,5 +1633,218 @@ test("existing native model edits remain available for legacy front-only separat
         { accepted: true, studioCreditLimit: 1000, imageCreditLimit: 0 },
       ),
     /정면·후면·좌측·우측/,
+  );
+});
+
+// Synthetic derivative fixture verifies host trust/provenance only, not canvas quality.
+function normalizedFixture(
+  artifacts: WorkbenchArtifact[],
+  workspace: string,
+  projectRoot: string,
+): WorkbenchArtifact[] {
+  return artifacts.map((a) => {
+    if (a.kind !== "image") return a;
+    const bytes = image(`normalized:${a.sha256}`);
+    const file = path.join(
+      workspace,
+      `normalized-${a.role}-${a.view ?? "front"}.png`,
+    );
+    fs.writeFileSync(file, bytes);
+    const { normalizationIssue: _issue, ...raw } = a;
+    return {
+      ...raw,
+      normalized: {
+        path: path.relative(projectRoot, file).split(path.sep).join("/"),
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        bytes: bytes.length,
+        width: 1,
+        height: 1,
+        sourceSha256: a.sha256,
+        anchorSha256:
+          artifacts.find(
+            (other) =>
+              other.role === a.role && (other.view ?? "front") === "front",
+          )?.sha256 ?? a.sha256,
+      },
+    };
+  });
+}
+
+test("worker-supplied image normalization metadata is stripped before trusted preparation", async (t) => {
+  let serviceSawSpoof = false;
+  const x = await setup(t, true, [0, 0, 0], (artifacts, workspace, root) => {
+    serviceSawSpoof ||= artifacts.some(
+      (a) => !!a.normalized || !!a.normalizationIssue,
+    );
+    return normalizedFixture(artifacts, workspace, root);
+  });
+  x.executor.hook = (_, result) => {
+    for (const a of result.candidates[0].artifacts) {
+      a.normalized = {
+        path: "../../credentials",
+        sha256: "forged",
+        bytes: 1,
+        width: 1024,
+        height: 1024,
+        sourceSha256: "forged",
+        anchorSha256: "forged",
+      };
+      a.normalizationIssue = "worker cannot control host preparation";
+    }
+    return result;
+  };
+  const job = await x.execute({ step: "separate", prompt: "split" });
+  assert.equal(job.status, "review", job.summary);
+  assert.equal(serviceSawSpoof, false);
+  const images = job.candidates[0].artifacts.filter((a) => a.kind === "image");
+  assert.equal(images.length, 12);
+  assert.ok(
+    images.every(
+      (a) => a.normalized?.sourceSha256 === a.sha256 && !a.normalizationIssue,
+    ),
+  );
+  assert.ok(
+    job.candidates[0].artifacts
+      .filter((a) => a.kind !== "image")
+      .every((a) => !a.normalized && !a.normalizationIssue),
+  );
+});
+
+test("fresh model prepares legacy registered images while raw dependency hashes remain unchanged", async (t) => {
+  let ready = false;
+  const x = await setup(t, true, [0, 0, 0], (artifacts, workspace, root) =>
+    ready ? normalizedFixture(artifacts, workspace, root) : artifacts,
+  );
+  const split = await x.execute({ step: "separate", prompt: "split" }, true);
+  const raw = split.candidates[0].artifacts
+    .filter((a) => a.kind === "image")
+    .map((a) => ({ path: a.path, sha256: a.sha256 }));
+  assert.ok(split.candidates[0].artifacts.every((a) => !a.normalized));
+  ready = true;
+  const model = await x.execute({
+    step: "model",
+    role: "head",
+    prompt: "model",
+  });
+  assert.equal(model.status, "review", model.summary);
+  const saved = x.engine.get(x.w.id).jobs.find((j) => j.id === split.id)!;
+  assert.ok(
+    saved.candidates[0].artifacts
+      .filter((a) => a.kind === "image")
+      .every((a) => !!a.normalized),
+  );
+  for (const original of raw) {
+    const input = x.executor.calls
+      .at(-1)!
+      .inputs.find((a) => a.path === original.path)!;
+    assert.equal(input.sha256, original.sha256);
+    assert.equal(input.normalized?.sourceSha256, original.sha256);
+  }
+  assert.equal(model.dependencies.separate.jobId, split.id);
+});
+
+test("normalization issues allow photo review, block new model submission, and repair locally without a worker", async (t) => {
+  let ready = false;
+  const x = await setup(t, true, [0, 0, 0], (artifacts, workspace, root) =>
+    ready
+      ? normalizedFixture(artifacts, workspace, root)
+      : artifacts.map((a) =>
+          a.kind === "image"
+            ? { ...a, normalizationIssue: "Opaque background needs review" }
+            : a,
+        ),
+  );
+  const split = await x.execute({ step: "separate", prompt: "split" }, true);
+  assert.equal(split.status, "review");
+  const calls = x.executor.calls.length;
+  assert.throws(
+    () =>
+      x.engine.execute(
+        x.w.id,
+        { step: "model", prompt: "model", role: "head" },
+        { accepted: true, studioCreditLimit: 1000, imageCreditLimit: 0 },
+      ),
+    /크기·배경/,
+  );
+  assert.equal(x.executor.calls.length, calls);
+  ready = true;
+  const prepared = x.engine.action(x.project.id, {
+    kind: "normalize-images",
+    jobId: split.id,
+  });
+  const job = prepared.jobs.find((j) => j.id === split.id)!;
+  const img = job.candidates[0].artifacts.find((a) => a.kind === "image")!;
+  assert.equal(job.status, "review");
+  assert.equal(prepared.selections.separate.jobId, split.id);
+  assert.equal(x.executor.calls.length, calls);
+  fs.appendFileSync(
+    x.store.file(x.project.id, img.normalized!.path),
+    "tampered derivative",
+  );
+  assert.throws(() => x.engine.accept(x.w.id, split.id), /정리된 사진 파일/);
+  x.engine.action(x.project.id, { kind: "normalize-images", jobId: split.id });
+  x.engine.accept(x.w.id, split.id);
+  assert.equal(x.executor.calls.length, calls);
+  fs.appendFileSync(
+    x.store.file(x.project.id, img.path),
+    "tampered raw source",
+  );
+  assert.throws(
+    () =>
+      x.engine.action(x.project.id, {
+        kind: "normalize-images",
+        jobId: split.id,
+      }),
+    /기준 산출물이 변경/,
+  );
+});
+
+test("local normalization failures and invalid derived provenance never cause image regeneration", async (t) => {
+  for (const failure of ["throws", "source", "path", "metadata"] as const) {
+    const x = await setup(t, true, [0, 0, 0], (artifacts, workspace, root) => {
+      if (failure === "throws") throw new Error("Local canvas decoder failed");
+      const normalized = normalizedFixture(artifacts, workspace, root);
+      for (const a of normalized.filter((a) => a.kind === "image")) {
+        if (failure === "source") a.normalized!.sourceSha256 = "0".repeat(64);
+        if (failure === "path") a.normalized!.path = "../../outside.png";
+        if (failure === "metadata") a.sha256 = "0".repeat(64);
+      }
+      return normalized;
+    });
+    let recoveries = 0;
+    x.executor.recover = async (ctx) => {
+      recoveries++;
+      return x.executor.fixture(ctx);
+    };
+    const job = await x.execute({ step: "separate", prompt: "split" });
+    assert.equal(job.status, "review", failure + ": " + job.summary);
+    assert.equal(recoveries, 0);
+    assert.ok(
+      job.candidates[0].artifacts
+        .filter((a) => a.kind === "image")
+        .every((a) => !a.normalized && !!a.normalizationIssue),
+      failure,
+    );
+  }
+});
+
+test("normalized derivatives are copied and verified with project backups", async (t) => {
+  const x = await setup(t, true, [0, 0, 0], normalizedFixture);
+  const job = await x.execute({ step: "separate", prompt: "split" }, true);
+  const img = job.candidates[0].artifacts.find((a) => a.kind === "image")!;
+  const backup = path.join(x.root, "normalized-backup");
+  fs.cpSync(x.store.directory(x.project.id), backup, { recursive: true });
+  const other = new Store(path.join(x.root, "normalized-restored"));
+  await other.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));
+  t.after(() => other.db.close());
+  other.save(x.store.project(x.project.id));
+  const restored = new WorkbenchEngine(other, new MockExecutor());
+  restored.restoreFromBackup(x.project.id, backup);
+  assert.ok(fs.existsSync(other.file(x.project.id, img.normalized!.path)));
+  restored.accept(x.w.id, job.id);
+  fs.appendFileSync(path.join(backup, img.normalized!.path), "broken");
+  assert.throws(
+    () => restored.restoreFromBackup(x.project.id, backup),
+    /정리된 사진 파일/,
   );
 });

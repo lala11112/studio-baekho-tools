@@ -36,9 +36,35 @@ const visualKey = (name: string) =>
   name
     .toLowerCase()
     .replace(
-      /^(?:separate[-_:](?:head|hair|body)[:/]|(?:head|hair|body)[:/])\s*/,
+      /^(?:separate[-_:](?:head|hair|body)(?:[-_](?:front|back|left|right))?[:/]|(?:head|hair|body)[:/])\s*/,
       "",
     );
+const visualCategories: Record<
+  NonNullable<WorkbenchCheck["visualCategory"]>,
+  string
+> = {
+  alignment: "원본과 크기·정렬·비율을 확인해 주세요.",
+  alpha_edges: "투명 배경과 파츠 가장자리를 확인해 주세요.",
+  appearance: "원본과 외형이 같은지 확인해 주세요.",
+  view_consistency: "방향별 형태와 비율이 자연스럽게 이어지는지 확인해 주세요.",
+  semantic_isolation: "다른 파츠가 섞여 있는지 확인해 주세요.",
+};
+// Older workers invented view-specific labels for visual judgement. Compatibility is
+// deliberately limited to subjective image appearance, never file or geometry validity.
+const legacyViewObservation =
+  /^(front|back|left|right)(?:_view)?_(geometry|appearance|silhouette|anatomy|proportions)_(convincing|consistent|matches_reference)$/;
+const isVisualObservation = (check: WorkbenchCheck) => {
+  const key = visualKey(check.name);
+  if (check.visualCategory !== undefined)
+    return (
+      key === "visual_quality" &&
+      Object.hasOwn(visualCategories, check.visualCategory)
+    );
+  return (
+    Object.hasOwn(separationVisualChecks, key) ||
+    legacyViewObservation.test(key)
+  );
+};
 
 export function blocksWorkbenchCheck(
   step: WorkbenchStep,
@@ -47,15 +73,15 @@ export function blocksWorkbenchCheck(
   if (
     !check ||
     typeof check.name !== "string" ||
-    typeof check.passed !== "boolean"
+    typeof check.passed !== "boolean" ||
+    (check.detail !== undefined &&
+      (typeof check.detail !== "string" || check.detail.length > 600)) ||
+    (check.visualCategory !== undefined && !isVisualObservation(check))
   )
     return true;
   return (
     check.passed !== true &&
-    !(
-      step === "separate" &&
-      Object.hasOwn(separationVisualChecks, visualKey(check.name))
-    )
+    !(step === "separate" && isVisualObservation(check))
   );
 }
 
@@ -76,7 +102,23 @@ export function normalizeWorkbenchChecks(
 }
 
 export function workbenchCheckLabel(check: WorkbenchCheck): string {
-  return separationVisualChecks[visualKey(check.name)] ?? check.name;
+  const key = visualKey(check.name);
+  const legacyView = legacyViewObservation.exec(key);
+  const directionNames: Record<string, string> = {
+    front: "정면",
+    back: "후면",
+    left: "왼쪽",
+    right: "오른쪽",
+  };
+  const label =
+    check.visualCategory &&
+    Object.hasOwn(visualCategories, check.visualCategory)
+      ? visualCategories[check.visualCategory]
+      : (separationVisualChecks[key] ??
+        (legacyView
+          ? `${directionNames[legacyView[1]]} 사진의 형태·비율을 확인해 주세요.`
+          : check.name));
+  return check.detail?.trim() ? `${label} ${check.detail.trim()}` : label;
 }
 
 export function workbenchWarningMessages(
