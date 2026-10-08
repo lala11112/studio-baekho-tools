@@ -3,6 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { Store, uid } from "./store";
+import { parseJsonText } from "./json";
 import { CodexWorker, type ProductionWorker } from "./codex-worker";
 import type {
   ProductionArtifact,
@@ -347,7 +348,7 @@ function verifyFormat(
   if (kind === "report") {
     if (![".json", ".md", ".txt", ".html"].includes(ext))
       throw new Error("검증 보고서 형식 오류");
-    if (ext === ".json") JSON.parse(bytes.toString("utf8"));
+    if (ext === ".json") parseJsonText(bytes.toString("utf8"));
   } else if (kind === "image") {
     if (!(
       bytes
@@ -578,7 +579,7 @@ export class ProductionEngine {
     stage.dependsOn.forEach(visit);
     return run.stages.filter((item) => ids.has(item.id));
   }
-  private verifyArtifacts(
+  verifyArtifacts(
     run: ProductionRun,
     stage: ProductionStage,
     result: StageResult,
@@ -628,7 +629,7 @@ export class ProductionEngine {
       );
       if (!manifest)
         throw new Error("실제 애니메이션 이미지 시퀀스 manifest가 없습니다.");
-      const data = JSON.parse(
+      const data = parseJsonText(
         fs.readFileSync(within(run.workspace, manifest.path), "utf8"),
       );
       if (
@@ -677,7 +678,7 @@ export class ProductionEngine {
         throw new Error(
           "다방향 이미지 시퀀스의 실제 동기화 manifest가 없습니다.",
         );
-      const data = JSON.parse(
+      const data = parseJsonText(
         fs.readFileSync(within(run.workspace, manifest.path), "utf8"),
       );
       const sequences = this.ancestors(run, stage).filter(
@@ -703,7 +704,7 @@ export class ProductionEngine {
           throw new Error(
             `${view} 이미지 시퀀스의 동기화 근거가 불완전합니다.`,
           );
-        frameSets[view] = JSON.parse(
+        frameSets[view] = parseJsonText(
           fs.readFileSync(within(run.workspace, sequence.path), "utf8"),
         ).frames;
       }
@@ -796,7 +797,7 @@ export class ProductionEngine {
         const manifest = sequence.artifacts.find(
           (item) => path.basename(item.path) === "sequence-manifest.json",
         );
-        const frames = JSON.parse(
+        const frames = parseJsonText(
           fs.readFileSync(within(run.workspace, manifest!.path), "utf8"),
         ).frames as { path: string }[];
         for (const index of [

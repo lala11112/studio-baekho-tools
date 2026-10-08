@@ -48,7 +48,7 @@ import type {
 } from "../shared/types";
 import { Viewport } from "./Viewport";
 import { CropEditor } from "./CropEditor";
-import { ProductionDesk } from "./ProductionDesk";
+import { AssetWorkbench } from "./AssetWorkbench";
 import { catalog } from "../shared/catalog";
 import {
   TripoStudio,
@@ -57,7 +57,7 @@ import {
   canPreview,
 } from "./TripoStudio";
 const steps = [
-  ["production", "캐릭터 자동 제작", Workflow],
+  ["workbench", "단계별 에셋 제작", Workflow],
   ["studio", "Tripo 작업실", Sparkles],
   ["image", "이미지 스튜디오", ImagePlus],
   ["parts", "파츠 준비", Scissors],
@@ -187,7 +187,7 @@ export function App() {
   function open(p: Project) {
     setId(p.id);
     setPartId(p.parts[0]?.id ?? "");
-    setTab(p.demo ? "assembly" : "production");
+    setTab(p.demo ? "assembly" : "workbench");
     setPreview("");
   }
   async function request(r: Generation) {
@@ -265,14 +265,14 @@ export function App() {
         >
           <Folder size={18} /> 모든 프로젝트
         </button>
-        <div className="nav-label">제작 파이프라인</div>
+        <div className="nav-label">에셋 제작</div>
         <button
           disabled={!p}
-          onClick={() => setTab("production")}
-          className={`nav ${tab === "production" ? "selected" : ""}`}
+          onClick={() => setTab("workbench")}
+          className={`nav ${tab === "workbench" ? "selected" : ""}`}
         >
           <Workflow size={18} />
-          <span>캐릭터 자동 제작</span>
+          <span>단계별 에셋 제작</span>
         </button>
         <details
           className="manual-tools"
@@ -310,7 +310,7 @@ export function App() {
             />
           </button>
           <div className="version">
-            PROTOTYPE <span>v0.3.0</span>
+            PROTOTYPE <span>v0.4.0</span>
           </div>
         </div>
       </aside>
@@ -370,10 +370,7 @@ export function App() {
               <div>
                 <div className="eyebrow">YOUR CREATIVE WORKSPACE</div>
                 <h1>아이디어에서, 플레이 가능한 캐릭터로.</h1>
-                <p>
-                  캐릭터의 기준을 정하고, 반복되는 제작과 검수를 이어서
-                  실행하세요.
-                </p>
+                <p>이미지를 고르고, 파츠를 다듬고, 동작을 완성하세요.</p>
               </div>
               <button className="primary" onClick={() => setCreate(true)}>
                 <Plus size={17} /> 새 프로젝트
@@ -381,16 +378,17 @@ export function App() {
             </div>
             <div className="hero-card">
               <div>
-                <Badge tone="green">CHARACTER PRODUCTION</Badge>
+                <Badge tone="green">CHARACTER WORKBENCH</Badge>
                 <h2>
-                  원하는 모습을 정하고.
+                  원하는 모습을 고르고.
                   <br />
-                  제작은 이어서.
+                  단계마다 내 손으로.
                 </h2>
                 <p>
-                  이미지 분리부터 생성, 검수, 조립과 애니메이션까지.
+                  이미지와 모델 후보를 비교하고, 필요한 곳을 명령으로
+                  수정하세요.
                   <br />
-                  결과와 수정 이유를 남기며 필요한 부분만 다시 작업합니다.
+                  설정 · 실행 · 선택 · 수정. 다음 단계는 준비됐을 때.
                 </p>
                 <button
                   onClick={() => {
@@ -470,9 +468,9 @@ export function App() {
               </button>
             </div>
             <div className="footnote">
-              <CircleHelp size={16} /> 자동 제작은 Codex 작업자와 Tripo Studio
-              브라우저를 연결합니다. 영상 생성 연결과 실제 제작 검증은 별도
-              상태로 표시합니다.
+              <CircleHelp size={16} /> 이미지 생성 도구 · Tripo Studio · Blender
+              + Astra를 단계별로 연결합니다. 사용자가 결과를 채택한 뒤 다음
+              작업을 실행합니다.
             </div>
           </main>
         )}
@@ -524,11 +522,14 @@ export function App() {
                 )}
               </div>
             </div>
-            {tab === "production" && (
-              <ProductionDesk
+            {tab === "workbench" && (
+              <AssetWorkbench
                 key={p.id}
                 project={p}
-                runs={(state.productionRuns ?? []).filter(
+                workbench={(state.workbenches ?? []).find(
+                  (w) => w.projectId === p.id,
+                )}
+                legacyRuns={(state.productionRuns ?? []).filter(
                   (r) => r.projectId === p.id,
                 )}
                 run={run}
@@ -1564,7 +1565,7 @@ export function App() {
                 </div>
               </main>
             )}
-            {tab !== "production" && (
+            {tab !== "workbench" && (
               <JobPanel
                 p={p}
                 run={run}
@@ -1580,8 +1581,8 @@ export function App() {
             <span className="status-dot" /> 로컬 엔진 준비됨
           </span>
           <span>
-            {tab === "production"
-              ? "Codex 작업자 · Studio 브라우저"
+            {tab === "workbench"
+              ? "단계별 선택 · Blender + Astra"
               : state.key.configured
                 ? "Tripo API 키 설정됨 · 모델 접근 미검증"
                 : "Tripo API 미연결"}{" "}

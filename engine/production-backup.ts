@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { ProductionRun } from "../shared/production";
 import type { Store } from "./store";
+import { readJsonFile } from "./json";
 
 function hashFile(file: string) {
   const hash = createHash("sha256"),
@@ -134,9 +135,7 @@ export function restoreProductionArchives(
     };
     if (fs.statSync(path.join(sourceRoot, "run.json")).size > 5 * 1024 * 1024)
       throw Error("제작 기록이 너무 큽니다.");
-    const saved = runSchema.parse(
-      JSON.parse(fs.readFileSync(resolve("run.json"), "utf8")),
-    );
+    const saved = runSchema.parse(readJsonFile(resolve("run.json")));
     if (
       saved.id !== entry.name ||
       saved.projectId !== projectId ||

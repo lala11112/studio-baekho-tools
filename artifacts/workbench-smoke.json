@@ -1,0 +1,17 @@
+{
+  "passed": true,
+  "realElectron": true,
+  "mockExecutor": true,
+  "candidateSelection": true,
+  "manualStageGates": true,
+  "objectEdit": true,
+  "rigToggles": true,
+  "versionRevert": true,
+  "referenceGate": true,
+  "restartNoAutoRun": true,
+  "legacyAutoStartDisabled": true,
+  "workerCalls": 11,
+  "paidRequests": 0,
+  "actualCharacterQualityVerified": false,
+  "errors": []
+}

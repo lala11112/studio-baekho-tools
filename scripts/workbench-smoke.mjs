@@ -1,0 +1,332 @@
+/** Real Electron UI/IPC/store with an explicitly mocked authoring executor. No generation or paid requests. */
+import { _electron as electron } from "playwright";
+import electronPath from "electron";
+import { build } from "esbuild";
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import assert from "node:assert/strict";
+
+const root = process.cwd();
+const fixture = path.resolve(
+  "artifacts/runtime",
+  `workbench-ui-${randomUUID()}`,
+);
+const harness = path.join(fixture, "harness");
+const invocationPath = path.join(fixture, "calls.jsonl");
+fs.mkdirSync(path.join(harness, "dist-electron"), { recursive: true });
+fs.mkdirSync("artifacts/screenshots", { recursive: true });
+const old = fs.readFileSync("scripts/production-smoke.mjs", "utf8");
+const glbFunction = old
+  .slice(
+    old.indexOf("function tinyGlb()"),
+    old.indexOf("fs.writeFileSync(modelPath"),
+  )
+  .replace("function tinyGlb()", "function baseGlb()");
+const mockFile = path.join(fixture, "mock-executor.ts");
+fs.writeFileSync(
+  mockFile,
+  `import fs from 'node:fs'; import path from 'node:path'; import {nativeImage} from 'electron';
+${glbFunction}
+function tinyGlb(){
+  const original=baseGlb(),size=original.readUInt32LE(12),doc=JSON.parse(original.toString('utf8',20,20+size));
+  const bin=original.subarray(28+size),uv=Buffer.from(new Float32Array([0,0,1,0,0,1]).buffer);
+  const png=nativeImage.createFromBitmap(Buffer.from([90,120,180,255]),{width:1,height:1}).toPNG();
+  const binary=Buffer.concat([bin,uv,png,Buffer.alloc((4-png.length%4)%4)]);
+  const uvView=doc.bufferViews.length;doc.bufferViews.push({buffer:0,byteOffset:bin.length,byteLength:uv.length});
+  const uvIndex=doc.accessors.length;doc.accessors.push({bufferView:uvView,componentType:5126,count:3,type:'VEC2'});
+  const imageView=doc.bufferViews.length;doc.bufferViews.push({buffer:0,byteOffset:bin.length+uv.length,byteLength:png.length});
+  doc.images=[{bufferView:imageView,mimeType:'image/png'}];doc.textures=[{source:0}];doc.materials=[{pbrMetallicRoughness:{baseColorTexture:{index:0}}}];
+  doc.meshes[0].primitives[0].attributes.TEXCOORD_0=uvIndex;doc.meshes[0].primitives[0].material=0;doc.buffers[0].byteLength=binary.length;
+  const text=JSON.stringify(doc),json=Buffer.from(text.padEnd(Math.ceil(Buffer.byteLength(text)/4)*4,' '));
+  const out=Buffer.alloc(28+json.length+binary.length);out.write('glTF');out.writeUInt32LE(2,4);out.writeUInt32LE(out.length,8);out.writeUInt32LE(json.length,12);out.writeUInt32LE(0x4e4f534a,16);json.copy(out,20);out.writeUInt32LE(binary.length,20+json.length);out.writeUInt32LE(0x004e4942,24+json.length);binary.copy(out,28+json.length);return out;
+}
+export class CodexWorkbenchExecutor {
+  constructor() {} shutdown() {}
+  async probe(){return {codex:{available:true,authenticated:true},capabilities:{studio:true},message:'MOCK ONLY'};}
+  async execute(ctx,onProgress){
+    fs.appendFileSync(${JSON.stringify(invocationPath)},JSON.stringify(ctx.job.request)+'\\n');
+    onProgress('UI TEST: synthetic fixtures, no real generation');
+    await new Promise(r=>setTimeout(r,100));
+    const step=ctx.job.step; let count=0;
+    const write=(name,data,kind,role)=>{fs.writeFileSync(path.join(ctx.workspace,name),data);return {path:name,kind,...(role?{role}:{})};};
+    const pic=(role)=>{count++;const bytes=Buffer.alloc(32*32*4); for(let i=0;i<bytes.length;i+=4){bytes[i]=count*17;bytes[i+1]=100;bytes[i+2]=count*11;bytes[i+3]=255;}return write('MOCK-'+count+'.png',nativeImage.createFromBitmap(bytes,{width:32,height:32}).toPNG(),'image',role);};
+    const model=(i,role)=>{const bytes=tinyGlb();bytes.writeFloatLE(i+0.2,28+bytes.readUInt32LE(12));return write('MOCK-'+i+'.glb',bytes,'model',role);};
+    const objects=[{id:'body',name:'MOCK Body',category:'body',separate:true},{id:'coat',name:'MOCK Coat',category:'clothing',separate:true},{id:'hair',name:'MOCK Hair',category:'hair',separate:true}];
+    let candidates;
+    if(step==='concept') candidates=[0,1,2,3].map(i=>({id:'candidate-'+i,label:'MOCK image '+(i+1),artifacts:[pic()]}));
+    else if(step==='model') candidates=[0,1,2,3].map(i=>({id:'candidate-'+i,label:'MOCK model '+(i+1),artifacts:[model(i,ctx.job.request.role),pic()]}));
+    else {
+      let artifacts=[];
+      if(step==='separate') artifacts=['head','hair','body'].map(pic);
+      else if(step==='surface') artifacts=['head','hair','body'].map((r,i)=>model(i,r));
+      else if(['assembly','rig','animation'].includes(step)) artifacts=[model(5),pic(),write('MOCK.blend',Buffer.from('BLENDER-MOCK-UI-ONLY'),'blend')];
+      else if(step==='reference') {const frames=[0,1,2].map(time=>{const entries={time};for(const view of ['front','side','back']){const a=pic(view);artifacts.push(a);entries[view]=a.path;}return entries;});artifacts.push(write('frames.json',JSON.stringify({schemaVersion:1,motion:ctx.job.request.motion,duration:2,fps:12,camera:'fixed',frames}),'frames'));}
+      else artifacts=[write('export.fbx',Buffer.from('MOCK EXPORT'),'export'),write('report.json','{}','report')];
+      candidates=[{id:'version',label:'MOCK '+step,artifacts,objects}];
+    }
+    return {status:'completed',summary:'Explicit synthetic UI fixture: human review required.',candidates,checks:[{name:'MOCK fixture only',passed:true}]};
+  }
+}`,
+);
+await build({
+  entryPoints: ["electron/main.ts"],
+  outfile: path.join(harness, "dist-electron/main.cjs"),
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  external: ["electron", "sql.js"],
+  plugins: [
+    {
+      name: "mock-workbench-only",
+      setup(b) {
+        b.onResolve({ filter: /workbench-executor$/ }, () => ({
+          path: mockFile,
+        }));
+      },
+    },
+  ],
+});
+fs.copyFileSync(
+  "dist-electron/preload.cjs",
+  path.join(harness, "dist-electron/preload.cjs"),
+);
+fs.cpSync("dist", path.join(harness, "dist"), { recursive: true });
+fs.mkdirSync(path.join(harness, "node_modules/sql.js/dist"), {
+  recursive: true,
+});
+fs.copyFileSync(
+  "node_modules/sql.js/dist/sql-wasm.wasm",
+  path.join(harness, "node_modules/sql.js/dist/sql-wasm.wasm"),
+);
+fs.writeFileSync(
+  path.join(harness, "package.json"),
+  JSON.stringify({
+    name: "partsmith-guided-test",
+    version: "0.4.0",
+    main: "dist-electron/main.cjs",
+  }),
+);
+let app, page;
+const errors = [];
+const invocations = () =>
+  fs.existsSync(invocationPath)
+    ? fs
+        .readFileSync(invocationPath, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map(JSON.parse)
+    : [];
+async function launch() {
+  app = await electron.launch({
+    executablePath: electronPath,
+    args: [harness],
+    env: {
+      ...process.env,
+      PARTSMITH_DATA: path.join(fixture, "data"),
+      NODE_PATH: path.join(root, "node_modules"),
+    },
+  });
+  page = await app.firstWindow();
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.waitForSelector(".home");
+}
+const call = (c) => page.evaluate((c) => window.desktop.call(c), c);
+const state = () => call({ type: "state" });
+const approval = {
+  accepted: true,
+  studioCreditLimit: 1000,
+  imageCreditLimit: 0,
+};
+async function jobDone() {
+  for (let i = 0; i < 100; i++) {
+    const w = (await state()).workbenches[0];
+    const j = w?.jobs?.[0];
+    if (j && j.status !== "running") {
+      assert.equal(j.status, "review", j.summary);
+      return j;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw Error("Timed out waiting for mock action");
+}
+try {
+  await launch();
+  await page
+    .getByRole("button", { name: "새 프로젝트", exact: true })
+    .first()
+    .click();
+  await page
+    .locator(".modal input[type=text],.modal input:not([type])")
+    .first()
+    .fill("단계별 제작 검증 · MOCK");
+  await page
+    .getByRole("button", { name: "프로젝트 만들기", exact: true })
+    .click();
+  await page.getByTestId("workbench").waitFor();
+  const project = (await state()).projects[0];
+  assert.equal(invocations().length, 0);
+  await page
+    .getByTestId("workbench-concept-prompt")
+    .fill("MOCK UI test. Four distinct options, no real request.");
+  await page.getByTestId("workbench-approve").check();
+  await page.getByTestId("workbench-execute-concept").click();
+  await jobDone();
+  await page.getByTestId("workbench-candidate-3").waitFor();
+  assert.equal(invocations().length, 1);
+  assert.deepEqual((await state()).workbenches[0].selections, {});
+  await page.screenshot({
+    path: "artifacts/screenshots/workbench-mock-candidates.png",
+  });
+  await page.getByTestId("workbench-select-1").click();
+  const execute = async (request) => {
+    await call({
+      type: "workbench.action",
+      id: project.id,
+      action: { kind: "execute", request, approval },
+    });
+    return jobDone();
+  };
+  const accept = async (job) =>
+    call({
+      type: "workbench.action",
+      id: project.id,
+      action: { kind: "accept", jobId: job.id },
+    });
+  await page.getByTestId("workbench-step-parts").click();
+  await page.getByTestId("workbench-approve").check();
+  await page.getByTestId("workbench-execute-separate").click();
+  await jobDone();
+  await page.getByTestId("workbench-accept-separate").click();
+  assert.equal(
+    invocations().length,
+    2,
+    "Selecting separation must not generate models",
+  );
+  for (const role of ["head", "hair", "body"]) {
+    const j = await execute({
+      step: "model",
+      role,
+      prompt: "MOCK",
+      polygonCount: 6000,
+    });
+    assert.equal(j.candidates.length, 4);
+    await call({
+      type: "workbench.action",
+      id: project.id,
+      action: { kind: "select", jobId: j.id, candidateId: j.candidates[2].id },
+    });
+  }
+  await accept(await execute({ step: "surface", prompt: "MOCK" }));
+  const initial = await execute({ step: "assembly", prompt: "MOCK assemble" });
+  await accept(initial);
+  await page.getByTestId("workbench-step-assembly").click();
+  await page
+    .getByTestId("workbench-objects")
+    .getByRole("checkbox")
+    .last()
+    .check();
+  await page
+    .getByTestId("workbench-assembly-prompt")
+    .fill("MOCK: make selected hair shorter.");
+  await page.getByTestId("workbench-execute-assembly").click();
+  const edit = await jobDone();
+  assert.equal(edit.request.baseJobId, initial.id);
+  assert(edit.request.objectIds.length > 0);
+  await page.getByTestId("workbench-accept-assembly").click();
+  await page.screenshot({
+    path: "artifacts/screenshots/workbench-mock-assembly.png",
+  });
+  await call({
+    type: "workbench.action",
+    id: project.id,
+    action: { kind: "revert", jobId: initial.id },
+  });
+  assert.equal(
+    (await state()).workbenches[0].selections.assembly.jobId,
+    initial.id,
+  );
+  await page.getByTestId("workbench-step-rig").click();
+  await page
+    .getByTestId("workbench-rig-targets")
+    .getByRole("switch")
+    .nth(1)
+    .check();
+  await page.getByTestId("workbench-execute-rig").click();
+  const rig = await jobDone();
+  assert(rig.request.rigTargets.some((t) => t.extraBones));
+  assert(rig.request.rigTargets.some((t) => !t.extraBones));
+  await page.getByTestId("workbench-accept-rig").click();
+  await page.screenshot({
+    path: "artifacts/screenshots/workbench-mock-rig.png",
+  });
+  await assert.rejects(
+    () => execute({ step: "animation", motion: "wave", prompt: "MOCK" }),
+    /채택/,
+  );
+  const reference = await execute({
+    step: "reference",
+    motion: "wave",
+    prompt: "MOCK",
+    fps: 12,
+    duration: 2,
+  });
+  const before = invocations().length;
+  assert(!(await state()).workbenches[0].selections["reference:wave"]);
+  await accept(reference);
+  assert.equal(invocations().length, before);
+  await page.getByTestId("workbench-step-motion").click();
+  await page.getByTestId("workbench-motion-name").fill("wave");
+  await page.getByTestId("workbench-sequence").waitFor();
+  await page.getByLabel("참조 동작 시점").fill("1");
+  await page.getByAltText("정면 1.00초 동작").waitFor();
+  assert.equal(await page.getByTestId("workbench-sequence").locator("img").count(), 3);
+  await page.screenshot({ path: "artifacts/screenshots/workbench-mock-reference.png" });
+  await accept(
+    await execute({ step: "animation", motion: "wave", prompt: "MOCK author" }),
+  );
+  const count = invocations().length;
+  await app.close();
+  app = undefined;
+  await launch();
+  await page.locator(".project-card").first().click();
+  await page.getByTestId("workbench").waitFor();
+  assert.equal(invocations().length, count, "Restart must not call authoring");
+  assert((await state()).workbenches[0].selections["animation:wave"]);
+  await assert.rejects(
+    () =>
+      call({ type: "production.start", runId: "old", budgetAccepted: true }),
+    /이전 자동 제작/,
+  );
+  assert.deepEqual(errors, []);
+  fs.writeFileSync(
+    "artifacts/workbench-smoke.json",
+    JSON.stringify(
+      {
+        passed: true,
+        realElectron: true,
+        mockExecutor: true,
+        candidateSelection: true,
+        manualStageGates: true,
+        objectEdit: true,
+        rigToggles: true,
+        versionRevert: true,
+        referenceGate: true,
+        restartNoAutoRun: true,
+        legacyAutoStartDisabled: true,
+        workerCalls: count,
+        paidRequests: 0,
+        actualCharacterQualityVerified: false,
+        errors,
+      },
+      null,
+      2,
+    ),
+  );
+  console.log(
+    "Guided Electron smoke passed; mocked outputs, zero remote requests.",
+  );
+} finally {
+  if (app) await app.close();
+}

@@ -17,6 +17,9 @@ import { Store, uid } from "../engine/store";
 import { Engine } from "../engine/engine";
 import { ProductionEngine } from "../engine/production";
 import { restoreProductionArchives } from "../engine/production-backup";
+import { WorkbenchEngine } from "../engine/workbench";
+import { CodexWorkbenchExecutor } from "../engine/workbench-executor";
+import { parseJsonText, readJsonFile } from "../engine/json";
 import { CodexWorker } from "../engine/codex-worker";
 import { StudioBrowser } from "./studio-browser";
 import { Tripo } from "../engine/tripo";
@@ -44,6 +47,7 @@ let win: BrowserWindow;
 let store: Store;
 let engine: Engine;
 let production: ProductionEngine;
+let workbench: WorkbenchEngine;
 let studio: StudioBrowser;
 let local: LocalPipeline;
 let vault: Vault;
@@ -87,19 +91,65 @@ async function dispatch(c: Command): Promise<unknown> {
         catalog,
         dataDir: store.root,
         productionRuns: production.list(),
+        workbenches: workbench.list(),
       };
-    case "production.create":
-      return production.create(c.id, c.config);
-    case "production.start":
-      if (c.budgetAccepted !== true)
+    case "workbench.action":
+      return workbench.action(c.id, c.action);
+    case "workbench.probe":
+      return workbench.probe();
+    case "workbench.open":
+      return shell.openPath(store.directory(c.id));
+    case "workbench.recover-separation": {
+      const run = production.get(c.runId);
+      if (run.projectId !== c.id)
+        throw new Error("현재 프로젝트의 분리 결과만 복구할 수 있습니다.");
+      const stage = run.stages.find((item) => item.kind === "separate");
+      if (
+        !stage ||
+        !Number.isSafeInteger(c.attempt) ||
+        c.attempt < 1 ||
+        c.attempt > stage.attempt
+      )
+        throw new Error("복구할 분리 시도가 없습니다.");
+      const resultFile = path.join(
+        run.workspace,
+        `stages/${stage.id}/attempt-${c.attempt}/result.json`,
+      );
+      if (!fs.existsSync(resultFile))
         throw new Error(
-          "이번 제작의 입력·실행 범위와 크레딧 상한을 확인하세요.",
+          "해당 시도에는 완료 결과가 없습니다. 다른 시도를 선택하세요.",
         );
-      return production.start(c.runId);
+      const result = readJsonFile(resultFile);
+      if (result.status !== "completed")
+        throw new Error("완료된 분리 결과만 복구할 수 있습니다.");
+      const verified = production.verifyArtifacts(
+        run,
+        { ...stage, attempt: c.attempt },
+        result,
+      );
+      const session = workbench.getForProject(c.id) ?? workbench.create(c.id);
+      return workbench.importSeparation(session.id, {
+        sourceSha256: run.source.sha256,
+        artifacts: verified
+          .filter(
+            (a) =>
+              a.kind === "image" &&
+              ["head", "hair", "body"].includes(a.role ?? ""),
+          )
+          .map((a) => ({
+            file: path.join(run.workspace, a.path),
+            role: a.role as "head" | "hair" | "body",
+          })),
+      });
+    }
+    case "production.create":
+    case "production.start":
+    case "production.resume":
+      throw new Error(
+        "이전 자동 제작은 기록으로 보관합니다. 에셋 제작실에서 단계를 선택해 실행하세요.",
+      );
     case "production.pause":
       return production.pause(c.runId);
-    case "production.resume":
-      return production.resume(c.runId);
     case "production.cancel":
       return production.cancel(c.runId);
     case "production.open":
@@ -142,7 +192,7 @@ async function dispatch(c: Command): Promise<unknown> {
       const source = result.filePaths[0];
       if (fs.statSync(source).size > 10 * 1024 * 1024)
         throw new Error("프로젝트 파일이 너무 큽니다.");
-      const p = JSON.parse(fs.readFileSync(source, "utf8")) as Project;
+      const p = parseJsonText(fs.readFileSync(source, "utf8")) as Project;
       if (
         p.schemaVersion !== 1 ||
         !Array.isArray(p.assets) ||
@@ -210,7 +260,9 @@ async function dispatch(c: Command): Promise<unknown> {
         }
       p.unity = undefined;
       restoreProductionArchives(store, p.id, base);
-      return store.save(p);
+      store.save(p);
+      workbench.restoreFromBackup(p.id, base);
+      return p;
     }
     case "asset.import": {
       const result = await dialog.showOpenDialog(win, {
@@ -469,13 +521,24 @@ app.whenReady().then(async () => {
       local.previewModel(projectId, nativeRelative),
   );
   studio = new StudioBrowser();
-  production = new ProductionEngine(
+  const worker = new CodexWorker({
+    connectionFactory: (context) => studio.workerConnection(context),
+    probeConnections: () => studio.probeConnections(),
+    stageReceipt: (runId, stageId, attempt) =>
+      studio.stageReceipt(runId, stageId, attempt),
+  });
+  production = new ProductionEngine(store, worker);
+  workbench = new WorkbenchEngine(
     store,
-    new CodexWorker({
-      connectionFactory: (context) => studio.workerConnection(context),
-      probeConnections: () => studio.probeConnections(),
-      stageReceipt: (runId, stageId, attempt) =>
-        studio.stageReceipt(runId, stageId, attempt),
+    new CodexWorkbenchExecutor(worker, {
+      projectRoot: (id) => store.directory(id),
+      blenderPath: () => store.settings.blenderPath,
+      unityPath: (id) => store.project(id).unityPath,
+      unityEditorPath: () => store.settings.unityEditorPath,
+      checkpointRoot: path.join(root, "workbench-checkpoints"),
+      resourcesPath: app.isPackaged
+        ? path.join(process.resourcesPath, "integrations")
+        : path.join(app.getAppPath(), "integrations"),
     }),
   );
   protocol.handle("asset", async (request) => {
@@ -499,9 +562,27 @@ app.whenReady().then(async () => {
             ),
           ),
         );
+      const knownWorkbenchArtifact = workbench
+        .list(id)
+        .some((session) =>
+          session.jobs.some((job) =>
+            job.candidates.some((candidate) =>
+              candidate.artifacts.some(
+                (artifact) => store.file(id, artifact.path) === file,
+              ),
+            ),
+          ),
+        );
       if (
         !p.assets.some((a) => store.file(id, a.file) === file) &&
-        !knownProductionArtifact
+        !knownProductionArtifact &&
+        !knownWorkbenchArtifact
+      )
+        return new Response("", { status: 403 });
+      if (
+        !fs
+          .realpathSync(file)
+          .startsWith(fs.realpathSync(store.directory(id)) + path.sep)
       )
         return new Response("", { status: 403 });
       const response = await net.fetch(pathToFileURL(file).toString());
@@ -556,6 +637,7 @@ app.whenReady().then(async () => {
   app.on("before-quit", () => {
     clearInterval(timer);
     production.shutdown();
+    workbench.shutdown();
     studio.close();
   });
 });

@@ -184,6 +184,7 @@ export type Quote = {
 export type AppState = {
   projects: Project[];
   productionRuns?: import("./production").ProductionRun[];
+  workbenches?: import("./workbench").Workbench[];
   settings: Settings;
   key: { configured: boolean; storage: string };
   dataDir: string;
@@ -191,6 +192,19 @@ export type AppState = {
 };
 export type Command =
   | { type: "state" }
+  | {
+      type: "workbench.action";
+      id: string;
+      action: import("./workbench").WorkbenchAction;
+    }
+  | { type: "workbench.probe" }
+  | { type: "workbench.open"; id: string }
+  | {
+      type: "workbench.recover-separation";
+      id: string;
+      runId: string;
+      attempt: number;
+    }
   | {
       type: "production.create";
       id: string;

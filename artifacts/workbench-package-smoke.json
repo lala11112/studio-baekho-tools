@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "isPackaged": true,
+  "version": "0.4.0",
+  "isolatedStore": true,
+  "workbenchDefaultScreen": true,
+  "cliAvailable": true,
+  "chatgptLoginDetected": true,
+  "workerInferenceCalls": 0,
+  "paidRequests": 0,
+  "actualProductionVerified": false,
+  "errors": []
+}

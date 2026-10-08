@@ -340,7 +340,11 @@ export function Viewport({
       )}
       {error && <div className="viewport-error">{error}</div>}
       <div className="viewport-bottom">
-        <span>드래그 회전 · 휠 확대 · 더블클릭 파츠 선택</span>
+        <span>
+          {previewId
+            ? "드래그 회전 · 휠 확대"
+            : "드래그 회전 · 휠 확대 · 더블클릭 파츠 선택"}
+        </span>
         <span>Y ↑ · m</span>
       </div>
       {animation && clips.length > 0 && (

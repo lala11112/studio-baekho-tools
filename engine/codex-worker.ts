@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import { parseJsonText } from "./json";
 import type {
   ProductionProbe,
   ProductionRun,
@@ -31,6 +32,8 @@ export type WorkerTask = {
   stage: ProductionStage;
   prompt: string;
   imagePaths: string[];
+  /** Host-selected model for a specific user-requested authoring action. */
+  requestedModel?: "gpt-6-astra";
   /** Host-selected existing project folders, never supplied by worker output. */
   allowedWritePaths?: string[];
   schemaPath: string;
@@ -78,6 +81,14 @@ export function codexArguments(task: WorkerTask, extraArgs: string[] = []) {
     "workspace-write",
     "--config",
     'approval_policy="never"',
+    // Child jobs use built-in image tools and local Blender scripts. Keep the
+    // user's disabled integrations disabled without rewriting their config.
+    "--config",
+    "mcp_servers.blender.enabled=false",
+    "--config",
+    "mcp_servers.fal_ai.enabled=false",
+    "--config",
+    "mcp_servers.notion.enabled=false",
     "--skip-git-repo-check",
     "--cd",
     task.run.workspace,
@@ -86,8 +97,8 @@ export function codexArguments(task: WorkerTask, extraArgs: string[] = []) {
     "--output-last-message",
     task.resultPath,
   ];
-  if (task.stage.kind === "motion-transfer")
-    args.push("--model", "gpt-6-astra");
+  if (task.requestedModel || task.stage.kind === "motion-transfer")
+    args.push("--model", task.requestedModel ?? "gpt-6-astra");
   for (const directory of task.allowedWritePaths ?? [])
     args.push("--add-dir", directory);
   for (const file of task.imagePaths) args.push("--image", file);
@@ -291,6 +302,15 @@ export class CodexWorker implements ProductionWorker {
           failed = false,
           failure = "",
           settled = false;
+        const startedAt = Date.now();
+        let lastActivity = "작업자가 도구 연결을 확인하고 있습니다.";
+        const heartbeat = setInterval(() => {
+          if (!settled)
+            task.onEvent({
+              type: "worker.heartbeat",
+              message: `${lastActivity} · ${Math.floor((Date.now() - startedAt) / 1000)}초 경과`,
+            });
+        }, 15000);
         const log = fs.createWriteStream(
           path.join(path.dirname(task.resultPath), "codex-events.jsonl"),
           { flags: "a" },
@@ -299,6 +319,7 @@ export class CodexWorker implements ProductionWorker {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
+          clearInterval(heartbeat);
           task.signal.removeEventListener("abort", abort);
           this.active.delete(child);
           log.end();
@@ -313,7 +334,7 @@ export class CodexWorker implements ProductionWorker {
                   "Codex 완료 이벤트와 결과 파일이 모두 확인되지 않았습니다.",
               );
             resolve({
-              result: JSON.parse(fs.readFileSync(task.resultPath, "utf8")),
+              result: parseJsonText(fs.readFileSync(task.resultPath, "utf8")),
               threadId,
             });
           } catch (error) {
@@ -358,6 +379,20 @@ export class CodexWorker implements ProductionWorker {
             log.write(clean(line) + "\n");
             try {
               const event = JSON.parse(line);
+              if (event.type === "item.started") {
+                const item = event.item;
+                if (item?.type === "mcp_tool_call")
+                  lastActivity = `도구 실행 중: ${String(item.tool ?? item.tool_name ?? "연결 도구").slice(0, 100)}`;
+                else if (item?.type === "command_execution")
+                  lastActivity = "로컬 파일·Blender 작업을 실행하고 있습니다.";
+                else if (item?.type === "image_generation")
+                  lastActivity = "이미지를 생성하고 있습니다.";
+                else lastActivity = "작업자가 현재 단계를 처리하고 있습니다.";
+                task.onEvent({
+                  type: "worker.progress",
+                  message: lastActivity,
+                });
+              }
               if (
                 event.type === "thread.started" &&
                 typeof event.thread_id === "string"
@@ -379,11 +414,16 @@ export class CodexWorker implements ProductionWorker {
               if (
                 event.type === "item.completed" &&
                 event.item?.type === "agent_message"
-              )
+              ) {
+                lastActivity = clean(event.item.text ?? "작업 중").slice(
+                  0,
+                  300,
+                );
                 task.onEvent({
                   type: event.type,
                   message: clean(event.item.text ?? ""),
                 });
+              }
             } catch {
               /* Non-JSON diagnostics are never interpreted as control instructions. */
             }

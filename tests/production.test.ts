@@ -248,6 +248,21 @@ function saveRun(store: Store, run: ProductionRun) {
   store.put("production", run.id, run);
 }
 
+test("Windows UTF-8 BOM reports validate without rerunning generation; malformed JSON is still rejected", async () => {
+  const { engine, worker, run } = await setup();
+  const stage = { ...run.stages[0], attempt: 1 };
+  const result = worker.fixture({ run, stage } as WorkerTask);
+  const report = result.artifacts.find((a) => a.kind === "report")!;
+  const file = path.join(run.workspace, report.path);
+  const original = fs.readFileSync(file, "utf8");
+  fs.writeFileSync(file, "\uFEFF" + original);
+  const verified = (engine as any).verifyArtifacts(run, stage, result);
+  assert.equal(verified.length, result.artifacts.length);
+  assert.equal(worker.calls.length, 0);
+  fs.writeFileSync(file, "\uFEFF{broken");
+  assert.throws(() => (engine as any).verifyArtifacts(run, stage, result));
+});
+
 test("mock DAG automatically executes every stage serially with verified frames and Astra arguments; no video provider is required", async () => {
   const { engine, worker, run } = await setup();
   engine.start(run.id);

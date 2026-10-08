@@ -1,5 +1,18 @@
 # 메인 툴 연동 계약 v1
 
+## 0.4.0 단계별 제작 계약
+
+신규 기본 화면은 `shared/workbench.ts`의 Workbench 상태와 `engine/workbench.ts`를 사용합니다. `workbench.action`은 `execute/select/accept/revert/cancel/retry/retry-validation/import-source` 등 명시한 한 가지 동작만 수행합니다. 실행 완료 콜백은 다음 공정을 호출하지 않습니다. `AppState.workbenches`에 단계별 작업 버전·검증된 파일·입력 선택 계보가 제공됩니다.
+
+- `workbench.probe`: Codex 로그인과 도구 연결 조회, 생성 요청 없음.
+- `workbench.recover-separation`: 현재 프로젝트의 이전 분리 결과를 호스트에서 재검증하고 새 검토 버전으로 복사합니다. 현재 선택 이미지의 SHA가 이전 원본과 같아야 하며 재생성하지 않습니다.
+- `CodexWorkbenchExecutor`: 기존 ChatGPT CLI와 Studio 브라우저를 연결합니다. 조립·리깅·애니메이션에는 `gpt-6-astra`를 지정합니다. 파츠 분리·이미지·참조 프레임은 기존 이미지 생성 도구를 호출합니다.
+- Studio 크레딧은 현재 작업 단위의 고정 상한과 호스트 과금·다운로드 장부로 확인합니다. 완료한 UV/텍스처 하위 처리 결과는 사용자 데이터 폴더의 체크포인트에 해시와 함께 기록하고 같은 작업을 이어갈 때 재사용합니다. 불명확한 제출은 다시 클릭하지 않습니다.
+- Blender 파일은 호스트가 별도로 열어 실제 오브젝트 ID·메시·뼈·웨이트·포즈 채널을 검사합니다. 검사 결과는 예술적 품질 판정과 구분합니다.
+- 입력과 산출물은 프로젝트 상대 경로이며 작업마다 별도 폴더를 사용합니다. 상위 선택 변경은 의존 선택을 해제하고 이전 파일은 유지합니다. 백업에서 경로·해시를 검증한 등록 파일만 복원하며 작업을 자동 실행하지 않습니다.
+
+이전 `production.create/start/resume` IPC는 0.4.0에서 차단했습니다. 기존 자동 제작 코드는 이력의 산출물 검증·호환성 시험을 위해 남아 있습니다. 아래 API 수동 도구 계약도 계속 유지합니다.
+
 계약의 TypeScript 원본은 `shared/types.ts`입니다. 첫 버전은 서버 없이 프로세스 내부 호출을 사용합니다. 메인 툴의 기술이 결정되면 이 계약을 로컬 소켓/HTTP로 감싸되 인증·origin·요청 크기 제한을 추가해야 합니다. renderer에서 Node나 API 키를 직접 사용하지 않습니다.
 
 ## 계층
