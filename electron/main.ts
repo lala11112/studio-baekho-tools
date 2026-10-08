@@ -1,0 +1,478 @@
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  nativeImage,
+  net,
+  protocol,
+  shell,
+} from "electron";
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+import { z } from "zod";
+import { Store, uid } from "../engine/store";
+import { Engine } from "../engine/engine";
+import { Tripo } from "../engine/tripo";
+import { LocalPipeline } from "../engine/local";
+import { Vault } from "./vault";
+import { catalog } from "../shared/catalog";
+import type { Command, Project } from "../shared/types";
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "asset",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true,
+    },
+  },
+]);
+if (process.env.PARTSMITH_DATA)
+  app.setPath("userData", path.resolve(process.env.PARTSMITH_DATA));
+const lock = app.requestSingleInstanceLock();
+if (!lock) app.quit();
+let win: BrowserWindow;
+let store: Store;
+let engine: Engine;
+let local: LocalPipeline;
+let vault: Vault;
+const finite = z.number().finite();
+const vec = z.tuple([finite, finite, finite]);
+const transform = z.object({
+  position: vec,
+  rotation: vec,
+  scale: z.tuple([finite.positive(), finite.positive(), finite.positive()]),
+});
+const partPatch = z
+  .object({
+    name: z.string().trim().min(1).max(80).optional(),
+    role: z.enum(["body", "head", "hair", "other"]).optional(),
+    prompt: z.string().max(6000).optional(),
+    imageId: z.string().optional(),
+    selectedId: z.string().optional(),
+    locked: z.boolean().optional(),
+    visible: z.boolean().optional(),
+    occluded: z.boolean().optional(),
+    transform: transform.optional(),
+  })
+  .strict();
+const projectPatch = z
+  .object({
+    name: z.string().trim().min(1).max(100).optional(),
+    style: z.string().max(200).optional(),
+    height: finite.min(0.1).max(10).optional(),
+    unityPath: z.string().max(1024).optional(),
+    unityFolder: z.string().max(150).optional(),
+  })
+  .strict();
+async function dispatch(c: Command): Promise<unknown> {
+  if (!c || typeof c.type !== "string") throw new Error("잘못된 명령");
+  switch (c.type) {
+    case "state":
+      return {
+        projects: store.projects(),
+        settings: store.settings,
+        key: vault.info(),
+        catalog,
+        dataDir: store.root,
+      };
+    case "project.create":
+      return engine.create(c.name, !!c.demo);
+    case "project.update": {
+      const p = store.project(c.id),
+        patch = projectPatch.parse(c.patch);
+      Object.assign(p, patch);
+      return patch.height !== undefined ? engine.touch(p) : store.save(p);
+    }
+    case "project.export": {
+      const p = store.project(c.id);
+      const result = await dialog.showOpenDialog(win, {
+        properties: ["openDirectory", "createDirectory"],
+        title: "프로젝트 백업을 저장할 폴더",
+      });
+      if (result.canceled) return;
+      const dest = path.join(result.filePaths[0], `Partsmith-${p.id}`);
+      if (fs.existsSync(dest))
+        throw new Error("같은 백업 폴더가 있습니다. 다른 위치를 선택하세요.");
+      if (path.resolve(dest).startsWith(path.resolve(store.root) + path.sep))
+        throw new Error("앱 데이터 폴더 밖을 선택하세요.");
+      fs.cpSync(store.directory(p.id), dest, { recursive: true });
+      return dest;
+    }
+    case "project.open": {
+      const result = await dialog.showOpenDialog(win, {
+        filters: [{ name: "Partsmith 프로젝트", extensions: ["json"] }],
+        properties: ["openFile"],
+      });
+      if (result.canceled) return;
+      const source = result.filePaths[0];
+      if (fs.statSync(source).size > 10 * 1024 * 1024)
+        throw new Error("프로젝트 파일이 너무 큽니다.");
+      const p = JSON.parse(fs.readFileSync(source, "utf8")) as Project;
+      if (
+        p.schemaVersion !== 1 ||
+        !Array.isArray(p.assets) ||
+        !Array.isArray(p.parts) ||
+        !Array.isArray(p.jobs) ||
+        !Array.isArray(p.builds) ||
+        !Array.isArray(p.assemblies)
+      )
+        throw new Error("지원하지 않는 프로젝트 형식");
+      store.directory(p.id);
+      projectPatch.parse({
+        name: p.name,
+        style: p.style,
+        height: p.height,
+        unityPath: p.unityPath,
+        unityFolder: p.unityFolder,
+      });
+      for (const part of p.parts)
+        partPatch.parse({ name: part.name, transform: part.transform });
+      if (store.projects().some((x) => x.id === p.id))
+        throw new Error(
+          "이미 목록에 있는 프로젝트입니다. 목록에서 열어주세요.",
+        );
+      const base = path.dirname(source);
+      const files = new Set(p.assets.map((a) => a.file));
+      for (const b of p.builds) {
+        files.add(b.glb);
+        files.add(b.fbx);
+        files.add(b.blend);
+        files.add(b.report);
+        const relativeTextures = path.join(path.dirname(b.fbx), "textures");
+        store.file(p.id, relativeTextures);
+        const textures = path.resolve(base, relativeTextures);
+        if (textures.startsWith(base + path.sep) && fs.existsSync(textures))
+          for (const name of fs.readdirSync(textures))
+            if (/\.png$/i.test(name))
+              files.add(path.join(relativeTextures, name));
+      }
+      for (const f of files) {
+        store.file(p.id, f);
+        const src = path.resolve(base, f);
+        if (
+          !src.startsWith(base + path.sep) ||
+          !/\.(png|jpe?g|glb|fbx|blend|json)$/i.test(src)
+        )
+          throw new Error("잘못된 에셋 경로");
+        if (fs.existsSync(src)) store.write(p.id, f, fs.readFileSync(src));
+      }
+      for (const j of p.jobs)
+        if (["submitting", "queued"].includes(j.status)) {
+          j.status = "submission_unknown";
+          j.message = "백업 복원 · 원격 제출 여부 확인 필요";
+        }
+      p.unity = undefined;
+      return store.save(p);
+    }
+    case "asset.import": {
+      const result = await dialog.showOpenDialog(win, {
+        properties: ["openFile"],
+        filters: [
+          {
+            name: c.kind === "image" ? "이미지" : "GLB 모델",
+            extensions: c.kind === "image" ? ["png", "jpg", "jpeg"] : ["glb"],
+          },
+        ],
+      });
+      if (result.canceled) return;
+      return engine.importFile(c.id, result.filePaths[0], c.kind, c.partId);
+    }
+    case "image.select": {
+      const p = store.project(c.id);
+      if (!p.assets.some((a) => a.id === c.assetId && a.kind === "image"))
+        throw new Error("이미지 없음");
+      p.selectedImageId = c.assetId;
+      return engine.touch(p);
+    }
+    case "part.add": {
+      const p = store.project(c.id);
+      p.parts.push(engine.part(z.string().trim().min(1).max(80).parse(c.name)));
+      return engine.touch(p);
+    }
+    case "part.delete": {
+      const p = store.project(c.id);
+      if (p.parts.find((x) => x.id === c.partId)?.locked)
+        throw new Error("고정을 해제하세요.");
+      p.parts = p.parts.filter((x) => x.id !== c.partId);
+      return engine.touch(p);
+    }
+    case "part.update": {
+      const p = store.project(c.id),
+        part = p.parts.find((x) => x.id === c.partId);
+      if (!part) throw new Error("파츠 없음");
+      const patch = partPatch.parse(c.patch);
+      if (
+        part.locked &&
+        Object.keys(patch).some((k) => !["locked", "visible"].includes(k))
+      )
+        throw new Error("파츠 고정을 해제하세요.");
+      if (patch.selectedId && !part.candidates.includes(patch.selectedId))
+        throw new Error("이 파츠의 후보가 아닙니다.");
+      if (
+        patch.imageId &&
+        !p.assets.some((a) => a.id === patch.imageId && a.kind === "image")
+      )
+        throw new Error("이미지 없음");
+      Object.assign(part, patch);
+      return engine.touch(p);
+    }
+    case "part.crop": {
+      const p = store.project(c.id),
+        part = p.parts.find((x) => x.id === c.partId),
+        a = p.assets.find((x) => x.id === c.sourceId && x.kind === "image");
+      if (!a || !part || part.locked)
+        throw new Error("입력 이미지·파츠·잠금 상태를 확인하세요.");
+      const image = nativeImage.createFromPath(store.file(c.id, a.file));
+      const size = image.getSize();
+      const r = z
+        .object({
+          x: finite.min(0),
+          y: finite.min(0),
+          width: finite.positive(),
+          height: finite.positive(),
+        })
+        .parse(c.rect);
+      const rect = {
+        x: Math.floor(r.x),
+        y: Math.floor(r.y),
+        width: Math.floor(r.width),
+        height: Math.floor(r.height),
+      };
+      if (
+        rect.width < 14 ||
+        rect.height < 14 ||
+        rect.x + rect.width > size.width ||
+        rect.y + rect.height > size.height
+      )
+        throw new Error("이미지 안에서 14px 이상 영역을 선택하세요.");
+      let cropped = image.crop(rect);
+      if (c.polygon && c.polygon.length >= 3) {
+        const poly = z
+          .array(z.tuple([finite, finite]))
+          .min(3)
+          .max(200)
+          .parse(c.polygon);
+        const bitmap = cropped.toBitmap();
+        for (let y = 0; y < rect.height; y++)
+          for (let x = 0; x < rect.width; x++) {
+            let inside = false;
+            for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+              const [xi, yi] = poly[i],
+                [xj, yj] = poly[j];
+              if (
+                yi > y + rect.y !== yj > y + rect.y &&
+                x + rect.x < ((xj - xi) * (y + rect.y - yi)) / (yj - yi) + xi
+              )
+                inside = !inside;
+            }
+            if (!inside) bitmap[(y * rect.width + x) * 4 + 3] = 0;
+          }
+        cropped = nativeImage.createFromBitmap(bitmap, {
+          width: rect.width,
+          height: rect.height,
+        });
+      }
+      const file = `assets/${uid()}.png`;
+      store.write(c.id, file, cropped.toPNG());
+      const asset = engine.asset(
+        p,
+        file,
+        "image",
+        `${part.name} · 수동 영역`,
+        "crop",
+        { parentId: a.id },
+      );
+      part.imageId = asset.id;
+      part.occluded = true;
+      engine.touch(p);
+      return asset;
+    }
+    case "assembly.save": {
+      const p = store.project(c.id);
+      p.assemblies.push({
+        id: uid(),
+        name: c.name.slice(0, 100) || `조합 ${p.assemblies.length + 1}`,
+        createdAt: new Date().toISOString(),
+        parts: structuredClone(p.parts),
+      });
+      return store.save(p);
+    }
+    case "assembly.restore": {
+      const p = store.project(c.id),
+        a = p.assemblies.find((x) => x.id === c.assemblyId);
+      if (!a) throw new Error("조합 없음");
+      p.parts = structuredClone(a.parts);
+      return engine.touch(p);
+    }
+    case "generation.quote":
+      return engine.quote(c.id, c.request);
+    case "generation.approve":
+      return engine.approve(c.quoteId, c.unknownCostAccepted);
+    case "job.poll":
+      return engine.poll(c.id, c.jobId);
+    case "job.cancel":
+      return engine.cancel(c.id, c.jobId);
+    case "job.reconcile":
+      return engine.reconcile(c.id, c.jobId, c.remoteId);
+    case "settings.update":
+      if (
+        c.settings.tripoRegion &&
+        c.settings.tripoRegion !== store.settings.tripoRegion &&
+        store
+          .projects()
+          .some((p) =>
+            p.jobs.some((j) =>
+              [
+                "queued",
+                "submitting",
+                "running",
+                "paused",
+                "submission_unknown",
+              ].includes(j.status),
+            ),
+          )
+      )
+        throw new Error(
+          "진행 중이거나 제출 확인이 필요한 작업이 있어 연결 지역을 변경할 수 없습니다.",
+        );
+      store.settings = z
+        .object({
+          tripoRegion: z
+            .enum(["international", "china"])
+            .default("international"),
+          blenderPath: z.string().max(1024),
+          unityPath: z.string().max(1024),
+          unityEditorPath: z.string().max(1024),
+        })
+        .strict()
+        .parse(c.settings);
+      return store.settings;
+    case "settings.probe":
+      return local.probe();
+    case "key.save":
+      return vault.save(c.key);
+    case "key.delete":
+      return vault.delete();
+    case "key.check":
+      return engine.tripo.balance();
+    case "blender.build":
+      return local.build(c.id, c.mode, c.assetId);
+    case "blender.open": {
+      const p = store.project(c.id),
+        b = p.builds.find((x) => x.id === c.buildId);
+      if (!b) throw new Error("Blender 파일 없음");
+      const process = spawn(
+        store.settings.blenderPath,
+        [store.file(c.id, b.blend)],
+        { detached: true, stdio: "ignore", windowsHide: true, shell: false },
+      );
+      process.on("error", () => {});
+      process.unref();
+      return true;
+    }
+    case "unity.install":
+      return local.install(c.id);
+    case "unity.import":
+      return local.importUnity(c.id, c.buildId);
+    case "unity.result":
+      return local.result(c.id);
+    case "folder.open":
+      return shell.openPath(c.id ? store.directory(c.id) : store.root);
+    default:
+      throw new Error("허용되지 않은 명령");
+  }
+}
+app.whenReady().then(async () => {
+  const root = app.getPath("userData");
+  store = new Store(root);
+  await store.open(
+    path.join(app.getAppPath(), "node_modules/sql.js/dist/sql-wasm.wasm"),
+  );
+  vault = new Vault(root);
+  engine = new Engine(
+    store,
+    new Tripo(
+      () => vault.get(),
+      fetch,
+      () => store.settings.tripoRegion,
+    ),
+  );
+  local = new LocalPipeline(
+    store,
+    app.isPackaged
+      ? path.join(process.resourcesPath, "integrations")
+      : path.join(app.getAppPath(), "integrations"),
+  );
+  protocol.handle("asset", async (request) => {
+    try {
+      const u = new URL(request.url);
+      if (u.hostname !== "project") return new Response("", { status: 403 });
+      const [id, ...parts] = u.pathname
+        .slice(1)
+        .split("/")
+        .map(decodeURIComponent);
+      const file = store.file(id, parts.join("/"));
+      const p = store.project(id);
+      if (!p.assets.some((a) => store.file(id, a.file) === file))
+        return new Response("", { status: 403 });
+      const response = await net.fetch(pathToFileURL(file).toString());
+      const headers = new Headers(response.headers);
+      headers.set("Access-Control-Allow-Origin", "*");
+      return new Response(response.body, { status: response.status, headers });
+    } catch {
+      return new Response("", { status: 404 });
+    }
+  });
+  win = new BrowserWindow({
+    width: 1440,
+    height: 900,
+    minWidth: 1080,
+    minHeight: 720,
+    backgroundColor: "#101213",
+    title: "Partsmith · 캐릭터 제작실",
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (e) => e.preventDefault());
+  win.webContents.session.setPermissionRequestHandler((_w, _p, cb) =>
+    cb(false),
+  );
+  ipcMain.handle("partsmith:command", async (event, c) => {
+    if (
+      event.sender !== win.webContents ||
+      event.senderFrame !== win.webContents.mainFrame
+    )
+      return { ok: false, error: "허용되지 않은 호출자" };
+    try {
+      return { ok: true, value: await dispatch(c) };
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : "작업 실패";
+      return {
+        ok: false,
+        error: vault.get() ? raw.split(vault.get()).join("[REDACTED]") : raw,
+      };
+    }
+  });
+  if (process.env.PARTSMITH_DEV) await win.loadURL("http://127.0.0.1:5173");
+  else await win.loadFile(path.join(__dirname, "../dist/index.html"));
+  const timer = setInterval(() => void engine.pollActive(), 10000);
+  app.on("before-quit", () => clearInterval(timer));
+});
+app.on("second-instance", () => {
+  win?.show();
+  win?.focus();
+});
+app.on("window-all-closed", () => app.quit());

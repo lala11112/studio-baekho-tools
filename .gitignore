@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.local/
+artifacts/runtime/
+*.log
+*.key
+*.db
+*.db.*
+.env
+.env.*
+!.env.example
+Thumbs.db
+.DS_Store

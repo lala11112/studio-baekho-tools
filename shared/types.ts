@@ -1,0 +1,222 @@
+export type Vec3 = [number, number, number];
+export type Transform = { position: Vec3; rotation: Vec3; scale: Vec3 };
+export const identity = (): Transform => ({
+  position: [0, 0, 0],
+  rotation: [0, 0, 0],
+  scale: [1, 1, 1],
+});
+export type Asset = {
+  id: string;
+  file: string;
+  kind: "image" | "model";
+  label: string;
+  origin: "import" | "tripo" | "demo" | "crop" | "blender";
+  parentId?: string;
+  jobId?: string;
+  createdAt: string;
+  prompt?: string;
+};
+export type Part = {
+  id: string;
+  name: string;
+  role: "body" | "head" | "hair" | "other";
+  prompt: string;
+  imageId?: string;
+  candidates: string[];
+  selectedId?: string;
+  locked: boolean;
+  visible: boolean;
+  transform: Transform;
+  occluded: boolean;
+};
+export type JobKind =
+  "image" | "edit" | "model" | "rig-check" | "rig" | "animate";
+export type JobStatus =
+  | "queued"
+  | "submitting"
+  | "running"
+  | "success"
+  | "failed"
+  | "submission_unknown"
+  | "paused"
+  | "cancelled"
+  | "cancelled_local";
+export type Generation = {
+  kind: JobKind;
+  prompt: string;
+  model: string;
+  size?: string;
+  count: number;
+  partId?: string;
+  sourceId?: string;
+  sourceTaskId?: string;
+  animation?: string;
+};
+export type Job = {
+  id: string;
+  quoteId: string;
+  kind: JobKind;
+  status: JobStatus;
+  progress: number;
+  remoteId?: string;
+  request: Generation;
+  createdAt: string;
+  message?: string;
+  credits?: number;
+  output?: Record<string, unknown>;
+  assetId?: string;
+  revision: number;
+};
+export type Assembly = {
+  id: string;
+  name: string;
+  createdAt: string;
+  parts: Part[];
+};
+export type BuildResult = {
+  id: string;
+  revision: number;
+  mode: string;
+  glb: string;
+  fbx: string;
+  blend: string;
+  report: string;
+  warnings: string[];
+  hasRig: boolean;
+  clips: string[];
+};
+export type UnityResult = {
+  requestId: string;
+  status: string;
+  avatarValid: boolean;
+  avatarHuman: boolean;
+  prefabPath: string;
+  userPrefabPath: string;
+  scenePath: string;
+  clips: string[];
+  playbackVerified: boolean;
+  runtimePlayModeVerified?: boolean;
+  runtimeClips?: string[];
+  runtimeMovingClips?: string[];
+  warnings: string[];
+  errors: string[];
+  unityVersion?: string;
+  pipeline?: string;
+  revision: number;
+  guid?: string;
+};
+export type Project = {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  style: string;
+  height: number;
+  unityPath: string;
+  unityFolder: string;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+  assets: Asset[];
+  selectedImageId?: string;
+  parts: Part[];
+  jobs: Job[];
+  assemblies: Assembly[];
+  builds: BuildResult[];
+  unity?: UnityResult;
+  demo: boolean;
+};
+export type Settings = {
+  tripoRegion: "international" | "china";
+  blenderPath: string;
+  unityPath: string;
+  unityEditorPath: string;
+};
+export type Quote = {
+  id: string;
+  projectId: string;
+  request: Generation;
+  revision: number;
+  expiresAt: number;
+  estimatedCredits: number | null;
+  costSource: string;
+  inputSummary: string;
+  consumed: boolean;
+};
+export type AppState = {
+  projects: Project[];
+  settings: Settings;
+  key: { configured: boolean; storage: string };
+  dataDir: string;
+  catalog: typeof import("./catalog").catalog;
+};
+export type Command =
+  | { type: "state" }
+  | { type: "project.create"; name: string; demo?: boolean }
+  | {
+      type: "project.update";
+      id: string;
+      patch: Partial<
+        Pick<Project, "name" | "style" | "height" | "unityPath" | "unityFolder">
+      >;
+    }
+  | { type: "project.export"; id: string }
+  | { type: "project.open" }
+  | {
+      type: "asset.import";
+      id: string;
+      kind: "image" | "model";
+      partId?: string;
+    }
+  | { type: "image.select"; id: string; assetId: string }
+  | { type: "part.add"; id: string; name: string }
+  | { type: "part.delete"; id: string; partId: string }
+  | {
+      type: "part.update";
+      id: string;
+      partId: string;
+      patch: Partial<Omit<Part, "id" | "candidates">>;
+    }
+  | {
+      type: "part.crop";
+      id: string;
+      partId: string;
+      sourceId: string;
+      rect: { x: number; y: number; width: number; height: number };
+      polygon?: [number, number][];
+    }
+  | { type: "assembly.save"; id: string; name: string }
+  | { type: "assembly.restore"; id: string; assemblyId: string }
+  | { type: "generation.quote"; id: string; request: Generation }
+  | {
+      type: "generation.approve";
+      quoteId: string;
+      unknownCostAccepted: boolean;
+    }
+  | { type: "job.poll"; id: string; jobId: string }
+  | { type: "job.cancel"; id: string; jobId: string }
+  | { type: "job.reconcile"; id: string; jobId: string; remoteId: string }
+  | { type: "settings.update"; settings: Settings }
+  | { type: "settings.probe" }
+  | { type: "key.save"; key: string }
+  | { type: "key.delete" }
+  | { type: "key.check" }
+  | {
+      type: "blender.build";
+      id: string;
+      mode: "assemble" | "demo-rig" | "convert";
+      assetId?: string;
+    }
+  | { type: "blender.open"; id: string; buildId: string }
+  | { type: "unity.install"; id: string }
+  | { type: "unity.import"; id: string; buildId: string }
+  | { type: "unity.result"; id: string }
+  | { type: "folder.open"; id?: string };
+export interface DesktopApi {
+  call<T = unknown>(command: Command): Promise<T>;
+  assetUrl(projectId: string, file: string): string;
+}
+declare global {
+  interface Window {
+    desktop: DesktopApi;
+  }
+}

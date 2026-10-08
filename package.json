@@ -1,0 +1,65 @@
+{
+  "name": "partsmith",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Local character production workbench for Unity",
+  "author": "Partsmith",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc --noEmit && vite build && node scripts/build.mjs",
+    "start": "electron .",
+    "test": "tsx --test tests/*.test.ts",
+    "test:ui": "node scripts/smoke.mjs",
+    "package": "npm run build && electron-builder --win dir"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "sql.js": "^1.13.0",
+    "three": "^0.180.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/sql.js": "^1.4.9",
+    "@types/three": "^0.180.0",
+    "@vitejs/plugin-react": "5.0.4",
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.55.0",
+    "prettier": "3.9.9",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "7.3.7"
+  },
+  "build": {
+    "appId": "local.partsmith.app",
+    "productName": "Partsmith",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "node_modules/sql.js/dist/sql-wasm.wasm",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "integrations",
+        "to": "integrations"
+      }
+    ],
+    "win": {
+      "target": "dir",
+      "signAndEditExecutable": false
+    }
+  }
+}
