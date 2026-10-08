@@ -1,0 +1,11 @@
+# Design authoring session metadata, not teammate documentation
+/design/figma-state.json
+/design/verification-status.json
+
+# Local environment and generated caches
+.env
+.env.*
+!.env.example
+__pycache__/
+.DS_Store
+Thumbs.db
