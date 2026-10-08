@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "checks": [
+    "Observed controls, editable prompts, native select, stale IDs and workspace-only file upload",
+    "Normal click cannot charge; displayed-cost match and durable single-attempt reservation enforced",
+    "Native Electron download persisted with run/stage lineage and SHA256",
+    "Authenticated loopback and real child stdio MCP initialize/tools-list/tools-call round trip",
+    "Combined Sign up/Log in and password page halts worker for user input"
+  ],
+  "workspace": "C:\\Users\\김민준\\Desktop\\3D tool\\artifacts\\runtime\\studio-browser-smoke\\20cd9e54-fba5-4c38-a8b7-0c8b553cd423",
+  "actualStudio": false,
+  "packagedMcp": true,
+  "mcpExecutable": "C:\\Users\\김민준\\Desktop\\3D tool\\release\\0.3.0\\win-unpacked\\Partsmith.exe",
+  "mcpEntry": "C:\\Users\\김민준\\Desktop\\3D tool\\release\\0.3.0\\win-unpacked\\resources\\app.asar\\dist-electron\\production-mcp.cjs",
+  "browserHost": "offline development fixture",
+  "realPaidCalls": 0,
+  "fixtureCreditsReserved": 100
+}

@@ -3,8 +3,9 @@
 ## Repository and branch
 - This checkout is `https://github.com/lala11112/studio-baekho-tools`.
 - Continue this project on branch `Auto-3D-Tool`. Preserve other branches and unrelated work.
-- Partsmith is the Windows client for Tripo production tasks. The client collects inputs/options, submits to official Tripo APIs, tracks existing jobs, downloads results, and connects them to Blender/Unity. Do not present local demo models or substitute algorithms as Tripo output.
-- Treat Smart Mesh P2 as the requested default. It is Preview in the official v3 API; keep account entitlement and actual paid-generation verification distinct from documented support. Offer P1/HD as manual alternatives, never silently resubmit using another model. Verify endpoint support before claiming parity with a Tripo Studio feature.
+- Partsmith automates the whole character production workflow, not a recreation of Tripo's controls. Primary flow: front image → semantic body/head/hair separation → Tripo Studio generation and visual checks → UV/textures → Blender assembly/refinement → final UV/textures and rig → synchronized multiview 2D animation image sequences → Codex Astra creates and inspects Blender 3D animation → Unity validation. Keep existing API tools as advanced manual tools.
+- The user's latest animation requirement is multiview 2D animated images/frames, not mandatory video input or a motion-capture service. Use front/side/back frames and explicit timing. Select `gpt-6-astra` for the 3D animation worker as requested; other workers retain the user's configured default. Never silently replace Astra, reference frames, or authored motion with preset Idle/Walk.
+- Treat Smart Mesh P2 in Tripo Studio as the requested default. API P2 Preview support and Studio capabilities are separate. Never silently switch generation models or replay ambiguous submissions. Do not present local demos, task queues, worker-reported checks, or mocked tests as proof of completed high-quality AI production.
 
 ## Development record — explicit user instruction
 - At the end of every completed work item, update the existing Notion page **게임 개발(종합) → Auto-3D-Tool 개발 기록**.
@@ -19,7 +20,7 @@
 ## Credentials and paid requests
 - Never put API keys, decrypted credential values, or authentication headers in source control, logs, screenshots, Notion, or chat.
 - Keep DPAPI credentials in the application's existing user data directory.
-- Every paid Tripo operation must use the app's reviewed approval flow. Do not retry ambiguous POST submissions automatically.
+- Every paid operation must fit an explicit approved scope. API manual tools use per-request approval. Automatic Studio work uses a frozen run budget, observed cost, durable pre-click journal, and bounded stage attempts. Do not retry ambiguous submissions automatically.
 - International API: `https://openapi.tripo3d.ai/v3`; China API: `https://openapi.tripo3d.com/v3`. Match the key's account region.
 
 ## Integrations preference

@@ -1,6 +1,33 @@
-# Partsmith 0.1.1 검증 결과
+# Partsmith 검증 결과
 
 검증일: 2026-10-08, Windows. 실제 API 생성과 로컬 데모 검증을 구분합니다.
+
+## 0.3.0 — 자동 제작 실행기와 Codex Astra
+
+방향을 수정했습니다. 앱의 중심은 Tripo 기능별 화면에서 전체 캐릭터 제작의 실행·검수·재작업으로 바뀝니다. 최신 애니메이션 요구는 **멀티뷰 2D 애니메이션 이미지 시퀀스 → Codex Astra의 Blender 포즈·키프레임·보간 제작**입니다. 영상 서비스나 모션 캡처를 필수 입력으로 두지 않습니다.
+
+- 실제 Codex CLI 0.153.4: 저장된 ChatGPT 로그인으로 기본 작업자와 `--model gpt-6-astra` 작업자를 각각 실행했습니다. 두 실행에서 실제 `turn.completed`와 구조화된 결과 파일을 확인했습니다. Astra는 제공된 도구 목록에 `image_gen__imagegen`이 있다고 보고했습니다. **이미지 생성 도구 자체를 호출하거나 캐릭터를 만든 시험은 아닙니다.**
+- `npm test`: **43/43 통과**. 신규 제작 엔진 12개, 보관용 제작 백업 2개, Studio 정책 4개 및 기존 25개 회귀 테스트입니다. 승인 우회·입력 변경·동시 실행·한도·재시작·확정 결과 재작업·모호한 제출 차단, 일시정지 직후 기록된 과금 재확인, 유효하지 않은 메시·리그·애니메이션, 단일 이미지·같은 이미지 복제·잘못된 프레임 시간 대응 거부를 포함합니다. 엔진의 생성물과 영수증은 모의 데이터입니다.
+- `scripts/production-smoke.mjs`: 실제 Electron UI·IPC·SQLite·제작 실행기, 테스트 번들에서만 모의 Codex 작업자/Studio 영수증을 사용합니다. 19개 공정의 자동 진행, 승인·일시정지·재시작 무재제출·재개, 이미지/GLB 제공을 확인했습니다. 단일 이미지와 `checks=true`만 제출한 애니메이션 참조는 이미지 시퀀스 누락으로 `needs_input`이 되며 Astra·Unity 단계가 실행되지 않습니다. 보고서: `artifacts/production-smoke.json`.
+- `scripts/studio-browser-smoke.ts`: 실제 Electron과 로컬 테스트 웹페이지에서 관찰한 요소 클릭·입력·선택·업로드, 비용 기록 후 실제 클릭, 다운로드 SHA·호스트 영수증, MCP 초기화, 로그인 화면 중단을 검사했습니다. 도메인·경로·중복 제출·변조된 다운로드 사본을 함께 검사합니다. **실제 Studio 계정이나 유료 생성 시험은 아닙니다.** 보고서: `artifacts/studio-browser-smoke.json`.
+- 기존 `npm run test:ui`: 실제 Electron, renderer 격리, 로컬 Blender 마네킹, GLB·클립 재생, 재시작 검증 통과. 이 결과는 신규 Astra 제작 품질과 구분합니다.
+- 최종 Windows 0.3.0 패키지 생성 성공. `scripts/production-package-smoke.mjs`에서 실제 EXE의 버전·SQLite·자동 제작 기본 화면·Codex 로그인 조회를 확인했습니다. `scripts/studio-browser-smoke.ts`는 패키지 내부 MCP 프로세스의 초기화·도구 목록·`studio_status`를 로컬 fixture에 연결해 검증했습니다. 보고서: `artifacts/production-package-smoke.json`, `artifacts/studio-browser-smoke-packaged.json`. 실제 생성 요청은 0회입니다.
+- 제작 백업 복원은 검증된 파일의 경로·해시를 검사해 보관용으로 복원합니다. 실행 승인·활성 상태를 복원하지 않습니다. Markdown 보고서 복원도 확인했습니다. 신규 제작 이력 백업의 전체 UI 복원 시험은 아직 수행하지 않았습니다.
+
+발견·수정한 문제: 기능별 버튼만 있던 흐름에 실행기가 없었음, 유료 제출 전 실패까지 불명확 제출로 처리하던 복구 문제, 승인 범위 내 재작업을 불필요하게 막던 문제, 동시에 시작한 실행이 하나의 Studio 브라우저를 공유하던 문제, 첫 브라우저 프레임 전 캡처 실패, 숨겨진 CAPTCHA iframe의 오탐, 작업자 보고만으로 표시되는 초록 체크, 재시작 후 기준 입력란의 기본값 회귀, 큰 백업을 한꺼번에 메모리에 보관하던 문제를 수정했습니다.
+
+**미검증 범위:** 실제 파츠 분리·복원 이미지, Studio P2·Smart UV·텍스처·리깅, 캐릭터의 멀티뷰 이미지 시퀀스, Astra가 만든 동작의 자연스러움과 접지, 해당 결과의 Unity 종단 검증. 파일·해시·애니메이션 채널 검사는 시각 품질을 보장하지 않습니다. 정상 DOM 컨트롤을 통한 Studio 조작을 제공하며 임의 캔버스 드래그 도구는 없습니다. 로그인·CAPTCHA·지원하지 않는 조작·모호한 과금은 입력 필요 상태로 멈춥니다. 기본 통합 및 사용자 추가 MCP 설정은 바꾸지 않았습니다.
+
+불명확한 원격 제출을 Studio 기록과 대조한 뒤 잠금을 해제하는 복구 UI는 아직 없습니다. 해당 실행은 잠금을 유지합니다. 과금 전 실패로 확인된 단계는 재개할 수 있습니다. Unity 단계는 실제 `Assets`·`ProjectSettings`가 있는 설정된 프로젝트만 쓰기 범위에 추가하고 기존 Partsmith Unity 브리지를 사용합니다. 브리지 또는 프로젝트가 준비되지 않으면 입력 필요 상태로 멈춥니다.
+
+```powershell
+npm run build
+npm test
+node scripts/production-smoke.mjs
+npx tsx scripts/studio-browser-smoke.ts
+```
+
+아래는 기존 버전의 검증 이력이며 신규 자동 제작의 성공을 대신하지 않습니다.
 
 ## 실행 환경과 결과물
 

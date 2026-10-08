@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "isPackaged": true,
+  "version": "0.3.0",
+  "isolatedStore": true,
+  "productionDefaultScreen": true,
+  "cliAvailable": true,
+  "chatgptLoginDetected": true,
+  "workerInferenceCalls": 0,
+  "paidRequests": 0,
+  "actualProductionVerified": false,
+  "errors": []
+}

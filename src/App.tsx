@@ -48,6 +48,7 @@ import type {
 } from "../shared/types";
 import { Viewport } from "./Viewport";
 import { CropEditor } from "./CropEditor";
+import { ProductionDesk } from "./ProductionDesk";
 import { catalog } from "../shared/catalog";
 import {
   TripoStudio,
@@ -56,6 +57,7 @@ import {
   canPreview,
 } from "./TripoStudio";
 const steps = [
+  ["production", "캐릭터 자동 제작", Workflow],
   ["studio", "Tripo 작업실", Sparkles],
   ["image", "이미지 스튜디오", ImagePlus],
   ["parts", "파츠 준비", Scissors],
@@ -185,7 +187,7 @@ export function App() {
   function open(p: Project) {
     setId(p.id);
     setPartId(p.parts[0]?.id ?? "");
-    setTab(p.demo ? "assembly" : "studio");
+    setTab(p.demo ? "assembly" : "production");
     setPreview("");
   }
   async function request(r: Generation) {
@@ -264,18 +266,33 @@ export function App() {
           <Folder size={18} /> 모든 프로젝트
         </button>
         <div className="nav-label">제작 파이프라인</div>
-        {steps.map(([key, label, Icon], i) => (
-          <button
-            key={key}
-            disabled={!p}
-            onClick={() => setTab(key)}
-            className={`nav ${tab === key ? "selected" : ""}`}
-          >
-            <Icon size={18} />
-            <span>{label}</span>
-            <small>0{i + 1}</small>
-          </button>
-        ))}
+        <button
+          disabled={!p}
+          onClick={() => setTab("production")}
+          className={`nav ${tab === "production" ? "selected" : ""}`}
+        >
+          <Workflow size={18} />
+          <span>캐릭터 자동 제작</span>
+        </button>
+        <details
+          className="manual-tools"
+          key={p?.id}
+          open={p?.demo || undefined}
+        >
+          <summary>수동 도구 · 문제 해결</summary>
+          {steps.slice(1).map(([key, label, Icon], i) => (
+            <button
+              key={key}
+              disabled={!p}
+              onClick={() => setTab(key)}
+              className={`nav ${tab === key ? "selected" : ""}`}
+            >
+              <Icon size={18} />
+              <span>{label}</span>
+              <small>0{i + 1}</small>
+            </button>
+          ))}
+        </details>
         <div className="sidebar-bottom">
           <div className="local-note">
             <ShieldCheck size={18} />
@@ -293,7 +310,7 @@ export function App() {
             />
           </button>
           <div className="version">
-            PROTOTYPE <span>v0.2.0</span>
+            PROTOTYPE <span>v0.3.0</span>
           </div>
         </div>
       </aside>
@@ -354,7 +371,8 @@ export function App() {
                 <div className="eyebrow">YOUR CREATIVE WORKSPACE</div>
                 <h1>아이디어에서, 플레이 가능한 캐릭터로.</h1>
                 <p>
-                  이미지를 다듬고, 파츠를 만들고, 나만의 캐릭터를 조립하세요.
+                  캐릭터의 기준을 정하고, 반복되는 제작과 검수를 이어서
+                  실행하세요.
                 </p>
               </div>
               <button className="primary" onClick={() => setCreate(true)}>
@@ -363,16 +381,16 @@ export function App() {
             </div>
             <div className="hero-card">
               <div>
-                <Badge tone="green">PARTS FIRST</Badge>
+                <Badge tone="green">CHARACTER PRODUCTION</Badge>
                 <h2>
-                  하나씩 만들고.
+                  원하는 모습을 정하고.
                   <br />
-                  자유롭게 조합하고.
+                  제작은 이어서.
                 </h2>
                 <p>
-                  몸체, 머리, 헤어를 독립적으로 제작하세요.
+                  이미지 분리부터 생성, 검수, 조립과 애니메이션까지.
                   <br />
-                  마음에 드는 파츠는 고정하고, 필요한 곳만 다시.
+                  결과와 수정 이유를 남기며 필요한 부분만 다시 작업합니다.
                 </p>
                 <button
                   onClick={() => {
@@ -452,8 +470,9 @@ export function App() {
               </button>
             </div>
             <div className="footnote">
-              <CircleHelp size={16} /> 실제 생성에는 Tripo API 키와 API 크레딧이
-              필요합니다. Studio 구독과 별도입니다.
+              <CircleHelp size={16} /> 자동 제작은 Codex 작업자와 Tripo Studio
+              브라우저를 연결합니다. 영상 생성 연결과 실제 제작 검증은 별도
+              상태로 표시합니다.
             </div>
           </main>
         )}
@@ -505,6 +524,17 @@ export function App() {
                 )}
               </div>
             </div>
+            {tab === "production" && (
+              <ProductionDesk
+                key={p.id}
+                project={p}
+                runs={(state.productionRuns ?? []).filter(
+                  (r) => r.projectId === p.id,
+                )}
+                run={run}
+                busy={busy}
+              />
+            )}
             {tab === "studio" && (
               <TripoStudio
                 key={p.id}
@@ -1534,12 +1564,14 @@ export function App() {
                 </div>
               </main>
             )}
-            <JobPanel
-              p={p}
-              run={run}
-              remoteId={remoteId}
-              setRemoteId={setRemoteId}
-            />
+            {tab !== "production" && (
+              <JobPanel
+                p={p}
+                run={run}
+                remoteId={remoteId}
+                setRemoteId={setRemoteId}
+              />
+            )}
           </>
         )}
         {tab === "settings" && <SettingsPanel state={state} run={run} />}
@@ -1548,9 +1580,11 @@ export function App() {
             <span className="status-dot" /> 로컬 엔진 준비됨
           </span>
           <span>
-            {state.key.configured
-              ? "Tripo 키 설정됨 · 모델 접근 미검증"
-              : "Tripo 미연결"}{" "}
+            {tab === "production"
+              ? "Codex 작업자 · Studio 브라우저"
+              : state.key.configured
+                ? "Tripo API 키 설정됨 · 모델 접근 미검증"
+                : "Tripo API 미연결"}{" "}
             <i />{" "}
             {p
               ? `${p.parts.length} PARTS · REV ${p.revision}`

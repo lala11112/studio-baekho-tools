@@ -1,0 +1,13 @@
+{
+  "astraModel": "gpt-6-astra",
+  "savedChatGPTAuthentication": true,
+  "tripoCalls": 0,
+  "cliVersion": "0.153.4",
+  "astraWorkerCompleted": true,
+  "imageGenerationInvoked": false,
+  "date": "2026-10-08",
+  "defaultWorkerCompleted": true,
+  "notes": "Two actual CLI inferences. Astra tool availability was reported by the worker; generation and animation quality were not tested.",
+  "imageGenerationToolReported": "image_gen__imagegen",
+  "real3DAnimationCreated": false
+}

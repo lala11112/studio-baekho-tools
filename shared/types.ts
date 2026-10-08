@@ -183,6 +183,7 @@ export type Quote = {
 };
 export type AppState = {
   projects: Project[];
+  productionRuns?: import("./production").ProductionRun[];
   settings: Settings;
   key: { configured: boolean; storage: string };
   dataDir: string;
@@ -190,6 +191,22 @@ export type AppState = {
 };
 export type Command =
   | { type: "state" }
+  | {
+      type: "production.create";
+      id: string;
+      config: import("./production").ProductionConfig;
+    }
+  | { type: "production.start"; runId: string; budgetAccepted: boolean }
+  | {
+      type:
+        | "production.pause"
+        | "production.resume"
+        | "production.cancel"
+        | "production.open";
+      runId: string;
+    }
+  | { type: "production.probe" }
+  | { type: "studio.open" | "studio.status" }
   | { type: "project.create"; name: string; demo?: boolean }
   | {
       type: "project.update";

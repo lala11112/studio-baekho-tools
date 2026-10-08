@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "checks": [
+    "Observed controls, editable prompts, native select, stale IDs and workspace-only file upload",
+    "Normal click cannot charge; displayed-cost match and durable single-attempt reservation enforced",
+    "Native Electron download persisted with run/stage lineage and SHA256",
+    "Authenticated loopback and real child stdio MCP initialize/tools-list handshake",
+    "Combined Sign up/Log in and password page halts worker for user input"
+  ],
+  "workspace": "C:\\Users\\김민준\\Desktop\\3D tool\\artifacts\\runtime\\studio-browser-smoke\\a9c86781-540d-454c-9d08-1afff1bfb02e",
+  "actualStudio": false,
+  "realPaidCalls": 0,
+  "fixtureCreditsReserved": 100
+}

@@ -1,5 +1,12 @@
 import { build } from "esbuild";
 await build({
+  entryPoints: ["electron/production-mcp.ts"],
+  outfile: "dist-electron/production-mcp.cjs",
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+});
+await build({
   entryPoints: ["electron/main.ts"],
   outfile: "dist-electron/main.cjs",
   bundle: true,

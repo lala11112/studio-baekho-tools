@@ -15,6 +15,10 @@ import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { Store, uid } from "../engine/store";
 import { Engine } from "../engine/engine";
+import { ProductionEngine } from "../engine/production";
+import { restoreProductionArchives } from "../engine/production-backup";
+import { CodexWorker } from "../engine/codex-worker";
+import { StudioBrowser } from "./studio-browser";
 import { Tripo } from "../engine/tripo";
 import { LocalPipeline } from "../engine/local";
 import { Vault } from "./vault";
@@ -39,6 +43,8 @@ if (!lock) app.quit();
 let win: BrowserWindow;
 let store: Store;
 let engine: Engine;
+let production: ProductionEngine;
+let studio: StudioBrowser;
 let local: LocalPipeline;
 let vault: Vault;
 const finite = z.number().finite();
@@ -80,7 +86,30 @@ async function dispatch(c: Command): Promise<unknown> {
         key: vault.info(),
         catalog,
         dataDir: store.root,
+        productionRuns: production.list(),
       };
+    case "production.create":
+      return production.create(c.id, c.config);
+    case "production.start":
+      if (c.budgetAccepted !== true)
+        throw new Error(
+          "이번 제작의 입력·실행 범위와 크레딧 상한을 확인하세요.",
+        );
+      return production.start(c.runId);
+    case "production.pause":
+      return production.pause(c.runId);
+    case "production.resume":
+      return production.resume(c.runId);
+    case "production.cancel":
+      return production.cancel(c.runId);
+    case "production.open":
+      return shell.openPath(production.get(c.runId).workspace);
+    case "production.probe":
+      return production.probe();
+    case "studio.open":
+      return studio.open(true);
+    case "studio.status":
+      return studio.status();
     case "project.create":
       return engine.create(c.name, !!c.demo);
     case "project.update": {
@@ -166,7 +195,13 @@ async function dispatch(c: Command): Promise<unknown> {
           )
         )
           throw new Error("잘못된 에셋 경로");
-        if (fs.existsSync(src)) store.write(p.id, f, fs.readFileSync(src));
+        if (fs.existsSync(src)) {
+          if (
+            !fs.realpathSync(src).startsWith(fs.realpathSync(base) + path.sep)
+          )
+            throw new Error("백업 에셋이 프로젝트 밖 파일을 가리킵니다.");
+          store.write(p.id, f, fs.readFileSync(src));
+        }
       }
       for (const j of p.jobs)
         if (["submitting", "queued"].includes(j.status)) {
@@ -174,6 +209,7 @@ async function dispatch(c: Command): Promise<unknown> {
           j.message = "백업 복원 · 원격 제출 여부 확인 필요";
         }
       p.unity = undefined;
+      restoreProductionArchives(store, p.id, base);
       return store.save(p);
     }
     case "asset.import": {
@@ -432,6 +468,16 @@ app.whenReady().then(async () => {
     (projectId, nativeRelative) =>
       local.previewModel(projectId, nativeRelative),
   );
+  studio = new StudioBrowser();
+  production = new ProductionEngine(
+    store,
+    new CodexWorker({
+      connectionFactory: (context) => studio.workerConnection(context),
+      probeConnections: () => studio.probeConnections(),
+      stageReceipt: (runId, stageId, attempt) =>
+        studio.stageReceipt(runId, stageId, attempt),
+    }),
+  );
   protocol.handle("asset", async (request) => {
     try {
       const u = new URL(request.url);
@@ -442,7 +488,21 @@ app.whenReady().then(async () => {
         .map(decodeURIComponent);
       const file = store.file(id, parts.join("/"));
       const p = store.project(id);
-      if (!p.assets.some((a) => store.file(id, a.file) === file))
+      const knownProductionArtifact = production
+        .list(id)
+        .some((run) =>
+          run.stages.some((stage) =>
+            stage.artifacts.some(
+              (artifact) =>
+                store.file(id, `production/${run.id}/${artifact.path}`) ===
+                file,
+            ),
+          ),
+        );
+      if (
+        !p.assets.some((a) => store.file(id, a.file) === file) &&
+        !knownProductionArtifact
+      )
         return new Response("", { status: 403 });
       const response = await net.fetch(pathToFileURL(file).toString());
       const headers = new Headers(response.headers);
@@ -492,7 +552,12 @@ app.whenReady().then(async () => {
   if (process.env.PARTSMITH_DEV) await win.loadURL("http://127.0.0.1:5173");
   else await win.loadFile(path.join(__dirname, "../dist/index.html"));
   const timer = setInterval(() => void engine.pollActive(), 10000);
-  app.on("before-quit", () => clearInterval(timer));
+  win.on("closed", () => app.quit());
+  app.on("before-quit", () => {
+    clearInterval(timer);
+    production.shutdown();
+    studio.close();
+  });
 });
 app.on("second-instance", () => {
   win?.show();
