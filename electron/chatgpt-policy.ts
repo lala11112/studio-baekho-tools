@@ -28,7 +28,8 @@ export function isChatGptAuthUrl(value: string) {
       !url.password &&
       !url.port &&
       ((url.hostname === "chatgpt.com" &&
-        /^\/auth\/(?:login|callback|logout)(?:\/|$)/.test(url.pathname)) ||
+        (url.pathname === "/auth/login_with" ||
+          /^\/auth\/(?:login|callback|logout)(?:\/|$)/.test(url.pathname))) ||
         [
           "auth.openai.com",
           "auth0.openai.com",
@@ -49,6 +50,23 @@ export function isChatGptPopupUrl(value: string) {
   );
 }
 
+/** Diagnostic scope only; this does not authorize requests or worker navigation. */
+export function isChatGptSignInRequest(value: string) {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "chatgpt.com" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      /^\/api\/auth\/signin(?:\/[a-zA-Z0-9_-]+)?$/.test(url.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Never retain credentials, query strings, fragments or opaque route values. */
 export function chatGptDiagnosticLocation(value: string): {
   host?: string;
@@ -63,6 +81,7 @@ export function chatGptDiagnosticLocation(value: string): {
       "auth",
       "api",
       "login",
+      "login_with",
       "log-in",
       "logout",
       "callback",

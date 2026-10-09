@@ -17,6 +17,7 @@ import {
   downloadChatControl,
   isChatGptAuthUrl,
   isChatGptPopupUrl,
+  isChatGptSignInRequest,
   isChatGptUrl,
   chatGptDiagnosticLocation,
   isGoogleEmbeddedBrowserRejection,
@@ -880,6 +881,45 @@ export class ChatGptBrowser {
       );
       session.setPermissionCheckHandler(() => false);
       this.configureLoginWindow(win, this.fixtureUrl ?? CHATGPT_URL, false);
+      // Observe only native sign-in request outcomes in this dedicated session.
+      // Never inspect headers/bodies or retain query strings and credentials.
+      const requestWindow = (webContentsId: number | undefined, url: string) => {
+        if (!isChatGptSignInRequest(url)) return;
+        return [...this.loginWindows.keys()].find(
+          (candidate) =>
+            !candidate.isDestroyed() &&
+            candidate.webContents.id === webContentsId,
+        );
+      };
+      const signInFilter = { urls: ["https://chatgpt.com/api/auth/signin*"] };
+      session.webRequest.onCompleted(signInFilter, (details) => {
+        const owner = requestWindow(details.webContentsId, details.url);
+        if (
+          owner &&
+          Number.isInteger(details.statusCode) &&
+          details.statusCode >= 400 &&
+          details.statusCode <= 599
+        )
+          this.fail(
+            owner,
+            `AUTH_HTTP_${details.statusCode}`,
+            details.url,
+            details.statusCode === 403
+              ? "ChatGPT 웹 로그인 요청이 HTTP 403으로 거부되었습니다. 인증 창을 확인한 뒤 다시 연결해 주세요."
+              : `ChatGPT 웹 로그인 요청이 실패했습니다(HTTP ${details.statusCode}). 인증 창을 확인한 뒤 다시 연결해 주세요.`,
+          );
+      });
+      session.webRequest.onErrorOccurred(signInFilter, (details) => {
+        if (details.error === "net::ERR_ABORTED") return;
+        const owner = requestWindow(details.webContentsId, details.url);
+        if (owner)
+          this.fail(
+            owner,
+            "AUTH_REQUEST_FAILED",
+            details.url,
+            "ChatGPT 로그인 요청을 완료하지 못했습니다. 인증 창을 확인한 뒤 다시 연결해 주세요.",
+          );
+      });
       const onDownload = (
         event: Electron.Event,
         item: DownloadItem,
@@ -898,6 +938,8 @@ export class ChatGptBrowser {
       };
       session.on("will-download", onDownload);
       win.on("closed", () => {
+        session.webRequest.onCompleted(null);
+        session.webRequest.onErrorOccurred(null);
         session.removeListener("will-download", onDownload);
         for (const popup of this.loginWindows.keys())
           if (popup !== win && !popup.isDestroyed()) popup.close();

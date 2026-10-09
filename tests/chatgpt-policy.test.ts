@@ -9,6 +9,7 @@ import {
   isChatGptUrl,
   isChatGptAuthUrl,
   isChatGptPopupUrl,
+  isChatGptSignInRequest,
   chatGptDiagnosticLocation,
   isGoogleEmbeddedBrowserRejection,
   validateOriginalImage,
@@ -78,7 +79,60 @@ test("Human authentication popups allow exact blank and trusted destinations wit
   assert(!isChatGptUrl("about:blank"));
   assert(!isChatGptUrl("https://chatgpt.com/auth/callback?code=private"));
 });
+test("Observed ChatGPT provider login route is human-auth-only and exact", () => {
+  for (const url of [
+    "https://chatgpt.com/auth/login_with",
+    "https://chatgpt.com/auth/login_with?provider=google&state=private#private",
+  ]) {
+    assert(isChatGptAuthUrl(url), url);
+    assert(isChatGptPopupUrl(url), url);
+    assert(!isChatGptUrl(url), url);
+  }
+  for (const url of [
+    "https://chatgpt.com/auth/login_with/",
+    "https://chatgpt.com/auth/login_with/extra",
+    "https://chatgpt.com/auth/login_with_extra",
+    "https://chatgpt.com/auth/login_with.evil",
+    "https://chatgpt.com/auth/unobserved",
+    "https://chatgpt.com.evil.test/auth/login_with",
+    "http://chatgpt.com/auth/login_with",
+    "https://secret@chatgpt.com/auth/login_with",
+    "https://chatgpt.com:9999/auth/login_with",
+  ]) {
+    assert(!isChatGptAuthUrl(url), url);
+    assert(!isChatGptPopupUrl(url), url);
+    assert(!isChatGptUrl(url), url);
+  }
+});
+test("Sign-in request diagnostics exclude session checks, unrelated routes and unsafe origins", () => {
+  for (const url of [
+    "https://chatgpt.com/api/auth/signin",
+    "https://chatgpt.com/api/auth/signin/google?state=private#private",
+  ]) {
+    assert(isChatGptSignInRequest(url), url);
+    assert(!isChatGptUrl(url), url);
+    assert(!isChatGptAuthUrl(url), url);
+  }
+  for (const url of [
+    "https://chatgpt.com/api/auth/session",
+    "https://chatgpt.com/api/auth/signin_extra",
+    "https://chatgpt.com/api/auth/signin/google/extra",
+    "https://chatgpt.com/api/unrelated",
+    "https://chatgpt.com.evil.test/api/auth/signin/google",
+    "https://auth.openai.com/api/auth/signin/google",
+    "http://chatgpt.com/api/auth/signin/google",
+    "https://secret@chatgpt.com/api/auth/signin/google",
+    "https://chatgpt.com:9999/api/auth/signin/google",
+  ])
+    assert(!isChatGptSignInRequest(url), url);
+});
 test("Login diagnostics retain public route segments but redact credentials, opaque paths, query and fragment", () => {
+  assert.deepEqual(
+    chatGptDiagnosticLocation(
+      "https://chatgpt.com/auth/login_with?provider=google&state=private#private",
+    ),
+    { host: "chatgpt.com", path: "/auth/login_with" },
+  );
   assert.deepEqual(
     chatGptDiagnosticLocation(
       "https://name:password@auth.openai.com/auth/callback/private-token-123?code=secret&email=person@example.com#access_token=other",
