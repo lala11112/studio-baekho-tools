@@ -55,7 +55,11 @@ class MockExecutor implements WorkbenchExecutor {
   fixture(ctx: WorkbenchExecutionContext): WorkbenchResult {
     const step = ctx.job.step;
     const candidates: WorkbenchResult["candidates"] = [];
-    for (let i = 0; i < (step === "concept" ? 4 : 1); i++) {
+    for (
+      let i = 0;
+      i < (ctx.job.request.generationCount ?? (step === "concept" ? 4 : 1));
+      i++
+    ) {
       const artifacts: WorkbenchResult["candidates"][number]["artifacts"] = [];
       const write = (
         name: string,
@@ -91,13 +95,15 @@ class MockExecutor implements WorkbenchExecutor {
           for (const view of ctx.job.request.views ?? ["front"])
             write(
               `${role}-${view}.png`,
-              image(`${role}-${view}`),
+              image(`${role}-${view}${i ? `-${i}` : ""}`),
               "image",
               role,
               ctx.job.request.views ? view : undefined,
             );
       if (step === "surface")
-        for (const role of ["head", "hair", "body"])
+        for (const role of ctx.job.request.modelInput === "whole"
+          ? ["whole"]
+          : ["head", "hair", "body"])
           write(`${role}.glb`, glb(role), "model", role);
       if (["assembly", "rig", "animation"].includes(step)) {
         write("scene.blend", `BLENDER-v500 mock ${ctx.job.id}`, "blend");
@@ -238,6 +244,323 @@ async function setup(
   };
   return { root, store, project, executor, engine, w, execute, assemble };
 }
+
+test("requested image sets and new model counts are frozen and require explicit candidate selection", async (t) => {
+  const x = await setup(t);
+  for (const generationCount of [1, 2, 4]) {
+    for (const step of ["concept", "separate", "model"] as const) {
+      const job = await x.execute({
+        step,
+        prompt: "requested count",
+        generationCount,
+        ...(step === "model" ? { modelInput: "whole" as const } : {}),
+      });
+      assert.equal(job.status, "review", job.summary);
+      assert.equal(job.request.generationCount, generationCount);
+      assert.equal(job.candidates.length, generationCount);
+      if (generationCount > 1)
+        assert.throws(() => x.engine.accept(x.w.id, job.id), /하나/);
+      if (step === "separate")
+        for (const candidate of job.candidates)
+          assert.equal(
+            candidate.artifacts.filter((a) => a.kind === "image").length,
+            12,
+          );
+    }
+  }
+  const calls = x.executor.calls.length;
+  for (const generationCount of [0, -1, 1.5, 17, NaN, Infinity])
+    for (const step of ["concept", "separate", "model"] as const)
+      assert.throws(
+        () =>
+          x.engine.execute(x.w.id, {
+            step,
+            prompt: "bad count",
+            generationCount,
+          }),
+        /생성 개수/,
+      );
+  assert.equal(x.executor.calls.length, calls);
+});
+
+test("whole-image modeling is the new default and proceeds to texture without a separation job", async (t) => {
+  const x = await setup(t);
+  const source = x.engine.get(x.w.id).selections.concept;
+  const model = await x.execute({ step: "model", prompt: "whole" }, true);
+  assert.equal(model.slot, "model:whole");
+  assert.equal(model.request.modelInput, "whole");
+  assert.equal(model.request.role, "whole");
+  assert.deepEqual(model.dependencies, { concept: source });
+  assert.equal(
+    x.executor.calls[0].inputs.filter((a) => a.kind === "image").length,
+    1,
+  );
+  const surface = await x.execute({ step: "surface", prompt: "texture" }, true);
+  assert.equal(surface.status, "review");
+  assert.equal(surface.request.modelInput, "whole");
+  assert.deepEqual(Object.keys(surface.dependencies), [
+    "concept",
+    "model:whole",
+  ]);
+  assert.equal(
+    surface.candidates[0].artifacts.filter((a) => a.kind === "model").length,
+    1,
+  );
+  assert.equal(
+    x.engine.get(x.w.id).jobs.some((j) => j.step === "separate"),
+    false,
+  );
+  assert.throws(
+    () =>
+      x.engine.execute(x.w.id, {
+        step: "assembly",
+        prompt: "wrong route",
+        modelInput: "parts",
+      }),
+    /채택한 텍스처 모델/,
+  );
+  const assembly = await x.execute(
+    { step: "assembly", prompt: "refine whole character" },
+    true,
+  );
+  assert.equal(assembly.request.modelInput, "whole");
+  assert.equal(assembly.status, "review");
+  const replacement = await x.execute(
+    { step: "concept", prompt: "new concept", generationCount: 1 },
+    true,
+  );
+  assert.equal(x.engine.get(x.w.id).selections.concept.jobId, replacement.id);
+  assert.equal(x.engine.get(x.w.id).selections["model:whole"], undefined);
+  assert.equal(x.engine.get(x.w.id).selections.surface, undefined);
+});
+
+test("single separation and selected multiview directions are frozen into each part model", async (t) => {
+  const x = await setup(t);
+  for (const views of [
+    ["front"],
+    ["front", "left"],
+    ["front", "back", "right"],
+  ] as WorkbenchView[][]) {
+    const separated = await x.execute(
+      {
+        step: "separate",
+        prompt: "split",
+        separationMode: views.length === 1 ? "single" : "multiview",
+        views,
+      },
+      true,
+    );
+    assert.equal(separated.status, "review");
+    assert.deepEqual(separated.request.views, views);
+    assert.equal(
+      separated.candidates[0].artifacts.filter((a) => a.kind === "image")
+        .length,
+      views.length * 3,
+    );
+    const model = await x.execute(
+      { step: "model", prompt: "part", role: "body", modelInput: "parts" },
+      true,
+    );
+    assert.equal(model.status, "review");
+    assert.deepEqual(model.request.views, views);
+  }
+  for (const views of [[], ["back"], ["front", "front"], ["front", "unknown"]])
+    assert.throws(
+      () =>
+        x.engine.execute(x.w.id, {
+          step: "separate",
+          prompt: "invalid",
+          views: views as WorkbenchView[],
+        }),
+      /정면/,
+    );
+  assert.throws(
+    () =>
+      x.engine.execute(x.w.id, {
+        step: "separate",
+        prompt: "invalid",
+        separationMode: "single",
+        views: ["front", "back"],
+      }),
+    /정면/,
+  );
+});
+
+test("switching accepted model routes clears incompatible active selections while preserving history", async (t) => {
+  const x = await setup(t);
+  await x.execute(
+    { step: "separate", prompt: "single", separationMode: "single" },
+    true,
+  );
+  for (const role of ["head", "hair", "body"] as const)
+    await x.execute({ step: "model", prompt: "parts", role }, true);
+  const partsSurface = await x.execute(
+    { step: "surface", prompt: "parts texture" },
+    true,
+  );
+  const whole = await x.execute(
+    { step: "model", prompt: "whole", modelInput: "whole" },
+    true,
+  );
+  assert.equal(x.engine.get(x.w.id).selections.surface, undefined);
+  for (const role of ["head", "hair", "body"])
+    assert.equal(x.engine.get(x.w.id).selections[`model:${role}`], undefined);
+  assert.ok(x.engine.get(x.w.id).jobs.some((j) => j.id === partsSurface.id));
+  const wholeSurface = await x.execute(
+    { step: "surface", prompt: "whole texture" },
+    true,
+  );
+  await x.execute({ step: "model", prompt: "parts again", role: "head" }, true);
+  assert.equal(x.engine.get(x.w.id).selections["model:whole"], undefined);
+  assert.equal(x.engine.get(x.w.id).selections.surface, undefined);
+  assert.ok(x.engine.get(x.w.id).jobs.some((j) => j.id === whole.id));
+  assert.ok(x.engine.get(x.w.id).jobs.some((j) => j.id === wholeSurface.id));
+  assert.throws(
+    () =>
+      x.engine.execute(
+        x.w.id,
+        { step: "surface", prompt: "incomplete parts", modelInput: "parts" },
+        { accepted: true, imageCreditLimit: 0, studioCreditLimit: 100 },
+      ),
+    /model:hair/,
+  );
+});
+
+test("every separation candidate is validated and identical sets or duplicate models are rejected", async (t) => {
+  const x = await setup(t);
+  x.executor.hook = (_, result) => {
+    result.candidates[1].artifacts = result.candidates[1].artifacts.filter(
+      (a) => a.role !== "body",
+    );
+    return result;
+  };
+  const missing = await x.execute({
+    step: "separate",
+    prompt: "two",
+    generationCount: 2,
+  });
+  assert.equal(missing.status, "failed");
+  assert.match(missing.summary, /12장/);
+  x.executor.hook = (_, result) => {
+    result.candidates[1].artifacts = result.candidates[0].artifacts;
+    return result;
+  };
+  const duplicate = await x.execute({
+    step: "separate",
+    prompt: "two",
+    generationCount: 2,
+  });
+  assert.equal(duplicate.status, "failed");
+  assert.match(duplicate.summary, /서로 다른 이미지 세트/);
+  const model = await x.execute({
+    step: "model",
+    prompt: "two",
+    generationCount: 2,
+  });
+  assert.equal(model.status, "failed");
+  assert.match(model.summary, /서로 다른 후보/);
+});
+
+test("multiple correction alternatives freeze the selected separation base and preserve unaffected originals in every set", async (t) => {
+  const x = await setup(t);
+  const base = await x.execute({
+    step: "separate",
+    prompt: "two bases",
+    generationCount: 2,
+    views: ["front", "back"],
+  });
+  x.engine.select(x.w.id, base.id, base.candidates[1].id);
+  x.executor.hook = (ctx, result) => {
+    for (const candidate of result.candidates)
+      for (const artifact of candidate.artifacts.filter(
+        (a) => a.kind === "image",
+      )) {
+        const old = base.candidates[1].artifacts.find(
+          (a) => a.role === artifact.role && a.view === artifact.view,
+        )!;
+        fs.writeFileSync(
+          path.join(ctx.workspace, artifact.path),
+          artifact.role === "head" && artifact.view === "back"
+            ? image(`${candidate.id}-changed`)
+            : fs.readFileSync(x.store.file(x.project.id, old.path)),
+        );
+      }
+    return result;
+  };
+  const correction = await x.execute({
+    step: "separate",
+    prompt: "change back",
+    baseJobId: base.id,
+    role: "head",
+    view: "back",
+    generationCount: 2,
+  });
+  assert.equal(correction.status, "review", correction.summary);
+  assert.equal(correction.request.baseCandidateId, base.candidates[1].id);
+  assert.deepEqual(correction.request.views, ["front", "back"]);
+  assert.equal(x.engine.get(x.w.id).selections.separate.jobId, base.id);
+  const oldHook = x.executor.hook;
+  x.executor.hook = async (ctx, result) => {
+    const corrected = await oldHook!(ctx, result);
+    const untouched = corrected.candidates[1].artifacts.find(
+      (a) => a.role === "body" && a.view === "front",
+    )!;
+    fs.writeFileSync(
+      path.join(ctx.workspace, untouched.path),
+      image("must not change"),
+    );
+    return corrected;
+  };
+  const invalid = await x.execute({
+    step: "separate",
+    prompt: "change back",
+    baseJobId: base.id,
+    baseCandidateId: base.candidates[1].id,
+    role: "head",
+    view: "back",
+    generationCount: 2,
+  });
+  assert.equal(invalid.status, "failed");
+  assert.match(invalid.summary, /그대로 보존/);
+  assert.throws(
+    () =>
+      x.engine.execute(x.w.id, {
+        step: "separate",
+        prompt: "wrong direction",
+        baseJobId: base.id,
+        views: ["front"],
+      }),
+    /기준 버전의 방향/,
+  );
+});
+
+test("model candidate reroll selects the accepted candidate and never permits multiple mesh edits", async (t) => {
+  const x = await setup(t);
+  const base = await x.execute(
+    { step: "model", prompt: "two", generationCount: 2 },
+    true,
+  );
+  x.engine.select(x.w.id, base.id, base.candidates[1].id);
+  const edited = await x.execute({
+    step: "model",
+    prompt: "edit selected",
+    baseJobId: base.id,
+  });
+  assert.equal(edited.status, "review");
+  assert.equal(edited.request.baseCandidateId, base.candidates[1].id);
+  assert.equal(edited.request.generationCount, 1);
+  assert.equal(edited.request.modelEditScope, "all");
+  assert.throws(
+    () =>
+      x.engine.execute(x.w.id, {
+        step: "model",
+        prompt: "unsafe edits",
+        baseJobId: base.id,
+        generationCount: 2,
+      }),
+    /수정 결과 1개/,
+  );
+});
 
 test("guided steps require chosen inputs and explicit generation scope; default concept provider is GPT", async (t) => {
   const x = await setup(t, false);
@@ -1355,9 +1678,9 @@ test("new separation freezes twelve role/view images and models have one result"
       x.engine.execute(x.w.id, {
         step: "separate",
         prompt: "bad",
-        views: ["front"],
+        views: ["back"],
       }),
-    /네 방향/,
+    /정면/,
   );
 });
 
@@ -1532,7 +1855,7 @@ test("retry and restart preserve a legacy separation plan without automatic stra
   assert.equal(restarted.get(x.w.id).selections.separate, undefined);
 });
 
-test("legacy three-front review remains readable but cannot start a new four-view model", async (t) => {
+test("legacy three-front review can explicitly start a front-only part model without fabricating views", async (t) => {
   const x = await setup(t);
   const source = x.engine.get(x.w.id).jobs[0].candidates[0].artifacts[0];
   const imported = x.engine.importSeparation(x.w.id, {
@@ -1543,16 +1866,15 @@ test("legacy three-front review remains readable but cannot start a new four-vie
     })),
   });
   x.engine.accept(x.w.id, imported.jobs[0].id);
-  assert.throws(
-    () =>
-      x.engine.execute(
-        x.w.id,
-        { step: "model", prompt: "model", role: "head" },
-        { accepted: true, studioCreditLimit: 1000, imageCreditLimit: 0 },
-      ),
-    /정면·후면·좌측·우측/,
-  );
-  assert.equal(x.executor.calls.length, 0);
+  const model = await x.execute({
+    step: "model",
+    prompt: "model",
+    role: "head",
+    modelInput: "parts",
+  });
+  assert.equal(model.status, "review");
+  assert.deepEqual(model.request.views, ["front"]);
+  assert.equal(x.executor.calls.length, 1);
 });
 
 test("targeted image reroll preserves accepted input until adoption and keeps other part models current", async (t) => {
@@ -1813,15 +2135,14 @@ test("existing native model edits remain available for legacy front-only separat
               .sha256,
       ),
   );
-  assert.throws(
-    () =>
-      x.engine.execute(
-        x.w.id,
-        { step: "model", prompt: "신규 모델", role: "hair" },
-        { accepted: true, studioCreditLimit: 1000, imageCreditLimit: 0 },
-      ),
-    /정면·후면·좌측·우측/,
-  );
+  const fresh = await x.execute({
+    step: "model",
+    prompt: "신규 모델",
+    role: "hair",
+    modelInput: "parts",
+  });
+  assert.equal(fresh.status, "review");
+  assert.deepEqual(fresh.request.views, ["front"]);
 });
 
 // Synthetic derivative fixture verifies host trust/provenance only, not canvas quality.

@@ -67,40 +67,47 @@ export class CodexWorkbenchExecutor {
     onProgress('UI TEST: synthetic fixtures, no real generation');
     await new Promise(r=>setTimeout(r,100));
     const step=ctx.job.step; let count=0;
+    if(ctx.job.request.prompt==='MOCK ambiguous') return {status:'submission_unknown',summary:'MOCK needs external submission check',candidates:[],checks:[]};
     if(step==='separate'&&!ctx.recovered) return {status:'needs_input',summary:'MOCK transient download timeout',candidates:[],checks:[],recovery:{kind:'retry',reason:'MOCK transient download timeout'}};
     const write=(name,data,kind,role)=>{fs.writeFileSync(path.join(ctx.workspace,name),data);return {path:name,kind,...(role?{role}:{})};};
     const pic=(role)=>{count++;const bytes=Buffer.alloc(32*32*4); for(let i=0;i<bytes.length;i+=4){bytes[i]=count*17;bytes[i+1]=ctx.workbench.jobs.length*13;bytes[i+2]=count*11;const pixel=i/4,x=pixel%32,y=Math.floor(pixel/32);bytes[i+3]=(x>=4&&x<28&&y>=4&&y<28)?255:0;}return write('MOCK-'+count+'.png',nativeImage.createFromBitmap(bytes,{width:32,height:32}).toPNG(),'image',role);};
     const model=(i,role)=>{const bytes=tinyGlb();bytes.writeFloatLE(i+0.2,28+bytes.readUInt32LE(12));return write('MOCK-'+i+'.glb',bytes,'model',role);};
     const objects=[{id:'body',name:'MOCK Body',category:'body',separate:true},{id:'coat',name:'MOCK Coat',category:'clothing',separate:true},{id:'hair',name:'MOCK Hair',category:'hair',separate:true}];
     let candidates;
-    if(step==='concept') candidates=[0,1,2,3].map(i=>({id:'candidate-'+i,label:'MOCK image '+(i+1),artifacts:[pic()]}));
-    else if(step==='model') candidates=[{id:'candidate-0',label:'MOCK single model',artifacts:[model(0,ctx.job.request.role),pic()]}];
+    if(step==='concept') candidates=Array.from({length:ctx.job.request.generationCount??4},(_,i)=>({id:'candidate-'+i,label:'MOCK image '+(i+1),artifacts:[pic()]}));
+    else if(step==='model') candidates=Array.from({length:ctx.job.request.generationCount??1},(_,i)=>({id:'candidate-'+i,label:'MOCK model '+(i+1),artifacts:[model(i,ctx.job.request.role),pic()]}));
     else {
       let artifacts=[];
       if(step==='separate') {
         const req=ctx.job.request,base=ctx.workbench.jobs.find(j=>j.id===req.baseJobId);
-        const previous=(base?.candidates[0]??base?.draftCandidates?.[0])?.artifacts.filter(a=>a.kind==='image')??[];
+        const previous=(base?.candidates.find(c=>c.id===req.baseCandidateId)??base?.candidates[0]??base?.draftCandidates?.[0])?.artifacts.filter(a=>a.kind==='image')??[];
         const previousRoot=base?path.join(path.dirname(ctx.workspace),base.id):'';
         const changed=[];
-        for(const role of ['head','hair','body']) for(const view of ['front','back','left','right']) {
+        const sets=[];
+        for(let alternative=0;alternative<(req.generationCount??1);alternative++) {
+        artifacts=[];
+        for(const role of ['head','hair','body']) for(const view of req.views??['front','back','left','right']) {
           const old=previous.find(a=>a.role===role&&(a.view??'front')===view);
           const target=(!req.role||req.role===role)&&(!req.view||req.view===view);
           if(old&&(!target||req.reuseExisting)) {
             const source=path.join(previousRoot,path.basename(old.path));
-            const name='MOCK-kept-'+role+'-'+view+'.png';
+            const name='MOCK-kept-'+alternative+'-'+role+'-'+view+'.png';
             artifacts.push({...write(name,fs.readFileSync(source),'image',role),view});
           } else if(target) {artifacts.push({...pic(role),view});changed.push(role+':'+view);}
         }
+        sets.push({id:'version-'+alternative,label:'MOCK set '+(alternative+1),artifacts,objects});
+        }
+        candidates=sets;
         fs.appendFileSync(path.join(ctx.workspace,'MOCK-generated.jsonl'),JSON.stringify(changed)+'\\n');
         ctx.onDraft?.({status:'completed',summary:'MOCK two photos ready',candidates:[{id:'draft',label:'MOCK saved photos',artifacts:artifacts.filter(a=>a.view==='front'&&a.role!=='body')}],checks:[{name:'original_alignment_and_scale_preserved',passed:false}]});
         const draftDeadline=Date.now()+20000;
         while(!fs.existsSync(${JSON.stringify(draftReleasePath)})&&Date.now()<draftDeadline) await new Promise(r=>setTimeout(r,50));
       }
-      else if(step==='surface') artifacts=['head','hair','body'].map((r,i)=>model(i,r));
+      else if(step==='surface') artifacts=(ctx.job.request.modelInput==='whole'?['whole']:['head','hair','body']).map((r,i)=>model(i,r));
       else if(['assembly','rig','animation'].includes(step)) artifacts=[model(5),pic(),write('MOCK.blend',Buffer.from('BLENDER-MOCK-UI-ONLY'),'blend')];
       else if(step==='reference') {const frames=[0,1,2].map(time=>{const entries={time};for(const view of ['front','side','back']){const a=pic(view);artifacts.push(a);entries[view]=a.path;}return entries;});artifacts.push(write('frames.json',JSON.stringify({schemaVersion:1,motion:ctx.job.request.motion,duration:2,fps:12,camera:'fixed',frames}),'frames'));}
       else artifacts=[write('export.fbx',Buffer.from('MOCK EXPORT'),'export'),write('report.json','{}','report')];
-      candidates=[{id:'version',label:'MOCK '+step,artifacts,objects}];
+      candidates??=[{id:'version',label:'MOCK '+step,artifacts,objects}];
     }
     return {status:'completed',summary:'Explicit synthetic UI fixture: human review required.',candidates,checks:[{name:'MOCK fixture only',passed:true},...(step==='separate'?[{name:'original_position_and_scale_preserved',passed:false},{name:'clean_peripheral_alpha',passed:false}]:[])]};
   }
@@ -278,13 +285,16 @@ try {
   await page.getByTestId("workbench-provider").selectOption("chatgpt-web");
   await page
     .getByTestId("workbench-concept-prompt")
-    .fill("MOCK UI test. Four distinct options, no real request.");
+    .fill("MOCK UI test. Two distinct options, no real request.");
+  await page.getByTestId("workbench-concept-count").fill("2");
   await page.getByTestId("workbench-approve").check();
   await page.getByTestId("workbench-execute-concept").click();
   await jobDone();
-  await page.getByTestId("workbench-candidate-3").waitFor();
+  await page.getByTestId("workbench-candidate-1").waitFor();
+  assert.equal(await page.getByTestId("workbench-candidate-2").count(), 0);
   assert.equal(invocations().length, 1);
   assert.equal(invocations()[0].imageBackend, "chatgpt-web");
+  assert.equal(invocations()[0].generationCount, 2);
   assert.deepEqual((await state()).workbenches[0].selections, {});
   await page.screenshot({
     path: "artifacts/screenshots/workbench-mock-candidates.png",
@@ -306,12 +316,58 @@ try {
     });
   await page.getByTestId("workbench-step-parts").click();
   assert.equal(
+    await page.getByTestId("workbench-model-input").inputValue(),
+    "whole",
+    "New projects default to direct modeling",
+  );
+  assert.equal(await page.getByTestId("workbench-tab-separate").count(), 0);
+  await page.getByTestId("workbench-model-count").fill("2");
+  await page.getByTestId("workbench-credit-limit").fill("1000");
+  await page.getByTestId("workbench-approve").check();
+  await page.getByTestId("workbench-execute-model").click();
+  const directModel = await jobDone();
+  assert.equal(directModel.request.generationCount, 2);
+  assert.equal(directModel.request.modelInput, "whole");
+  assert.equal(directModel.request.role, "whole");
+  assert.equal(directModel.candidates.length, 2);
+  assert.deepEqual(Object.keys(directModel.dependencies), ["concept"]);
+  await page.getByTestId("workbench-candidate-1").waitFor();
+  await page.screenshot({
+    path: "artifacts/screenshots/workbench-direct-model-options.png",
+  });
+  await page.getByTestId("workbench-select-1").click();
+  assert((await state()).workbenches[0].selections["model:whole"]);
+  assert(await page.getByTestId("workbench-step-surface").isEnabled());
+  const afterDirectCalls = invocations().length;
+  await page.getByTestId("workbench-model-input").selectOption("parts");
+  assert.equal(
+    invocations().length,
+    afterDirectCalls,
+    "Changing route never generates",
+  );
+  assert.equal(
+    await page.getByTestId("workbench-separation-mode").inputValue(),
+    "single",
+  );
+  assert.match(
+    await page.getByTestId("workbench-separation-total").textContent(),
+    /3장/,
+  );
+  await page.getByTestId("workbench-separation-mode").selectOption("multiview");
+  await page.getByTestId("workbench-view-right").uncheck();
+  assert.match(
+    await page.getByTestId("workbench-separation-total").textContent(),
+    /9장/,
+  );
+  assert(await page.getByTestId("workbench-view-front").isDisabled());
+  await page.getByTestId("workbench-view-right").check();
+  assert.equal(
     await page.getByTestId("workbench-group-separation-views").count(),
     0,
   );
   assert.match(
     await page.getByTestId("workbench-separation-batch-help").textContent(),
-    /파츠마다 ChatGPT 웹 채팅에 정면·후면·좌·우 멀티뷰를 한 번 요청/,
+    /파츠마다 ChatGPT 웹 채팅에 선택한 방향/,
   );
   assert.equal(
     await page.getByTestId("workbench-separation-backend").inputValue(),
@@ -319,7 +375,7 @@ try {
   );
   assert.match(
     await page.getByTestId("workbench-separation-batch-help").textContent(),
-    /방향별 독립 이미지 4장/,
+    /방향별 독립 원본 이미지/,
   );
   await page.getByTestId("workbench-approve").check();
   await page.getByTestId("workbench-execute-separate").click();
@@ -413,7 +469,7 @@ try {
   await page.getByTestId("workbench-accept-separate").click();
   assert.equal(
     invocations().length,
-    3,
+    afterDirectCalls + 2,
     "Selecting separation must not generate models",
   );
   for (const role of ["head", "hair", "body"]) {
@@ -629,12 +685,110 @@ try {
   await accept(
     await execute({ step: "animation", motion: "wave", prompt: "MOCK author" }),
   );
+  await page.getByTestId("workbench-step-parts").click();
+  await page.getByTestId("workbench-tab-separate").click();
+  await page.getByTestId("workbench-separation-operation").selectOption("new");
+  await page.getByTestId("workbench-separation-mode").selectOption("single");
+  await page.getByTestId("workbench-separation-count").fill("2");
+  await page.getByTestId("workbench-approve").check();
+  await page.getByTestId("workbench-execute-separate").click();
+  const frontSets = await jobDone();
+  assert.equal(frontSets.request.separationMode, "single");
+  assert.deepEqual(frontSets.request.views, ["front"]);
+  assert.equal(frontSets.request.generationCount, 2);
+  assert.equal(frontSets.candidates.length, 2);
+  assert(
+    frontSets.candidates.every(
+      (c) => c.artifacts.filter((a) => a.kind === "image").length === 3,
+    ),
+  );
+  await page
+    .getByTestId("workbench-candidate-1")
+    .locator("img")
+    .first()
+    .waitFor();
+  assert.equal(
+    await page.getByTestId("workbench-candidate-1").locator("img").count(),
+    3,
+  );
+  await page.screenshot({
+    path: "artifacts/screenshots/workbench-single-view-sets.png",
+  });
+  await page
+    .getByTestId("workbench-separation-operation")
+    .selectOption("correct");
+  await page
+    .getByTestId("workbench-separation-base")
+    .selectOption(frontSets.candidates[1].id);
+  await page.getByTestId("workbench-separation-count").fill("1");
+  await page.getByTestId("workbench-separate-role").selectOption("hair");
+  await page.getByTestId("workbench-separate-view").selectOption("front");
+  await page.getByTestId("workbench-approve").check();
+  await page.getByTestId("workbench-execute-separate").click();
+  const frontEdit = await jobDone();
+  assert.equal(frontEdit.request.baseCandidateId, frontSets.candidates[1].id);
+  for (const original of frontSets.candidates[1].artifacts.filter(
+    (a) => a.kind === "image" && a.role !== "hair",
+  )) {
+    assert.equal(
+      frontEdit.candidates[0].artifacts.find(
+        (a) => a.kind === "image" && a.role === original.role,
+      )?.sha256,
+      original.sha256,
+      "Correction preserves images from the chosen set",
+    );
+  }
+  assert(
+    (await state()).workbenches[0].selections["animation:wave"],
+    "Unaccepted alternatives do not invalidate the chosen pipeline",
+  );
+  await page.getByTestId("workbench-model-input").selectOption("whole");
+  await page.getByTestId("workbench-step-concept").click();
+  await page.getByTestId("workbench-provider").selectOption("chatgpt-web");
+  await page.getByTestId("workbench-concept-prompt").fill("MOCK ambiguous");
+  await page.getByTestId("workbench-approve").check();
+  await page.getByTestId("workbench-execute-concept").click();
+  await page.getByTestId("workbench-resolve-submission").waitFor();
+  assert.match(
+    await page.getByTestId("workbench-resolve-submission").textContent(),
+    /ChatGPT에서 미제출 확인/,
+  );
+  const beforeResolve = invocations().length;
+  page.once("dialog", async (dialog) => {
+    assert.match(dialog.message(), /실제로 제출되지 않았음/);
+    await dialog.dismiss();
+  });
+  await page.getByTestId("workbench-resolve-submission").click();
+  assert.equal(
+    (await state()).workbenches[0].jobs[0].status,
+    "submission_unknown",
+  );
+  page.once("dialog", async (dialog) => {
+    await dialog.accept();
+  });
+  await page.getByTestId("workbench-resolve-submission").click();
+  await page.waitForFunction(
+    async () =>
+      (await window.desktop.call({ type: "state" })).workbenches[0].jobs[0]
+        .status === "cancelled",
+  );
+  assert.equal(
+    invocations().length,
+    beforeResolve,
+    "Confirming no submission never sends a new request",
+  );
   const count = invocations().length;
   await app.close();
   app = undefined;
   await launch();
   await page.locator(".project-card").first().click();
   await page.getByTestId("workbench").waitFor();
+  await page.getByTestId("workbench-step-parts").click();
+  assert.equal(
+    await page.getByTestId("workbench-model-input").inputValue(),
+    "whole",
+    "Modeling route persists per project",
+  );
   assert.equal(invocations().length, count, "Restart must not call authoring");
   assert((await state()).workbenches[0].selections["animation:wave"]);
   await assert.rejects(
@@ -666,11 +820,18 @@ try {
         visualWarningsAllowUserReview: true,
         incompletePhotosBlockModelGeneration: true,
         modelPhotoFirstAndOptional3D: true,
-        firstConceptOnlyFourCandidates: true,
+        configurableConceptImageCount: true,
+        directWholeModelDefault: true,
+        configurableTripoModelCount: true,
+        optionalSingleOrMultiviewSeparation: true,
+        configurableAlternativeSets: true,
+        selectedSetCorrectionPreservesOtherImages: true,
+        modelRoutePersistsPerProject: true,
+        explicitNoSubmissionConfirmationDoesNotGenerate: true,
         singleModelResult: true,
         existingModelPartialEditRequest: true,
         fourViewsPerPart: true,
-        independentMultiviewDefaultWithoutSheetToggle: true,
+        independentMultiviewWithoutSheetToggle: true,
         promptTargetsOnePartView: true,
         rerollPreservesElevenImages: true,
         partialAndAllTwelveImagesDecoded: true,

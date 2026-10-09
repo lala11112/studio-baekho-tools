@@ -8,7 +8,10 @@ const data = path.resolve(
   "artifacts/runtime",
   `workbench-package-${randomUUID()}`,
 );
-const executablePath = path.resolve("release/0.6.0/win-unpacked/Partsmith.exe");
+const version = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+const executablePath = path.resolve(
+  `release/${version}/win-unpacked/Partsmith.exe`,
+);
 const app = await electron.launch({
   executablePath,
   env: { ...process.env, PARTSMITH_DATA: data },
@@ -22,7 +25,7 @@ try {
     isPackaged: app.isPackaged,
     version: app.getVersion(),
   }));
-  assert.equal(info.version, "0.6.0");
+  assert.equal(info.version, version);
   assert(info.isPackaged);
   const state = await page.evaluate(() =>
     window.desktop.call({ type: "state" }),
@@ -86,8 +89,12 @@ try {
     /먼저 웹 로그인을 확인/,
   );
   assert.equal(
-    (await page.evaluate(() => window.desktop.call({ type: "state" })))
-      .workbenches.reduce((count, workbench) => count + workbench.jobs.length, 0),
+    (
+      await page.evaluate(() => window.desktop.call({ type: "state" }))
+    ).workbenches.reduce(
+      (count, workbench) => count + workbench.jobs.length,
+      0,
+    ),
     0,
   );
   const probe = await page.evaluate(() =>
@@ -127,7 +134,7 @@ try {
     ),
   );
   console.log(
-    "Packaged 0.6.0 app: UI, SQLite, guided workbench entry, Codex login probe passed; no generation.",
+    `Packaged ${version} app: UI, SQLite, guided workbench entry, Codex login probe passed; no generation.`,
   );
 } finally {
   await app.close();

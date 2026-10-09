@@ -10,6 +10,7 @@ export type WorkbenchStep =
   | "animation"
   | "unity";
 export type WorkbenchRole = "head" | "hair" | "body";
+export type WorkbenchModelRole = WorkbenchRole | "whole";
 export type WorkbenchView = "front" | "back" | "left" | "right";
 export type WorkbenchObject = {
   id: string;
@@ -50,8 +51,12 @@ export type WorkbenchRequest = {
   /** Frozen execution route for concept/separate GPT jobs. Absent on legacy
    * saved jobs means Codex; only new requests default to the ChatGPT website. */
   imageBackend?: "chatgpt-web" | "codex";
-  role?: WorkbenchRole;
-  /** New separation jobs always freeze all four views; absent on legacy jobs. */
+  role?: WorkbenchModelRole;
+  /** User-approved candidate count; the app batch bound is independent of provider limits. */
+  generationCount?: number;
+  modelInput?: "whole" | "parts";
+  separationMode?: "single" | "multiview";
+  /** Frozen requested directions. Legacy saved separation without this field is front-only. */
   views?: WorkbenchView[];
   /** New GPT jobs request independent view images together per part.
    * The sheet strategy and absent fields remain readable on saved legacy jobs;
@@ -212,6 +217,20 @@ export const WORKBENCH_VIEWS: WorkbenchView[] = [
   "left",
   "right",
 ];
+export const WORKBENCH_MAX_GENERATION_COUNT = 16;
+export function workbenchGenerationCount(request: WorkbenchRequest): number {
+  return request.generationCount ?? (request.step === "concept" ? 4 : 1);
+}
+export function workbenchModelInput(
+  request: WorkbenchRequest,
+): "whole" | "parts" {
+  return request.modelInput ?? (request.role === "whole" ? "whole" : "parts");
+}
+export function workbenchSeparationViews(
+  request: WorkbenchRequest,
+): WorkbenchView[] {
+  return request.views ?? ["front"];
+}
 export function workbenchSlot(request: WorkbenchRequest): string {
   if (request.step === "model") return `model:${request.role}`;
   if (request.step === "reference" || request.step === "animation")

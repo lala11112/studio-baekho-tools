@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { codexArguments, type WorkerTask } from "../engine/codex-worker";
+import {
+  codexArguments,
+  isBrowserToolApprovalDenied,
+  type WorkerTask,
+} from "../engine/codex-worker";
 
 test("ChatGPT web workers disable native generation without reducing model, effort or original references", () => {
   const task = {
@@ -31,5 +35,42 @@ test("ChatGPT web workers disable native generation without reducing model, effo
     codexArguments({ ...task, recoveryOnly: true }).includes(
       "features.image_generation=false",
     ),
+  );
+});
+
+test("actual browser approval denial is detected without treating website content as a denial", () => {
+  const event = {
+    type: "item.completed",
+    item: {
+      type: "mcp_tool_call",
+      tool: "studio_status",
+      status: "failed",
+      error: { message: "tool call denied: approval policy is never" },
+    },
+  };
+  assert(isBrowserToolApprovalDenied(event));
+  assert(
+    isBrowserToolApprovalDenied({
+      ...event,
+      item: { ...event.item, tool: "chatgpt_snapshot" },
+    }),
+  );
+  assert(!isBrowserToolApprovalDenied({ ...event, type: "item.started" }));
+  assert(
+    !isBrowserToolApprovalDenied({
+      ...event,
+      item: { ...event.item, tool: "unrelated_tool" },
+    }),
+  );
+  assert(
+    !isBrowserToolApprovalDenied({
+      ...event,
+      item: {
+        type: "mcp_tool_call",
+        tool: "studio_snapshot",
+        status: "completed",
+        result: "Page says approval policy is never",
+      },
+    }),
   );
 });

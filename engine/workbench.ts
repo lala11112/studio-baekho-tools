@@ -11,6 +11,10 @@ import {
   WORKBENCH_ROLES,
   WORKBENCH_VIEWS,
   WORKBENCH_STEPS,
+  WORKBENCH_MAX_GENERATION_COUNT,
+  workbenchGenerationCount,
+  workbenchModelInput,
+  workbenchSeparationViews,
   workbenchSlot,
   type Workbench,
   type WorkbenchAction,
@@ -298,13 +302,15 @@ export class WorkbenchEngine {
       base.step !== request.step ||
       (!stoppedDraft && base.status !== "review") ||
       (!this.current(w, base) && !targetedSurface) ||
+      (request.step === "surface" &&
+        workbenchModelInput(base.request) !== workbenchModelInput(request)) ||
       (request.step === "model" && base.request.role !== request.role)
     )
       throw new Error("수정 기준 버전이 현재 입력과 일치하지 않습니다.");
     let candidates = stoppedDraft
       ? (base.draftCandidates ?? base.candidates)
       : base.candidates;
-    if (request.step === "model" && candidates.length > 1) {
+    if (request.baseCandidateId || candidates.length > 1) {
       const selected = w.selections[base.slot];
       candidates =
         request.baseCandidateId || selected?.jobId === base.id
@@ -327,13 +333,17 @@ export class WorkbenchEngine {
       case "separate":
         return ["concept"];
       case "model":
-        return ["concept", "separate"];
+        return workbenchModelInput(request) === "whole"
+          ? ["concept"]
+          : ["concept", "separate"];
       case "surface":
-        return [
-          "concept",
-          "separate",
-          ...WORKBENCH_ROLES.map((r) => `model:${r}`),
-        ];
+        return workbenchModelInput(request) === "whole"
+          ? ["concept", "model:whole"]
+          : [
+              "concept",
+              "separate",
+              ...WORKBENCH_ROLES.map((r) => `model:${r}`),
+            ];
       case "assembly":
         return ["concept", "surface"];
       case "rig":
@@ -359,6 +369,34 @@ export class WorkbenchEngine {
       throw new Error("작업 지시는 12,000자 이내로 작성하세요.");
     const r = structuredClone(request);
     r.prompt = r.prompt.trim();
+    if (["concept", "separate", "model"].includes(r.step)) {
+      r.generationCount ??= r.step === "concept" ? 4 : 1;
+      if (
+        !Number.isSafeInteger(r.generationCount) ||
+        r.generationCount < 1 ||
+        r.generationCount > WORKBENCH_MAX_GENERATION_COUNT
+      )
+        throw new Error(
+          `생성 개수는 1~${WORKBENCH_MAX_GENERATION_COUNT}개의 정수여야 합니다. 앱의 한 번 요청 범위입니다.`,
+        );
+      if (r.step === "model" && r.baseJobId && r.generationCount !== 1)
+        throw new Error(
+          "기존 모델 부분·전체 재생성은 선택한 모델의 수정 결과 1개만 만듭니다.",
+        );
+    } else if (r.generationCount !== undefined)
+      throw new Error(
+        "생성 개수는 이미지·분리·모델 단계에서만 설정할 수 있습니다.",
+      );
+    if (
+      r.modelInput !== undefined &&
+      (!["whole", "parts"].includes(r.modelInput) ||
+        !["model", "surface", "assembly"].includes(r.step))
+    )
+      throw new Error(
+        "모델 입력 방식은 모델·텍스처·조립 단계에서 전체 또는 파츠로 선택하세요.",
+      );
+    if (r.step !== "separate" && r.separationMode !== undefined)
+      throw new Error("분리 방식은 분리 단계에서만 선택할 수 있습니다.");
     if (["concept", "assembly", "reference"].includes(r.step) && !r.prompt)
       throw new Error("원하는 결과를 지시문에 입력하세요.");
     if (r.step === "concept") {
@@ -369,7 +407,9 @@ export class WorkbenchEngine {
     if (
       ["separate", "surface"].includes(r.step) &&
       r.role !== undefined &&
-      !WORKBENCH_ROLES.includes(r.role)
+      (r.role === "whole"
+        ? r.step !== "surface"
+        : !WORKBENCH_ROLES.includes(r.role))
     )
       throw new Error("수정할 파츠를 선택하세요.");
     if (r.step === "separate") {
@@ -387,18 +427,29 @@ export class WorkbenchEngine {
         throw new Error("지원하지 않는 GPT 파츠 묶음 생성 방식입니다.");
       // Only new requests are normalized. Saved legacy requests keep their plan.
       if (r.provider === "gpt") r.separationStrategy = "part-multiview-v1";
+      r.separationMode ??= "multiview";
+      if (!["single", "multiview"].includes(r.separationMode))
+        throw new Error("분리만 또는 멀티뷰 분리 방식을 선택하세요.");
+      r.views ??=
+        r.separationMode === "single" ? ["front"] : [...WORKBENCH_VIEWS];
       if (
-        r.views !== undefined &&
-        (r.views.length !== 4 ||
-          new Set(r.views).size !== 4 ||
-          r.views.some((v) => !WORKBENCH_VIEWS.includes(v)))
+        !Array.isArray(r.views) ||
+        !r.views.length ||
+        new Set(r.views).size !== r.views.length ||
+        !r.views.includes("front") ||
+        r.views.some((v) => !WORKBENCH_VIEWS.includes(v)) ||
+        (r.separationMode === "single" &&
+          (r.views.length !== 1 || r.views[0] !== "front"))
       )
         throw new Error(
-          "새 분리 작업에는 정면·후면·좌측·우측 네 방향이 필요합니다.",
+          "분리 사진 방향은 정면을 포함한 서로 다른 방향이어야 합니다. 분리만 선택하면 정면 1장을 사용합니다.",
         );
-      r.views = [...WORKBENCH_VIEWS];
       if (r.view !== undefined && !WORKBENCH_VIEWS.includes(r.view))
         throw new Error("올바른 이미지 방향을 선택하세요.");
+      if (r.view && !r.views.includes(r.view))
+        throw new Error(
+          "수정할 방향은 이 분리 작업에서 선택한 방향이어야 합니다.",
+        );
       if (r.reuseExisting !== undefined && typeof r.reuseExisting !== "boolean")
         throw new Error("기존 사진 재사용 설정이 올바르지 않습니다.");
       if ((r.role || r.view || r.reuseExisting) && !r.baseJobId)
@@ -425,7 +476,16 @@ export class WorkbenchEngine {
     if (r.step === "surface" && r.role && !r.baseJobId)
       throw new Error("한 파츠 텍스처 수정에는 기준 결과가 필요합니다.");
     if (r.step === "model") {
-      if (!WORKBENCH_ROLES.includes(r.role!))
+      r.modelInput ??= r.role && r.role !== "whole" ? "parts" : "whole";
+      if (r.modelInput === "whole") {
+        if (r.role && r.role !== "whole")
+          throw new Error("전체 이미지 모델링에는 전체 모델을 선택하세요.");
+        r.role = "whole";
+      }
+      if (
+        r.modelInput === "parts" &&
+        (!r.role || r.role === "whole" || !WORKBENCH_ROLES.includes(r.role))
+      )
         throw new Error("모델링할 파츠를 선택하세요.");
       if (r.baseJobId) {
         r.modelEditScope ??= "all";
@@ -493,8 +553,56 @@ export class WorkbenchEngine {
     const w = this.get(id);
     this.idle(w);
     this.workerIdle();
-    const r = this.normalize(request),
-      slot = workbenchSlot(r);
+    const input = structuredClone(request);
+    if (input.step === "separate" && input.baseJobId) {
+      const base = this.job(w, input.baseJobId);
+      const views = workbenchSeparationViews(base.request);
+      if (
+        input.views &&
+        JSON.stringify([...input.views].sort()) !==
+          JSON.stringify([...views].sort())
+      )
+        throw new Error(
+          "수정 작업은 기준 버전의 방향을 유지합니다. 방향을 바꾸려면 새 분리 작업을 실행하세요.",
+        );
+      if (
+        input.separationMode &&
+        input.separationMode !==
+          (base.request.separationMode ??
+            (views.length === 1 ? "single" : "multiview"))
+      )
+        throw new Error("수정 작업은 기준 버전의 분리 방식을 유지합니다.");
+      input.views = [...views];
+      input.separationMode =
+        base.request.separationMode ??
+        (views.length === 1 ? "single" : "multiview");
+    }
+    if (input.step === "surface") {
+      input.modelInput ??= input.baseJobId
+        ? workbenchModelInput(this.job(w, input.baseJobId).request)
+        : w.selections["model:whole"]
+          ? "whole"
+          : WORKBENCH_ROLES.some((role) => w.selections[`model:${role}`])
+            ? "parts"
+            : "whole";
+      if (
+        input.role &&
+        (input.modelInput === "whole") !== (input.role === "whole")
+      )
+        throw new Error(
+          "텍스처 수정 파츠와 선택한 모델 입력 방식이 일치하지 않습니다.",
+        );
+    }
+    const r = this.normalize(input);
+    if (r.step === "assembly") {
+      const route = workbenchModelInput(this.chosen(w, "surface").job.request);
+      if (r.modelInput !== undefined && r.modelInput !== route)
+        throw new Error(
+          "조립 입력 방식이 채택한 텍스처 모델과 일치하지 않습니다.",
+        );
+      r.modelInput = route;
+    }
+    const slot = workbenchSlot(r);
     if (
       w.jobs.some((j) => j.slot === slot && j.status === "submission_unknown")
     )
@@ -536,6 +644,8 @@ export class WorkbenchEngine {
     const inputs: WorkbenchArtifact[] = [];
     for (const dep of this.dependencySlots(w, r)) {
       const selected = this.chosen(w, dep);
+      if (r.step === "model" && dep === "separate")
+        r.views = [...workbenchSeparationViews(selected.job.request)];
       if (
         r.step === "model" &&
         !r.baseJobId &&
@@ -545,20 +655,20 @@ export class WorkbenchEngine {
         this.prepareCandidates(w, selected.job, [selected.candidate]);
         this.save(w);
         if (
-          WORKBENCH_VIEWS.some(
+          workbenchSeparationViews(selected.job.request).some(
             (view) =>
               !selected.candidate.artifacts.some(
                 (a) =>
                   a.kind === "image" &&
                   a.role === r.role &&
-                  a.view === view &&
+                  (a.view ?? "front") === view &&
                   a.normalized &&
                   !a.normalizationIssue,
               ),
           )
         )
           throw new Error(
-            "모델링 전에 선택한 파츠 네 방향 사진의 크기·배경 정리를 완료하세요. 표시된 사진별 사유를 확인해 주세요.",
+            "모델링 전에 선택한 파츠 사진의 크기·배경 정리를 완료하세요. 표시된 사진별 사유를 확인해 주세요.",
           );
       }
       dependencies[dep] = selected.selected;
@@ -567,15 +677,18 @@ export class WorkbenchEngine {
         r.step === "model" &&
         !r.baseJobId &&
         dep === "separate" &&
-        WORKBENCH_VIEWS.some(
+        workbenchSeparationViews(selected.job.request).some(
           (view) =>
             !selected.candidate.artifacts.some(
-              (a) => a.kind === "image" && a.role === r.role && a.view === view,
+              (a) =>
+                a.kind === "image" &&
+                a.role === r.role &&
+                (a.view ?? "front") === view,
             ),
         )
       )
         throw new Error(
-          "모델링 전에 선택한 파츠의 정면·후면·좌측·우측 사진을 모두 확인하고 채택하세요.",
+          "모델링 전에 선택한 파츠의 요청된 방향 사진을 모두 확인하고 채택하세요.",
         );
     }
     if (r.baseJobId) {
@@ -974,7 +1087,7 @@ export class WorkbenchEngine {
   ) {
     if (!this.current(w, job))
       throw new Error("완료된 작업의 기준 입력이 변경되었습니다.");
-    const expected = job.step === "concept" ? 4 : 1;
+    const expected = workbenchGenerationCount(job.request);
     if (
       !Array.isArray(result.candidates) ||
       result.candidates.length !== expected
@@ -990,7 +1103,8 @@ export class WorkbenchEngine {
     const workspace = this.workspace(w, job);
     const candidates = this.registerCandidates(w, job, result.candidates);
     this.checkOutputs(job, candidates, result, workspace);
-    this.checkPreservedBase(w, job, candidates[0]);
+    for (const candidate of candidates)
+      this.checkPreservedBase(w, job, candidate);
     this.prepareCandidates(w, job, candidates);
     job.candidates = candidates;
     job.checks = normalizeWorkbenchChecks(job.step, result.checks);
@@ -1133,38 +1247,41 @@ export class WorkbenchEngine {
       );
     if (
       !Array.isArray(result.candidates) ||
-      result.candidates.length !== 1 ||
+      !result.candidates.length ||
+      result.candidates.length > workbenchGenerationCount(job.request) ||
+      new Set(result.candidates.map((c) => c.id)).size !==
+        result.candidates.length ||
       !Array.isArray(result.checks)
     )
       throw new Error("파츠 분리 중간 결과가 올바르지 않습니다.");
     if (result.checks.some((check) => blocksWorkbenchCheck(job.step, check)))
       throw new Error("중간 이미지에 통과하지 못한 파일 검사가 있습니다.");
     const candidates = this.registerCandidates(w, job, result.candidates);
-    const artifacts = candidates[0].artifacts;
-    const images = artifacts.filter((a) => a.kind === "image");
-    this.checkSeparationSheetExports(
-      job,
-      candidates[0],
-      this.workspace(w, job),
-    );
-    const views = job.request.views ?? ["front"];
-    if (
-      !images.length ||
-      images.length > WORKBENCH_ROLES.length * views.length ||
-      artifacts.some((a) => !["image", "report", "export"].includes(a.kind)) ||
-      images.some(
-        (a) =>
-          !WORKBENCH_ROLES.includes(
-            a.role as (typeof WORKBENCH_ROLES)[number],
-          ) || !views.includes(a.view ?? "front"),
-      ) ||
-      new Set(images.map((a) => `${a.role}:${a.view ?? "front"}`)).size !==
-        images.length ||
-      new Set(images.map((a) => a.sha256)).size !== images.length
-    )
-      throw new Error(
-        "중간 결과에는 서로 다른 머리·머리카락·몸통 이미지와 보고서만 사용할 수 있습니다.",
-      );
+    for (const candidate of candidates) {
+      const artifacts = candidate.artifacts;
+      const images = artifacts.filter((a) => a.kind === "image");
+      this.checkSeparationSheetExports(job, candidate, this.workspace(w, job));
+      const views = job.request.views ?? ["front"];
+      if (
+        !images.length ||
+        images.length > WORKBENCH_ROLES.length * views.length ||
+        artifacts.some(
+          (a) => !["image", "report", "export"].includes(a.kind),
+        ) ||
+        images.some(
+          (a) =>
+            !WORKBENCH_ROLES.includes(
+              a.role as (typeof WORKBENCH_ROLES)[number],
+            ) || !views.includes(a.view ?? "front"),
+        ) ||
+        new Set(images.map((a) => `${a.role}:${a.view ?? "front"}`)).size !==
+          images.length ||
+        new Set(images.map((a) => a.sha256)).size !== images.length
+      )
+        throw new Error(
+          "중간 결과에는 서로 다른 머리·머리카락·몸통 이미지와 보고서만 사용할 수 있습니다.",
+        );
+    }
     this.prepareCandidates(w, job, candidates);
     job.draftCandidates = candidates;
     job.draftChecks = normalizeWorkbenchChecks(job.step, result.checks);
@@ -1213,15 +1330,27 @@ export class WorkbenchEngine {
       if (candidates.some((c) => !has(c, primary)))
         throw new Error("각 후보에 실제 이미지 또는 모델이 필요합니다.");
       if (
-        job.step === "concept" &&
-        new Set(
-          candidates.map(
-            (c) => c.artifacts.find((a) => a.kind === primary)!.sha256,
-          ),
-        ).size !== 4
+        job.step === "model" &&
+        candidates.some((c) => !has(c, "model", job.request.role))
       )
         throw new Error(
-          "서로 다른 후보 4개가 필요합니다. 같은 결과를 복제할 수 없습니다.",
+          "각 모델 후보는 요청한 전체 모델 또는 파츠 역할과 일치해야 합니다.",
+        );
+      if (
+        new Set(
+          candidates.map(
+            (c) =>
+              c.artifacts.find(
+                (a) =>
+                  a.kind === primary &&
+                  (primary !== "model" ||
+                    path.extname(a.path).toLowerCase() === ".glb"),
+              )?.sha256,
+          ),
+        ).size !== candidates.length
+      )
+        throw new Error(
+          "서로 다른 후보가 필요합니다. 같은 결과를 복제할 수 없습니다.",
         );
     }
     const c = candidates[0];
@@ -1252,33 +1381,44 @@ export class WorkbenchEngine {
       }
     }
     if (job.step === "separate") {
-      this.checkSeparationSheetExports(job, c, workspace);
-      const images = c.artifacts.filter((a) => a.kind === "image");
-      const views = job.request.views ?? ["front"];
-      if (
-        images.length !== WORKBENCH_ROLES.length * views.length ||
-        WORKBENCH_ROLES.some((role) =>
-          views.some(
-            (view) =>
-              !images.some(
-                (a) => a.role === role && (a.view ?? "front") === view,
-              ),
-          ),
+      const signatures = new Set<string>();
+      for (const candidate of candidates) {
+        this.checkSeparationSheetExports(job, candidate, workspace);
+        const images = candidate.artifacts.filter((a) => a.kind === "image");
+        const views = job.request.views ?? ["front"];
+        if (
+          images.length !== WORKBENCH_ROLES.length * views.length ||
+          WORKBENCH_ROLES.some((role) =>
+            views.some(
+              (view) =>
+                !images.some(
+                  (a) => a.role === role && (a.view ?? "front") === view,
+                ),
+            ),
+          )
         )
-      )
-        throw new Error(
-          job.request.views
-            ? "머리·머리카락·몸통의 정면·후면·좌측·우측 분리 이미지 12장이 모두 필요합니다."
-            : "머리·머리카락·몸통 분리 이미지가 모두 필요합니다.",
-        );
-      if (new Set(images.map((a) => a.sha256)).size !== images.length)
-        throw new Error("분리 결과는 서로 다른 파츠·방향 이미지여야 합니다.");
+          throw new Error(
+            `머리·머리카락·몸통의 요청된 ${views.length}방향 분리 이미지 ${WORKBENCH_ROLES.length * views.length}장이 모두 필요합니다.`,
+          );
+        if (new Set(images.map((a) => a.sha256)).size !== images.length)
+          throw new Error("분리 결과는 서로 다른 파츠·방향 이미지여야 합니다.");
+        const signature = images
+          .map((a) => `${a.role}:${a.view ?? "front"}:${a.sha256}`)
+          .sort()
+          .join("|");
+        if (signatures.has(signature))
+          throw new Error("분리 후보는 서로 다른 이미지 세트여야 합니다.");
+        signatures.add(signature);
+      }
     }
     if (
       job.step === "surface" &&
-      WORKBENCH_ROLES.some((role) => !has(c, "model", role))
+      (workbenchModelInput(job.request) === "whole"
+        ? ["whole"]
+        : WORKBENCH_ROLES
+      ).some((role) => !has(c, "model", role))
     )
-      throw new Error("선택한 세 파츠의 UV·텍스처 결과가 모두 필요합니다.");
+      throw new Error("선택한 모델의 UV·텍스처 결과가 모두 필요합니다.");
     if (["assembly", "rig", "animation"].includes(job.step)) {
       if (
         !has(c, "blend") ||
@@ -1385,6 +1525,12 @@ export class WorkbenchEngine {
     if (!candidate) throw new Error("후보를 찾을 수 없습니다.");
     this.verifyArtifacts(w, candidate.artifacts);
     const changed = !equal(w.selections[job.slot], { jobId, candidateId });
+    const replacedSlots =
+      job.step === "model"
+        ? workbenchModelInput(job.request) === "whole"
+          ? WORKBENCH_ROLES.map((role) => `model:${role}`)
+          : ["model:whole"]
+        : [];
     if (changed) {
       const dependsOn = (
         candidate: WorkbenchJob,
@@ -1394,7 +1540,9 @@ export class WorkbenchEngine {
         seen.add(candidate.id);
         return Object.entries(candidate.dependencies).some(
           ([slot, selection]) =>
-            slot === job.slot || dependsOn(this.job(w, selection.jobId), seen),
+            slot === job.slot ||
+            replacedSlots.includes(slot) ||
+            dependsOn(this.job(w, selection.jobId), seen),
         );
       };
       if (
@@ -1410,6 +1558,7 @@ export class WorkbenchEngine {
         );
     }
     w.selections[job.slot] = { jobId, candidateId };
+    for (const slot of replacedSlots) delete w.selections[slot];
     if (changed) {
       let again = true;
       while (again) {

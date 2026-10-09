@@ -840,6 +840,8 @@ test("explicit nonrepairable or new-generation requirements stop even when they 
     "JSON validation failed; cannot repair the missing generated image",
     "Geometry validation: a new image generation is required",
     "검증 결과 사용자 판단이 필요합니다",
+    "JSON result validation missing because approval_policy never rejected the tool",
+    "결과 파일 없음: 승인 정책에서 도구 실행이 거부됐습니다",
   ])
     assert.equal(classifyWorkbenchFailure(reason).kind, "blocked", reason);
 });
@@ -936,6 +938,62 @@ function recordChatGptDownloads(
     ),
   });
 }
+test("ChatGPT concept count 1 or 2 is frozen in one request and requires that many native originals", async () => {
+  for (const count of [1, 2]) {
+    const f = fixture("concept"),
+      worker = new Worker();
+    f.context.job.request.imageBackend = "chatgpt-web";
+    f.context.job.request.generationCount = count;
+    worker.hook = (task) => {
+      const result: WorkbenchResult = {
+        status: "completed",
+        summary: "Offline original fixture",
+        checks: [],
+        candidates: Array.from({ length: count }, (_, index) => {
+          const file = path.join(
+            path.dirname(task.resultPath),
+            `original-${index}.png`,
+          );
+          const png = new PNG({ width: 4, height: 4 });
+          png.data.fill(10 + index);
+          fs.writeFileSync(file, PNG.sync.write(png));
+          return {
+            id: `image-${index}`,
+            label: "fixture",
+            artifacts: [
+              {
+                kind: "image",
+                path: path
+                  .relative(task.run.workspace, file)
+                  .replaceAll("\\", "/"),
+              },
+            ],
+            objects: [],
+          };
+        }),
+      };
+      recordChatGptDownloads(worker, task, result);
+      return result;
+    };
+    const executor = new CodexWorkbenchExecutor(worker, f.services);
+    const result = await executor.execute(f.context, () => {});
+    assert.equal(result.status, "completed", result.summary);
+    assert.equal(result.candidates.length, count);
+    assert.equal(worker.calls.length, 1);
+    assert.match(
+      worker.calls[0].webPrompt!,
+      new RegExp(`Return exactly ${count} separate original images`),
+    );
+    assert(!worker.calls[0].webPrompt!.includes("FOUR"));
+    assert.match(worker.calls[0].prompt, /send exactly ONCE/);
+    assert.equal(
+      (await executor.execute(f.context, () => {})).status,
+      "completed",
+    );
+    assert.equal(worker.calls.length, 1);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
 test("actual-chat routing requests four concepts once and requires matching native download provenance", async () => {
   const f = fixture("concept"),
     worker = new Worker();
@@ -1170,7 +1228,7 @@ function multiviewOutput(
   task: WorkerTask,
   onlyViews?: string[],
 ): WorkbenchResult {
-  const role = /^separate-(head|hair|body)-multiview-v1$/.exec(
+  const role = /^separate-(head|hair|body)-multiview-v1(?:-set-\d+)?$/.exec(
     task.stage.id,
   )![1];
   const views =
@@ -1269,6 +1327,119 @@ function addSeparationBase(
   f.context.inputs.push(...artifacts);
   return artifacts;
 }
+
+test("separation count creates isolated full front-only alternatives and saved inspection never reruns them", async () => {
+  const f = fixture("separate"),
+    worker = new Worker();
+  f.context.job.request.generationCount = 2;
+  f.context.job.request.separationMode = "single";
+  f.context.job.request.views = ["front"];
+  f.context.job.request.imageBackend = "chatgpt-web";
+  worker.hook = (task) => {
+    const result = partOutput(task);
+    const file = path.join(
+      task.run.workspace,
+      result.candidates[0].artifacts[0].path,
+    );
+    fs.appendFileSync(file, task.stage.id);
+    recordChatGptDownloads(worker, task, result);
+    return result;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const result = await executor.execute(f.context, () => {});
+  assert.equal(result.status, "completed", result.summary);
+  assert.equal(result.candidates.length, 2);
+  assert.deepEqual(
+    result.candidates.map((candidate) => candidate.id),
+    ["separate-set-1", "separate-set-2"],
+  );
+  assert.equal(worker.calls.length, 6);
+  assert.equal(new Set(worker.calls.map((task) => task.stage.id)).size, 6);
+  for (const candidate of result.candidates) {
+    assert.equal(
+      candidate.artifacts.filter((artifact) => artifact.kind === "image")
+        .length,
+      3,
+    );
+    assert(candidate.artifacts.every((artifact) => artifact.view === "front"));
+  }
+  assert(executor.hasConfirmedSubmission(f.context.job));
+  assert.equal((await executor.inspectSaved(f.context)).status, "completed");
+  assert.equal(
+    (await executor.execute(f.context, () => {})).status,
+    "completed",
+  );
+  assert.equal(worker.calls.length, 6);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("multiview alternatives keep separate phase receipts and retain the completed set during recovery", async () => {
+  const f = multiviewFixture(),
+    worker = new Worker();
+  f.context.job.request.generationCount = 2;
+  f.context.job.request.imageBackend = "chatgpt-web";
+  let interrupted = true;
+  worker.hook = (task) => {
+    const result = multiviewOutput(
+      task,
+      task.recoveryOnly
+        ? [...fourViews]
+        : task.stage.id === "separate-head-multiview-v1-set-2" && interrupted
+          ? ["front"]
+          : undefined,
+    );
+    if (task.recoveryOnly) result.status = "completed";
+    recordChatGptDownloads(worker, task, result);
+    return result;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const first = await executor.execute(f.context, () => {});
+  assert.equal(first.status, "needs_input");
+  assert.equal(first.candidates.length, 2);
+  assert.equal(
+    first.candidates[0].artifacts.filter(
+      (artifact) => artifact.kind === "image",
+    ).length,
+    12,
+  );
+  assert.equal(
+    first.candidates[1].artifacts.filter(
+      (artifact) => artifact.kind === "image",
+    ).length,
+    1,
+  );
+  assert.equal(worker.calls.length, 4);
+  interrupted = false;
+  const recovered = await executor.recover(
+    {
+      ...f.context,
+      recovery: {
+        attempt: 1,
+        mode: "retry",
+        error: "existing originals now available",
+      },
+    },
+    () => {},
+  );
+  assert.equal(recovered.status, "completed", recovered.summary);
+  assert.equal(recovered.candidates.length, 2);
+  assert(
+    recovered.candidates.every(
+      (candidate) =>
+        candidate.artifacts.filter((artifact) => artifact.kind === "image")
+          .length === 12,
+    ),
+  );
+  assert.equal(worker.calls.length, 7);
+  assert.equal(worker.calls[4].stage.id, "separate-head-multiview-v1-set-2");
+  assert.equal(worker.calls[4].recoveryOnly, true);
+  assert.match(worker.calls[4].prompt, /No fill, upload, submit, new chat/);
+  assert.equal(
+    worker.calls.filter((task) => task.stage.id.endsWith("set-1")).length,
+    3,
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
 
 test("four-view separation produces twelve independent photos and references earlier directions of the same part", async () => {
   const f = fixture("separate"),
@@ -2290,6 +2461,143 @@ test("missing-only execution still respects an explicitly selected direction", a
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
+function recordStudioModels(
+  worker: Worker,
+  task: WorkerTask,
+  result: WorkbenchResult,
+) {
+  worker.receipts.set(task.stage.id, {
+    charges: [{ state: "observed", cost: 100 }],
+    downloads: result.candidates.map((candidate) => ({
+      state: "completed",
+      file: candidate.artifacts[0].path,
+      sha256: digest(
+        path.join(task.run.workspace, candidate.artifacts[0].path),
+      ),
+    })),
+  });
+}
+test("whole character uses its accepted concept directly and one native Tripo count submission returns multiple candidates", async () => {
+  const f = fixture("model"),
+    worker = new Worker();
+  const concept = { ...f.context.inputs[0], role: undefined, view: undefined };
+  f.context.inputs = [concept];
+  f.context.job.request = {
+    step: "model",
+    prompt: "",
+    modelInput: "whole",
+    role: "whole",
+    generationCount: 2,
+  };
+  worker.hook = (task) => {
+    const result = output(task, 2);
+    recordStudioModels(worker, task, result);
+    return result;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const result = await executor.execute(f.context, () => {});
+  assert.equal(result.status, "completed", result.summary);
+  assert.equal(result.candidates.length, 2);
+  assert(
+    result.candidates.every((candidate) =>
+      candidate.artifacts.every((artifact) => artifact.role === "whole"),
+    ),
+  );
+  assert.equal(worker.calls.length, 1);
+  assert.equal(worker.calls[0].imagePaths?.length, 1);
+  assert.match(
+    worker.calls[0].prompt,
+    /selected WHOLE character concept image/,
+  );
+  assert.match(worker.calls[0].prompt, /visibly selected native count 2/);
+  assert.match(worker.calls[0].prompt, /single-image input mode/);
+  assert.match(
+    worker.calls[0].prompt,
+    /never clamp count, loop Generate, or substitute repeated submissions/,
+  );
+  assert.equal(
+    (await executor.execute(f.context, () => {})).status,
+    "completed",
+  );
+  assert.equal(worker.calls.length, 1);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+test("front-only part modeling supports requested count above four with one charge and rejects missing candidate downloads", async () => {
+  for (const missingDownload of [false, true]) {
+    const f = fixture("model"),
+      worker = new Worker();
+    f.context.inputs = [f.context.inputs[0]];
+    Object.assign(f.context.job.request, {
+      modelInput: "parts",
+      views: ["front"],
+      generationCount: 5,
+      prompt: "",
+    });
+    worker.hook = (task) => {
+      const result = output(task, 5);
+      recordStudioModels(worker, task, result);
+      if (missingDownload) worker.receipts.get(task.stage.id)!.downloads.pop();
+      return result;
+    };
+    const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+      f.context,
+      () => {},
+    );
+    assert.equal(
+      result.status,
+      missingDownload ? "needs_input" : "completed",
+      result.summary,
+    );
+    if (!missingDownload) assert.equal(result.candidates.length, 5);
+    else assert.match(result.summary, /고유 후보 파일이 부족/);
+    assert.equal(worker.calls.length, 1);
+    assert.equal(worker.calls[0].imagePaths?.length, 1);
+    assert.match(worker.calls[0].prompt, /visibly selected native count 5/);
+    assert.equal(worker.receipts.get("model")?.charges.length, 1);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+test("whole character surface performs only whole UV and texture operations", async () => {
+  const f = fixture("surface"),
+    worker = new Worker();
+  f.context.job.request.modelInput = "whole";
+  worker.hook = (task) => {
+    const result = output(task, 1);
+    recordStudioModels(worker, task, result);
+    return result;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const result = await executor.execute(f.context, () => {});
+  assert.equal(result.status, "completed", result.summary);
+  assert.deepEqual(
+    worker.calls.map((task) => task.stage.id),
+    ["whole-uv", "whole-texture"],
+  );
+  assert(
+    result.candidates[0].artifacts.every(
+      (artifact) => artifact.role === "whole",
+    ),
+  );
+  assert(executor.hasConfirmedSubmission(f.context.job));
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+test("whole character assembly refines the selected character with Astra without inventing three input parts", async () => {
+  const f = fixture("assembly"),
+    worker = new Worker();
+  f.context.job.request.modelInput = "whole";
+  await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(worker.calls.length, 1);
+  assert.equal(worker.calls[0].requestedModel, "gpt-6-astra");
+  assert.match(
+    worker.calls[0].prompt,
+    /Refine the selected WHOLE textured character/,
+  );
+  assert(!worker.calls[0].prompt.includes("Assemble the THREE"));
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
 test("model requires four mapped references, one output and an observable supported correction prompt", async () => {
   const f = fixture("model"),
     worker = new Worker();

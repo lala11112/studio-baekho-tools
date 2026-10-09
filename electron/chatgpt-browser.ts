@@ -2,6 +2,7 @@ import { app, BrowserWindow, nativeImage, type DownloadItem } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import { browserToolPolicy } from "./worker-tool-policy";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type {
   WorkerConnection,
@@ -1103,6 +1104,7 @@ export class ChatGptBrowser {
         'mcp_servers.partsmith_chatgpt.env_vars=["PARTSMITH_STUDIO_PORT","PARTSMITH_STUDIO_TOKEN"]',
         "-c",
         'mcp_servers.partsmith_chatgpt.env.ELECTRON_RUN_AS_NODE="1"',
+        ...browserToolPolicy("partsmith_chatgpt", CHATGPT_TOOLS),
       ],
       env: {
         PARTSMITH_STUDIO_PORT: String(bridge.port),

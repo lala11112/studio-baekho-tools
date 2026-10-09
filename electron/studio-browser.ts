@@ -2,6 +2,7 @@ import { app, BrowserWindow, type DownloadItem } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import { browserToolPolicy } from "./worker-tool-policy";
 import {
   createHash,
   randomBytes,
@@ -40,6 +41,8 @@ type Control = {
   fileIndex?: number;
   accept?: string;
   options?: { value: string; label: string }[];
+  value?: string;
+  selected?: boolean;
   bounds?: { x: number; y: number; width: number; height: number };
 };
 type Snapshot = {
@@ -159,6 +162,19 @@ function collect(id: string) {
       role: el.getAttribute("role") || "",
       type: el.getAttribute("type") || "",
       label: labels[index],
+      ...((el instanceof HTMLInputElement &&
+        el.type !== "password" &&
+        el.type !== "email" &&
+        el.type !== "file") ||
+      el instanceof HTMLSelectElement
+        ? { value: el.value }
+        : {}),
+      selected:
+        el.getAttribute("aria-pressed") === "true" ||
+        el.getAttribute("aria-selected") === "true" ||
+        el.getAttribute("aria-checked") === "true" ||
+        el.getAttribute("data-state") === "checked" ||
+        (el instanceof HTMLInputElement && el.checked),
       disabled:
         (el as HTMLButtonElement).disabled === true ||
         el.getAttribute("aria-disabled") === "true",
@@ -1092,6 +1108,7 @@ export class StudioBrowser {
         'mcp_servers.partsmith_studio.env_vars=["PARTSMITH_STUDIO_PORT","PARTSMITH_STUDIO_TOKEN"]',
         "-c",
         'mcp_servers.partsmith_studio.env.ELECTRON_RUN_AS_NODE="1"',
+        ...browserToolPolicy("partsmith_studio", STUDIO_TOOLS),
       ],
       env: {
         PARTSMITH_STUDIO_PORT: String(bridge.port),

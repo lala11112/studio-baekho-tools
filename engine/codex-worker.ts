@@ -137,6 +137,31 @@ export function codexArguments(task: WorkerTask, extraArgs: string[] = []) {
   args.push(...extraArgs, "-");
   return args;
 }
+/** Deterministic transport failure, not a request to reason over more files. */
+export function isBrowserToolApprovalDenied(event: unknown): boolean {
+  const value = event as {
+    type?: string;
+    item?: {
+      type?: string;
+      tool?: string;
+      tool_name?: string;
+      server?: string;
+      status?: string;
+      error?: unknown;
+      result?: unknown;
+    };
+  };
+  const item = value?.item;
+  return (
+    value?.type === "item.completed" &&
+    item?.type === "mcp_tool_call" &&
+    /^(?:studio_|chatgpt_)/.test(item.tool ?? item.tool_name ?? "") &&
+    (item.status === "failed" || Boolean(item.error)) &&
+    /approval[_ ]policy.{0,40}never|(?:denied|blocked).{0,60}approval|approval.{0,60}(?:denied|blocked)/i.test(
+      JSON.stringify(item.error ?? item.result ?? ""),
+    )
+  );
+}
 const unavailable: WorkerCapabilities = {
   studio: false,
   video: false,
@@ -425,6 +450,15 @@ export class CodexWorker implements ProductionWorker {
             log.write(clean(line) + "\n");
             try {
               const event = JSON.parse(line);
+              if (isBrowserToolApprovalDenied(event)) {
+                this.terminate(child);
+                finish(
+                  new Error(
+                    "앱 내부 브라우저 도구 호출이 승인 정책으로 차단됐습니다. 작업을 중단했으며 추가 생성·복구 요청을 보내지 않습니다. 최신 앱으로 실행하고 기존 제출 기록을 확인하세요.",
+                  ),
+                );
+                return;
+              }
               if (event.type === "item.started") {
                 const item = event.item;
                 if (item?.type === "mcp_tool_call")

@@ -19,7 +19,7 @@ import {
 import type { ProductionRun, ProductionStage } from "../shared/production";
 import type {
   WorkbenchArtifact,
-  WorkbenchExecutionContext,
+  WorkbenchExecutionContext as SharedExecutionContext,
   WorkbenchExecutor,
   WorkbenchObject,
   WorkbenchResult,
@@ -28,6 +28,19 @@ import type {
   WorkbenchRecovery,
   WorkbenchView,
 } from "../shared/workbench";
+import {
+  WORKBENCH_MAX_GENERATION_COUNT,
+  workbenchGenerationCount,
+  workbenchModelInput,
+} from "../shared/workbench";
+
+type WorkbenchExecutionContext = SharedExecutionContext & {
+  separationVariant?: number;
+};
+const countWord = (count: number) =>
+  count === 1 ? "ONE" : count === 4 ? "FOUR" : String(count);
+const variantSuffix = (context?: WorkbenchExecutionContext) =>
+  context?.separationVariant ? `-set-${context.separationVariant}` : "";
 
 export type WorkbenchServices = {
   projectRoot: (projectId: string) => string;
@@ -54,10 +67,15 @@ type SeparatedPart = {
   view?: WorkbenchView;
   result: WorkbenchResult;
 };
-const separationStage = (role: string, view?: WorkbenchView) =>
-  `separate-${role}${view ? `-${view}` : ""}`;
-const sheetStage = (role: string) => `separate-${role}-sheet-v1`;
-const multiviewStage = (role: string) => `separate-${role}-multiview-v1`;
+const separationStage = (
+  role: string,
+  view?: WorkbenchView,
+  context?: WorkbenchExecutionContext,
+) => `separate-${role}${view ? `-${view}` : ""}${variantSuffix(context)}`;
+const sheetStage = (role: string, context?: WorkbenchExecutionContext) =>
+  `separate-${role}-sheet-v1${variantSuffix(context)}`;
+const multiviewStage = (role: string, context?: WorkbenchExecutionContext) =>
+  `separate-${role}-multiview-v1${variantSuffix(context)}`;
 const usesChatGptWeb = (context: WorkbenchExecutionContext) =>
   context.job.request.imageBackend === "chatgpt-web" &&
   context.job.request.provider !== "tripo" &&
@@ -165,6 +183,12 @@ type PhaseJournal = {
 /** Only concrete failures are eligible. Unrecognized requests still need a person. */
 export function classifyWorkbenchFailure(reason: string): WorkbenchRecovery {
   if (
+    /approval[_ -]?policy|승인\s*정책|approvals?.*(?:denied|reject)|(?:denied|reject).*approvals?|권한.*(?:거부|차단)|승인.*(?:거부|차단)/i.test(
+      reason,
+    )
+  )
+    return { kind: "blocked", reason };
+  if (
     /login|log.in|captcha|로그인|인증|budget|credit|예산|크레딧|unsupported|지원하지|unavailable|사용할 수 없|찾을 수 없|clarif|사용자.*(선택|결정|판단|승인)|설정.*필요|체크포인트.*변경|완료된 단계 파일이 변경|cannot.*(repair|recover)|(?:복구|수정).*(?:불가|불가능|할 수 없)|(?:new|another).*(?:image|generation).*(?:required|needed)|새.*(?:이미지|생성).*(?:필요|요청)|다시.*생성.*필요/i.test(
       reason,
     )
@@ -237,7 +261,7 @@ const resultSchema = z
           })
           .strict(),
       )
-      .max(4),
+      .max(WORKBENCH_MAX_GENERATION_COUNT),
     checks: z
       .array(
         z
@@ -284,6 +308,7 @@ export const workbenchResultJsonSchema = {
     summary: { type: "string" },
     candidates: {
       type: "array",
+      maxItems: WORKBENCH_MAX_GENERATION_COUNT,
       items: {
         type: "object",
         additionalProperties: false,
@@ -383,16 +408,24 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
   }
   private receiptStageIds(job: WorkbenchJob) {
     if (job.step === "surface")
-      return ["head", "hair", "body"].flatMap((role) => [
-        `${role}-uv`,
-        `${role}-texture`,
-      ]);
-    if (job.step === "separate" && job.request.imageBackend === "chatgpt-web")
-      return ["head", "hair", "body"].flatMap((role) => [
-        multiviewStage(role),
-        separationStage(role),
-        ...orderedViews.map((view) => separationStage(role, view)),
-      ]);
+      return (
+        workbenchModelInput(job.request) === "whole"
+          ? ["whole"]
+          : ["head", "hair", "body"]
+      ).flatMap((role) => [role + "-uv", role + "-texture"]);
+    if (job.step === "separate" && job.request.imageBackend === "chatgpt-web") {
+      const count = workbenchGenerationCount(job.request);
+      return Array.from({ length: count }, (_, index) => {
+        const suffix = count > 1 ? "-set-" + (index + 1) : "";
+        return ["head", "hair", "body"].flatMap((role) => [
+          "separate-" + role + "-multiview-v1" + suffix,
+          "separate-" + role + suffix,
+          ...orderedViews.map(
+            (view) => "separate-" + role + "-" + view + suffix,
+          ),
+        ]);
+      }).flat();
+    }
     return [job.step];
   }
   hasSubmission(job: WorkbenchJob) {
@@ -718,7 +751,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       );
     const folder = path.resolve(
       context.workspace,
-      `outputs/${separationStage(role, view)}`,
+      `outputs/${separationStage(role, view, context)}`,
     );
     for (const artifact of artifacts) {
       const file = this.file(context.workspace, artifact.path);
@@ -749,7 +782,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         ) {
           const checkpoint = this.loadCheckpoint(
             context,
-            separationStage(role, view),
+            separationStage(role, view, context),
           );
           const group =
             context.job.request.separationStrategy === "part-multiview-v1"
@@ -766,8 +799,8 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
             this.verifyChatGptOriginal(
               context,
               group?.views.includes(view ?? "front")
-                ? multiviewStage(role)
-                : separationStage(role, view),
+                ? multiviewStage(role, context)
+                : separationStage(role, view, context),
               file,
             );
         }
@@ -792,7 +825,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     role: string,
     view?: WorkbenchView,
   ): WorkbenchResult | undefined {
-    const stageId = separationStage(role, view);
+    const stageId = separationStage(role, view, context);
     // A hash-protected checkpoint is authoritative. Never fall back after tampering.
     const checkpoint = this.loadCheckpoint(context, stageId);
     if (checkpoint) return this.inspectPart(context, role, checkpoint, view);
@@ -806,7 +839,8 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     role: string,
     createViews?: WorkbenchView[],
   ): SheetPlan | undefined {
-    const file = this.checkpointFile(context, sheetStage(role)) + ".plan.json";
+    const file =
+      this.checkpointFile(context, sheetStage(role, context)) + ".plan.json";
     if (fs.existsSync(file)) {
       const plan = readJson(file) as SheetPlan;
       if (
@@ -827,8 +861,8 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       return plan;
     }
     if (
-      this.journal(context, sheetStage(role)) ||
-      fs.existsSync(this.checkpointFile(context, sheetStage(role)))
+      this.journal(context, sheetStage(role, context)) ||
+      fs.existsSync(this.checkpointFile(context, sheetStage(role, context)))
     )
       throw Error(
         "시작된 멀티뷰 작업의 고정 계획이 없습니다. 새 생성은 하지 않습니다.",
@@ -876,7 +910,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       );
     const folder = path.resolve(
       context.workspace,
-      "outputs/" + sheetStage(role),
+      "outputs/" + sheetStage(role, context),
     );
     for (const artifact of artifacts) {
       const file = this.file(context.workspace, artifact.path);
@@ -910,7 +944,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     context: WorkbenchExecutionContext,
     plan: SheetPlan,
   ): WorkbenchResult | undefined {
-    const stageId = sheetStage(plan.role),
+    const stageId = sheetStage(plan.role, context),
       checkpoint = this.loadCheckpoint(context, stageId);
     if (checkpoint) return this.inspectSheet(context, plan.role, checkpoint);
     const resultFile = this.file(
@@ -934,10 +968,10 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     const bytes = fs.readFileSync(this.file(context.workspace, source.path));
     const sourceSha256 = createHash("sha256").update(bytes).digest("hex");
     const split = splitMultiviewSheet(bytes, plan.views);
-    const sourceExportPath = `outputs/${separationStage(plan.role, plan.views[0])}/source-sheet.png`;
+    const sourceExportPath = `outputs/${separationStage(plan.role, plan.views[0], context)}/source-sheet.png`;
     const parts: SeparatedPart[] = [];
     for (const image of split.images) {
-      const stageId = separationStage(plan.role, image.view),
+      const stageId = separationStage(plan.role, image.view, context),
         folder = `outputs/${stageId}`;
       const relative = `${folder}/part.png`,
         expectedSha = createHash("sha256").update(image.png).digest("hex");
@@ -1040,7 +1074,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     role: string,
     createViews?: WorkbenchView[],
   ): MultiviewPlan | undefined {
-    const stageId = multiviewStage(role),
+    const stageId = multiviewStage(role, context),
       file = this.checkpointFile(context, stageId) + ".plan.json";
     if (fs.existsSync(file)) {
       const plan = readJson(file) as MultiviewPlan;
@@ -1087,7 +1121,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     context: WorkbenchExecutionContext,
     plan: MultiviewPlan,
   ): WorkbenchResult | undefined {
-    const stageId = multiviewStage(plan.role),
+    const stageId = multiviewStage(plan.role, context),
       checkpoint = this.checkpointFile(context, stageId);
     if (fs.existsSync(checkpoint)) {
       const saved = readJson(checkpoint);
@@ -1124,7 +1158,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       throw Error(
         "독립 멀티뷰 묶음은 한 후보 안에 방향별 원본을 저장해야 합니다.",
       );
-    const stageId = multiviewStage(plan.role),
+    const stageId = multiviewStage(plan.role, context),
       folder = path.resolve(context.workspace, `outputs/${stageId}`);
     raw.summary = this.chatGptInputSummary(context, stageId, raw.summary);
     if (
@@ -1146,7 +1180,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       if (JSON.stringify(checks) === JSON.stringify(checked.checks))
         return checked;
       const updated = { ...checked, checks },
-        stage = separationStage(plan.role, view);
+        stage = separationStage(plan.role, view, context);
       fs.writeFileSync(
         this.file(context.workspace, `outputs/${stage}/result.json`),
         JSON.stringify(updated),
@@ -1167,7 +1201,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       if (!images.some((a) => a.view === view)) {
         const existing = this.loadCheckpoint(
           context,
-          separationStage(plan.role, view),
+          separationStage(plan.role, view, context),
         );
         if (existing) {
           const checked = mergeWarnings(
@@ -1235,7 +1269,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         if (pixelSha) seenPixels.add(pixelSha);
         if (!files.some((f) => f.path === artifact.path))
           files.push({ path: artifact.path, sha256: sourceSha256 });
-        const partStage = separationStage(plan.role, artifact.view),
+        const partStage = separationStage(plan.role, artifact.view, context),
           existing = this.loadCheckpoint(context, partStage);
         if (existing) {
           const checked = this.inspectPart(
@@ -1334,7 +1368,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       if (!parts.some((p) => p.view === view)) {
         const existing = this.loadCheckpoint(
           context,
-          separationStage(plan.role, view),
+          separationStage(plan.role, view, context),
         );
         if (existing && !images.some((a) => a.view === view))
           parts.push({
@@ -1381,7 +1415,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     task: WorkerTask,
     onProgress: (message: string) => void,
   ): Promise<WorkbenchResult> {
-    const role = /^separate-(head|hair|body)-multiview-v1$/.exec(
+    const role = /^separate-(head|hair|body)-multiview-v1(?:-set-\d+)?$/.exec(
         task.stage.id,
       )![1],
       plan = this.multiviewPlan(context, role)!;
@@ -1519,6 +1553,16 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
   async inspectSaved(
     context: WorkbenchExecutionContext,
   ): Promise<WorkbenchResult> {
+    if (
+      context.job.step === "separate" &&
+      !context.separationVariant &&
+      workbenchGenerationCount(context.job.request) > 1
+    )
+      return this.separationVariants(
+        context,
+        (variant) => this.inspectSaved(variant),
+        true,
+      );
     if (context.job.step !== "separate")
       throw Error(
         "저장된 사진 확인은 파츠 분리 단계에서만 사용할 수 있습니다.",
@@ -1648,14 +1692,19 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       (context.job.step === "concept" &&
         context.job.request.provider !== "tripo");
     const separated =
-      /^separate-(head|hair|body)(?:-(front|back|left|right))?$/.exec(stageId);
-    const sheetRole = /^separate-(head|hair|body)-sheet-v1$/.exec(stageId)?.[1];
+      /^separate-(head|hair|body)(?:-(front|back|left|right))?(?:-set-\d+)?$/.exec(
+        stageId,
+      );
+    const sheetRole = /^separate-(head|hair|body)-sheet-v1(?:-set-\d+)?$/.exec(
+      stageId,
+    )?.[1];
     const sheetPlan = sheetRole
       ? this.sheetPlan(context, sheetRole)
       : undefined;
-    const multiviewRole = /^separate-(head|hair|body)-multiview-v1$/.exec(
-      stageId,
-    )?.[1];
+    const multiviewRole =
+      /^separate-(head|hair|body)-multiview-v1(?:-set-\d+)?$/.exec(
+        stageId,
+      )?.[1];
     const multiviewPlan = multiviewRole
       ? this.multiviewPlan(context, multiviewRole)
       : undefined;
@@ -1861,6 +1910,10 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     phase?: Phase,
   ) {
     const request = context.job.request;
+    const count = workbenchGenerationCount(request);
+    const modelViews = inputs.filter(
+      (input) => input.referenceUse === "selected-part-view",
+    );
     if (usesChatGptWeb(context))
       return this.chatGptWorkerPrompt(context, inputs, folder, phase);
     const imagePhase =
@@ -1878,8 +1931,8 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     const instructions: Record<WorkbenchStep, string> = {
       concept:
         request.provider === "tripo"
-          ? "Use the visible Tripo Studio image generation workspace to create exactly FOUR genuine image candidates from the user prompt. Observe the available model and four-result count UI; do not assume a price or unsupported batch option. A single observed approved charge is allowed. Download all four actual image results. If the site requires four independent paid submissions, report needs_input instead of submitting multiple times."
-          : `Create exactly FOUR distinct front-view full-body character image candidates from the user's prompt with consistent useful framing. ${imageRules} Use FOUR separate built-in calls. Save each candidate immediately; report candidly if fewer than four finish. Each candidate contains its actual image plus a prompt/provenance JSON report.`,
+          ? `Use the visible Tripo Studio image generation workspace to create exactly ${countWord(count)} genuine image candidates from the user prompt. Observe and verify the actually selected native count=${count} UI value; do not assume a price or unsupported batch option. A single observed approved charge is allowed. Download all ${count} actual image results. If the native count is unavailable or requires independent paid submissions, report needs_input before submitting; never clamp or loop Generate.`
+          : `Create exactly ${countWord(count)} distinct front-view full-body character image candidates from the user's prompt with consistent useful framing. ${imageRules} Use an actually supported independent-image interface; never invent count arguments. Produce exactly ${count} original images within this approved scope. Save each candidate immediately; report candidly if fewer than ${count} finish. Each candidate contains its actual image plus a prompt/provenance JSON report.`,
       separate:
         phase?.kind === "separate-multiview"
           ? `One logical multiview task for the '${phase.role}' part. Requested independent original directions ONLY: ${JSON.stringify(phase.views)}. Produce ONE separate full-quality native image file for EACH requested direction; never create or crop a sheet, grid, collage or composite. Character-left/right are the character's own sides; never mirror or copy a direction. Inspect the supplied original and all distinct same-part references once, then preserve identity, design, geometry, asymmetry, useful scale, camera consistency and transparent background. ${phase.role === "head" ? "Isolate face/skull without hair or body." : phase.role === "hair" ? "Isolate the matching hair without face or body." : "Isolate neck-down body including outfit without head or hair."} Use the configured built-in image capability and imagegen skill only. If the actually available tool supports independent multi-output in one invocation, use its documented interface; do not invent an n/count argument. Otherwise, within THIS SAME worker you may make one full-quality image call per direction, concurrently only when the actual tools support concurrency. Do not use an API/provider fallback or start another worker per view. Keep model, reasoning effort and useful original resolution; no downsampling. Set transparent_background=true when supported. No claims of one image-tool call, equal quality or measured speedup without evidence. IMMEDIATELY copy each genuine native file unchanged to this output folder and update result.json atomically with all completed files, even while other directions are unfinished. Return ONE candidate with separate image artifacts, each role '${phase.role}' and its exact view. Keep partial output status needs_input until the requested originals exist. Inspect each completed original once; for every aesthetic concern retain visual_quality, passed=false, severity warning, one finite visualCategory alignment/alpha_edges/appearance/view_consistency/semantic_isolation, and a concrete detail under 600 characters. Valid originals remain available for user review; never regenerate them to fix aesthetic observations. Missing files, wrong role/view, duplicates and integrity are blocking. Do not accept or advance stages.`
@@ -1889,13 +1942,13 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       model: `${
         request.baseJobId
           ? `Use ONLY Tripo Studio's existing-model partial regeneration/regional-edit feature. This is an edit of the exact supplied base model, NOT new model generation. Locate and open the matching existing Studio model using its native download and observed remote identity/provenance; verify the editor target before any action. If that exact model cannot be identified/opened, return needs_input. Requested edit scope: '${request.modelEditScope ?? "all"}'. ${request.modelEditScope === "part" ? `Select ONLY the requested region '${request.modelEditTarget}' using the actual regional selector; verify the selected region visibly. If reliable region selection is unavailable, return needs_input.` : "Inside the partial-regeneration feature select the entire existing model as the edit target, and visibly verify the all-model region. Do not substitute the new Generate feature."} Use the observed Edit Mesh canvas and its region box handles. Use studio_canvas_drag with the current snapshot element and normalized points to adjust the actual selection, then capture a fresh snapshot to verify it. Observe the actual remaining partial-regeneration allowance/count (or explicit unlimited label) and actual paid-button price when relevant. Never invent the maximum, reset rule or price. If free allowance is exhausted, a paid edit is allowed only when its actual credit price is visibly explicit and inside the frozen approved budget; otherwise return needs_input. If neither valid allowance nor price is observable, or the feature is unsupported, return needs_input. Execute at most ONE observed host-gated partial regeneration using studio_mesh_edit_submit(snapshotId, element, operationId, expectedCredits, evidenceText); expectedCredits is zero only when explicit free/무료 wording or an explicit zero-credit button is visible AND remaining allowance is positive or unlimited; never infer zero cost merely from a remaining-use count or unlimited label. Otherwise use the actual visible price. evidenceText must quote the current allowance/price evidence. Never use ordinary studio_submit for this edit. Never auto-loop. Never use new-model Generate, a fresh image-to-model task, API fallback or another model as a substitute.`
-          : `Use visible Tripo Studio Smart Mesh P2 with the selected '${request.role}' FOUR real views (front, back, character-left, character-right), ${request.polygonCount === undefined ? "the observed Studio polygon default" : `requested polygon count ${request.polygonCount}`}, and ONE-candidate mode. Use only inputs tagged referenceUse='selected-part-view' for the four input slots. When normalized metadata/sourceSha256 is present, their localPath is the host-verified 2048x2048 PNG with common canvas, part scale and center; upload that localPath, not the raw provenance path. Do not regenerate, recrop or resize those prepared inputs. Observe P2's actual multi-view slot labels and map character-left/right correctly. Confirm P2, all four inputs, count ONE and actual total credit cost before the sole gated submission. If P2 multi-view or count ONE is unavailable, return needs_input. Read actual allowed polygon controls/range; never silently clamp. Do not assume any fixed price. Never fall back to another model/API or single-view generation.`
+          : `Use visible Tripo Studio Smart Mesh P2 with ${workbenchModelInput(request) === "whole" ? "the selected WHOLE character concept image; do not separate the character" : `the selected '${request.role}' part views`}: ${JSON.stringify(modelViews.map((input) => input.view ?? "front"))}. ${request.polygonCount === undefined ? "Use the observed Studio polygon default" : `Use requested polygon count ${request.polygonCount}`}, and ${countWord(count)}-candidate mode using Tripo's EXISTING native generation-count control. Use ONLY inputs tagged referenceUse='selected-part-view' as generation inputs. For a single selected image, use the actual single-image input mode. For multiple selected views, observe the real multi-view slot labels and map the frozen directions correctly; map character-left/right correctly; do not add, mirror or invent missing views. When normalized metadata/sourceSha256 is present, upload its host-verified 2048x2048 PNG with common canvas, part scale and center from localPath, not raw provenance. Do not regenerate, recrop or resize prepared inputs. Confirm P2, exactly these ${modelViews.length} image inputs, the visibly selected native count ${count}, and the actual TOTAL credit cost before the sole gated submission. If P2, the selected input mode or native count ${count} is unavailable, return needs_input before clicking; never clamp count, loop Generate, or substitute repeated submissions. Read actual polygon controls/range; never silently clamp. Do not assume fixed prices or fall back to another model/API.`
       }
         ${request.baseJobId ? "Use the requested target and user text to select the existing mesh region when the instruction only identifies an area. Region-only guidance may use the visible selection handles without a text prompt field. If the request instead requires a specific shape/appearance correction, inspect whether this operation has a supported prompt field or explicit setting that can apply it; enter and verify the actual requested correction where supported. If unsupported, return needs_input, clearly explain the limitation, and never pretend a stochastic region regeneration applies a precise requested shape. Do not generate new reference images." : request.prompt.trim() ? "The non-empty user prompt is a real requested correction: before paid-submit, observe a prompt field supported by this exact operation, enter the requested text and verify it visibly. If no supported field can apply the correction, return needs_input and explain that the part reference images or supported edit settings must first be revised; NEVER submit while silently ignoring the prompt." : "No extra text correction was requested; preserve the selected inputs and requested scope."}
-        Download exactly ONE real resulting model version. Preserve each native file unchanged as an export artifact for host receipt verification. Capture the candidate's actual Studio preview with studio_snapshot, copy its returned screenshot path from studio-evidence into the output folder as an image artifact, and record its matching remote model/version ID, operation and observed allowance/settings. Use the Studio image for review; do not render review images in Blender. If the native file is an uncompressed self-contained geometry GLB accepted by the app, copy it as a separate model artifact without invoking Blender. Only unsupported formats such as FBX, compressed GLB or external-resource glTF require Blender conversion; retain native originals unchanged. Return exactly ONE candidate, preserve earlier versions, and never retry an ambiguous click.`,
+        Download exactly ${countWord(count)} real resulting model version(s). Preserve each native file unchanged as an export artifact for host receipt verification. Capture the candidate's actual Studio preview with studio_snapshot, copy its returned screenshot path from studio-evidence into the output folder as an image artifact, and record its matching remote model/version ID, operation and observed allowance/settings. Use the Studio image for review; do not render review images in Blender. If the native file is an uncompressed self-contained geometry GLB accepted by the app, copy it as a separate model artifact without invoking Blender. Only unsupported formats such as FBX, compressed GLB or external-resource glTF require Blender conversion; retain native originals unchanged. Return exactly ${countWord(count)} candidate(s), each with its own native download and matching preview; preserve earlier versions, and never retry an ambiguous click.`,
       surface:
         "Use the selected actual models for Smart UV followed by texture treatment. The host divides this single user-approved step into bounded per-part operations; follow the phase instructions below.",
-      assembly: `You are the requested Codex gpt-6-astra author. ${commonBlender} ${request.baseJobId ? "Open the prior accepted .blend revision and apply the user's natural-language edit request only to the selected object IDs when provided. Keep unspecified proportions, materials and objects stable." : "Assemble the THREE selected textured parts into one character scene. Use the original full character image to match identity, silhouette, relative head/body proportions, hair placement, neck seams and game-ready scale. Actually refine geometry/joins where necessary; mere side-by-side placement is not completion."} Record changes, review renders and unresolved quality concerns. Return ONE candidate version for the user to accept, refine or restore. Never start rigging automatically.`,
+      assembly: `You are the requested Codex gpt-6-astra author. ${commonBlender} ${request.baseJobId ? "Open the prior accepted .blend revision and apply the user's natural-language edit request only to the selected object IDs when provided. Keep unspecified proportions, materials and objects stable." : workbenchModelInput(request) === "whole" || inputs.some((input) => input.role === "whole") ? "Refine the selected WHOLE textured character as one editable character scene; do not invent three separate input parts. Use the original full character image to match identity, silhouette, proportions and game-ready scale." : "Assemble the THREE selected textured parts into one character scene. Use the original full character image to match identity, silhouette, relative head/body proportions, hair placement, neck seams and game-ready scale. Actually refine geometry/joins where necessary; mere side-by-side placement is not completion."} Record changes, review renders and unresolved quality concerns. Return ONE candidate version for the user to accept, refine or restore. Never start rigging automatically.`,
       rig: `You are the requested Codex gpt-6-astra author. ${commonBlender} Rig the accepted assembled character in Blender. Create body bones and real deform weights. Requested object toggles: ${JSON.stringify(request.rigTargets ?? [])}. For extraBones=true add suitable dedicated deform bones and weights for that object (cloth hems, sleeves, hair, ears, tails or accessories as appropriate); set EACH dedicated bone's custom property partsmith_target_id to the stable object ID. For extraBones=false add no dedicated bones; bind that object to the appropriate existing body bones or bone parent. NEVER interpret a toggle as Unity physics simulation. If requested clothing/hair is fused inseparably and cannot be confidently isolated, return needs_input with the required region/object clarification. Test shoulder/elbow/hip/knee and enabled accessory deformations; capture review renders. Export GLB with skins and no unweighted vertices.`,
       reference: `Generate ONE coherent synchronized multiview 2D KEY-POSE image sequence for '${request.motion}', duration ${request.duration}s. The user approved EXACTLY ${request.referenceFrameCount ?? 3} shared key-pose timestamps and ${3 * (request.referenceFrameCount ?? 3)} actual generated images in total (one front/side/back image at each time). The ${request.fps} fps setting is for later 3D animation playback, NOT a promise of full-rate 2D video frames. ${imageRules} Use front/side/back reference views of the SAME accepted character. Define exactly the approved number of meaningful shared timestamps including 0 and duration, then make actual images for each time and view with the SAME pose and fixed camera. Reference the completed front image at a time when generating side/back for that time. Preserve face, body proportions, outfit, hair and scale. Do not assume independently generated views synchronize. Inspect correspondence and identity and report uncertainty. Return ONE candidate, every actual key-pose frame as image artifact, and ONE frames artifact JSON: {schemaVersion:1,motion:<string>,fps:<number>,duration:<number>,camera:'fixed',frames:[{time:<seconds>,front:<job-relative PNG>,side:<job-relative PNG>,back:<job-relative PNG>}]} with increasing time. Video or motion capture services are not required. Do not create 3D animation yet.`,
       animation: `You are the requested Codex gpt-6-astra author. ${commonBlender} Inspect the user-accepted synchronized front/side/back 2D frame sequence and timestamps, and the accepted rig. Infer and AUTHOR actual bone poses, keyframes, interpolation and timing in Blender from those specific images for '${request.motion}'. Use actual visual reasoning and bpy execution, not preset Idle/Walk, text-only pose plans or generic animation templates. Compare rendered key phases against corresponding multiview frames; correct foot contact, sliding, penetration and timing. Bake/export actual action clips in GLB and editable .blend. Respect user corrections. If views disagree materially return needs_input, never invent synchronization. Return ONE version for review.`,
@@ -1946,11 +1999,12 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     phase?: Phase,
   ) {
     const request = context.job.request;
+    const count = workbenchGenerationCount(request);
     const brief = `Character brief / requested correction: ${request.prompt}`;
     if (context.job.step === "concept")
       return [
         brief,
-        "Create FOUR distinct full-body front-view character concept images in this single request. Return four separate original images, each one candidate. Use useful consistent framing and preserve the provided reference identity when supplied. Label each result candidate-1, candidate-2, candidate-3 or candidate-4 in adjacent text, not inside the image. Do not make a contact sheet, collage, grid or four panels in one image. Retain full image quality and resolution. If four separate images cannot be produced, say so without substituting a sheet.",
+        `Create ${countWord(count)} distinct full-body front-view character concept images in this single request. Return exactly ${count} separate original images, each one candidate. Use useful consistent framing and preserve the provided reference identity when supplied. Label each result candidate-1 through candidate-${count} in adjacent text, not inside the image. Do not make a contact sheet, collage, grid or multiple panels in one image. Retain full image quality and resolution. If the requested separate images cannot be produced, say so without substituting a sheet.`,
       ].join("\n\n");
     const role = phase!.role,
       views = phase?.views ?? [phase?.view ?? "front"];
@@ -1978,7 +2032,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       "Call chatgpt_snapshot and inspect the visible UI. Login, CAPTCHA, usage limits or an unsupported UI require needs_input with the exact reason. Use chatgpt_navigate(new) only before this phase has been submitted, then chatgpt_upload_references for the host-approved originals and chatgpt_fill_prompt for the host-frozen image request. Confirm attachments and prompt are visibly present; send exactly ONCE using chatgpt_submit. One chat request may produce several images. Do not send follow-ups, regenerate, retry, edit the sent prompt or create another chat if results are missing or the submission is ambiguous. The adapter keeps a durable pre-send journal. Use submission_unknown when it cannot identify the submitted conversation.",
       "Wait with bounded chatgpt_wait and fresh snapshots. Use chatgpt_click_image on each actual generated image, then its observed original-image download control through chatgpt_download_image. chatgpt_downloads returns host-owned download records. Save each native downloaded original immediately and update result.json atomically with all completed files. Screenshots, previews, uploads, blobs extracted via network, or synthesized files are not output originals. Never crop, resize, stitch, re-encode, mirror or strip alpha. Preserve genuine partial originals even when later results are missing.",
       context.job.step === "concept"
-        ? "Return FOUR candidates, each containing exactly one separate original image artifact and a short factual report. Keep partial candidates and needs_input if fewer than four original images were actually returned."
+        ? `Return ${countWord(workbenchGenerationCount(context.job.request))} candidates, each containing exactly one separate original image artifact and a short factual report. Keep partial candidates and needs_input if fewer than ${workbenchGenerationCount(context.job.request)} original images were actually returned.`
         : `Requested independent original directions ONLY: ${JSON.stringify(views)}. Return ONE candidate with an image artifact for each existing requested original, role '${phase!.role}', exact view front/back/left/right. Map views using the visibly associated response labels and visual inspection of the actual downloaded image; never infer orientation from download order, generic filenames or thumbnail position. If a direction remains uncertain, keep its downloaded file but do not label or register it as a confirmed view; return needs_input. Never fabricate missing directions.`,
       "Inspect each actual original once for identity, isolation, direction, asymmetry, cross-view consistency, scale, framing and alpha edges. Keep aesthetic observations as visual_quality, passed=false, severity=warning, visualCategory alignment/alpha_edges/appearance/view_consistency/semantic_isolation, and concrete detail under 600 characters. Integrity, duplicate files and wrong role/view are blocking. Aesthetic warnings never trigger regeneration. The host verifies every output hash against actual native download receipts. Do not compute hashes or produce long logs. Never accept a result or advance stages. Return strict JSON matching the provided schema with actual files and truthful checks.",
     ].join("\n\n");
@@ -1996,11 +2050,11 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         context.job.request.provider === "tripo");
     const stageId = phase
       ? phase.kind === "separate-multiview"
-        ? multiviewStage(phase.role)
+        ? multiviewStage(phase.role, context)
         : phase.kind === "separate-sheet"
-          ? sheetStage(phase.role)
+          ? sheetStage(phase.role, context)
           : phase.kind === "separate"
-            ? separationStage(phase.role, phase.view)
+            ? separationStage(phase.role, phase.view, context)
             : `${phase.role}-${phase.kind}`
       : context.job.step;
     const folder = `outputs/${stageId}`;
@@ -2293,7 +2347,10 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         for (const candidate of result.candidates)
           for (const artifact of candidate.artifacts)
             artifact.role = context.job.request.role;
-      const expected = !phase && context.job.step === "concept" ? 4 : 1;
+      const expected =
+        !phase && ["concept", "model"].includes(context.job.step)
+          ? workbenchGenerationCount(context.job.request)
+          : 1;
       if (result.candidates.length !== expected)
         throw Error(`실제 후보 ${expected}개가 모두 필요합니다.`);
       for (const candidate of result.candidates) {
@@ -2433,10 +2490,69 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       };
     }
   }
+  /** Full separation alternatives have isolated files, journals and native receipts. */
+  private async separationVariants(
+    context: WorkbenchExecutionContext,
+    run: (variant: WorkbenchExecutionContext) => Promise<WorkbenchResult>,
+    inspectOnly = false,
+  ): Promise<WorkbenchResult> {
+    const count = workbenchGenerationCount(context.job.request);
+    const results: WorkbenchResult[] = [];
+    const combine = (partial?: WorkbenchResult): WorkbenchResult => {
+      const all = partial ? [...results, partial] : results;
+      const complete =
+        all.length === count &&
+        all.every((result) => result.status === "completed");
+      const last = all.at(-1);
+      return {
+        status: all.some((result) => result.status === "submission_unknown")
+          ? "submission_unknown"
+          : complete
+            ? "completed"
+            : "needs_input",
+        summary: complete
+          ? `${count}개 분리 후보 세트가 준비됐습니다. 원하는 세트를 채택하세요.`
+          : `${results.filter((result) => result.status === "completed").length}/${count}개 분리 후보 세트 완료. ${last?.summary ?? "저장된 결과를 확인합니다."}`,
+        candidates: all.flatMap((result, index) =>
+          result.candidates.map((candidate) => ({
+            ...candidate,
+            id: `separate-set-${index + 1}`,
+            label: `분리 후보 ${index + 1}`,
+          })),
+        ),
+        checks: uniqueChecks(all.flatMap((result) => result.checks)),
+        ...(!complete && last?.recovery ? { recovery: last.recovery } : {}),
+      };
+    };
+    for (let index = 1; index <= count; index++) {
+      if (context.signal.aborted) return combine();
+      const result = await run({
+        ...context,
+        separationVariant: index,
+        job: {
+          ...context.job,
+          request: { ...context.job.request, generationCount: 1 },
+        },
+        onDraft: (partial) => context.onDraft?.(combine(partial)),
+      });
+      results.push(result);
+      context.onDraft?.(combine());
+      if (!inspectOnly && result.status !== "completed") break;
+    }
+    return combine();
+  }
   async execute(
     context: WorkbenchExecutionContext,
     onProgress: (message: string) => void,
   ): Promise<WorkbenchResult> {
+    if (
+      context.job.step === "separate" &&
+      !context.separationVariant &&
+      workbenchGenerationCount(context.job.request) > 1
+    )
+      return this.separationVariants(context, (variant) =>
+        this.execute(variant, onProgress),
+      );
     if (
       context.job.step === "separate" &&
       context.job.request.separationStrategy === "part-sheet-v1"
@@ -2466,16 +2582,36 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     let selectedModelViews: InputFile[] = [];
     let modelViewSources: InputFile[] = [];
     if (context.job.step === "model") {
+      if (
+        context.job.request.baseJobId &&
+        workbenchGenerationCount(context.job.request) !== 1
+      )
+        return {
+          status: "needs_input",
+          summary:
+            "기존 모델 부분 재생성은 한 버전만 만듭니다. 신규 모델 여러 개 생성으로 대체하지 않습니다.",
+          candidates: [],
+          checks: [],
+          recovery: {
+            kind: "blocked",
+            reason: "기존 모델 편집 개수는 1개여야 합니다.",
+          },
+        };
       const base = this.baseInputs(context, inputs);
-      const separationInputs =
-        this.selectedInputs(context, inputs, "separate") ??
-        inputs.filter((input) => !base.includes(input));
-      const selectedViews = separationInputs.filter(
+      const whole = workbenchModelInput(context.job.request) === "whole";
+      const imageInputs = whole
+        ? (this.selectedInputs(context, inputs, "concept") ??
+          inputs.filter((input) => !input.role || input.role === "whole"))
+        : (this.selectedInputs(context, inputs, "separate") ??
+          inputs.filter((input) => !base.includes(input)));
+      const expectedViews = whole
+        ? ["front"]
+        : (context.job.request.views ?? orderedViews);
+      const selectedViews = imageInputs.filter(
         (input) =>
           input.kind === "image" &&
-          input.role === context.job.request.role &&
-          input.view &&
-          ["front", "back", "left", "right"].includes(input.view),
+          (whole || input.role === context.job.request.role) &&
+          expectedViews.includes(input.view ?? "front"),
       );
       selectedModelViews = selectedViews;
       modelViewSources = selectedViews;
@@ -2502,11 +2638,13 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         };
       try {
         const anchor = selectedViews.find(
-          (input) => input.view === "front",
+          (input) => (input.view ?? "front") === "front",
         )?.sha256;
-        selectedModelViews = selectedViews.map((input) =>
-          this.modelViewInput(context, input, anchor),
-        );
+        selectedModelViews = whole
+          ? selectedViews
+          : selectedViews.map((input) =>
+              this.modelViewInput(context, input, anchor),
+            );
       } catch (error) {
         const summary =
           error instanceof Error
@@ -2522,21 +2660,25 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       }
       if (
         !context.job.request.baseJobId &&
-        (["front", "back", "left", "right"].some(
+        (expectedViews.some(
           (view) =>
-            selectedViews.filter((input) => input.view === view).length !== 1,
+            selectedViews.filter((input) => (input.view ?? "front") === view)
+              .length !== 1,
         ) ||
-          new Set(selectedViews.map((input) => input.sha256)).size !== 4)
+          selectedViews.length !== expectedViews.length ||
+          new Set(selectedViews.map((input) => input.sha256)).size !==
+            expectedViews.length)
       )
         return {
           status: "needs_input",
-          summary:
-            "선택한 파츠의 정면·후면·캐릭터 왼쪽·오른쪽 사진 네 장을 먼저 채택해야 합니다.",
+          summary: whole
+            ? "전체 모델을 만들 원본 이미지 한 장을 먼저 채택해야 합니다."
+            : "모델 입력으로 선택한 파츠 방향 사진을 모두 채택해야 합니다.",
           candidates: [],
           checks: [],
           recovery: {
             kind: "blocked",
-            reason: "모델 생성용 네 방향 사진이 부족하거나 중복됐습니다.",
+            reason: "모델 생성용 선택 사진이 부족하거나 중복됐습니다.",
           },
         };
     }
@@ -2561,7 +2703,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         if (!request.reuseExisting && targeted(role, view)) continue;
         const previous = this.loadCheckpoint(
           context,
-          separationStage(role, view),
+          separationStage(role, view, context),
         );
         if (previous) {
           parts.push({
@@ -2581,7 +2723,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         const artifact = this.preserveInput(
           context,
           input,
-          "outputs/" + separationStage(role, view),
+          "outputs/" + separationStage(role, view, context),
         );
         artifact.view = view ?? input.view;
         const output: WorkbenchResult = {
@@ -2598,7 +2740,11 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
           checks: this.inheritedChecks(context, role),
         };
         this.inspectPart(context, role, output, view, true);
-        this.saveCheckpoint(context, separationStage(role, view), output);
+        this.saveCheckpoint(
+          context,
+          separationStage(role, view, context),
+          output,
+        );
         parts.push({ role, view, result: output });
       }
       if (parts.length) context.onDraft?.(draft());
@@ -2784,11 +2930,14 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       );
       // Subsequent view workers may only read earlier images; verify the host hashes again.
       for (const part of parts)
-        this.loadCheckpoint(context, separationStage(part.role, part.view));
+        this.loadCheckpoint(
+          context,
+          separationStage(part.role, part.view, context),
+        );
       if (request.separationStrategy === "part-sheet-v1")
         for (const role of ["head", "hair", "body"])
           if (this.sheetPlan(context, role))
-            this.loadCheckpoint(context, sheetStage(role));
+            this.loadCheckpoint(context, sheetStage(role, context));
       if (request.separationStrategy === "part-multiview-v1")
         for (const role of ["head", "hair", "body"]) {
           const plan = this.multiviewPlan(context, role);
@@ -2829,7 +2978,11 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
               "outputs/surface-preserved/" + input.role,
             ),
           );
-      for (const role of targetRole ? [targetRole] : ["head", "hair", "body"]) {
+      for (const role of targetRole
+        ? [targetRole]
+        : workbenchModelInput(context.job.request) === "whole"
+          ? ["whole"]
+          : ["head", "hair", "body"]) {
         const primary =
           this.selectedInputs(context, inputs, `model:${role}`) ??
           inputs.filter((input) => input.role === role);
@@ -2876,11 +3029,11 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       result = {
         status: "completed",
         summary:
-          "선택한 세 파츠의 Smart UV·텍스처 결과가 준비됐습니다. 외형을 확인한 뒤 채택하세요.",
+          "선택한 모델의 Smart UV·텍스처 결과가 준비됐습니다. 외형을 확인한 뒤 채택하세요.",
         candidates: [
           {
             id: "surface",
-            label: "세 파츠 후처리 결과",
+            label: "모델 후처리 결과",
             artifacts,
             objects: [],
           },

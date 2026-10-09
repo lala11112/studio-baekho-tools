@@ -20,6 +20,12 @@
 
 0.5.4까지 앱의 GPT 경로는 사용자 로그인으로 Codex CLI 작업자를 실행하는 방식이었으며, ChatGPT 웹 채팅 자동 조작과 같지 않습니다. 실제 생성과 모의 작업자·합성 PNG 시험은 검증 기록에서 구분합니다.
 
+### 내부 브라우저 도구의 비대화형 권한 — 0.6.1, 2026-10-09
+
+공식 [Codex 설정 참조](https://learn.chatgpt.com/docs/config-file/config-reference)는 `mcp_servers.<id>.tools.<tool>.approval_mode`를, [플러그인 설정 예시](https://developers.openai.com/plugins/build/plugins)는 특정 도구의 `approval_mode="approve"`를 설명합니다. Partsmith는 이 설정을 자식 프로세스 명령 인자로만 전달하며 실제 앱 소유 도구 이름을 allowlist로 고정합니다. `approval_policy="never"`와 `workspace-write`는 유지하고 전역 설정·계정 권한·다른 서버는 바꾸지 않습니다. 앱 자체의 비용 한도·제출 기록·중복 방지·인증 보호도 유지합니다. 실제 인증된 CLI가 로컬 시험 MCP의 상태·다운로드 조회를 호출하는지 별도로 검증합니다. 이는 실제 Tripo 생성 검증과 다릅니다.
+
+0.6.1의 생성 개수는 앱의 요청값입니다. Tripo의 실제 화면에 있는 옵션과 선택 상태를 관찰한 뒤 그 값으로 한 번 제출하도록 지시합니다. 1–16이라는 앱 입력 범위를 Tripo의 지원 개수나 고정 요금으로 주장하지 않으며, 지원하지 않는 개수를 여러 제출로 대신하지 않습니다.
+
 ### 사용자 계정의 ChatGPT 웹 연결 — 0.6.0, 2026-10-09
 
 공식 [ChatGPT 이미지 생성 안내](https://learn.chatgpt.com/docs/image-generation)는 웹 채팅에 이미지 생성을 요청하고 참조를 첨부하며, 생성된 이미지를 확대 뷰어에서 확인하는 사용 방법을 설명합니다. 웹에서의 이미지 가용성과 사용 한도는 계정·워크스페이스 설정에 달려 있습니다. 이것을 별도 API 키나 API의 다중 이미지 인자와 동일하게 취급하지 않습니다.

@@ -11,7 +11,7 @@
     "Detached observed canvas is rejected before input events",
     "Combined Sign up/Log in and password page halts worker for user input"
   ],
-  "workspace": "C:\\Users\\김민준\\Desktop\\3D tool\\artifacts\\runtime\\studio-browser-smoke\\89658d05-1280-454b-8a9d-fd5f3144fead",
+  "workspace": "C:\\Users\\김민준\\Desktop\\3D tool\\artifacts\\runtime\\studio-browser-smoke\\2ecbf973-0ff1-46e4-bf4b-5121940ccc93",
   "actualStudio": false,
   "packagedMcp": false,
   "mcpExecutable": "C:\\Users\\김민준\\Desktop\\3D tool\\node_modules\\electron\\dist\\electron.exe",
