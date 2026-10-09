@@ -1,10 +1,10 @@
 {
-  "date": "2026-10-09T11:40:19.919Z",
+  "date": "2026-10-09T11:58:19.288Z",
   "liveChatGpt": false,
   "checks": [
     "Observed contenteditable composer without role and excludes sidebar history",
     "Uncertain native upload cannot submit even when a filename is already visible",
-    "Frozen references uploaded by native file input; exact prompt filled; stale IDs rejected",
+    "Frozen references uploaded by native file input; exact prompt filled; stale IDs rejected; UI status polling preserves valid worker control IDs",
     "Fresh pre-send observation rejects user-edited prompt and still-uploading reference",
     "One durable send; current generated-image-gallery recognized; repeat submit and new chat blocked",
     "Four independent native PNG downloads retain exact bytes and stage/conversation/hash association; differing preview/viewer identities must be rebound; viewer closes for next image",

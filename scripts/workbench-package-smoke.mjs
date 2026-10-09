@@ -54,6 +54,10 @@ try {
     window.desktop.call({ type: "chatgpt.status" }),
   );
   assert.equal(webStatus.available, true);
+  assert.equal(webStatus.state, "closed");
+  assert.equal(webStatus.opened, false);
+  assert.equal(webStatus.canReconnect, true);
+  assert(await page.getByTestId("workbench-chatgpt-reconnect").isVisible());
   assert.equal(
     webStatus.ready,
     false,
@@ -123,6 +127,8 @@ try {
         codexLoginDetected: probe.codex.authenticated,
         chatgptWebDefault: true,
         chatgptWebReady: webStatus.ready,
+        chatgptConnectionState: webStatus.state,
+        explicitReconnectAvailable: webStatus.canReconnect,
         loginPreflightCreatedJobs: 0,
         workerInferenceCalls: 0,
         paidRequests: 0,

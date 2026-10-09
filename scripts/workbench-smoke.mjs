@@ -15,6 +15,11 @@ const fixture = path.resolve(
 const harness = path.join(fixture, "harness");
 const invocationPath = path.join(fixture, "calls.jsonl");
 const draftReleasePath = path.join(fixture, "draft-reviewed.txt");
+const chatGptLoginCompletePath = path.join(fixture, "mock-login-complete.txt");
+const chatGptConnectionCallsPath = path.join(
+  fixture,
+  "mock-connection-calls.jsonl",
+);
 fs.mkdirSync(path.join(harness, "dist-electron"), { recursive: true });
 fs.mkdirSync("artifacts/screenshots", { recursive: true });
 const old = fs.readFileSync("scripts/production-smoke.mjs", "utf8");
@@ -28,11 +33,22 @@ const mockFile = path.join(fixture, "mock-executor.ts");
 const mockChatGptFile = path.join(fixture, "mock-chatgpt-browser.ts");
 fs.writeFileSync(
   mockChatGptFile,
-  `export class ChatGptBrowser {
-  ready = false;
+  `import fs from 'node:fs';
+export class ChatGptBrowser {
+  state = 'closed';
+  opened = false;
+  reconnects = 0;
   constructor() {} close() {}
-  async status() { return {available:true, ready:this.ready, reason:this.ready?'MOCK ChatGPT login only':'MOCK login required', url:'https://chatgpt.com/'}; }
-  async open() { this.ready=true; return this.status(); }
+  record(type) { fs.appendFileSync(${JSON.stringify(chatGptConnectionCallsPath)}, JSON.stringify({type})+'\\n'); }
+  async status() {
+    this.record('status');
+    if(this.opened && fs.existsSync(${JSON.stringify(chatGptLoginCompletePath)})) this.state='ready';
+    return {available:true,state:this.state,opened:this.opened,ready:this.state==='ready',canReconnect:this.state==='failed',
+      reason:this.state==='ready'?'MOCK ChatGPT login only':this.state==='failed'?'MOCK initial page load failed':this.state==='loading'?'MOCK page loading':'MOCK login required',
+      ...(this.state==='failed'?{diagnostic:{code:'ERR_CONNECTION_RESET',host:'chatgpt.com',path:'/'}}:{}),url:'https://chatgpt.com/'};
+  }
+  async open() { this.record('open');this.opened=true;this.state='loading';setTimeout(()=>this.state='failed',500);return this.status(); }
+  async reconnect() { this.record('reconnect');this.reconnects++;this.state='loading';setTimeout(()=>this.state='login_required',500);return this.status(); }
   workerConnection() { return {}; }
   stageReceipt() { return {charges:[],downloads:[]}; }
 }`,
@@ -266,10 +282,81 @@ try {
     "Login preflight must not leave an unsent job stranded in recovery",
   );
   await page.getByTestId("workbench-chatgpt-open").click();
-  await page.getByTestId("workbench-chatgpt-connection-status").waitFor();
+  const connectionStatus = page.getByTestId(
+    "workbench-chatgpt-connection-status",
+  );
+  await page
+    .locator(
+      '[data-testid="workbench-chatgpt-connection-status"][data-state="loading"]',
+    )
+    .waitFor();
+  assert.match(await connectionStatus.textContent(), /페이지 로딩 중/);
+  assert.equal(
+    await page.getByTestId("workbench-chatgpt-status").isEnabled(),
+    true,
+    "Initial navigation returns promptly without locking UI controls",
+  );
+  await page
+    .locator(
+      '[data-testid="workbench-chatgpt-connection-status"][data-state="failed"]',
+    )
+    .waitFor();
+  assert.match(await connectionStatus.textContent(), /연결 실패/);
   assert.match(
-    await page.getByTestId("workbench-chatgpt-connection-status").textContent(),
-    /MOCK ChatGPT login only/,
+    await page.getByTestId("workbench-chatgpt-diagnostic").textContent(),
+    /ERR_CONNECTION_RESET · chatgpt\.com \//,
+  );
+  await page.getByTestId("workbench-chatgpt-reconnect").click();
+  await page
+    .locator(
+      '[data-testid="workbench-chatgpt-connection-status"][data-state="loading"]',
+    )
+    .waitFor();
+  await page
+    .locator(
+      '[data-testid="workbench-chatgpt-connection-status"][data-state="login_required"]',
+    )
+    .waitFor();
+  assert.match(await connectionStatus.textContent(), /로그인 대기/);
+  assert.equal(
+    await page.getByTestId("workbench-chatgpt-diagnostic").count(),
+    0,
+  );
+  fs.writeFileSync(
+    chatGptLoginCompletePath,
+    "Mock user completed login; no account connection.",
+  );
+  await page
+    .locator(
+      '[data-testid="workbench-chatgpt-connection-status"][data-state="ready"]',
+    )
+    .waitFor();
+  assert.match(await connectionStatus.textContent(), /MOCK ChatGPT login only/);
+  const connectionCalls = () =>
+    fs
+      .readFileSync(chatGptConnectionCallsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+  const settledStatusCalls = connectionCalls().filter(
+    (c) => c.type === "status",
+  ).length;
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  assert.equal(
+    connectionCalls().filter((c) => c.type === "status").length,
+    settledStatusCalls,
+    "Automatic connection polling stops when ready",
+  );
+  assert.equal(connectionCalls().filter((c) => c.type === "open").length, 1);
+  assert.equal(
+    connectionCalls().filter((c) => c.type === "reconnect").length,
+    1,
+    "Only the explicit reconnect click retries navigation",
+  );
+  assert.equal(
+    (await state()).workbenches.flatMap((workbench) => workbench.jobs).length,
+    0,
+    "Completing login must not resume the rejected generation request",
   );
   await page.getByTestId("workbench-chatgpt-status").click();
   assert.equal(
@@ -809,6 +896,12 @@ try {
         passed: true,
         realElectron: true,
         mockExecutor: true,
+        mockChatGptConnection: true,
+        chatGptLoadingFailureDiagnosis: true,
+        explicitChatGptReconnect: true,
+        loginStatusRefreshWithoutGeneration: true,
+        loginPollingStopsWhenReady: true,
+        actualChatGptLoginVerified: false,
         candidateSelection: true,
         manualStageGates: true,
         objectEdit: true,

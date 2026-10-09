@@ -209,6 +209,8 @@ async function dispatch(c: Command): Promise<unknown> {
       return chatgpt.open(true);
     case "chatgpt.status":
       return chatgpt.status();
+    case "chatgpt.reconnect":
+      return chatgpt.reconnect();
     case "studio.status":
       return studio.status();
     case "project.create":

@@ -192,9 +192,14 @@ export type AppState = {
 };
 export type ChatGptStatus = {
   available: boolean;
+  state: "closed" | "loading" | "login_required" | "ready" | "failed";
   ready: boolean;
   reason: string;
   url?: string;
+  opened?: boolean;
+  requiresInput?: boolean;
+  canReconnect?: boolean;
+  diagnostic?: { code: string; host?: string; path?: string };
 };
 export type Command =
   | { type: "state" }
@@ -227,7 +232,7 @@ export type Command =
     }
   | { type: "production.probe" }
   | { type: "studio.open" | "studio.status" }
-  | { type: "chatgpt.open" | "chatgpt.status" }
+  | { type: "chatgpt.open" | "chatgpt.status" | "chatgpt.reconnect" }
   | { type: "project.create"; name: string; demo?: boolean }
   | { type: "project.delete"; id: string }
   | {

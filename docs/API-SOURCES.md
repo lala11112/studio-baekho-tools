@@ -12,6 +12,12 @@
 
 ## 기능별 문서
 
+### ChatGPT 인증 팝업과 내장 브라우저 한계 — 0.6.2, 2026-10-09
+
+Electron 공식 [창 열기](https://www.electronjs.org/docs/latest/api/window-open) 문서에서 `setWindowOpenHandler`의 `deny`는 실제 창 생성을 취소합니다. 기존 코드의 인증 팝업은 추가 창을 항상 거부했습니다. 새 구현은 메인 창과 인증 팝업에 같은 주소 검사와 세션을 적용하고, 임시 `about:blank` 이후에도 이동을 검사합니다. 이 코드 결함의 수정과 사용자 환경의 실제 실패 원인 확인은 구분합니다.
+
+Google 공식 [네이티브 앱 OAuth 오류 안내](https://developers.google.com/identity/protocols/oauth2/native-app#disallowed_useragent)는 허용하지 않는 내장 사용자 에이전트에서 `disallowed_useragent` 오류가 발생할 수 있다고 설명합니다. 실제 오류가 확인되면 현재 내장 방식의 한계로 표시하며 사용자 에이전트 위장이나 쿠키 복사로 우회하지 않습니다. 로컬 인증 페이지 시험은 실제 Google 계정 로그인 성공의 근거가 아닙니다.
+
 ### GPT 한 요청에서 4개 독립 원본 받기 — 2026-10-09 정정
 
 공식 [OpenAI 이미지 생성 안내](https://developers.openai.com/api/docs/guides/image-generation)의 Image API `n` 매개변수, Codex 내장 이미지 도구의 입력 규격, 사용자가 ChatGPT에서 보내는 한 번의 채팅 요청은 서로 다른 층위입니다. 내장 도구에 개수 매개변수가 없다는 사실만으로 한 GPT 요청에서 여러 독립 이미지를 받을 수 없다고 결론 내린 것은 잘못이었습니다. 사용자의 의도는 정면·후면·좌·우 각각의 원본 네 장이며, 2×2 시트를 잘라 네 파일로 만드는 기능이 아닙니다. 0.5.4부터 새 시트 생성 옵션을 제거하고 파츠마다 한 GPT 작업에 필요한 방향별 독립 원본을 요청합니다.

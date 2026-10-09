@@ -77,6 +77,13 @@ const statuses: Record<string, string> = {
   failed: "작업 실패",
   cancelled: "중단됨",
 };
+const chatGptStateLabels: Record<ChatGptStatus["state"], string> = {
+  closed: "연결 안 됨",
+  loading: "페이지 로딩 중",
+  login_required: "로그인 대기",
+  ready: "연결 준비됨",
+  failed: "연결 실패",
+};
 
 function SourceImageSize({
   projectId,
@@ -286,6 +293,75 @@ export function AssetWorkbench({
     )?.request.imageBackend ?? "chatgpt-web",
   );
   const [chatGptStatus, setChatGptStatus] = useState<ChatGptStatus>();
+  const [chatGptConnecting, setChatGptConnecting] = useState(false);
+  const [chatGptWatch, setChatGptWatch] = useState(0);
+  const chatGptRequest = useRef(0);
+  const chatGptMounted = useRef(true);
+  // Connection checks are read-only and must not lock workbench actions or
+  // resume a worker. Sequence IDs discard replies from older checks.
+  async function checkChatGpt(
+    type: "chatgpt.open" | "chatgpt.status" | "chatgpt.reconnect",
+  ) {
+    const request = ++chatGptRequest.current;
+    setChatGptConnecting(true);
+    try {
+      const status = await window.desktop.call<ChatGptStatus>({ type });
+      if (chatGptMounted.current && request === chatGptRequest.current) {
+        setChatGptStatus(status);
+        setChatGptWatch(Date.now());
+      }
+    } catch {
+      if (chatGptMounted.current && request === chatGptRequest.current)
+        setChatGptStatus({
+          available: true,
+          ready: false,
+          state: "failed",
+          canReconnect: true,
+          reason: "연결 상태를 확인하지 못했습니다. 다시 연결해 주세요.",
+          diagnostic: { code: "CONNECTION_CHECK_FAILED" },
+        });
+    } finally {
+      if (chatGptMounted.current && request === chatGptRequest.current)
+        setChatGptConnecting(false);
+    }
+  }
+  useEffect(() => {
+    chatGptMounted.current = true;
+    void checkChatGpt("chatgpt.status");
+    return () => {
+      chatGptMounted.current = false;
+      chatGptRequest.current++;
+    };
+  }, []);
+  const watchChatGpt =
+    chatGptStatus?.opened === true &&
+    ["loading", "login_required", "failed"].includes(chatGptStatus.state);
+  useEffect(() => {
+    if (!watchChatGpt || !chatGptWatch || chatGptConnecting) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const request = chatGptRequest.current;
+    const poll = async () => {
+      if (stopped || Date.now() - chatGptWatch >= 10 * 60 * 1000) return;
+      try {
+        const status = await window.desktop.call<ChatGptStatus>({
+          type: "chatgpt.status",
+        });
+        if (stopped || request !== chatGptRequest.current) return;
+        setChatGptStatus(status);
+        if (!status.opened || status.state === "ready") return;
+      } catch {
+        // A background IPC failure does not erase the last concrete diagnosis.
+        return;
+      }
+      timer = setTimeout(poll, 2500);
+    };
+    timer = setTimeout(poll, 2500);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [watchChatGpt, chatGptWatch, chatGptConnecting]);
   const [prompt, setPrompt] = useState(
     w?.jobs.find((j) => j.step === "concept")?.request.prompt ?? "",
   );
@@ -1125,26 +1201,28 @@ export function AssetWorkbench({
         <div className="wb-connections">
           <button
             data-testid="workbench-chatgpt-open"
-            disabled={busy}
-            onClick={async () => {
-              const status = await run({ type: "chatgpt.open" });
-              if (status && typeof status.ready === "boolean")
-                setChatGptStatus(status);
-            }}
+            disabled={busy || chatGptConnecting}
+            onClick={() => void checkChatGpt("chatgpt.open")}
           >
             ChatGPT 연결
           </button>
           <button
             data-testid="workbench-chatgpt-status"
-            disabled={busy}
-            onClick={async () => {
-              const status = await run({ type: "chatgpt.status" });
-              if (status && typeof status.ready === "boolean")
-                setChatGptStatus(status);
-            }}
+            disabled={busy || chatGptConnecting}
+            onClick={() => void checkChatGpt("chatgpt.status")}
           >
             ChatGPT 상태 확인
           </button>
+          {chatGptStatus?.canReconnect && (
+            <button
+              data-testid="workbench-chatgpt-reconnect"
+              disabled={busy || chatGptConnecting}
+              onClick={() => void checkChatGpt("chatgpt.reconnect")}
+            >
+              <RefreshCw size={13} />
+              ChatGPT 다시 연결
+            </button>
+          )}
           <button onClick={() => run({ type: "studio.open" })}>
             Tripo 연결
           </button>
@@ -1167,13 +1245,28 @@ export function AssetWorkbench({
       </div>
       {probe && <p className="wb-note">{probe}</p>}
       {chatGptStatus && (
-        <p
-          className="wb-note"
+        <div
+          className={`wb-note${chatGptStatus.state === "failed" ? " warning" : ""}`}
           data-testid="workbench-chatgpt-connection-status"
+          data-state={chatGptStatus.state}
+          role="status"
+          aria-live="polite"
         >
-          ChatGPT 웹 · {chatGptStatus.ready ? "연결 준비됨" : "확인 필요"} —{" "}
+          ChatGPT 웹 · {chatGptStateLabels[chatGptStatus.state]} —{" "}
           {chatGptStatus.reason}
-        </p>
+          {chatGptStatus.diagnostic && (
+            <small
+              className="wb-connection-diagnostic"
+              data-testid="workbench-chatgpt-diagnostic"
+            >
+              진단: {chatGptStatus.diagnostic.code}
+              {chatGptStatus.diagnostic.host &&
+                ` · ${chatGptStatus.diagnostic.host}`}
+              {chatGptStatus.diagnostic.path &&
+                ` ${chatGptStatus.diagnostic.path}`}
+            </small>
+          )}
+        </div>
       )}
       <nav className="wb-steps" aria-label="에셋 제작 단계">
         {pages.map((s, i) => (

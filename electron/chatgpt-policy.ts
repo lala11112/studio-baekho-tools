@@ -42,6 +42,78 @@ export function isChatGptAuthUrl(value: string) {
     return false;
   }
 }
+/** Human-operated authentication may open a temporary blank child first. */
+export function isChatGptPopupUrl(value: string) {
+  return (
+    value === "about:blank" || isChatGptUrl(value) || isChatGptAuthUrl(value)
+  );
+}
+
+/** Never retain credentials, query strings, fragments or opaque route values. */
+export function chatGptDiagnosticLocation(value: string): {
+  host?: string;
+  path?: string;
+} {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "about:" && url.pathname === "blank")
+      return { path: "about:blank" };
+    if (!["https:", "http:"].includes(url.protocol)) return {};
+    const publicSegments = new Set([
+      "auth",
+      "api",
+      "login",
+      "log-in",
+      "logout",
+      "callback",
+      "signin",
+      "sign-in",
+      "signup",
+      "sign-up",
+      "authorize",
+      "oauth",
+      "oauth2",
+      "v1",
+      "v2",
+      "v3",
+      "identifier",
+      "challenge",
+      "error",
+      "denied",
+      "ServiceLogin",
+      "AccountChooser",
+      "o",
+      "u",
+      "c",
+      "verify",
+      "continue",
+      "consent",
+      "select_account",
+      "native",
+      "signinchooser",
+    ]);
+    const pathname = url.pathname
+      .split("/")
+      .map((part) => (!part || publicSegments.has(part) ? part : "[redacted]"))
+      .join("/");
+    return { host: url.hostname, path: pathname };
+  } catch {
+    return {};
+  }
+}
+
+export function isGoogleEmbeddedBrowserRejection(value: string) {
+  try {
+    const url = new URL(value);
+    return (
+      isChatGptAuthUrl(value) &&
+      url.hostname === "accounts.google.com" &&
+      url.searchParams.get("error") === "disallowed_useragent"
+    );
+  } catch {
+    return false;
+  }
+}
 export const sensitiveChatControl =
   /log\s*in|sign\s*(in|up)|password|captcha|subscribe|upgrade|purchase|payment|delete|share|regenerat|retry|try again|send|submit|로그인|회원가입|비밀번호|인증|결제|구독|삭제|공유|재생성|다시 시도|보내기|전송|제출/i;
 export const downloadChatControl =

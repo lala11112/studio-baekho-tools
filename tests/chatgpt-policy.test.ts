@@ -8,6 +8,9 @@ import {
   CHATGPT_TOOLS,
   isChatGptUrl,
   isChatGptAuthUrl,
+  isChatGptPopupUrl,
+  chatGptDiagnosticLocation,
+  isGoogleEmbeddedBrowserRejection,
   validateOriginalImage,
   downloadChatControl,
   submitChatControl,
@@ -53,6 +56,72 @@ test("ChatGPT navigation permits only home and exact conversations; auth origins
   assert(isChatGptAuthUrl("https://accounts.google.com/"));
   assert(!isChatGptAuthUrl("https://auth.openai.com.evil.test/"));
   assert(!isChatGptAuthUrl("https://user@accounts.google.com/"));
+});
+test("Human authentication popups allow exact blank and trusted destinations without broadening worker navigation", () => {
+  for (const url of [
+    "about:blank",
+    "https://accounts.google.com/v3/signin/identifier",
+    "https://auth.openai.com/log-in",
+    "https://chatgpt.com/auth/callback?code=private",
+  ])
+    assert(isChatGptPopupUrl(url), url);
+  for (const url of [
+    "about:blank#payload",
+    "data:text/html,login",
+    "javascript:alert(1)",
+    "https://accounts.google.com.evil.test/",
+    "http://accounts.google.com/",
+    "https://accounts.google.com:9999/",
+    "https://secret@auth.openai.com/",
+  ])
+    assert(!isChatGptPopupUrl(url), url);
+  assert(!isChatGptUrl("about:blank"));
+  assert(!isChatGptUrl("https://chatgpt.com/auth/callback?code=private"));
+});
+test("Login diagnostics retain public route segments but redact credentials, opaque paths, query and fragment", () => {
+  assert.deepEqual(
+    chatGptDiagnosticLocation(
+      "https://name:password@auth.openai.com/auth/callback/private-token-123?code=secret&email=person@example.com#access_token=other",
+    ),
+    {
+      host: "auth.openai.com",
+      path: "/auth/callback/[redacted]",
+    },
+  );
+  assert.deepEqual(
+    chatGptDiagnosticLocation(
+      "https://accounts.google.com/v3/signin/identifier?continue=secret",
+    ),
+    {
+      host: "accounts.google.com",
+      path: "/v3/signin/identifier",
+    },
+  );
+  assert.deepEqual(
+    chatGptDiagnosticLocation("https://auth.openai.com/auth/%73ecret/callback"),
+    {
+      host: "auth.openai.com",
+      path: "/auth/[redacted]/callback",
+    },
+  );
+  assert.deepEqual(chatGptDiagnosticLocation("about:blank"), {
+    path: "about:blank",
+  });
+  assert.deepEqual(chatGptDiagnosticLocation("javascript:secret"), {});
+});
+test("Only the explicit trusted Google embedded-browser rejection is classified from an auth URL", () => {
+  assert(
+    isGoogleEmbeddedBrowserRejection(
+      "https://accounts.google.com/o/oauth2/error?error=disallowed_useragent&token=secret",
+    ),
+  );
+  for (const url of [
+    "https://accounts.google.com/?error=access_denied",
+    "https://accounts.google.com/?note=disallowed_useragent",
+    "https://evil.test/?error=disallowed_useragent",
+    "https://user@accounts.google.com/?error=disallowed_useragent",
+  ])
+    assert(!isGoogleEmbeddedBrowserRejection(url), url);
 });
 test("One durable submission survives retries, crashes and changed attempt numbers", () => {
   const f = fixture(),

@@ -1,0 +1,17 @@
+{
+  "date": "2026-10-09T11:58:12.348Z",
+  "liveChatGpt": false,
+  "realGoogleLogin": false,
+  "network": "loopback and intercepted HTTPS only",
+  "checks": [
+    "Main and nested authentication popups open with identical session and hardened renderer preferences",
+    "Offline callback returns to parent; ready state refreshes without Send or automatic generation",
+    "Temporary about:blank popup and nested blank popup can navigate to allowed authentication hosts",
+    "Blocked popup is cancelled before navigation, shows only sanitized diagnostic, and explicit reconnect recovers",
+    "Navigation guard also protects a previously allowed blank popup; blocked target is never requested",
+    "Actual rendered disallowed_useragent fixture is reported unsupported without spoofing or alternate sign-in",
+    "Unnavigated blank popup times out visibly and explicit reconnect closes it",
+    "Failed first load remains diagnosable and explicit reconnect reloads successfully without sending",
+    "Explicit reconnect is refused while a worker bridge is active; page and one-submission journal remain unchanged"
+  ]
+}

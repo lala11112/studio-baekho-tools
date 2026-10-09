@@ -50,8 +50,9 @@ const unpack=result=>JSON.parse(result.content[0].text);
 const observe=async()=>unpack(await browser.callTool('chatgpt_snapshot'));
 const element=(view,kind)=>{const item=view.controls.find(node=>node.kind===kind);assert(item,'Missing '+kind);return {snapshotId:view.snapshotId,element:item.index};};
 const checks=[];
+const waitReady=async()=>{for(let n=0;n<80;n++){const status=await browser.status();if(status.ready)return status;await new Promise(r=>setTimeout(r,100));}throw Error('Fixture ChatGPT page did not become ready');};
 try{
- browser.attachRun(context);assert.equal((await browser.open(true)).ready,true);
+ browser.attachRun(context);await browser.open(true);await waitReady();
  let view=unpack(await browser.callTool('chatgpt_navigate',{target:'new'}));
  assert(!view.text.includes('PRIVATE SIDEBAR'));assert(view.controls.some(node=>node.kind==='composer'));
  checks.push('Observed contenteditable composer without role and excludes sidebar history');
@@ -69,9 +70,10 @@ try{
  view=unpack(await browser.callTool('chatgpt_upload_references',element(view,'upload')));
  assert(view.text.includes('reference.png'));
  await assert.rejects(browser.callTool('chatgpt_fill_prompt',stale),/Stale/);
+ await browser.status();
  view=unpack(await browser.callTool('chatgpt_fill_prompt',element(view,'composer')));
  assert.equal(view.composerText,prompt);
- checks.push('Frozen references uploaded by native file input; exact prompt filled; stale IDs rejected');
+ checks.push('Frozen references uploaded by native file input; exact prompt filled; stale IDs rejected; UI status polling preserves valid worker control IDs');
  const wc=BrowserWindow.getAllWindows()[0].webContents;
  await wc.executeJavaScript('document.querySelector("[contenteditable]").textContent="Changed after snapshot"');
  await assert.rejects(browser.callTool('chatgpt_submit',element(view,'send')),/Exact frozen prompt/);
@@ -104,7 +106,7 @@ try{
  checks.push('Four independent native PNG downloads retain exact bytes and stage/conversation/hash association; differing preview/viewer identities must be rebound; viewer closes for next image');
  await browser.close();
  browser=new ChatGptBrowser({fixtureUrl,ledgerDirectory:path.join(directory,'ledgers')});
- browser.attachRun({...context,attempt:2,recoveryOnly:true,referencePaths:[]});await browser.open(true);
+ browser.attachRun({...context,attempt:2,recoveryOnly:true,referencePaths:[]});await browser.open(true);await waitReady();
  await assert.rejects(browser.callTool('chatgpt_navigate',{target:'new'}),/recovery-only/);
  view=unpack(await browser.callTool('chatgpt_navigate',{target:'current'}));
  assert.equal(browser.stageReceipt(context.runId,context.stageId).downloads.length,4);
