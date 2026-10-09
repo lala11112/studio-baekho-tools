@@ -1,0 +1,19 @@
+{
+  "ok": true,
+  "date": "2026-10-09T03:53:33.742Z",
+  "checks": [
+    "home loads real isolated records; shell APIs isolated",
+    "modeling project and unsent prompt survive navigation",
+    "combat native view and unsent prompt survive navigation; bridges isolated",
+    "common results reopen exact combat report without replacing setup draft",
+    "switching Unity projects opens the new project report and survives later polling",
+    "rapid navigation hides native view over settings",
+    "native workspace survives minimize and restore",
+    "1180x760 shell and native workspace remain within window",
+    "no renderer exceptions",
+    "no Unity command requests created by navigation or report viewing"
+  ],
+  "evidence": "isolated local fixture; no paid generation or actual Unity run",
+  "rendererErrors": [],
+  "screenshots": "artifacts\\screenshots\\studio"
+}

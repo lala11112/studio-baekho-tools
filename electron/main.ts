@@ -26,8 +26,11 @@ import { Tripo } from "../engine/tripo";
 import { LocalPipeline } from "../engine/local";
 import { Vault } from "./vault";
 import { catalog } from "../shared/catalog";
+import { installStudioHost } from "./studio-host";
 import type { Command, Project } from "../shared/types";
 protocol.registerSchemesAsPrivileged([
+  { scheme: "baekho", privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  { scheme: "baekho-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
   {
     scheme: "asset",
     privileges: {
@@ -39,8 +42,9 @@ protocol.registerSchemesAsPrivileged([
     },
   },
 ]);
-if (process.env.PARTSMITH_DATA)
-  app.setPath("userData", path.resolve(process.env.PARTSMITH_DATA));
+// Retain Partsmith's existing data, encrypted credentials and Studio session.
+// The package identity stays unchanged; both launchers share this data/instance lock.
+app.setPath("userData", path.resolve(process.env.BAEKHO_DATA || process.env.PARTSMITH_DATA || path.join(app.getPath("appData"), "partsmith")));
 const lock = app.requestSingleInstanceLock();
 if (!lock) app.quit();
 let win: BrowserWindow;
@@ -498,6 +502,7 @@ async function dispatch(c: Command): Promise<unknown> {
   }
 }
 app.whenReady().then(async () => {
+  if (!lock) return;
   const root = app.getPath("userData");
   store = new Store(root);
   await store.open(
@@ -629,12 +634,12 @@ app.whenReady().then(async () => {
     }
   });
   win = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1080,
-    minHeight: 720,
+    width: 1500,
+    height: 940,
+    minWidth: 1180,
+    minHeight: 760,
     backgroundColor: "#101213",
-    title: "Partsmith · 캐릭터 제작실",
+    title: "백호툴 · Studio Baekho",
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -665,12 +670,20 @@ app.whenReady().then(async () => {
       };
     }
   });
-  if (process.env.PARTSMITH_DEV) await win.loadURL("http://127.0.0.1:5173");
-  else await win.loadFile(path.join(__dirname, "../dist/index.html"));
+  const host = installStudioHost({
+    window: win,
+    root,
+    modeling: () => ({ projects: store.projects(), workbenches: workbench.list(), productionRuns: production.list() }),
+    modelingBusy: () => workbench.list().some(w => w.jobs.some(j => j.status === "running")) || production.list().some(r => r.status === "running") || store.projects().some(p => p.jobs.some(j => ["queued", "submitting", "running"].includes(j.status))),
+  });
+  const standalone = process.argv.includes("--partsmith");
+  if (process.env.PARTSMITH_DEV) await win.loadURL(`http://127.0.0.1:5173${standalone ? "?workspace=partsmith" : ""}`);
+  else await win.loadFile(path.join(__dirname, "../dist/index.html"), standalone ? { query: { workspace: "partsmith" } } : {});
   const timer = setInterval(() => void engine.pollActive(), 10000);
   win.on("closed", () => app.quit());
   app.on("before-quit", () => {
     clearInterval(timer);
+    host.shutdown();
     production.shutdown();
     workbench.shutdown();
     studio.close();

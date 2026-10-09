@@ -1,9 +1,9 @@
 {
   "name": "partsmith",
-  "version": "0.5.1",
+  "version": "0.7.0",
   "private": true,
-  "description": "Local character production workbench for Unity",
-  "author": "Partsmith",
+  "description": "Studio Baekho workspace for character production and combat feel experiments",
+  "author": "Studio Baekho",
   "license": "UNLICENSED",
   "type": "module",
   "main": "dist-electron/main.cjs",
@@ -11,7 +11,10 @@
     "dev": "node scripts/dev.mjs",
     "build": "tsc --noEmit && vite build && node scripts/build.mjs",
     "start": "electron .",
+    "start:partsmith": "electron . --partsmith",
     "test": "tsx --test tests/*.test.ts",
+    "test:combat": "node --test Desktop/tests/*.test.cjs",
+    "test:integration": "node scripts/studio-smoke.mjs",
     "test:ui": "node scripts/smoke.mjs",
     "package": "npm run build && electron-builder --win dir"
   },
@@ -43,13 +46,15 @@
   },
   "build": {
     "appId": "local.partsmith.app",
-    "productName": "Partsmith",
+    "productName": "Baekho Tools",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "Desktop/src/**/*.cjs",
+      "Desktop/renderer/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm",
       "package.json"
     ],
@@ -57,6 +62,15 @@
       {
         "from": "integrations",
         "to": "integrations"
+      },
+      {
+        "from": "Packages",
+        "to": "Packages"
+      },
+      {
+        "from": "scripts",
+        "to": "scripts",
+        "filter": ["*.ps1"]
       }
     ],
     "win": {

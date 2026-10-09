@@ -13,7 +13,7 @@ const { ProjectClient } = require('../src/project-client.cjs');
 const mainPath = path.resolve(__dirname, '../src/main.cjs');
 const localRequire = createRequire(mainPath);
 
-function fixture(t) {
+function fixture(t, { selectInitialProject = true } = {}) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'combat-lab-main-'));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   function project(name) {
@@ -24,8 +24,10 @@ function fixture(t) {
     return fs.realpathSync(root);
   }
   const root = project('projectA');
-  const calls = [], statuses = new Map(), ipc = new Map();
+  const calls = [], statuses = new Map(), ipc = new Map(), protocols = new Map(), lifecycle = [];
   const options = {
+    ready: true,
+    open: async () => ({ canceled: true }),
     save: async () => ({ canceled: true }),
     generate: async () => ({ candidates: [], provider: 'codex', createdUtc: '2026-10-08T00:00:00Z' }),
     describe: async target => ({ adapters: [{ id: path.basename(target.projectPath), sources: [] }] })
@@ -37,25 +39,42 @@ function fixture(t) {
     async command(name, payload) { calls.push({ projectPath: this.projectPath, name, payload }); return { assetPath: payload.assetPath }; }
   }
   const electron = {
-    app: { setName() {}, getPath: () => path.join(temporary, 'settings'), requestSingleInstanceLock: () => false, quit() {} },
-    protocol: { registerSchemesAsPrivileged() {} },
-    dialog: { showSaveDialog: (...args) => options.save(...args) },
-    ipcMain: { handle: (name, callback) => ipc.set(name, callback) }
+    app: { setName() { lifecycle.push('setName'); }, setPath() { lifecycle.push('setPath'); },
+      getPath: () => path.join(temporary, 'settings'), isReady: () => options.ready,
+      requestSingleInstanceLock: () => { lifecycle.push('lock'); return false; }, quit() { lifecycle.push('quit'); },
+      on() { lifecycle.push('listener'); }, whenReady() { lifecycle.push('whenReady'); return Promise.resolve(); } },
+    BrowserWindow: class { constructor() { lifecycle.push('window'); } },
+    protocol: { registerSchemesAsPrivileged() { lifecycle.push('privileges'); },
+      handle(name, callback) { assert.ok(!protocols.has(name), 'protocol registration is unique'); protocols.set(name, callback); } },
+    dialog: { showSaveDialog: (...args) => options.save(...args), showOpenDialog: (...args) => options.open(...args) },
+    ipcMain: { handle(name, callback) { assert.ok(!ipc.has(name), 'IPC registration is unique'); ipc.set(name, callback); } }
   };
   class FakeGenerator {
-    async status() { return { available: true, authenticated: true, provider: 'codex', label: 'Codex 연결됨', error: '' }; }
+    async status() { options.statusCalls = (options.statusCalls || 0) + 1; return { available: true, authenticated: true, provider: 'codex', label: 'Codex 연결됨', error: '' }; }
     generate(input, optionsValue) { return options.generate(input, optionsValue); }
   }
   const context = vm.createContext({
     require: name => name === 'electron' ? electron : name === './project-client.cjs' ? { ProjectClient: FakeClient } : name === './ai-candidates.cjs' ? { CodexCandidateGenerator: FakeGenerator } : localRequire(name),
-    process: { argv: [], platform: process.platform }, __dirname: path.dirname(mainPath),
+    process: { argv: [], platform: process.platform }, __dirname: path.dirname(mainPath), module: { exports: {} },
     Buffer, URL, Response, console, setTimeout, structuredClone, AbortController
   });
-  vm.runInContext(fs.readFileSync(mainPath, 'utf8') + '\nglobalThis.testApi = {handlers, selectProject, snapshot, media, installIpc, setWindow: value => { window = value; }};', context);
+  // Inspect the same production closure without adding test-only public exports.
+  const source = fs.readFileSync(mainPath, 'utf8').replace('return Object.freeze({ initialize, getSummary,',
+    `globalThis.testApi = { handlers, selectProject, snapshot, media, installIpc,
+      setWindow: value => { testWindow = value; testContents = value?.webContents; },
+      setWebContents: value => { testContents = value; } };
+return Object.freeze({ initialize, getSummary,`);
+  vm.runInContext(source, context);
+  context.integratedSettings = path.join(temporary, 'settings', 'combat-integration.json');
+  context.legacySettings = path.join(temporary, 'legacy', 'settings.json');
+  vm.runInContext(`let testWindow, testContents;
+    globalThis.service = module.exports.createCombatService({ getWindow: () => testWindow, getWebContents: () => testContents,
+      settingsPath: integratedSettings, legacySettingsPath: legacySettings });`, context);
   const api = context.testApi;
-  api.selectProject(root);
+  if (selectInitialProject) api.selectProject(root);
   const request = { schemaVersion: 1, candidates: [{ id: 'baseline', values: [] }] };
-  return { temporary, root, project, api, options, calls, statuses, request, ipc };
+  return { temporary, root, project, api, options, calls, statuses, request, ipc, service: context.service,
+    protocols, lifecycle, integratedSettings: context.integratedSettings, legacySettings: context.legacySettings };
 }
 
 test('report refresh preserves media grants and invalidates grants on project change', async t => {
@@ -425,6 +444,143 @@ function generationCatalog() {
   }] }] };
 }
 
+test('embedded service import and initialization have no standalone lifecycle effects', t => {
+  const { service, options, protocols, ipc, lifecycle, integratedSettings } = fixture(t, { selectInitialProject: false });
+  assert.deepEqual(lifecycle, []);
+  assert.equal(protocols.size, 0);
+  assert.equal(ipc.size, 0);
+  options.ready = false;
+  assert.throws(() => service.initialize(), /after Electron is ready/);
+  options.ready = true;
+  service.initialize();
+  const handlers = ipc.size;
+  service.initialize();
+  assert.equal(protocols.size, 2);
+  assert.equal(ipc.size, handlers);
+  assert.deepEqual(lifecycle, []);
+  assert.equal(fs.existsSync(integratedSettings), false);
+});
+
+test('summary is synchronous and reads reports without AI, describe, commands or settings writes', t => {
+  const { root, service, options, calls, integratedSettings } = fixture(t);
+  options.describe = () => { throw new Error('must not describe'); };
+  const before = fs.readFileSync(integratedSettings, 'utf8');
+  const directory = path.join(root, 'CombatLabResults', 'historical-run');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'report.json'), JSON.stringify({ schemaVersion: 1, runId: 'historical-run',
+    startedUtc: '2026-10-08T00:00:00Z', results: [{ candidate: { id: 'baseline', values: [] }, status: 'completed' }] }));
+  const summary = service.getSummary();
+  assert.equal(typeof summary.then, 'undefined');
+  assert.equal(summary.projectPath, root);
+  assert.equal(summary.projectName, 'projectA');
+  assert.equal(summary.generating, false);
+  assert.equal(summary.runs[0].id, 'historical-run');
+  assert.equal(options.statusCalls || 0, 0);
+  assert.deepEqual(calls, []);
+  assert.equal(fs.readFileSync(integratedSettings, 'utf8'), before);
+});
+
+test('embedded IPC trusts only the injected main frame on the exact app document', async t => {
+  const { service, api, ipc } = fixture(t);
+  service.initialize();
+  const frame = { url: 'baekho://app/index.html?embedded=1' };
+  const embedded = { mainFrame: frame };
+  const host = { webContents: { mainFrame: { url: 'app://studio/index.html' } } };
+  api.setWindow(host);
+  api.setWebContents(embedded);
+  const bootstrap = ipc.get('baekho:bootstrap');
+  assert.ok((await bootstrap({ sender: embedded, senderFrame: frame })).projectPath);
+  await assert.rejects(bootstrap({ sender: host.webContents, senderFrame: host.webContents.mainFrame }), /허용되지 않은/);
+  for (const url of ['baekho://app/app.js', 'baekho://app/index.html/extra', 'baekho://app.evil/index.html', 'https://app/index.html', 'baekho://user@app/index.html']) {
+    frame.url = url;
+    await assert.rejects(bootstrap({ sender: embedded, senderFrame: frame }), /허용되지 않은/);
+  }
+});
+
+test('legacy project read is non-mutating and explicit choices only update integrated settings', async t => {
+  const { root, project, service, options, api, integratedSettings, legacySettings } = fixture(t, { selectInitialProject: false });
+  fs.mkdirSync(path.dirname(legacySettings), { recursive: true });
+  const legacy = JSON.stringify({ projectPath: root, unrelated: 'preserve' });
+  fs.writeFileSync(legacySettings, legacy);
+  service.initialize();
+  assert.equal(service.getSummary().projectPath, root);
+  assert.equal(fs.existsSync(integratedSettings), false);
+  const other = project('projectB'), host = { webContents: {} };
+  api.setWindow(host);
+  options.open = async parent => { assert.equal(parent, host); return { canceled: false, filePaths: [other] }; };
+  await service.chooseProject();
+  assert.equal(JSON.parse(fs.readFileSync(integratedSettings, 'utf8')).projectPath, other);
+  assert.equal(fs.readFileSync(legacySettings, 'utf8'), legacy);
+  assert.equal(options.statusCalls || 0, 0);
+});
+
+test('invalid saved project remains visible as an error without falling back or rewriting data', t => {
+  const { root, service, integratedSettings, legacySettings } = fixture(t, { selectInitialProject: false });
+  fs.mkdirSync(path.dirname(integratedSettings), { recursive: true });
+  fs.mkdirSync(path.dirname(legacySettings), { recursive: true });
+  fs.writeFileSync(integratedSettings, '{broken');
+  fs.writeFileSync(legacySettings, JSON.stringify({ projectPath: root }));
+  service.initialize();
+  const summary = service.getSummary();
+  assert.equal(summary.projectPath, '');
+  assert.ok(summary.connection.error);
+  assert.equal(fs.readFileSync(integratedSettings, 'utf8'), '{broken');
+});
+
+test('navigation and hiding send bounded view events and do not change project state', t => {
+  const { root, api, service, options } = fixture(t);
+  const sent = [], pending = [];
+  let loading = false;
+  api.setWebContents({ isLoadingMainFrame: () => loading, once: (name, callback) => pending.push(callback),
+    send: (channel, value) => sent.push({ channel, value }) });
+  service.navigate({ projectPath: root, runId: 'run-one', tab: 'compare', ignored: 'not sent' });
+  service.setVisible(false);
+  service.setVisible(true);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [
+    { channel: 'baekho:navigate', value: { projectPath: root, runId: 'run-one', tab: 'compare' } },
+    { channel: 'baekho:visibility', value: false }, { channel: 'baekho:visibility', value: true }
+  ]);
+  assert.throws(() => service.navigate({ runId: '../escape' }), /ID/);
+  assert.throws(() => service.navigate({ tab: 'settings' }), /화면/);
+  assert.throws(() => service.navigate({ runId: 'run-one', projectPath: root + '-old' }), /목록을 새로고침/);
+  loading = true;
+  service.navigate({ tab: 'setup' });
+  assert.equal(sent.length, 3);
+  pending[0]();
+  assert.equal(sent[3].value.tab, 'setup');
+  assert.equal(service.getSummary().projectPath, root);
+  assert.equal(options.statusCalls || 0, 0);
+});
+
+test('report lookup refuses a stale expected project even when both projects have the same run ID', async t => {
+  const { root, project, api } = fixture(t);
+  const other = project('projectB');
+  for (const projectPath of [root, other]) {
+    const directory = path.join(projectPath, 'CombatLabResults', 'shared-run');
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'report.json'), JSON.stringify({ schemaVersion: 1, runId: 'shared-run',
+      startedUtc: '2026-10-08T00:00:00Z', results: [{ candidate: { id: 'baseline', values: [] }, status: 'completed' }] }));
+  }
+  await api.handlers.loadReport('shared-run', root);
+  api.selectProject(other);
+  await assert.rejects(api.handlers.loadReport('shared-run', root), /프로젝트가 변경/);
+  assert.equal((await api.handlers.loadReport('shared-run', other)).report.runId, 'shared-run');
+});
+
+test('project picker refuses a live run before opening a native dialog', async t => {
+  const { root, options, service, statuses } = fixture(t);
+  let opened = 0;
+  options.open = async () => { opened++; return { canceled: true }; };
+  statuses.set(root, { connected: true, running: true });
+  assert.equal(service.hasActiveWork(), true);
+  await assert.rejects(service.chooseProject(), /실험/);
+  assert.equal(opened, 0);
+  statuses.set(root, { connected: false, running: true });
+  assert.equal(service.hasActiveWork(), false);
+  await service.chooseProject();
+  assert.equal(opened, 1);
+});
+
 test('AI generation uses trusted source metadata and preserves actual generated values and provenance', async t => {
   const { api, options } = fixture(t);
   options.describe = async () => generationCatalog();
@@ -503,4 +659,26 @@ test('generation is cancellable and blocks duplicate generation, play and projec
   assert.equal(api.handlers.cancelGeneration().cancelled, true);
   await cancelled;
   assert.equal((await api.handlers.aiStatus()).generating, false);
+});
+
+test('service shutdown aborts active generation and project picker is blocked before opening a dialog', async t => {
+  const { api, service, options } = fixture(t);
+  options.describe = async () => generationCatalog();
+  let entered, dialogs = 0;
+  const started = new Promise(resolve => { entered = resolve; });
+  options.open = async () => { dialogs++; return { canceled: true }; };
+  options.generate = (_input, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('AI 후보 생성을 취소했습니다.')), { once: true }); entered();
+  });
+  const pending = api.handlers.generateCandidates({ adapterId: 'combat', sourceGuid: 'source-guid', goal: '목표', count: 4 });
+  const cancelled = assert.rejects(pending, /취소/);
+  await started;
+  assert.equal(service.hasActiveWork(), true);
+  assert.equal(service.getSummary().generating, true);
+  await assert.rejects(service.chooseProject(), /AI/);
+  assert.equal(dialogs, 0);
+  service.shutdown();
+  await cancelled;
+  assert.equal(service.hasActiveWork(), false);
+  assert.equal(service.getSummary().generating, false);
 });

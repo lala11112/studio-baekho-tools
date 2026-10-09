@@ -1,6 +1,15 @@
 'use strict';
 
 const api = window.baekho;
+const embedded = Boolean(window.location?.search && new URLSearchParams(window.location.search).get('embedded') === '1');
+if (embedded) {
+  document.body.classList.add('embedded');
+  document.getElementById('experimentHistory').open = false;
+  const projectBar = document.querySelector('.sidebar');
+  projectBar.setAttribute('aria-label', '타격감 실험 프로젝트와 기록');
+  projectBar.append(document.querySelector('.connection'));
+  document.querySelector('.page-heading h1').textContent = '타격감 실험';
+}
 const $ = id => document.getElementById(id);
 const list = value => Array.isArray(value) ? value.filter(Boolean) : [];
 const copy = value => JSON.parse(JSON.stringify(value));
@@ -31,6 +40,7 @@ const state = {
   activeRunId: null, selectedRunId: null, reportBundle: null, reportSignature: '',
   reportLoading: false, reportGeneration: 0, view: 'setup', lastHistoryKey: '',
   wasRunning: false, projectGeneration: 0, generating: false, generationCancelled: false,
+  navigationGeneration: 0,
   requestOrigin: 'draft', generatedSignature: '',
   selectedActions: [], actionDrafts: Object.create(null), actionPanels: new Map(), selectionControls: [],
 };
@@ -575,9 +585,10 @@ async function refresh() {
   if (state.refreshing || state.busy > 0 || !api) return;
   state.refreshing = true;
   const generation = state.projectGeneration;
+  const navigationGeneration = state.navigationGeneration;
   try {
     const snapshot = await api.refresh();
-    if (generation !== state.projectGeneration) return;
+    if (generation !== state.projectGeneration || navigationGeneration !== state.navigationGeneration) return;
     const previouslyRunning = state.wasRunning;
     applySnapshot(snapshot);
     const observedRunning = Boolean(snapshot?.connection?.running);
@@ -591,6 +602,7 @@ async function refresh() {
     if (previouslyRunning && !state.wasRunning) state.activeRunId = null;
     updateControls();
   } catch (error) {
+    if (generation !== state.projectGeneration || navigationGeneration !== state.navigationGeneration) return;
     $('connectionLabel').textContent = '연결 확인 실패';
     $('connectionLabel').title = error?.message || String(error);
     $('connectionDot').className = 'status-dot error';
@@ -775,8 +787,11 @@ async function openReport(runId, options = {}) {
   state.reportLoading = true;
   const generation = state.reportGeneration;
   try {
-    const bundle = await api.loadReport(runId);
-    if (generation !== state.reportGeneration || !bundle?.report) return;
+    const expectedProjectPath = options.projectPath ?? state.snapshot?.projectPath;
+    const bundle = await api.loadReport(runId, expectedProjectPath);
+    if (generation !== state.reportGeneration || !bundle?.report ||
+        (options.navigationGeneration !== undefined && options.navigationGeneration !== state.navigationGeneration) ||
+        (expectedProjectPath !== undefined && expectedProjectPath !== state.snapshot?.projectPath)) return;
     const switching = state.selectedRunId !== runId || !state.reportBundle;
     if (switching) { $('feedback').value = ''; $('winner').value = ''; $('runtimeDetails').open = false; }
     state.selectedRunId = runId;
@@ -792,7 +807,38 @@ async function openReport(runId, options = {}) {
     if (options.switchView !== false) showView('compare');
     drawHistory();
   } catch (error) { if (!options.quiet) throw error; }
-  finally { state.reportLoading = false; }
+  finally {
+    state.reportLoading = false;
+    if (pendingNavigation && !navigationBusy) void followNavigation(pendingNavigation);
+  }
+}
+
+// Host navigation opens the actual saved report without replacing experiment drafts.
+// Initial navigation may arrive while bootstrap is still retrieving the catalog.
+let pendingNavigation = null, navigationBusy = false;
+async function followNavigation(target) {
+  pendingNavigation = target;
+  state.navigationGeneration = (state.navigationGeneration || 0) + 1;
+  if (!state.snapshot || navigationBusy || state.reportLoading) return;
+  navigationBusy = true;
+  try {
+    while (pendingNavigation) {
+      const next = pendingNavigation; pendingNavigation = null;
+      const navigationGeneration = state.navigationGeneration;
+      await operation(async () => {
+        // The shell can change the service's project while this retained renderer
+        // is hidden. Synchronize it before opening a report; older polls must not
+        // replace this snapshot and clear the newly opened report afterward.
+        const snapshot = await api.refresh();
+        if (navigationGeneration !== state.navigationGeneration) return;
+        applySnapshot(snapshot);
+        if (snapshot.projectPath !== next.projectPath)
+          throw new Error('프로젝트가 변경되었습니다. 현재 프로젝트의 실험 기록을 다시 선택하세요.');
+        if (next.runId) await openReport(next.runId, { projectPath: next.projectPath, navigationGeneration });
+        else if (next.tab) showView(next.tab);
+      });
+    }
+  } finally { navigationBusy = false; }
 }
 
 $('dismissMessage').addEventListener('click', () => message(''));
@@ -940,7 +986,12 @@ $('align').addEventListener('change', () => {
 paintPlayback();
 requestAnimationFrame(tick);
 if (api) {
-  operation(async () => { applySnapshot(await api.bootstrap()); }).finally(() => { setInterval(refresh, 1500); });
+  api.onNavigate?.(target => { void followNavigation(target); });
+  api.onVisibility?.(visible => { if (!visible) stop(); });
+  operation(async () => {
+    applySnapshot(await api.bootstrap());
+    if (pendingNavigation) await followNavigation(pendingNavigation);
+  }).finally(() => { setInterval(refresh, 1500); });
 } else {
   message('데스크톱 연결을 찾을 수 없습니다. Baekho Studio 앱에서 이 화면을 실행하세요.', true);
   updateControls();

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Box,
   Boxes,
@@ -56,6 +62,7 @@ import {
   operationLabels,
   canPreview,
 } from "./TripoStudio";
+import "./partsmith-embedded.css";
 const steps = [
   ["workbench", "단계별 에셋 제작", Workflow],
   ["studio", "Tripo 작업실", Sparkles],
@@ -134,7 +141,18 @@ function AssetImage({ p, a }: { p: Project; a?: Asset }) {
     </div>
   );
 }
-export function App() {
+export interface AppProps {
+  embedded?: boolean;
+  navigation?: {
+    key: number;
+    projectId?: string;
+    tab?: string;
+    create?: boolean;
+  };
+}
+
+export function App({ embedded = false, navigation }: AppProps = {}) {
+  const appliedNavigation = useRef<number | undefined>(undefined);
   const [state, setState] = useState<AppState>(),
     [id, setId] = useState(""),
     [tab, setTab] = useState("home"),
@@ -164,6 +182,60 @@ export function App() {
     const timer = setInterval(() => void refresh(), 2500);
     return () => clearInterval(timer);
   }, [refresh]);
+  useEffect(() => {
+    if (!state || !navigation || appliedNavigation.current === navigation.key)
+      return;
+    appliedNavigation.current = navigation.key;
+    const target = navigation.projectId
+      ? state.projects.find((project) => project.id === navigation.projectId)
+      : undefined;
+    if (navigation.projectId && !target) {
+      setId("");
+      setPartId("");
+      setPreview("");
+      setTab("home");
+      setError(
+        "요청한 프로젝트를 찾을 수 없습니다. 프로젝트 목록에서 다시 선택하거나 ‘프로젝트 열기’로 저장 폴더를 불러오세요.",
+      );
+      return;
+    }
+    if (target && target.id !== id) {
+      setId(target.id);
+      setPartId(target.parts[0]?.id ?? "");
+      setPreview("");
+    }
+    const requestedTab = navigation.tab;
+    if (
+      requestedTab &&
+      (requestedTab === "home" ||
+        requestedTab === "settings" ||
+        steps.some(([key]) => key === requestedTab))
+    ) {
+      if (
+        requestedTab !== "home" &&
+        requestedTab !== "settings" &&
+        !target &&
+        !state.projects.some((project) => project.id === id)
+      ) {
+        setTab("home");
+        setError(
+          "제작할 프로젝트를 먼저 선택하거나 새 프로젝트를 만들어 주세요.",
+        );
+      } else {
+        setTab(requestedTab);
+        setError("");
+      }
+    } else if (requestedTab) {
+      setTab("home");
+      setError(
+        "요청한 제작 화면을 찾을 수 없습니다. 프로젝트를 다시 선택해 주세요.",
+      );
+    } else if (target) {
+      setTab(target.demo ? "assembly" : "workbench");
+      setError("");
+    }
+    if (navigation.create) setCreate(true);
+  }, [navigation, state, id]);
   const p = state?.projects.find((p) => p.id === id),
     part = p?.parts.find((x) => x.id === partId) ?? p?.parts[0];
   async function run<T = any>(
@@ -185,6 +257,7 @@ export function App() {
     }
   }
   function open(p: Project) {
+    setError("");
     setId(p.id);
     setPartId(p.parts[0]?.id ?? "");
     setTab(p.demo ? "assembly" : "workbench");
@@ -219,7 +292,9 @@ export function App() {
   }, [tab, id, refresh]);
   if (!window.desktop)
     return (
-      <div className="standalone">
+      <div
+        className={embedded ? "standalone partsmith-embedded" : "standalone"}
+      >
         <h1>Partsmith</h1>
         <p>로컬 기능은 Electron 앱에서 실행됩니다.</p>
         <code>npm run dev</code>
@@ -227,7 +302,9 @@ export function App() {
     );
   if (!state)
     return (
-      <div className="standalone">
+      <div
+        className={embedded ? "standalone partsmith-embedded" : "standalone"}
+      >
         <LoaderCircle className="spin" />
         <p>제작실을 여는 중…</p>
       </div>
@@ -246,109 +323,200 @@ export function App() {
         ? "연결 설정"
         : (steps.find((s) => s[0] === tab)?.[1] ?? "제작실");
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <button className="brand" onClick={() => setTab("home")}>
-          <div className="brand-mark">
-            <Boxes size={24} />
-          </div>
-          <span>
-            partsmith<small>CHARACTER WORKBENCH</small>
-          </span>
-        </button>
-        <div className="workspace-label">
-          개인 작업 공간 <Badge>LOCAL</Badge>
-        </div>
-        <button
-          className={`nav ${tab === "home" ? "selected" : ""}`}
-          onClick={() => setTab("home")}
-        >
-          <Folder size={18} /> 모든 프로젝트
-        </button>
-        <div className="nav-label">에셋 제작</div>
-        <button
-          disabled={!p}
-          onClick={() => setTab("workbench")}
-          className={`nav ${tab === "workbench" ? "selected" : ""}`}
-        >
-          <Workflow size={18} />
-          <span>단계별 에셋 제작</span>
-        </button>
-        <details
-          className="manual-tools"
-          key={p?.id}
-          open={p?.demo || undefined}
-        >
-          <summary>수동 도구 · 문제 해결</summary>
-          {steps.slice(1).map(([key, label, Icon], i) => (
-            <button
-              key={key}
-              disabled={!p}
-              onClick={() => setTab(key)}
-              className={`nav ${tab === key ? "selected" : ""}`}
-            >
-              <Icon size={18} />
-              <span>{label}</span>
-              <small>0{i + 1}</small>
-            </button>
-          ))}
-        </details>
-        <div className="sidebar-bottom">
-          <div className="local-note">
-            <ShieldCheck size={18} />
-            <div>
-              내 컴퓨터에 저장<small>키는 프로젝트와 별도 보관</small>
+    <div className={embedded ? "app partsmith-embedded" : "app"}>
+      {!embedded && (
+        <aside className="sidebar">
+          <button className="brand" onClick={() => setTab("home")}>
+            <div className="brand-mark">
+              <Boxes size={24} />
             </div>
+            <span>
+              partsmith<small>CHARACTER WORKBENCH</small>
+            </span>
+          </button>
+          <div className="workspace-label">
+            개인 작업 공간 <Badge>LOCAL</Badge>
           </div>
           <button
-            className={`nav ${tab === "settings" ? "selected" : ""}`}
-            onClick={() => setTab("settings")}
+            className={`nav ${tab === "home" ? "selected" : ""}`}
+            onClick={() => setTab("home")}
           >
-            <Settings size={18} /> 연결 설정
-            <span
-              className={`connection-dot ${state.key.configured ? "online" : ""}`}
-            />
+            <Folder size={18} /> 모든 프로젝트
           </button>
-          <div className="version">
-            PROTOTYPE <span>v0.5.1</span>
-          </div>
-        </div>
-      </aside>
-      <div className="app-body">
-        <header className="topbar">
-          <div className="breadcrumbs">
-            <span>작업 공간</span>
-            <ChevronRight size={13} />
-            <button onClick={() => setTab("home")}>
-              {p?.name ?? "프로젝트"}
-            </button>
-            {p && (
-              <>
-                <ChevronRight size={13} />
-                <span>{headerTitle}</span>
-              </>
-            )}
-          </div>
-          <div className="top-actions">
-            <span className="saved">
-              <span className="status-dot" /> 로컬 자동 저장
-            </span>
+          <div className="nav-label">에셋 제작</div>
+          <button
+            disabled={!p}
+            onClick={() => setTab("workbench")}
+            className={`nav ${tab === "workbench" ? "selected" : ""}`}
+          >
+            <Workflow size={18} />
+            <span>단계별 에셋 제작</span>
+          </button>
+          <details
+            className="manual-tools"
+            key={p?.id}
+            open={p?.demo || undefined}
+          >
+            <summary>수동 도구 · 문제 해결</summary>
+            {steps.slice(1).map(([key, label, Icon], i) => (
+              <button
+                key={key}
+                disabled={!p}
+                onClick={() => setTab(key)}
+                className={`nav ${tab === key ? "selected" : ""}`}
+              >
+                <Icon size={18} />
+                <span>{label}</span>
+                <small>0{i + 1}</small>
+              </button>
+            ))}
+          </details>
+          <div className="sidebar-bottom">
+            <div className="local-note">
+              <ShieldCheck size={18} />
+              <div>
+                내 컴퓨터에 저장<small>키는 프로젝트와 별도 보관</small>
+              </div>
+            </div>
             <button
-              title="프로젝트 폴더 열기"
-              onClick={() => run({ type: "folder.open", id: p?.id })}
+              className={`nav ${tab === "settings" ? "selected" : ""}`}
+              onClick={() => setTab("settings")}
             >
-              <FolderOpen size={17} />
+              <Settings size={18} /> 연결 설정
+              <span
+                className={`connection-dot ${state.key.configured ? "online" : ""}`}
+              />
             </button>
-            <button className="avatar" onClick={() => setTab("settings")}>
-              M
-            </button>
+            <div className="version">
+              PROTOTYPE <span>v0.5.1</span>
+            </div>
           </div>
-        </header>
+        </aside>
+      )}
+      <div className="app-body">
+        {embedded ? (
+          <header className="ps-toolbar">
+            <div className="ps-project-row">
+              <label className="ps-project-picker">
+                <span>작업 프로젝트</span>
+                <select
+                  aria-label="작업 프로젝트"
+                  value={p?.id ?? ""}
+                  onChange={(event) => {
+                    const project = state.projects.find(
+                      (project) => project.id === event.target.value,
+                    );
+                    if (project) open(project);
+                  }}
+                >
+                  <option value="" disabled>
+                    프로젝트를 선택하세요
+                  </option>
+                  {state.projects.map((project) => (
+                    <option value={project.id} key={project.id}>
+                      {project.name}
+                      {project.demo ? " · 데모" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="ps-project-actions">
+                <button
+                  title="프로젝트 폴더 열기"
+                  aria-label="프로젝트 폴더 열기"
+                  onClick={() => run({ type: "folder.open", id: p?.id })}
+                >
+                  <FolderOpen size={16} />
+                </button>
+                <button className="primary" onClick={() => setCreate(true)}>
+                  <Plus size={16} /> 새 프로젝트
+                </button>
+              </div>
+            </div>
+            <nav className="ps-local-nav" aria-label="3D 제작 탐색">
+              <button
+                className={tab === "home" ? "selected" : ""}
+                aria-current={tab === "home" ? "page" : undefined}
+                onClick={() => setTab("home")}
+              >
+                <Folder size={15} /> 프로젝트 목록
+              </button>
+              <button
+                disabled={!p}
+                className={tab === "workbench" ? "selected" : ""}
+                aria-current={tab === "workbench" ? "page" : undefined}
+                onClick={() => setTab("workbench")}
+              >
+                <Workflow size={15} /> 단계별 제작
+              </button>
+              <label className="ps-manual-picker">
+                <span className="ps-visually-hidden">고급 수동 도구</span>
+                <select
+                  aria-label="고급 수동 도구"
+                  disabled={!p}
+                  className={
+                    steps.slice(1).some(([key]) => key === tab)
+                      ? "selected"
+                      : ""
+                  }
+                  value={steps.slice(1).some(([key]) => key === tab) ? tab : ""}
+                  onChange={(event) => setTab(event.target.value)}
+                >
+                  <option value="" disabled>
+                    고급 수동 도구
+                  </option>
+                  {steps.slice(1).map(([key, label]) => (
+                    <option value={key} key={key}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className={tab === "settings" ? "selected" : ""}
+                aria-current={tab === "settings" ? "page" : undefined}
+                onClick={() => setTab("settings")}
+              >
+                <Settings size={15} /> 연결 설정
+              </button>
+            </nav>
+          </header>
+        ) : (
+          <header className="topbar">
+            <div className="breadcrumbs">
+              <span>작업 공간</span>
+              <ChevronRight size={13} />
+              <button onClick={() => setTab("home")}>
+                {p?.name ?? "프로젝트"}
+              </button>
+              {p && (
+                <>
+                  <ChevronRight size={13} />
+                  <span>{headerTitle}</span>
+                </>
+              )}
+            </div>
+            <div className="top-actions">
+              <span className="saved">
+                <span className="status-dot" /> 로컬 자동 저장
+              </span>
+              <button
+                title="프로젝트 폴더 열기"
+                onClick={() => run({ type: "folder.open", id: p?.id })}
+              >
+                <FolderOpen size={17} />
+              </button>
+              <button className="avatar" onClick={() => setTab("settings")}>
+                M
+              </button>
+            </div>
+          </header>
+        )}
         {error && (
           <div role="alert" className="banner error">
             <AlertTriangle size={17} />
             <span>{error}</span>
-            <button onClick={() => setError("")}>
+            <button aria-label="오류 메시지 닫기" onClick={() => setError("")}>
               <X size={16} />
             </button>
           </div>
@@ -368,51 +536,65 @@ export function App() {
           <main className="home page">
             <div className="page-heading">
               <div>
-                <div className="eyebrow">YOUR CREATIVE WORKSPACE</div>
-                <h1>아이디어에서, 플레이 가능한 캐릭터로.</h1>
-                <p>이미지를 고르고, 파츠를 다듬고, 동작을 완성하세요.</p>
-              </div>
-              <button className="primary" onClick={() => setCreate(true)}>
-                <Plus size={17} /> 새 프로젝트
-              </button>
-            </div>
-            <div className="hero-card">
-              <div>
-                <Badge tone="green">CHARACTER WORKBENCH</Badge>
-                <h2>
-                  원하는 모습을 고르고.
-                  <br />
-                  단계마다 내 손으로.
-                </h2>
+                {!embedded && (
+                  <div className="eyebrow">YOUR CREATIVE WORKSPACE</div>
+                )}
+                <h1>
+                  {embedded
+                    ? "3D 제작 프로젝트"
+                    : "아이디어에서, 플레이 가능한 캐릭터로."}
+                </h1>
                 <p>
-                  이미지와 모델 후보를 비교하고, 필요한 곳을 명령으로
-                  수정하세요.
-                  <br />
-                  설정 · 실행 · 선택 · 수정. 다음 단계는 준비됐을 때.
+                  {embedded
+                    ? "작업을 이어가거나 새 캐릭터를 만들어 보세요."
+                    : "이미지를 고르고, 파츠를 다듬고, 동작을 완성하세요."}
                 </p>
-                <button
-                  onClick={() => {
-                    setDemo(true);
-                    setName("마네킹 연결 테스트");
-                    setCreate(true);
-                  }}
-                >
-                  로컬 데모로 시작 <ArrowUpRight size={17} />
+              </div>
+              {!embedded && (
+                <button className="primary" onClick={() => setCreate(true)}>
+                  <Plus size={17} /> 새 프로젝트
                 </button>
-              </div>
-              <div className="hero-graphic">
-                <div className="orbit orbit-one" />
-                <div className="orbit orbit-two" />
-                <Boxes size={112} strokeWidth={0.75} />
-                <span className="float-label l1">01 / BODY</span>
-                <span className="float-label l2">02 / HEAD</span>
-                <span className="float-label l3">03 / HAIR</span>
-              </div>
-              <div className="hero-flow">
-                이미지 <ChevronRight /> 파츠 <ChevronRight /> 조립{" "}
-                <ChevronRight /> Unity
-              </div>
+              )}
             </div>
+            {!embedded && (
+              <div className="hero-card">
+                <div>
+                  <Badge tone="green">CHARACTER WORKBENCH</Badge>
+                  <h2>
+                    원하는 모습을 고르고.
+                    <br />
+                    단계마다 내 손으로.
+                  </h2>
+                  <p>
+                    이미지와 모델 후보를 비교하고, 필요한 곳을 명령으로
+                    수정하세요.
+                    <br />
+                    설정 · 실행 · 선택 · 수정. 다음 단계는 준비됐을 때.
+                  </p>
+                  <button
+                    onClick={() => {
+                      setDemo(true);
+                      setName("마네킹 연결 테스트");
+                      setCreate(true);
+                    }}
+                  >
+                    로컬 데모로 시작 <ArrowUpRight size={17} />
+                  </button>
+                </div>
+                <div className="hero-graphic">
+                  <div className="orbit orbit-one" />
+                  <div className="orbit orbit-two" />
+                  <Boxes size={112} strokeWidth={0.75} />
+                  <span className="float-label l1">01 / BODY</span>
+                  <span className="float-label l2">02 / HEAD</span>
+                  <span className="float-label l3">03 / HAIR</span>
+                </div>
+                <div className="hero-flow">
+                  이미지 <ChevronRight /> 파츠 <ChevronRight /> 조립{" "}
+                  <ChevronRight /> Unity
+                </div>
+              </div>
+            )}
             <div className="section-title">
               <h2>
                 내 프로젝트 <small>{state.projects.length}</small>
@@ -478,13 +660,15 @@ export function App() {
           <>
             <div className="stage-heading">
               <div>
-                <span className="eyebrow">
-                  {String(steps.findIndex((s) => s[0] === tab) + 1).padStart(
-                    2,
-                    "0",
-                  )}{" "}
-                  / CHARACTER PIPELINE
-                </span>
+                {!embedded && (
+                  <span className="eyebrow">
+                    {String(steps.findIndex((s) => s[0] === tab) + 1).padStart(
+                      2,
+                      "0",
+                    )}{" "}
+                    / CHARACTER PIPELINE
+                  </span>
+                )}
                 <h1>
                   {headerTitle}
                   {p.demo && <Badge tone="amber">데모</Badge>}

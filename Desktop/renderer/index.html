@@ -17,8 +17,10 @@
       <button id="chooseProject" class="subtle full">프로젝트 선택 <span aria-hidden="true">↗</span></button>
       <div class="section-label modules-label">MODULES</div>
       <div class="module active"><span class="module-icon" aria-hidden="true">⌁</span><span>Combat Lab<small>전투 제작 · 실험</small></span><span class="module-dot"></span></div>
-      <div class="history-heading"><div class="section-label">RECENT EXPERIMENTS</div><span id="historyCount" class="count">0</span></div>
+      <details id="experimentHistory" class="experiment-history" open>
+      <summary class="history-heading"><span class="section-label">최근 실험</span><span id="historyCount" class="count">0</span></summary>
       <div id="history" class="history" aria-label="최근 실험"><p class="sidebar-empty">첫 실험을 실행하면<br>여기에 기록이 쌓입니다.</p></div>
+      </details>
       <div class="sidebar-footer"><span class="local-dot"></span> 로컬 워크스페이스<span class="version">0.6</span></div>
     </aside>
     <div class="workspace">
