@@ -22,6 +22,7 @@
   "partialAndAllTwelveImagesDecoded": true,
   "longWindowsInheritedImagePathsDecoded": true,
   "aligned2048PreviewsAndLocalOnlyAlignment": true,
+  "nativeResolutionDistinctFrom2048Preview": true,
   "rerollKeepsOtherModelSelections": true,
   "sameTimeMultiview": true,
   "restartNoAutoRun": true,

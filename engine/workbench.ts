@@ -365,6 +365,17 @@ export class WorkbenchEngine {
     )
       throw new Error("수정할 파츠를 선택하세요.");
     if (r.step === "separate") {
+      r.provider ??= "gpt";
+      if (!["gpt", "tripo"].includes(r.provider))
+        throw new Error("지원하지 않는 이미지 제공자입니다.");
+      if (
+        r.separationStrategy !== undefined &&
+        (r.separationStrategy !== "part-sheet-v1" || r.provider !== "gpt")
+      )
+        throw new Error("지원하지 않는 GPT 파츠 묶음 생성 방식입니다.");
+      // Only new execute requests are normalized. Saved retry/recovery jobs keep
+      // their frozen strategy, including legacy jobs where this field is absent.
+      if (r.provider === "gpt") r.separationStrategy = "part-sheet-v1";
       if (
         r.views !== undefined &&
         (r.views.length !== 4 ||
@@ -384,6 +395,10 @@ export class WorkbenchEngine {
           "부분 수정이나 이어 만들기에는 저장된 기준 버전이 필요합니다.",
         );
     }
+    if (r.step !== "separate" && r.separationStrategy !== undefined)
+      throw new Error(
+        "파츠 묶음 생성 방식은 분리 단계에서만 사용할 수 있습니다.",
+      );
     if (r.step === "surface" && r.role && !r.baseJobId)
       throw new Error("한 파츠 텍스처 수정에는 기준 결과가 필요합니다.");
     if (r.step === "model") {
@@ -1040,6 +1055,54 @@ export class WorkbenchEngine {
       };
     });
   }
+  /** Only the host's exact per-part source-sheet export may accompany photo drafts. */
+  private checkSeparationSheetExports(
+    job: WorkbenchJob,
+    candidate: WorkbenchCandidate,
+    workspace: string,
+  ) {
+    const roles = new Set<string>();
+    for (const artifact of candidate.artifacts.filter(
+      (a) => a.kind === "export",
+    )) {
+      const relative = artifact.path.split(`/jobs/${job.id}/`)[1] ?? "";
+      const match =
+        /^outputs\/separate-(head|hair|body)-(front|back|left|right)\/source-sheet\.png$/.exec(
+          relative,
+        );
+      const folder = artifact.path.slice(0, artifact.path.lastIndexOf("/") + 1);
+      if (
+        job.request.separationStrategy !== "part-sheet-v1" ||
+        !match ||
+        artifact.role !== match[1] ||
+        artifact.view !== undefined ||
+        roles.has(match[1]) ||
+        !candidate.artifacts.some(
+          (a) =>
+            a.kind === "image" &&
+            a.role === match[1] &&
+            a.view === match[2] &&
+            a.path.startsWith(folder),
+        )
+      )
+        throw new Error(
+          "멀티뷰 시트 원본은 해당 파츠·방향 폴더의 사진과 함께 한 번만 등록할 수 있습니다.",
+        );
+      const bytes = fs.readFileSync(safeRelative(workspace, relative));
+      if (
+        bytes.length < 33 ||
+        !bytes
+          .subarray(0, 8)
+          .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
+        bytes.readUInt32BE(8) !== 13 ||
+        bytes.toString("ascii", 12, 16) !== "IHDR" ||
+        bytes.readUInt32BE(16) < 1 ||
+        bytes.readUInt32BE(20) < 1
+      )
+        throw new Error("멀티뷰 시트 원본은 실제 PNG 이미지여야 합니다.");
+      roles.add(match[1]);
+    }
+  }
   private applyDraft(w: Workbench, job: WorkbenchJob, result: WorkbenchResult) {
     if (job.step !== "separate" || !this.current(w, job))
       throw new Error(
@@ -1056,11 +1119,16 @@ export class WorkbenchEngine {
     const candidates = this.registerCandidates(w, job, result.candidates);
     const artifacts = candidates[0].artifacts;
     const images = artifacts.filter((a) => a.kind === "image");
+    this.checkSeparationSheetExports(
+      job,
+      candidates[0],
+      this.workspace(w, job),
+    );
     const views = job.request.views ?? ["front"];
     if (
       !images.length ||
       images.length > WORKBENCH_ROLES.length * views.length ||
-      artifacts.some((a) => !["image", "report"].includes(a.kind)) ||
+      artifacts.some((a) => !["image", "report", "export"].includes(a.kind)) ||
       images.some(
         (a) =>
           !WORKBENCH_ROLES.includes(
@@ -1161,6 +1229,7 @@ export class WorkbenchEngine {
       }
     }
     if (job.step === "separate") {
+      this.checkSeparationSheetExports(job, c, workspace);
       const images = c.artifacts.filter((a) => a.kind === "image");
       const views = job.request.views ?? ["front"];
       if (

@@ -102,6 +102,22 @@ async function main() {
   const checks: string[] = [];
   let bridge: Awaited<ReturnType<StudioBrowser["startBridge"]>> | undefined;
   try {
+    const imageConnection = await browser.workerConnection({
+      runId: randomUUID(),
+      stageId: "separate-head-sheet-v1",
+      workspace,
+      studioCreditLimit: 0,
+      videoCreditLimit: 0,
+      maxIterations: 1,
+      attempt: 1,
+      charged: false,
+    });
+    assert.deepEqual(imageConnection, {});
+    assert.equal((await browser.status()).runId, undefined);
+    assert.equal((await browser.status()).opened, false);
+    checks.push(
+      "GPT/local workers receive no unrelated Studio bridge, tool arguments or credentials",
+    );
     browser.attachRun(context);
     assert.equal((await browser.open(true)).ready, true);
     let view = await snapshot();

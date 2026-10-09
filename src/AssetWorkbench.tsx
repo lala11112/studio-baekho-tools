@@ -68,6 +68,34 @@ const statuses: Record<string, string> = {
   cancelled: "중단됨",
 };
 
+function SourceImageSize({
+  projectId,
+  image,
+}: {
+  projectId: string;
+  image: WorkbenchArtifact;
+}) {
+  const [size, setSize] = useState("원본 크기 확인 중");
+  useEffect(() => {
+    setSize("원본 크기 확인 중");
+    const original = new Image();
+    original.onload = () =>
+      setSize(`원본 ${original.naturalWidth} × ${original.naturalHeight}`);
+    original.onerror = () => setSize("원본 크기 확인 불가");
+    original.src = window.desktop.assetUrl(projectId, image.path);
+    return () => {
+      original.onload = null;
+      original.onerror = null;
+    };
+  }, [projectId, image.path, image.sha256]);
+  return (
+    <small className="wb-image-size" data-testid="workbench-native-image-size">
+      {size}
+      {image.normalized ? " · 표시 2048 × 2048 정렬" : " · 크기 맞춤 전"}
+    </small>
+  );
+}
+
 type ReferenceFrame = {
   time: number;
   front: string;
@@ -595,7 +623,8 @@ export function AssetWorkbench({
           </p>
           <p className="wb-muted">
             2048×2048 캔버스 · 같은 파츠의 정면 기준 높이와 중심을 맞춥니다.
-            원본 비율과 파일은 보존하며, 맞춘 사진을 Tripo에 전달합니다.
+            원본 비율과 파일은 보존하며, 맞춘 사진을 Tripo에 전달합니다. 2048
+            크기 맞춤은 원본에 없는 세부 묘사를 복원하지 않습니다.
           </p>
           {viewing && !locked && images.length > 0 && (
             <button
@@ -653,11 +682,7 @@ export function AssetWorkbench({
                         </button>
                       </div>
                       {image && (
-                        <small className="wb-image-size">
-                          {image.normalized
-                            ? "2048 × 2048 · 정면 기준 정렬"
-                            : "원본 · 크기 맞춤 전"}
-                        </small>
+                        <SourceImageSize projectId={p.id} image={image} />
                       )}
                       {image?.normalizationIssue && (
                         <p className="wb-image-issue">
@@ -1150,9 +1175,10 @@ export function AssetWorkbench({
                 )}
                 {partMode === "separate" ? (
                   <>
-                    <p>
-                      세 파츠의 정면·후면·왼쪽·오른쪽을 먼저 확인하고 모델을
-                      만듭니다.
+                    <p data-testid="workbench-separation-batch-help">
+                      파츠마다 정면·후면·왼쪽·오른쪽을 한 번에 묶어 만듭니다.
+                      머리·머리카락·몸통 총 3회 생성 후 12장으로 자동
+                      분리합니다. 사진을 확인하고 채택한 뒤 모델을 만듭니다.
                     </p>
                     <div className="wb-pair">
                       <label className="field">
@@ -1205,6 +1231,16 @@ export function AssetWorkbench({
                         onChange={(e) => setSeparationPrompt(e.target.value)}
                       />
                     </label>
+                    <p
+                      className="wb-note"
+                      data-testid="workbench-sheet-resolution-note"
+                    >
+                      4방향을 한 원본 이미지에 묶어 생성하므로 방향별 원본
+                      크기가 작아질 수 있습니다. 기존 개별 생성과 같은 세부
+                      품질을 보장하지 않으며, 결과의 원본 크기와 외형을 확인한
+                      뒤 채택하세요. 특정 방향은 수정 지시로 개별 리롤할 수
+                      있습니다.
+                    </p>
                     {approvalBox()}
                     {separationBase && missingSeparationCount > 0 && (
                       <>
@@ -1213,7 +1249,7 @@ export function AssetWorkbench({
                           data-testid="workbench-reuse-scope"
                         >
                           기존 {presentSeparationPairs.size}장은 유지합니다.
-                          없는 방향과 파츠 {missingSeparationCount}장만
+                          없는 {missingSeparationCount}장은 같은 파츠끼리 묶어
                           추가합니다.
                         </div>
                         {launch(
@@ -1234,7 +1270,7 @@ export function AssetWorkbench({
                     {launch(
                       separationBase
                         ? `선택한 ${rerollSeparationCount}장 수정 · 리롤`
-                        : "파츠 4방향 이미지 12장 만들기",
+                        : "파츠별 4방향 묶음 만들기 · 총 12장",
                       {
                         step: "separate",
                         prompt: separationPrompt,
@@ -1254,8 +1290,9 @@ export function AssetWorkbench({
                     )}
                     {separationBase && (
                       <small className="wb-muted">
-                        선택한 범위만 새로 만들고 다른 파츠·방향의 사진은 그대로
-                        사용합니다. 결과는 새 버전에 저장됩니다.
+                        한 파츠의 한 방향만 선택하면 한 장만 리롤합니다. 여러
+                        방향은 같은 파츠끼리 묶어 만들고, 다른 파츠·방향의
+                        사진은 그대로 사용합니다. 결과는 새 버전에 저장됩니다.
                       </small>
                     )}
                   </>

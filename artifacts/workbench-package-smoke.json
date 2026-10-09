@@ -1,7 +1,7 @@
 {
   "passed": true,
   "isPackaged": true,
-  "version": "0.5.1",
+  "version": "0.5.2",
   "isolatedStore": true,
   "workbenchDefaultScreen": true,
   "cliAvailable": true,

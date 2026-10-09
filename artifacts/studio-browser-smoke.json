@@ -1,6 +1,7 @@
 {
   "passed": true,
   "checks": [
+    "GPT/local workers receive no unrelated Studio bridge, tool arguments or credentials",
     "Observed controls, editable prompts, native select, stale IDs and workspace-only file upload",
     "Normal click cannot charge; displayed-cost match and durable single-attempt reservation enforced",
     "Native Electron download persisted with run/stage lineage and SHA256",
@@ -10,7 +11,7 @@
     "Detached observed canvas is rejected before input events",
     "Combined Sign up/Log in and password page halts worker for user input"
   ],
-  "workspace": "C:\\Users\\김민준\\Desktop\\3D tool\\artifacts\\runtime\\studio-browser-smoke\\a1008461-a019-4324-a604-f978f767f2d1",
+  "workspace": "C:\\Users\\김민준\\Desktop\\3D tool\\artifacts\\runtime\\studio-browser-smoke\\89658d05-1280-454b-8a9d-fd5f3144fead",
   "actualStudio": false,
   "packagedMcp": false,
   "mcpExecutable": "C:\\Users\\김민준\\Desktop\\3D tool\\node_modules\\electron\\dist\\electron.exe",

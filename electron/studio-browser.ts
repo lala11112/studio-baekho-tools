@@ -24,7 +24,10 @@ import {
   writeJson,
   type StudioRunContext,
 } from "./studio-policy";
-import type { WorkerConnectionContext } from "../engine/codex-worker";
+import type {
+  WorkerConnection,
+  WorkerConnectionContext,
+} from "../engine/codex-worker";
 
 type Control = {
   index: number;
@@ -1062,7 +1065,12 @@ export class StudioBrowser {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
-  async workerConnection(context: WorkerConnectionContext) {
+  async workerConnection(
+    context: WorkerConnectionContext,
+  ): Promise<WorkerConnection> {
+    // GPT image/local Blender work does not use this bridge. Do not inject its
+    // unrelated tool schemas, start a server, or replace the current Studio run.
+    if (!context.capability) return {};
     this.attachRun({
       runId: context.runId,
       stageId: context.stageId,

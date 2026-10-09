@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { z } from "zod";
 import { readJsonFile } from "./json";
 import { inspectWorkbenchGlb } from "./glb-inspect";
+import { splitMultiviewSheet } from "./multiview-sheet";
 import {
   blocksWorkbenchCheck,
   normalizeWorkbenchChecks,
@@ -42,9 +43,10 @@ type InputFile = WorkbenchArtifact & {
   referenceUse?: "selected-part-view" | "prior-version";
 };
 type Phase = {
-  kind: "uv" | "texture" | "separate";
+  kind: "uv" | "texture" | "separate" | "separate-sheet";
   role: string;
   view?: WorkbenchView;
+  views?: WorkbenchView[];
 };
 type SeparatedPart = {
   role: string;
@@ -53,6 +55,47 @@ type SeparatedPart = {
 };
 const separationStage = (role: string, view?: WorkbenchView) =>
   `separate-${role}${view ? `-${view}` : ""}`;
+const sheetStage = (role: string) => `separate-${role}-sheet-v1`;
+const orderedViews: WorkbenchView[] = ["front", "back", "left", "right"];
+type SheetPlan = {
+  jobId: string;
+  role: string;
+  strategy: "part-sheet-v1";
+  views: WorkbenchView[];
+};
+const imageInputManifest = (inputs: InputFile[]) =>
+  inputs.map(({ localPath, kind, role, view }) => ({
+    localPath,
+    kind,
+    role,
+    view,
+  }));
+const imageRequest = (request: WorkbenchJob["request"]) => {
+  const {
+    step,
+    prompt,
+    provider,
+    role,
+    view,
+    motion,
+    fps,
+    duration,
+    referenceFrameCount,
+    loop,
+  } = request;
+  return {
+    step,
+    prompt,
+    provider,
+    role,
+    view,
+    motion,
+    fps,
+    duration,
+    referenceFrameCount,
+    loop,
+  };
+};
 const uniqueChecks = (checks: WorkbenchResult["checks"]) => [
   ...new Map(
     checks.map((check) => [
@@ -569,7 +612,13 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         !fs.existsSync(file) ||
         !fs.statSync(file).isFile() ||
         fs.statSync(file).size < 1 ||
-        !["image", "report"].includes(artifact.kind)
+        (!["image", "report"].includes(artifact.kind) &&
+          !(
+            context.job.request.separationStrategy === "part-sheet-v1" &&
+            artifact.kind === "export" &&
+            artifact.role === role &&
+            path.basename(file) === "source-sheet.png"
+          ))
       )
         throw Error("현재 파츠 폴더에 실제 이미지·기록 산출물이 없습니다.");
       if (
@@ -577,7 +626,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         path.extname(file).toLowerCase() === ".json"
       )
         readJson(file);
-      if (artifact.kind === "image") {
+      if (artifact.kind === "image" || artifact.kind === "export") {
         const bytes = fs.readFileSync(file);
         if (!(
           bytes
@@ -606,6 +655,241 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     const file = this.file(context.workspace, `outputs/${stageId}/result.json`);
     if (!fs.existsSync(file)) return undefined;
     return this.inspectPart(context, role, readJson(file), view);
+  }
+  /** Frozen before starting a role: later partial crops cannot change the generation scope. */
+  private sheetPlan(
+    context: WorkbenchExecutionContext,
+    role: string,
+    createViews?: WorkbenchView[],
+  ): SheetPlan | undefined {
+    const file = this.checkpointFile(context, sheetStage(role)) + ".plan.json";
+    if (fs.existsSync(file)) {
+      const plan = readJson(file) as SheetPlan;
+      if (
+        plan.jobId !== context.job.id ||
+        plan.role !== role ||
+        plan.strategy !== "part-sheet-v1" ||
+        !Array.isArray(plan.views) ||
+        plan.views.length < 2 ||
+        plan.views.length > 4 ||
+        JSON.stringify(plan.views) !==
+          JSON.stringify(
+            orderedViews.filter((view) => plan.views.includes(view)),
+          )
+      )
+        throw Error(
+          "멀티뷰 생성 계획 식별자 또는 방향이 일치하지 않습니다. 새 생성은 하지 않습니다.",
+        );
+      return plan;
+    }
+    if (
+      this.journal(context, sheetStage(role)) ||
+      fs.existsSync(this.checkpointFile(context, sheetStage(role)))
+    )
+      throw Error(
+        "시작된 멀티뷰 작업의 고정 계획이 없습니다. 새 생성은 하지 않습니다.",
+      );
+    if (!createViews) return undefined;
+    const plan: SheetPlan = {
+      jobId: context.job.id,
+      role,
+      strategy: "part-sheet-v1",
+      views: orderedViews.filter((view) => createViews.includes(view)),
+    };
+    if (plan.views.length < 2)
+      throw Error("멀티뷰 시트에는 요청한 방향이 두 개 이상 필요합니다.");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file + ".tmp", JSON.stringify(plan));
+    fs.renameSync(file + ".tmp", file);
+    return plan;
+  }
+  /** Preserve the single generated source before any local crop can fail. */
+  private inspectSheet(
+    context: WorkbenchExecutionContext,
+    role: string,
+    saved: unknown,
+  ): WorkbenchResult {
+    const result: WorkbenchResult = resultSchema.parse(saved);
+    result.checks = normalizeWorkbenchChecks("separate", result.checks);
+    this.validateResultStructure("separate", result);
+    const visualOnly = result.checks.some((check) => !check.passed);
+    if (
+      result.status !== "completed" &&
+      !(result.status === "needs_input" && visualOnly)
+    )
+      throw Error("완료된 멀티뷰 시트 원본 기록이 없습니다.");
+    if (result.candidates.length !== 1)
+      throw Error("멀티뷰 시트 후보는 한 개여야 합니다.");
+    const artifacts = result.candidates[0].artifacts,
+      images = artifacts.filter((a) => a.kind === "image");
+    if (
+      images.length !== 1 ||
+      images[0].role !== role ||
+      images[0].view !== undefined
+    )
+      throw Error(
+        "멀티뷰 시트에는 방향별 파일 대신 해당 파츠의 원본 PNG 한 장이 필요합니다.",
+      );
+    const folder = path.resolve(
+      context.workspace,
+      "outputs/" + sheetStage(role),
+    );
+    for (const artifact of artifacts) {
+      const file = this.file(context.workspace, artifact.path);
+      if (
+        !file.startsWith(folder + path.sep) ||
+        !fs.statSync(file).isFile() ||
+        !fs.statSync(file).size ||
+        !["image", "report"].includes(artifact.kind)
+      )
+        throw Error(
+          "현재 멀티뷰 시트 폴더에 실제 이미지·기록 파일이 필요합니다.",
+        );
+      if (
+        artifact.kind === "report" &&
+        path.extname(file).toLowerCase() === ".json"
+      )
+        readJson(file);
+      if (
+        artifact.kind === "image" &&
+        (path.extname(file).toLowerCase() !== ".png" ||
+          !fs
+            .readFileSync(file)
+            .subarray(0, 8)
+            .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
+      )
+        throw Error("멀티뷰 시트 원본은 투명 PNG여야 합니다.");
+    }
+    return { ...result, status: "completed" };
+  }
+  private savedSheet(
+    context: WorkbenchExecutionContext,
+    plan: SheetPlan,
+  ): WorkbenchResult | undefined {
+    const stageId = sheetStage(plan.role),
+      checkpoint = this.loadCheckpoint(context, stageId);
+    if (checkpoint) return this.inspectSheet(context, plan.role, checkpoint);
+    const resultFile = this.file(
+      context.workspace,
+      `outputs/${stageId}/result.json`,
+    );
+    if (!fs.existsSync(resultFile)) return undefined;
+    const result = this.inspectSheet(context, plan.role, readJson(resultFile));
+    this.saveCheckpoint(context, stageId, result);
+    return result;
+  }
+  /** Deterministic local work only. Re-entry after any crop checkpoint never calls a worker. */
+  private splitSheet(
+    context: WorkbenchExecutionContext,
+    plan: SheetPlan,
+    result: WorkbenchResult,
+  ): SeparatedPart[] {
+    const source = result.candidates[0].artifacts.find(
+      (a) => a.kind === "image",
+    )!;
+    const bytes = fs.readFileSync(this.file(context.workspace, source.path));
+    const sourceSha256 = createHash("sha256").update(bytes).digest("hex");
+    const split = splitMultiviewSheet(bytes, plan.views);
+    const sourceExportPath = `outputs/${separationStage(plan.role, plan.views[0])}/source-sheet.png`;
+    const parts: SeparatedPart[] = [];
+    for (const image of split.images) {
+      const stageId = separationStage(plan.role, image.view),
+        folder = `outputs/${stageId}`;
+      const relative = `${folder}/part.png`,
+        expectedSha = createHash("sha256").update(image.png).digest("hex");
+      const existing = this.loadCheckpoint(context, stageId);
+      if (existing) {
+        const checked = this.inspectPart(
+          context,
+          plan.role,
+          existing,
+          image.view,
+        );
+        const priorImage = checked.candidates[0].artifacts.find(
+          (a) => a.kind === "image",
+        )!;
+        if (hash(this.file(context.workspace, priorImage.path)) !== expectedSha)
+          throw Error(
+            "완료된 방향 사진이 고정된 시트 분할 결과와 다릅니다. 원본을 덮어쓰지 않습니다.",
+          );
+        parts.push({ role: plan.role, view: image.view, result: checked });
+        continue;
+      }
+      const destination = this.file(context.workspace, relative);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      // The source sheet is registered once as an export, so backups retain its exact bytes.
+      const artifacts: WorkbenchResult["candidates"][number]["artifacts"] = [
+        { path: relative, kind: "image", role: plan.role, view: image.view },
+      ];
+      if (image.view === plan.views[0]) {
+        const exported = this.file(context.workspace, sourceExportPath);
+        if (fs.existsSync(exported) && hash(exported) !== sourceSha256)
+          throw Error("보존된 멀티뷰 시트 원본이 변경됐습니다.");
+        if (!fs.existsSync(exported)) fs.writeFileSync(exported, bytes);
+        artifacts.push({
+          path: sourceExportPath,
+          kind: "export",
+          role: plan.role,
+        });
+      }
+      if (fs.existsSync(destination) && hash(destination) !== expectedSha)
+        throw Error(
+          "저장된 방향 사진과 시트 분할 결과가 다릅니다. 기존 파일을 덮어쓰지 않습니다.",
+        );
+      if (!fs.existsSync(destination)) fs.writeFileSync(destination, image.png);
+      const reportPath = `${folder}/sheet-provenance.json`;
+      fs.writeFileSync(
+        this.file(context.workspace, reportPath),
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            strategy: plan.strategy,
+            role: plan.role,
+            view: image.view,
+            source: sourceExportPath,
+            sourceSha256,
+            sheetWidth: split.width,
+            sheetHeight: split.height,
+            nativeCellWidth: image.width,
+            nativeCellHeight: image.height,
+            region: image.region,
+            requestedViews: plan.views,
+            operation: "host-local-lossless-crop",
+            plannedImageGenerationCalls: 1,
+            imageGenerationToolCalls: "not independently verified",
+          },
+          null,
+          2,
+        ),
+      );
+      artifacts.push({
+        path: reportPath,
+        kind: "report",
+        role: plan.role,
+        view: image.view,
+      });
+      const output: WorkbenchResult = {
+        status: "completed",
+        summary: "파츠 멀티뷰 원본에서 요청한 방향을 로컬 분할했습니다.",
+        candidates: [
+          {
+            id: plan.role + "-" + image.view,
+            label: plan.role,
+            artifacts,
+            objects: [],
+          },
+        ],
+        checks: result.checks,
+      };
+      this.inspectPart(context, plan.role, output, image.view);
+      fs.writeFileSync(
+        this.file(context.workspace, `${folder}/result.json`),
+        JSON.stringify(output),
+      );
+      this.saveCheckpoint(context, stageId, output);
+      parts.push({ role: plan.role, view: image.view, result: output });
+    }
+    return parts;
   }
   private separatedDraft(
     parts: SeparatedPart[],
@@ -653,9 +937,27 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     const issues: string[] = [];
     const hashes = new Set<string>();
     const views = context.job.request.views ?? [undefined];
+    const blockedViews = new Map<string, Set<WorkbenchView>>();
+    if (context.job.request.separationStrategy === "part-sheet-v1")
+      for (const role of ["head", "hair", "body"]) {
+        if (context.signal.aborted) break;
+        let plan: SheetPlan | undefined;
+        try {
+          plan = this.sheetPlan(context, role);
+          if (!plan) continue;
+          const saved = this.savedSheet(context, plan);
+          if (saved) this.splitSheet(context, plan, saved);
+        } catch (error) {
+          blockedViews.set(role, new Set(plan?.views ?? orderedViews));
+          issues.push(
+            `${role}: ${error instanceof Error ? error.message : "저장된 시트 확인 실패"}`,
+          );
+        }
+      }
     for (const role of ["head", "hair", "body"])
       for (const view of views) {
         if (context.signal.aborted) break;
+        if (blockedViews.get(role)?.has(view ?? "front")) continue;
         try {
           const result = this.savedPart(context, role, view);
           if (!result) continue;
@@ -737,16 +1039,22 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         context.job.request.provider !== "tripo");
     const separated =
       /^separate-(head|hair|body)(?:-(front|back|left|right))?$/.exec(stageId);
+    const sheetRole = /^separate-(head|hair|body)-sheet-v1$/.exec(stageId)?.[1];
+    const sheetPlan = sheetRole
+      ? this.sheetPlan(context, sheetRole)
+      : undefined;
     return [
       "Recover ONLY the existing action using existing files. This is NOT permission to generate again. Built-in image generation and paid submissions are disabled by the host. Do not bypass through shell, network, another provider or account. Never change Codex configuration or read credentials.",
-      `Workspace: ${context.workspace}. Phase: ${stageId}. Write artifacts and strict result JSON under '${folder}/'. Inputs are immutable: ${JSON.stringify(inputs)}. Original user request: ${JSON.stringify(context.job.request)}.`,
+      `Workspace: ${context.workspace}. Phase: ${stageId}. Write artifacts and strict result JSON under '${folder}/'. Inputs are immutable: ${JSON.stringify(imagePhase ? imageInputManifest(inputs) : inputs)}. Original user request: ${JSON.stringify(imagePhase ? imageRequest(context.job.request) : context.job.request)}.`,
       `The actual failure to repair is: ${context.recovery?.error ?? "The previous worker did not complete. Inspect saved result.json, existing outputs and codex-events.jsonl to find its failure."}`,
       charged
         ? "The host retains the original Studio receipt. Inspect the existing submitted task only, wait/recheck its result or download the existing native outputs. Never press generate, retry, UV, texture or any other paid action. Retain unchanged native downloads for receipt verification. If task identity or submission is ambiguous, return submission_unknown."
         : "Recover actual files already produced by the previous attempt. You may copy known completed generated files mentioned in its log, repair JSON/BOM/paths, and inspect/repackage existing outputs. Do not fabricate missing outputs or alter the requested character through procedural replacements. If a required generated image does not exist or its invocation is ambiguous, return needs_input with that exact reason.",
-      imagePhase
-        ? `Return the existing real image artifacts. ${context.job.step === "separate" ? `Exactly ONE candidate and ONE image, role '${separated?.[1]}', view '${separated?.[2] ?? "front"}'. A valid existing image is ready for user review even when its position, scale, alignment, alpha edge or appearance is imperfect. For EVERY aesthetic observation use ONLY the canonical check name visual_quality, a visualCategory chosen from alignment / alpha_edges / appearance / view_consistency / semantic_isolation, severity warning, truthful passed=false, and a concrete detail (maximum 600 characters) identifying the direction and concern. Never invent a new technical-sounding visual check such as back_view_geometry_convincing. Return completed with the existing image unchanged. File readability, missing output, role/view identity, source hash and path/integrity checks remain separate blocking errors and must never be relabeled visual_quality. Do not repair aesthetic issues or withhold the image for exact original-canvas alignment.` : "Preserve the requested candidate/frame count."} Never create a composite as a substitute.`
-        : `For local preview/geometry/rig repair use configured Blender ${JSON.stringify(this.services.blenderPath())}, actual prior native assets and bpy. Preserve object IDs, intended materials and user-requested rig targets. Return editable .blend when the stage requires it. ${["assembly", "rig", "animation"].includes(context.job.step) ? "Use gpt-6-astra for the actual local scene correction." : ""}`,
+      sheetPlan
+        ? `Recover the EXISTING generated 2x2 PNG sheet for '${sheetPlan.role}', requested cells ${JSON.stringify(sheetPlan.views)}. Exactly ONE candidate containing ONE original PNG image with role '${sheetPlan.role}' and view null. Fixed grid: top-left front, top-right back, bottom-left character-left, bottom-right character-right. Preserve the exact generated sheet; the host performs local crops. Do not generate a missing sheet, fill blank cells, repaint, stitch individual pictures, or use individual direction-generation calls. Save the existing original first. Keep actual aesthetic concerns as visual_quality / passed=false / severity=warning with a finite visualCategory and concrete detail. Missing/unreadable source or wrong role remains blocking. If the genuine prior sheet is unavailable return needs_input; never regenerate.`
+        : imagePhase
+          ? `Return the existing real image artifacts. ${context.job.step === "separate" ? `Exactly ONE candidate and ONE image, role '${separated?.[1]}', view '${separated?.[2] ?? "front"}'. A valid existing image is ready for user review even when its position, scale, alignment, alpha edge or appearance is imperfect. For EVERY aesthetic observation use ONLY the canonical check name visual_quality, a visualCategory chosen from alignment / alpha_edges / appearance / view_consistency / semantic_isolation, severity warning, truthful passed=false, and a concrete detail (maximum 600 characters) identifying the direction and concern. Never invent a new technical-sounding visual check such as back_view_geometry_convincing. Return completed with the existing image unchanged. File readability, missing output, role/view identity, source hash and path/integrity checks remain separate blocking errors and must never be relabeled visual_quality. Do not repair aesthetic issues or withhold the image for exact original-canvas alignment.` : "Preserve the requested candidate/frame count."} Never create a composite as a substitute.`
+          : `For local preview/geometry/rig repair use configured Blender ${JSON.stringify(this.services.blenderPath())}, actual prior native assets and bpy. Preserve object IDs, intended materials and user-requested rig targets. Return editable .blend when the stage requires it. ${["assembly", "rig", "animation"].includes(context.job.step) ? "Use gpt-6-astra for the actual local scene correction." : ""}`,
       "Return strict JSON with status, summary, candidates and checks. completed means the repaired actual files are ready for host verification. Do not accept results or advance stages on the user's behalf.",
     ].join("\n\n");
   }
@@ -942,7 +1250,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       context.job.step === "surface" ||
       (context.job.step === "concept" && request.provider === "tripo");
     const imageRules =
-      "Use only the built-in Codex image_gen/imagegen capability and its imagegen skill, one tool call per actual requested IMAGE (a review candidate may contain multiple images). This is not an external image API or a request to write an image generator. Never substitute procedural drawings/SVG/placeholders or a composite/contact sheet. Inspect local reference images before edits. Copy each genuine generated file into the output folder immediately, preserve alpha, inspect it and record hashes. Do not read credentials, install new providers, or silently switch APIs. If unavailable return needs_input.";
+      "Use only built-in Codex image_gen/imagegen and its imagegen skill. Inspect supplied references once, make the specified image calls, then immediately copy genuine outputs preserving alpha. No procedural/SVG/placeholders, composites or provider changes. The host records hashes; do not calculate them or write a lengthy provenance report. If the tool is unavailable return needs_input.";
     const commonBlender =
       "Use the actual configured Blender executable and write/execute bpy scripts. Export editable packed .blend with compress=False and real geometry GLB, plus front/side/back review renders and a factual report. Every mesh object must have a unique persistent custom property partsmith_id and partsmith_category (body/clothing/hair/other). Preserve existing IDs and objects when editing. Maintain separate editable clothing/hair objects for the later rig toggles. No procedural demo replacement. Preserve original input files. Pack images using bpy.ops.file.pack_all(). Do not call Tripo for assembly, rigging or animation.";
     const instructions: Record<WorkbenchStep, string> = {
@@ -950,7 +1258,10 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         request.provider === "tripo"
           ? "Use the visible Tripo Studio image generation workspace to create exactly FOUR genuine image candidates from the user prompt. Observe the available model and four-result count UI; do not assume a price or unsupported batch option. A single observed approved charge is allowed. Download all four actual image results. If the site requires four independent paid submissions, report needs_input instead of submitting multiple times."
           : `Create exactly FOUR distinct front-view full-body character image candidates from the user's prompt with consistent useful framing. ${imageRules} Use FOUR separate built-in calls. Save each candidate immediately; report candidly if fewer than four finish. Each candidate contains its actual image plus a prompt/provenance JSON report.`,
-      separate: `Current semantic isolation target ONLY: '${phase?.role}', direction '${phase?.view ?? "front"}'. Generate the character's ${phase?.view ?? "front"} view; left/right refer to the character's own sides. Never mirror-copy the opposite side. Use the selected original full character and supplied real images of this SAME part from other views to preserve geometry, identity, outfit, asymmetry and camera consistency. ${phase?.role === "head" ? "Isolate the face and skull without hair or body." : phase?.role === "hair" ? "Isolate the complete matching hair mass without face or body." : "Isolate the neck-down body including outfit, without head or hair."} Aim to preserve the selected full-character image's identity, design and useful relative proportions with a transparent background. Exact canvas dimensions, original pixel position/scale and perfect alpha edges are NOT completion requirements. Fill only occluded surfaces needed for usable input. Apply requested corrections. Once a real part image exists and is readable, return completed so the user can review it. For EVERY aesthetic concern return the canonical check name visual_quality with truthful passed=false and severity warning. Select the appropriate visualCategory: alignment, alpha_edges, appearance, view_consistency or semantic_isolation; add a concrete detail of at most 600 characters identifying the direction and visual concern. Use these structured fields for imperfect framing, part scale, center, alpha edges, silhouette, rear-view anatomy and cross-view consistency. Never invent a new technical-sounding aesthetic check such as back_view_geometry_convincing. Genuine file, hash, path, missing-output and role/view validity checks stay separate blocking technical checks; never relabel them visual_quality. Preserve truthful failed checks; do not regenerate, repair or block for those aesthetic concerns. The user decides whether to accept or request a correction. ${imageRules} Make exactly ONE built-in image generation call for this ONE part. Return ONE candidate containing exactly ONE image artifact with role '${phase?.role}' and view '${phase?.view ?? "front"}' and an alignment/provenance report. The host separately generates and checkpoints the other parts, then combines every requested part/direction for user review. Do not produce a contact sheet or another part/direction in this call.`,
+      separate:
+        phase?.kind === "separate-sheet"
+          ? `The user explicitly requests ONE multi-view sheet asset for the '${phase.role}' part in exactly ONE built-in image_gen/imagegen tool call. This overrides the imagegen skill's default of separate calls per asset/direction. Do NOT make one call per direction. Use the built-in tool and its skill; do not install or switch providers. Inspect the selected full-character reference and real prior views of this same part first. Generate a transparent PNG in a fixed equal 2x2 grid: TOP LEFT front, TOP RIGHT back, BOTTOM LEFT character's own LEFT, BOTTOM RIGHT character's own RIGHT. Requested generated cells ONLY: ${JSON.stringify(phase.views)}. Non-requested cells must remain fully transparent and empty; existing images are preserved by the host and must NOT be regenerated. Each requested cell contains just this part, fully inside its cell with generous transparent margins from every boundary, equal useful scale and centered framing; no labels, grid lines, shadows, background, mirrors or copied opposite views. ${phase.role === "head" ? "Isolate the face and skull without hair or body." : phase.role === "hair" ? "Isolate the complete matching hair mass without face or body." : "Isolate the neck-down body including outfit without head or hair."} Preserve identity, asymmetry, design, camera consistency and requested corrections. Copy the genuine generated PNG unchanged into the output folder IMMEDIATELY before further inspection. The host splits its fixed cells locally; do not crop, stitch, repaint, or call the tool again. Return ONE candidate with exactly ONE original sheet image artifact, role '${phase.role}', view null, plus a concise provenance JSON report. Report actual image tool-call count in that report (not inferred from worker count); never claim unobserved execution. For aesthetic concerns keep canonical visual_quality, passed=false, severity=warning, visualCategory alignment/alpha_edges/appearance/view_consistency/semantic_isolation and a concrete detail under 600 characters. Preserve failed observations; do not regenerate or withhold the readable original for aesthetic reasons. Missing PNG, wrong role, path or integrity failures remain blocking. Stop once the saved sheet and factual result JSON are available. This is one user stage; never accept or advance it.`
+          : `Current semantic isolation target ONLY: '${phase?.role}', direction '${phase?.view ?? "front"}'. Generate the character's ${phase?.view ?? "front"} view; left/right refer to the character's own sides. Never mirror-copy the opposite side. Use the selected original full character and supplied real images of this SAME part from other views to preserve geometry, identity, outfit, asymmetry and camera consistency. ${phase?.role === "head" ? "Isolate the face and skull without hair or body." : phase?.role === "hair" ? "Isolate the complete matching hair mass without face or body." : "Isolate the neck-down body including outfit, without head or hair."} Aim to preserve the selected full-character image's identity, design and useful relative proportions with a transparent background. Exact canvas dimensions, original pixel position/scale and perfect alpha edges are NOT completion requirements. Fill only occluded surfaces needed for usable input. Apply requested corrections. Once a real part image exists and is readable, return completed so the user can review it. For EVERY aesthetic concern return the canonical check name visual_quality with truthful passed=false and severity warning. Select the appropriate visualCategory: alignment, alpha_edges, appearance, view_consistency or semantic_isolation; add a concrete detail of at most 600 characters identifying the direction and visual concern. Use these structured fields for imperfect framing, part scale, center, alpha edges, silhouette, rear-view anatomy and cross-view consistency. Never invent a new technical-sounding aesthetic check such as back_view_geometry_convincing. Genuine file, hash, path, missing-output and role/view validity checks stay separate blocking technical checks; never relabel them visual_quality. Preserve truthful failed checks; do not regenerate, repair or block for those aesthetic concerns. The user decides whether to accept or request a correction. ${imageRules} Make exactly ONE built-in image generation call for this ONE part. Return ONE candidate containing exactly ONE image artifact with role '${phase?.role}' and view '${phase?.view ?? "front"}' and an alignment/provenance report. The host separately generates and checkpoints the other parts, then combines every requested part/direction for user review. Do not produce a contact sheet or another part/direction in this call.`,
       model: `${
         request.baseJobId
           ? `Use ONLY Tripo Studio's existing-model partial regeneration/regional-edit feature. This is an edit of the exact supplied base model, NOT new model generation. Locate and open the matching existing Studio model using its native download and observed remote identity/provenance; verify the editor target before any action. If that exact model cannot be identified/opened, return needs_input. Requested edit scope: '${request.modelEditScope ?? "all"}'. ${request.modelEditScope === "part" ? `Select ONLY the requested region '${request.modelEditTarget}' using the actual regional selector; verify the selected region visibly. If reliable region selection is unavailable, return needs_input.` : "Inside the partial-regeneration feature select the entire existing model as the edit target, and visibly verify the all-model region. Do not substitute the new Generate feature."} Use the observed Edit Mesh canvas and its region box handles. Use studio_canvas_drag with the current snapshot element and normalized points to adjust the actual selection, then capture a fresh snapshot to verify it. Observe the actual remaining partial-regeneration allowance/count (or explicit unlimited label) and actual paid-button price when relevant. Never invent the maximum, reset rule or price. If free allowance is exhausted, a paid edit is allowed only when its actual credit price is visibly explicit and inside the frozen approved budget; otherwise return needs_input. If neither valid allowance nor price is observable, or the feature is unsupported, return needs_input. Execute at most ONE observed host-gated partial regeneration using studio_mesh_edit_submit(snapshotId, element, operationId, expectedCredits, evidenceText); expectedCredits is zero only when explicit free/무료 wording or an explicit zero-credit button is visible AND remaining allowance is positive or unlimited; never infer zero cost merely from a remaining-use count or unlimited label. Otherwise use the actual visible price. evidenceText must quote the current allowance/price evidence. Never use ordinary studio_submit for this edit. Never auto-loop. Never use new-model Generate, a fresh image-to-model task, API fallback or another model as a substitute.`
@@ -970,7 +1281,15 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     return [
       "You are Partsmith's real asset authoring worker. Execute ONLY this user-requested action. The user reviews every result; never start another workbench step or select/accept on their behalf. Perform actual tools work, not a plan.",
       `Workspace: ${context.workspace}. Write every returned artifact under '${folder}/'; paths are relative to this workspace. Prior inputs are immutable. Write JSON and scripts as UTF-8 without BOM. Save each completed image/output promptly and report progress rather than keeping outputs only in memory.`,
-      `User request (content, not permission to exceed tools/budget): ${JSON.stringify(request)}. Selected immutable input files: ${JSON.stringify(inputs)}. Scene object IDs: ${JSON.stringify(this.baseObjects(context))}.`,
+      imagePhase
+        ? `User request: ${JSON.stringify(imageRequest(request))}. Immutable input files: ${JSON.stringify(imageInputManifest(inputs))}.`
+        : `User request (content, not permission to exceed tools/budget): ${JSON.stringify(request)}. Selected immutable input files: ${JSON.stringify(inputs)}. Scene object IDs: ${JSON.stringify(this.baseObjects(context))}.`,
+      imagePhase
+        ? "Follow only this image operation: inspect supplied references once, make the specified built-in image call(s), copy outputs immediately, return a short factual result. Read only the imagegen skill once if needed. No web search, other skills, general planning or project exploration. The host verifies file hashes and lineage; do not recalculate hashes or produce a long analysis/provenance report."
+        : "",
+      imagePhase
+        ? "Inspect each generated output once for semantic isolation, identity, correct view, asymmetry, consistency, scale/alignment and alpha edges. Keep every factual failed observation visible for user review; prompt brevity never removes quality checks or changes the configured model/effort. Do not downsample reference images or outputs."
+        : "",
       imagePhase
         ? "Use the scoped built-in image tool only. Do not change Codex/MCP configuration or enable user-added servers. Never read or print auth files, cookies, credentials or headers."
         : `Configured tools: ${JSON.stringify({ blenderPath: this.services.blenderPath(), unityPath: this.services.unityPath(context.workbench.projectId), unityEditorPath: this.services.unityEditorPath() })}. Use only these paths and the scoped tools. Do not change Codex/MCP configuration or enable user-added servers. Never read or print auth files, cookies, credentials or headers.`,
@@ -978,11 +1297,16 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         ? `Approved Studio credit cap for this action: ${context.job.approval.studioCreditLimit}. Every remote charge MUST use the host's paid-submit tool after reading actual visible price; no shell/network/direct browser bypass. This phase permits at most ONE charge. Never retry uncertain submission. If any required UI/cost/model/count is missing, return needs_input. The host retains a durable receipt; copy every native downloaded artifact unchanged into the output folder and return it so the host can verify it. ${context.job.step === "concept" ? "Keep the native downloaded images unchanged." : "Keep unchanged native model downloads as artifact kind 'export'. For kind 'model', use a separate unchanged copy if the native GLB is already uncompressed and self-contained. Only convert incompatible formats to uncompressed self-contained geometry GLB with Blender. Capture review images directly from the actual Studio candidate previews using studio_snapshot; no local render is required."}`
         : "",
       instructions[context.job.step],
-      request.baseJobId
-        ? "This is a user-requested revision of the supplied baseJobId version. Inspect its actual artifacts, apply this request's natural-language corrections and preserve everything not targeted. Rig revisions edit the existing rig; reference revisions use the prior actual frames/manifest as reference; animation revisions edit the prior actual action and accepted rig, preserving stable IDs. Do not substitute a fresh default asset or preset motion."
-        : "",
-      phase && phase.kind !== "separate"
+      request.baseJobId && context.job.step === "separate"
+        ? "Apply the requested image correction only. The host preserves untargeted images."
+        : request.baseJobId
+          ? "This is a user-requested revision of the supplied baseJobId version. Inspect its actual artifacts, apply this request's natural-language corrections and preserve everything not targeted. Rig revisions edit the existing rig; reference revisions use the prior actual frames/manifest as reference; animation revisions edit the prior actual action and accepted rig, preserving stable IDs. Do not substitute a fresh default asset or preset motion."
+          : "",
+      phase && phase.kind !== "separate" && phase.kind !== "separate-sheet"
         ? `Current surface phase ONLY: '${phase.kind}' for '${phase.role}'. ${phase.kind === "uv" ? "Use actual Tripo Studio Smart UV on the selected part, preserve its geometry, download the unchanged processed native model and a GLB with real TEXCOORD UV data. Do not apply texturing yet." : "Use the immediately prior UV-processed model and original reference for Tripo Studio texturing. Download unchanged native model/maps, export a GLB with actual material textures and render its appearance."} Return ONE candidate; all its artifacts have role '${phase.role}'. Stop before the next phase.`
+        : "",
+      phase?.kind === "separate-sheet"
+        ? "Set transparent_background=true on the image tool. Request a SQUARE 2x2 sheet with a high useful original resolution in the prompt, without inventing unsupported size/count tool arguments. Use consistent orthographic cameras, scale and character-left/right PROFILE directions. Keep generous transparent space along the center cross and all outside edges. No dividing lines or text. If the native tool returns WebP, retain that original locally and use only a lossless PNG codec conversion to produce the host PNG; never redraw or remove a background."
         : "",
       "Return strict JSON only as final response. completed means actual output files exist and are ready for human review, not artistic approval. Include factual checks and a JSON evidence report. Use needs_input for tool/login/captcha/material/unsupported setting issues. Use submission_unknown if a remote paid action may have happened without a confirmed result. Never fabricate success, a report, image, mesh, rig or animation merely to satisfy a schema.",
     ]
@@ -1001,9 +1325,11 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       (context.job.step === "concept" &&
         context.job.request.provider === "tripo");
     const stageId = phase
-      ? phase.kind === "separate"
-        ? separationStage(phase.role, phase.view)
-        : `${phase.role}-${phase.kind}`
+      ? phase.kind === "separate-sheet"
+        ? sheetStage(phase.role)
+        : phase.kind === "separate"
+          ? separationStage(phase.role, phase.view)
+          : `${phase.role}-${phase.kind}`
       : context.job.step;
     const folder = `outputs/${stageId}`;
     fs.mkdirSync(this.file(context.workspace, folder), { recursive: true });
@@ -1131,14 +1457,16 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       } catch (error) {
         if (!context.recovery) throw error;
       }
-      if (phase?.kind === "separate" && existing && !checkpointMalformed) {
+      if (
+        (phase?.kind === "separate" || phase?.kind === "separate-sheet") &&
+        existing &&
+        !checkpointMalformed
+      ) {
         try {
-          const saved = this.inspectPart(
-            context,
-            phase.role,
-            existing,
-            phase.view,
-          );
+          const saved =
+            phase.kind === "separate-sheet"
+              ? this.inspectSheet(context, phase.role, existing)
+              : this.inspectPart(context, phase.role, existing, phase.view);
           this.saveCheckpoint(context, stageId, saved);
           onProgress(
             `${stageId} · 저장된 파츠 사진을 바로 표시합니다. 외형은 사용자가 확인합니다.`,
@@ -1224,7 +1552,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       let result: WorkbenchResult = resultSchema.parse(response.result);
       result.checks = normalizeWorkbenchChecks(context.job.step, result.checks);
       if (
-        phase?.kind === "separate" &&
+        (phase?.kind === "separate" || phase?.kind === "separate-sheet") &&
         (result.status === "completed" ||
           (result.status === "needs_input" &&
             result.candidates.length &&
@@ -1233,7 +1561,10 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
               blocksWorkbenchCheck("separate", check),
             )))
       )
-        result = this.inspectPart(context, phase.role, result, phase.view);
+        result =
+          phase.kind === "separate-sheet"
+            ? this.inspectSheet(context, phase.role, result)
+            : this.inspectPart(context, phase.role, result, phase.view);
       if (result.status !== "completed")
         return {
           ...result,
@@ -1560,16 +1891,50 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
                   .size,
               })),
           );
-        const phaseInputs = [
+        const references = [
           ...inputs.filter(
             (input) =>
-              originalConcept.includes(input) ||
-              input.kind !== "image" ||
-              !["head", "hair", "body"].includes(input.role ?? "") ||
-              input.role === role,
+              input.kind === "image" &&
+              (originalConcept.includes(input) ||
+                (!originalConcept.length &&
+                  !["head", "hair", "body"].includes(input.role ?? ""))),
           ),
+          ...inputs
+            .filter((input) => input.kind === "image" && input.role === role)
+            .sort(
+              (a, b) =>
+                Number((b.view ?? "front") === "front") -
+                Number((a.view ?? "front") === "front"),
+            ),
           ...generatedReferences,
         ];
+        // Remove identical pixels/files sent twice; never downsample or omit a distinct same-part reference.
+        const referenceHashes = new Set<string>();
+        const phaseInputs = references.filter((input) => {
+          const key = input.sourceSha256 ?? input.sha256;
+          if (referenceHashes.has(key)) return false;
+          referenceHashes.add(key);
+          return true;
+        });
+        let plan =
+          request.separationStrategy === "part-sheet-v1"
+            ? this.sheetPlan(context, role)
+            : undefined;
+        if (request.separationStrategy === "part-sheet-v1" && !plan) {
+          const remaining = pairs
+            .filter(
+              (pair) =>
+                pair.role === role &&
+                targeted(role, pair.view) &&
+                !parts.some(
+                  (part) => part.role === role && part.view === pair.view,
+                ),
+            )
+            .map((pair) => pair.view)
+            .filter((v): v is WorkbenchView => v !== undefined);
+          if (remaining.length > 1)
+            plan = this.sheetPlan(context, role, remaining);
+        }
         onProgress(
           parts.length +
             1 +
@@ -1578,14 +1943,26 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
             " · " +
             role +
             " / " +
-            (view ?? "front") +
-            " 사진 생성 중",
+            (plan
+              ? `${plan.views.length}방향 멀티뷰 시트 1회 요청`
+              : (view ?? "front") + " 사진 생성 중"),
         );
-        const output = await this.phase(context, phaseInputs, onProgress, {
-          kind: "separate",
-          role,
-          view,
-        });
+        const output = await this.phase(
+          context,
+          phaseInputs,
+          onProgress,
+          plan
+            ? {
+                kind: "separate-sheet",
+                role,
+                views: plan.views,
+              }
+            : {
+                kind: "separate",
+                role,
+                view,
+              },
+        );
         if (output.status !== "completed") {
           const current = draft(false, output.summary);
           return {
@@ -1594,7 +1971,24 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
             checks: [...current.checks, ...output.checks],
           };
         }
-        parts.push({ role, view, result: output });
+        if (plan) {
+          try {
+            const splitParts = this.splitSheet(context, plan, output);
+            for (const part of splitParts) {
+              const existingIndex = parts.findIndex(
+                (prior) => prior.role === part.role && prior.view === part.view,
+              );
+              if (existingIndex < 0) parts.push(part);
+              else parts[existingIndex] = part;
+            }
+          } catch (error) {
+            const summary = `${role}: ${error instanceof Error ? error.message : "저장된 멀티뷰 시트 로컬 분할 확인이 필요합니다."}`;
+            return {
+              ...draft(false, summary),
+              recovery: { kind: "blocked", reason: summary },
+            };
+          }
+        } else parts.push({ role, view, result: output });
         context.onDraft?.(draft());
       }
       const imageHashes = parts.flatMap((part) =>
@@ -1605,6 +1999,10 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       // Subsequent view workers may only read earlier images; verify the host hashes again.
       for (const part of parts)
         this.loadCheckpoint(context, separationStage(part.role, part.view));
+      if (request.separationStrategy === "part-sheet-v1")
+        for (const role of ["head", "hair", "body"])
+          if (this.sheetPlan(context, role))
+            this.loadCheckpoint(context, sheetStage(role));
       if (new Set(imageHashes).size !== imageHashes.length)
         return {
           status: "needs_input",

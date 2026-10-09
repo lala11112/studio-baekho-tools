@@ -50,6 +50,9 @@ export type WorkbenchRequest = {
   role?: WorkbenchRole;
   /** New separation jobs always freeze all four views; absent on legacy jobs. */
   views?: WorkbenchView[];
+  /** Frozen on new GPT separation requests: generate one four-view sheet per part.
+   * Absent on saved legacy jobs: retry keeps their original single-view phases. */
+  separationStrategy?: "part-sheet-v1";
   /** Optional one-view correction within the frozen separation set. */
   view?: WorkbenchView;
   /** Preserve every existing image and generate only missing role/view pairs. */

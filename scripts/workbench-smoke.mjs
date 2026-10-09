@@ -250,6 +250,10 @@ try {
       action: { kind: "accept", jobId: job.id },
     });
   await page.getByTestId("workbench-step-parts").click();
+  assert.match(
+    await page.getByTestId("workbench-separation-batch-help").textContent(),
+    /총 3회 생성 후 12장/,
+  );
   await page.getByTestId("workbench-approve").check();
   await page.getByTestId("workbench-execute-separate").click();
   await page.getByTestId("workbench-recovery").waitFor();
@@ -282,14 +286,55 @@ try {
     "UI observed partial photos before completion",
   );
   await jobDone();
+  assert(
+    invocations()
+      .filter((request) => request.step === "separate")
+      .every((request) => request.separationStrategy === "part-sheet-v1"),
+    "New separation and recovery must receive the same frozen grouped strategy",
+  );
   await page.getByTestId("workbench-visual-warnings").waitFor();
   assert(await page.getByTestId("workbench-accept-separate").isEnabled());
   await assertImagesDecoded("workbench-separation-views", 12);
-  const alignedImages = await page.getByTestId("workbench-separation-views").locator("img").evaluateAll(nodes => nodes.map(n => ({width:n.naturalWidth,height:n.naturalHeight,src:n.getAttribute("src")})));
-  assert(alignedImages.every(n => n.width === 2048 && n.height === 2048 && n.src.includes("/normalized/")), "All part previews must use the same normalized 2048 canvas");
+  await page.waitForFunction(() => {
+    const labels = [
+      ...document.querySelectorAll(
+        '[data-testid="workbench-native-image-size"]',
+      ),
+    ];
+    return (
+      labels.length === 12 &&
+      labels.every((n) => n.textContent.includes("원본 32 × 32"))
+    );
+  });
+  assert(
+    (
+      await page.getByTestId("workbench-sheet-resolution-note").textContent()
+    ).includes("보장하지 않으며"),
+  );
+  const alignedImages = await page
+    .getByTestId("workbench-separation-views")
+    .locator("img")
+    .evaluateAll((nodes) =>
+      nodes.map((n) => ({
+        width: n.naturalWidth,
+        height: n.naturalHeight,
+        src: n.getAttribute("src"),
+      })),
+    );
+  assert(
+    alignedImages.every(
+      (n) =>
+        n.width === 2048 && n.height === 2048 && n.src.includes("/normalized/"),
+    ),
+    "All part previews must use the same normalized 2048 canvas",
+  );
   const beforeAlignmentCalls = invocations().length;
   await page.getByTestId("workbench-normalize-images").click();
-  assert.equal(invocations().length,beforeAlignmentCalls,"Local alignment must not invoke generation");
+  assert.equal(
+    invocations().length,
+    beforeAlignmentCalls,
+    "Local alignment must not invoke generation",
+  );
   await page.getByTestId("workbench-visual-warnings").screenshot({
     path: "artifacts/screenshots/workbench-visual-warnings.png",
   });
@@ -547,6 +592,7 @@ try {
         partialAndAllTwelveImagesDecoded: true,
         longWindowsInheritedImagePathsDecoded: true,
         aligned2048PreviewsAndLocalOnlyAlignment: true,
+        nativeResolutionDistinctFrom2048Preview: true,
         rerollKeepsOtherModelSelections: true,
         sameTimeMultiview: true,
         restartNoAutoRun: true,

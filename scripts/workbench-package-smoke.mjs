@@ -8,7 +8,7 @@ const data = path.resolve(
   "artifacts/runtime",
   `workbench-package-${randomUUID()}`,
 );
-const executablePath = path.resolve("release/0.5.1/win-unpacked/Partsmith.exe");
+const executablePath = path.resolve("release/0.5.2/win-unpacked/Partsmith.exe");
 const app = await electron.launch({
   executablePath,
   env: { ...process.env, PARTSMITH_DATA: data },
@@ -22,7 +22,7 @@ try {
     isPackaged: app.isPackaged,
     version: app.getVersion(),
   }));
-  assert.equal(info.version, "0.5.1");
+  assert.equal(info.version, "0.5.2");
   assert(info.isPackaged);
   const state = await page.evaluate(() =>
     window.desktop.call({ type: "state" }),
@@ -76,7 +76,7 @@ try {
     ),
   );
   console.log(
-    "Packaged 0.5.1 app: UI, SQLite, guided workbench entry, Codex login probe passed; no generation.",
+    "Packaged 0.5.2 app: UI, SQLite, guided workbench entry, Codex login probe passed; no generation.",
   );
 } finally {
   await app.close();

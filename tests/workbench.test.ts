@@ -1324,6 +1324,8 @@ test("new separation freezes twelve role/view images and models have one result"
     true,
   );
   assert.deepEqual(split.request.views, ["front", "back", "left", "right"]);
+  assert.equal(split.request.provider, "gpt");
+  assert.equal(split.request.separationStrategy, "part-sheet-v1");
   assert.equal(
     split.candidates[0].artifacts.filter((a) => a.kind === "image").length,
     12,
@@ -1354,6 +1356,88 @@ test("new separation freezes twelve role/view images and models have one result"
       }),
     /네 방향/,
   );
+});
+
+test("grouped separation strategy is validated only for new GPT separation requests", async (t) => {
+  const x = await setup(t);
+  for (const request of [
+    {
+      step: "separate",
+      prompt: "invalid strategy",
+      separationStrategy: "unknown-v2",
+    },
+    {
+      step: "separate",
+      prompt: "wrong provider",
+      provider: "tripo",
+      separationStrategy: "part-sheet-v1",
+    },
+    {
+      step: "concept",
+      prompt: "wrong stage",
+      separationStrategy: "part-sheet-v1",
+    },
+  ])
+    assert.throws(
+      () => x.engine.execute(x.w.id, request as WorkbenchRequest),
+      /묶음 생성 방식/,
+    );
+  assert.equal(x.executor.calls.length, 0);
+  assert.equal(x.engine.get(x.w.id).jobs.length, 1);
+  const request: WorkbenchRequest = {
+    step: "separate",
+    prompt: "new GPT batch",
+  };
+  const grouped = await x.execute(request);
+  assert.equal(request.separationStrategy, undefined, "Input is not mutated");
+  assert.equal(grouped.request.separationStrategy, "part-sheet-v1");
+  assert.equal(
+    x.executor.calls[0].job.request.separationStrategy,
+    "part-sheet-v1",
+  );
+  assert.equal(grouped.status, "review");
+  assert.equal(x.engine.get(x.w.id).selections.separate, undefined);
+  const tripo = await x.execute({
+    step: "separate",
+    provider: "tripo",
+    prompt: "legacy provider",
+  });
+  assert.equal(tripo.request.separationStrategy, undefined);
+});
+
+test("retry and restart preserve a legacy separation plan without automatic strategy migration", async (t) => {
+  const x = await setup(t);
+  x.executor.hook = (_, result) => ({
+    ...result,
+    status: "needs_input",
+    candidates: [],
+  });
+  const stopped = await x.execute({ step: "separate", prompt: "legacy split" });
+  const stored = x.engine.get(x.w.id);
+  const legacy = stored.jobs.find((job) => job.id === stopped.id)!;
+  delete legacy.request.separationStrategy;
+  delete legacy.request.provider;
+  legacy.status = "running";
+  stored.activeJobId = legacy.id;
+  const frozen = structuredClone(legacy.request);
+  x.store.put("workbench", stored.id, stored);
+  const restarted = new WorkbenchEngine(x.store, x.executor, {
+    recoveryDelaysMs: [0, 0, 0],
+  });
+  t.after(() => restarted.shutdown());
+  const restored = restarted.get(x.w.id);
+  assert.equal(restored.activeJobId, undefined);
+  assert.equal(restored.jobs[0].status, "failed");
+  assert.deepEqual(restored.jobs[0].request, frozen);
+  assert.equal(x.executor.calls.length, 1, "Restart must not start a worker");
+  x.executor.hook = undefined;
+  restarted.retry(x.w.id, legacy.id);
+  const resumed = (await restarted.wait(x.w.id)).jobs[0];
+  assert.equal(resumed.status, "review", resumed.summary);
+  assert.equal(x.executor.calls.length, 2);
+  assert.deepEqual(x.executor.calls[1].job.request, frozen);
+  assert.deepEqual(resumed.request, frozen);
+  assert.equal(restarted.get(x.w.id).selections.separate, undefined);
 });
 
 test("legacy three-front review remains readable but cannot start a new four-view model", async (t) => {
@@ -1465,6 +1549,10 @@ test("stopped partial separation is a verified base for filling missing views on
   const stopped = await x.execute({ step: "separate", prompt: "split" });
   assert.equal(stopped.status, "needs_input");
   assert.equal(stopped.draftCandidates?.[0].artifacts.length, 1);
+  const legacyState = x.engine.get(x.w.id);
+  delete legacyState.jobs.find((job) => job.id === stopped.id)!.request
+    .separationStrategy;
+  x.store.put("workbench", legacyState.id, legacyState);
   x.executor.hook = undefined;
   const filled = await x.execute({
     step: "separate",
@@ -1473,6 +1561,13 @@ test("stopped partial separation is a verified base for filling missing views on
     reuseExisting: true,
   });
   assert.equal(filled.status, "review", filled.summary);
+  assert.equal(filled.request.separationStrategy, "part-sheet-v1");
+  assert.equal(
+    x.engine.get(x.w.id).jobs.find((job) => job.id === stopped.id)!.request
+      .separationStrategy,
+    undefined,
+    "Filling missing views creates a grouped version without migrating the legacy base",
+  );
   const retained = stopped.draftCandidates![0].artifacts[0];
   assert.equal(
     filled.candidates[0].artifacts.find(
@@ -1847,4 +1942,183 @@ test("normalized derivatives are copied and verified with project backups", asyn
     () => restored.restoreFromBackup(x.project.id, backup),
     /정리된 사진 파일/,
   );
+});
+
+function attachSheetExport(
+  ctx: WorkbenchExecutionContext,
+  result: WorkbenchResult,
+) {
+  const artifacts = result.candidates[0].artifacts;
+  const front = artifacts.find(
+    (a) => a.kind === "image" && a.role === "head" && a.view === "front",
+  )!;
+  const folder = "outputs/separate-head-front";
+  fs.mkdirSync(path.join(ctx.workspace, folder), { recursive: true });
+  fs.copyFileSync(
+    path.join(ctx.workspace, front.path),
+    path.join(ctx.workspace, folder, "part.png"),
+  );
+  front.path = `${folder}/part.png`;
+  const source = {
+    path: `${folder}/source-sheet.png`,
+    kind: "export" as const,
+    role: "head",
+  };
+  fs.writeFileSync(
+    path.join(ctx.workspace, source.path),
+    image("original source-sheet bytes"),
+  );
+  artifacts.push(source);
+  return source;
+}
+
+test("sheet source exports accompany unselectable drafts and survive full review, reroll and backup", async (t) => {
+  const x = await setup(t);
+  let release!: () => void;
+  x.executor.hook = async (ctx, result) => {
+    attachSheetExport(ctx, result);
+    ctx.onDraft!({
+      ...result,
+      candidates: [
+        {
+          ...result.candidates[0],
+          artifacts: result.candidates[0].artifacts.filter(
+            (a) => a.role === "head",
+          ),
+        },
+      ],
+    });
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return result;
+  };
+  x.engine.execute(x.w.id, { step: "separate", prompt: "grouped views" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const draft = x.engine.get(x.w.id).jobs[0];
+  assert.equal(draft.status, "running");
+  assert.equal(
+    draft.draftCandidates?.[0].artifacts.filter((a) => a.kind === "image")
+      .length,
+    4,
+  );
+  const raw = draft.draftCandidates![0].artifacts.find(
+    (a) => a.kind === "export",
+  )!;
+  assert.ok(raw);
+  assert.throws(() => x.engine.accept(x.w.id, draft.id));
+  const backup = path.join(x.root, "sheet-backup");
+  fs.cpSync(x.store.directory(x.project.id), backup, { recursive: true });
+  const other = new Store(path.join(x.root, "sheet-restored"));
+  await other.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));
+  t.after(() => other.db.close());
+  other.save(x.store.project(x.project.id));
+  const executor = new MockExecutor();
+  const restored = new WorkbenchEngine(other, executor);
+  restored.restoreFromBackup(x.project.id, backup);
+  assert.deepEqual(
+    fs.readFileSync(other.file(x.project.id, raw.path)),
+    image("original source-sheet bytes"),
+  );
+  assert.equal(executor.calls.length, 0);
+  release();
+  const completed = (await x.engine.wait(x.w.id)).jobs[0];
+  assert.equal(completed.status, "review", completed.summary);
+  assert.equal(
+    completed.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    12,
+  );
+  x.engine.accept(x.w.id, completed.id);
+  x.executor.hook = undefined;
+  const corrected = await x.execute({
+    step: "separate",
+    prompt: "hair back only",
+    role: "hair",
+    view: "back",
+    baseJobId: completed.id,
+  });
+  assert.equal(corrected.status, "review", corrected.summary);
+  assert.equal(
+    x.engine
+      .get(x.w.id)
+      .jobs.find((j) => j.id === completed.id)!
+      .candidates[0].artifacts.find((a) => a.kind === "export")!.sha256,
+    raw.sha256,
+  );
+  fs.cpSync(x.store.directory(x.project.id), backup, { recursive: true });
+  restored.restoreFromBackup(x.project.id, backup);
+  assert.deepEqual(
+    fs.readFileSync(other.file(x.project.id, raw.path)),
+    image("original source-sheet bytes"),
+  );
+  fs.appendFileSync(path.join(backup, raw.path), "tampered sheet");
+  assert.throws(() => restored.restoreFromBackup(x.project.id, backup), /손상/);
+});
+
+test("sheet source export validation rejects arbitrary drafts and complete outputs", async (t) => {
+  for (const fault of [
+    "legacy",
+    "path",
+    "role",
+    "view",
+    "format",
+    "duplicate",
+    "unpaired",
+  ] as const) {
+    const x = await setup(t);
+    x.executor.hook = (ctx, result) => {
+      const source = attachSheetExport(ctx, result);
+      if (fault === "path") {
+        const dest = "unrelated.png";
+        fs.copyFileSync(
+          path.join(ctx.workspace, source.path),
+          path.join(ctx.workspace, dest),
+        );
+        source.path = dest;
+      }
+      if (fault === "role") source.role = "hair";
+      if (fault === "view") (source as { view?: WorkbenchView }).view = "front";
+      if (fault === "format")
+        fs.writeFileSync(path.join(ctx.workspace, source.path), "not a PNG");
+      if (fault === "duplicate") {
+        const back = result.candidates[0].artifacts.find(
+          (a) => a.kind === "image" && a.role === "head" && a.view === "back",
+        )!;
+        const folder = "outputs/separate-head-back";
+        fs.mkdirSync(path.join(ctx.workspace, folder), { recursive: true });
+        fs.copyFileSync(
+          path.join(ctx.workspace, back.path),
+          path.join(ctx.workspace, folder, "part.png"),
+        );
+        back.path = `${folder}/part.png`;
+        const duplicate = { ...source, path: `${folder}/source-sheet.png` };
+        fs.copyFileSync(
+          path.join(ctx.workspace, source.path),
+          path.join(ctx.workspace, duplicate.path),
+        );
+        result.candidates[0].artifacts.push(duplicate);
+      }
+      if (fault === "unpaired") {
+        const front = result.candidates[0].artifacts.find(
+          (a) => a.kind === "image" && a.role === "head" && a.view === "front",
+        )!;
+        fs.copyFileSync(
+          path.join(ctx.workspace, front.path),
+          path.join(ctx.workspace, "front.png"),
+        );
+        front.path = "front.png";
+      }
+      ctx.onDraft!(result);
+      return result;
+    };
+    const job = await x.execute({
+      step: "separate",
+      prompt: "grouped views",
+      ...(fault === "legacy" ? { provider: "tripo" as const } : {}),
+    });
+    assert.equal(job.status, "failed", fault);
+    assert.equal(job.draftCandidates, undefined, fault);
+    assert.equal(job.candidates.length, 0, fault);
+    assert.match(job.summary, /멀티뷰 시트 원본/, fault);
+  }
 });
