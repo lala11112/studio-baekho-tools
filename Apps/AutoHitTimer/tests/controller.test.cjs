@@ -3,14 +3,14 @@ const assert = require('node:assert/strict');
 const { Controller } = require('../src/controller.cjs');
 const clip = { guid: 'a'.repeat(32), localId: '7400000', name: 'Attack', length: 1, sourceFingerprint: 'hash' };
 function fixture({ failAI = false, uncertainSave = false, deferPreview = false } = {}) {
-  const calls = []; let batch = 0;
+  const calls = []; let batch = 0, snapshot = 'snapshot';
   let persisted, requestId, releasePreview, receipt = { complete: false }, journal = { status: 'preview' };
   const client = { projectPath: 'C:/test', heartbeat: () => ({ ready: true }), mediaPath: filename => filename,
     response: () => receipt,
     command: async (command, payload, options) => {
       calls.push({ command, payload });
       if (command === 'actors') return { actors: [{ id: 'actor', label: 'Player' }] };
-      if (command === 'targets') return { sources: [{ guid: 's', label: 'Fire' }], targets: [{ sourceGuid: 's', actionPath: 'Actions.ComboSteps.Array.data[0]', snapshot: 'snapshot' }], groups: [] };
+      if (command === 'targets') return { sources: [{ guid: 's', label: 'Fire' }], targets: [{ sourceGuid: 's', actionPath: 'Actions.ComboSteps.Array.data[0]', snapshot }], groups: [] };
       if (command === 'saveStatus') return journal;
       if (command === 'capture') { batch++; return { sessionId: 'session', clip, duration: 1, fps: payload.fps, frames: (payload.times || Array.from({ length: 25 }, (_, i) => i / 24)).map((time, i) => ({ id: `b${batch}f${i}`, time, path: '/frame.png' })) }; }
       if (command === 'previewChange') {
@@ -31,6 +31,7 @@ function fixture({ failAI = false, uncertainSave = false, deferPreview = false }
     return { status: 'hits', summary: '베기', windows: [{ start: .25, end: .5, reason: '앞으로 베기', uncertain: false }] };
   } };
   return { controller: new Controller({ store, clientFactory: () => client, ai }), calls, releasePreview: () => releasePreview(),
+    changeSnapshot(value) { snapshot = value; },
     completeSave(value) { receipt = { complete: true, result: value }; },
     recoveryState(nextReceipt, nextJournal) { receipt = nextReceipt; journal = nextJournal; } };
 }
@@ -64,6 +65,24 @@ test('changing preview actor prevents saving analysis from the prior character',
   const { controller: c } = fixture(); await c.connectProject('C:/test'); c.addJobs([clip]);
   c.analyzeJobs([c.job().id]); await c.queuePromise; c.state.settings.weaponId = 'different'; c.updateJob(c.job().id, { reviewed: true });
   await assert.rejects(c.previewChange(), /다시 촬영/);
+});
+
+test('refreshing changed Unity targets rebases drafts and requires review without losing edits or touching pending saves', async () => {
+  const { controller: c, calls, changeSnapshot } = fixture(); await c.connectProject('C:/test'); c.addJobs([clip]); const job = c.job();
+  c.analyzeJobs([job.id]); await c.queuePromise;
+  c.updateJob(job.id, { sourceGuid: 's', actionPath: 'Actions.ComboSteps.Array.data[0]', timeOverrides: [{ path: 'Execution.ComboTransitionTime', value: .8 }] });
+  c.updateJob(job.id, { reviewed: true }); await c.previewChange();
+  const windows = structuredClone(job.windows), times = structuredClone(job.timeOverrides);
+  changeSnapshot('updated-snapshot'); await c.refreshCatalog();
+  assert.equal(job.expectedSnapshot, 'updated-snapshot'); assert.equal(job.reviewed, false);
+  assert.deepEqual(job.windows, windows); assert.deepEqual(job.timeOverrides, times);
+  await assert.rejects(c.applyChange('change'), /다시 확인/);
+  c.updateJob(job.id, { reviewed: true }); await c.previewChange();
+  assert.equal(calls.filter(call => call.command === 'previewChange').at(-1).payload.expectedSnapshot, 'updated-snapshot');
+  assert.equal(calls.filter(call => call.command === 'apply').length, 0);
+  job.pendingSave = { changeId: 'change', requestId: 'request' };
+  changeSnapshot('pending-snapshot'); await c.refreshCatalog();
+  assert.equal(job.expectedSnapshot, 'updated-snapshot'); assert.ok(job.pendingSave);
 });
 
 test('uncertain saves preserve request identity, block draft mutation and recover without a second apply', async () => {

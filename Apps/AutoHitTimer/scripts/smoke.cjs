@@ -19,13 +19,25 @@ app.disableHardwareAcceleration();
 let window;
 const calls = [];
 const errors = [];
-const clip = { guid: 'a'.repeat(32), localId: '7400000', name: '[모의] Sword_Slash_01', path: 'Assets/Mock/Slash.fbx', length: 1.2, stateName: 'Attack_Slash_01', compatible: true };
+const clip = { guid: 'a'.repeat(32), localId: '7400000', name: '[모의] Sword_Slash_01', path: 'Assets/Mock/Slash.fbx', length: 1.5, stateName: 'Attack_Slash_01', compatible: true };
+const oldClip = { ...clip, localId: '7400009', name: '[모의] Sword_Old', path: 'Assets/Mock/Old.fbx', length: 1.833 };
+const timeSettings = [
+  ['Execution.ComboTransitionTime', '다음 콤보 전환', 1.7],
+  ['Execution.Movement.MovementStartTime', '이동 시작', .1],
+  ['Execution.Movement.MovementEndTime', '이동 종료', .7],
+  ['Execution.Movement.TargetApproach.ApproachEndTime', '타겟 접근 종료', .6],
+  ['Execution.Movement.TargetApproach.RotationEndTime', '타겟 회전 종료', .5],
+  ['Feedback.Trail.TrailStartTime', '트레일 시작', .2],
+  ['Feedback.Trail.TrailEndTime', '트레일 종료', .8],
+  ['Feedback.Slash.SlashVFXStartTime', '슬래시 이펙트 시작', .3]
+].map(([path, label, value]) => ({ path, label, value, min: path === 'Feedback.Slash.SlashVFXStartTime' ? -1 : 0, max: 1.833 }));
 const sourceGuid = 'b'.repeat(32);
 const initialState = { projectPath: '', connection: { ready: false, message: 'Unity 프로젝트를 선택하세요.' }, ai: { available: false, authenticated: false, label: 'Codex 확인 전' }, actors: [], actorId: '', sources: [], targets: [], groups: [], jobs: [], selectedJobId: '', settings: {}, busy: false, notice: '' };
 let state = structuredClone(initialState);
 let saveCount = 0;
 let requireTimeOverrides = false;
 let previewValid = false;
+let previewAssignment = null;
 
 function frameData(time) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="512"><rect width="1024" height="512" fill="#19232c"/><path d="M0 405H1024M512 0V512" stroke="#3a4a56"/><g stroke="#90a4b2" stroke-width="14" stroke-linecap="round" fill="none"><circle cx="250" cy="160" r="28"/><path d="M250 190V310M250 224L182 285M250 230L336 205M250 310L210 390M250 310L294 390"/><circle cx="765" cy="160" r="28"/><path d="M765 190V310M765 224L755 292M765 230L833 227M765 310L733 390M765 310L791 390"/></g><path d="M335 205L405 ${100 + time * 40}M833 227L900 ${170 + time * 40}" stroke="#e9b767" stroke-width="7"/><text x="24" y="480" fill="#778f9f" font-size="18" font-family="sans-serif">MOCK UI FIXTURE · NOT UNITY CAPTURE / AI RESULT</text></svg>`;
@@ -37,7 +49,7 @@ function loadedState() {
   item.id = 'fixture-job'; item.status = 'review'; item.frames = [0, .2, .4, .6, .8, 1, 1.2].map((time, i) => ({ id: `f${i}`, time, url: frameData(time) }));
   item.windows = [{ id: 'hit-one', start: .25, end: .43, sourceIndex: -1, reason: '모의 결과: 검을 휘두르는 구간. 실제 AI 분석이 아닙니다.', uncertain: false }, { id: 'hit-two', start: .72, end: .9, sourceIndex: -1, reason: '모의 결과: 두 번째 타격 후보.', uncertain: true }];
   item.analysisStatus = 'uncertain';
-  return { ...structuredClone(initialState), projectPath: 'C:\\Mock\\FourTigerSword', connection: { ready: true, message: '모의 Unity 연결', unityVersion: '6000.3.10f1' }, ai: { available: true, authenticated: true, label: 'Codex 모의 연결' }, actorId: 'actor-1', actors: [{ id: 'actor-1', label: '[모의] 플레이어 캐릭터', weapons: [{ id: 'weapon-1', label: '[모의] 사인검', bone: 'RightHand' }] }], sources: [{ guid: sourceGuid, label: '[모의] 금 폼', type: 'MetalWeaponActionDataSO' }], targets: [{ sourceGuid, actionPath: 'Actions[0]', group: 'combo', label: '일반 공격 1단계', animationName: 'Attack_Slash_01', duration: 1.2, supported: true, snapshot: 'mock-snapshot', windows: [{ start: .2, end: .45, sourceIndex: 0 }, { start: .7, end: .92, sourceIndex: 2 }] }], groups: [{ sourceGuid, id: 'combo', label: '일반 콤보', supported: true }, { sourceGuid, id: 'skill', label: '스킬', supported: true }], jobs: [item], selectedJobId: item.id, settings: { actorId: 'actor-1' } };
+  return { ...structuredClone(initialState), projectPath: 'C:\\Mock\\FourTigerSword', connection: { ready: true, message: '모의 Unity 연결', unityVersion: '6000.3.10f1' }, ai: { available: true, authenticated: true, label: 'Codex 모의 연결' }, actorId: 'actor-1', actors: [{ id: 'actor-1', label: '[모의] 플레이어 캐릭터', weapons: [{ id: 'weapon-1', label: '[모의] 사인검', bone: 'RightHand' }] }], sources: [{ guid: sourceGuid, label: '[모의] 금 폼', type: 'MetalWeaponActionDataSO' }], targets: [{ sourceGuid, actionPath: 'Actions[0]', group: 'combo', label: '일반 공격 1단계', animationName: 'Attack_Slash_01', duration: 1.833, currentClip: structuredClone(clip), timeSettings: structuredClone(timeSettings), supported: true, snapshot: 'mock-snapshot', windows: [{ start: .2, end: .45, sourceIndex: 0 }, { start: .7, end: .92, sourceIndex: 2 }] }, { sourceGuid, actionPath: 'Actions[1]', group: 'combo', label: '일반 공격 2단계', animationName: 'Attack_Empty', duration: 1.1, currentClip: null, timeSettings: timeSettings.map(item => ({ ...item, value: item.path === 'Execution.ComboTransitionTime' ? .9 : item.value })), needsClipAssignment: true, supported: true, snapshot: 'mock-empty-snapshot', windows: [{ start: .2, end: .45, sourceIndex: 0 }, { start: .7, end: .92, sourceIndex: 2 }] }, { sourceGuid, actionPath: 'Actions[2]', group: 'combo', label: '일반 공격 3단계', animationName: 'Attack_Replace', duration: 1.833, currentClip: structuredClone(oldClip), timeSettings: structuredClone(timeSettings), supported: true, snapshot: 'mock-replace-snapshot', windows: [{ start: .2, end: .45, sourceIndex: 0 }, { start: .7, end: .92, sourceIndex: 2 }] }], groups: [{ sourceGuid, id: 'combo', label: '일반 콤보', supported: true }, { sourceGuid, id: 'skill', label: '스킬', supported: true }], jobs: [item], selectedJobId: item.id, settings: { actorId: 'actor-1' } };
 }
 
 const selected = () => state.jobs.find(item => item.id === state.selectedJobId);
@@ -71,10 +83,31 @@ const handlers = {
     assert(['update', 'register'].includes(options.mode));
     assert(Array.isArray(options.timeOverrides));
     const missing = requireTimeOverrides && !options.timeOverrides.some(item => item.path === 'Feedback.Slash.SlashVFXStartTime' && item.value === -1);
-    previewValid = !missing;
-    return { changeId: 'mock-change', canApply: !missing, summary: '모의 변경 검토 · 원본 및 AI 분석은 실행하지 않습니다.', hitCountBefore: 2, hitCountAfter: selected().windows.length, damageBefore: 2, damageAfter: 3, damageNote: '모의 기본 피해 계수 합계', mapping: { retained: 2, removed: 0, added: 0 }, issues: missing ? ['슬래시 이펙트 시간을 보정하세요.'] : [], requiredTimeOverrides: missing ? [{ path: 'Feedback.Slash.SlashVFXStartTime', label: '슬래시 시작', value: 3, min: -1, max: 1.2 }] : [], before: { animation: 'Attack_Slash_01' }, after: { animation: 'Attack_Slash_01' }, proposedStateName: options.mode === 'register' ? 'AHT_Sword_Slash_01' : '' };
+    const target = state.targets.find(item => item.sourceGuid === options.sourceGuid && item.actionPath === (options.mode === 'register' ? options.templatePath : options.actionPath));
+    const changedClip = target?.needsClipAssignment || target?.currentClip && (target.currentClip.guid !== selected().clip.guid || target.currentClip.localId !== selected().clip.localId);
+    previewAssignment = options.mode === 'update' && changedClip
+      ? { stateName: target.animationName, clipName: selected().clip.name, clipPath: selected().clip.path, previousClipName: target.currentClip?.name || null, previousClipPath: target.currentClip?.path || null } : null;
+    const editableTimeSettings = (target?.timeSettings || []).map(item => ({ ...item, max: selected().clip.length }));
+    const invalidSettings = editableTimeSettings.filter(item => {
+      const value = options.timeOverrides.find(override => override.path === item.path)?.value ?? item.value;
+      return value < item.min || value > item.max;
+    });
+    previewValid = !missing && !invalidSettings.length;
+    return { changeId: 'mock-change', canApply: previewValid, editableTimeSettings, clipAssignment: previewAssignment, controllerChanged: Boolean(previewAssignment) || options.mode === 'register', summary: '모의 변경 검토 · 원본 및 AI 분석은 실행하지 않습니다.', hitCountBefore: 2, hitCountAfter: selected().windows.length, damageBefore: 2, damageAfter: 3, damageNote: '모의 기본 피해 계수 합계', mapping: { retained: 2, removed: 0, added: 0 }, issues: missing ? ['슬래시 이펙트 시간을 보정하세요.'] : [], requiredTimeOverrides: missing ? [{ path: 'Feedback.Slash.SlashVFXStartTime', label: '슬래시 시작', value: 3, min: -1, max: selected().clip.length }] : invalidSettings, before: { animation: target?.animationName, duration: target?.duration }, after: { animation: target?.animationName, duration: selected().clip.length }, proposedStateName: options.mode === 'register' ? 'AHT_Sword_Slash_01' : '' };
   },
-  applyChange: id => { assert(previewValid); assert.equal(id, 'mock-change'); saveCount++; selected().status = 'saved'; selected().savedAssets = [{ path: 'Assets/Mock/Result.asset' }]; publish(); return { assets: selected().savedAssets }; },
+  applyChange: id => {
+    assert(previewValid); assert.equal(id, 'mock-change'); saveCount++; selected().status = 'saved';
+    selected().savedAssets = [{ path: 'Assets/Mock/Result.asset' }];
+    if (previewAssignment) selected().savedAssets.push({ path: 'Assets/Mock/Result.controller' });
+    if (!selected().copy) {
+      const target = state.targets.find(item => item.sourceGuid === selected().sourceGuid && item.actionPath === selected().actionPath);
+      target.needsClipAssignment = false;
+      target.currentClip = structuredClone(selected().clip);
+      target.duration = selected().clip.length;
+      target.timeSettings = target.timeSettings.map(item => ({ ...item, value: selected().timeOverrides.find(override => override.path === item.path)?.value ?? item.value }));
+    }
+    publish(); return { assets: selected().savedAssets };
+  },
   revealAsset: () => ({ opened: true })
 };
 
@@ -127,12 +160,22 @@ async function main() {
   assert.equal(selected().group, 'combo');
   await change('target-select', 'Actions[0]');
   assert.deepEqual(selected().windows.map(item => item.sourceIndex), [0, 2], 'Preserve sparse HitEvents indices');
+  assert.equal(await evaluate('document.querySelectorAll("[data-time-override]").length'), 8, 'All supported attack timing settings are editable before preview');
+  assert.equal(await evaluate('document.getElementById("override-Execution.ComboTransitionTime").value'), '1.7');
+  assert.equal(await evaluate('document.getElementById("override-Execution.ComboTransitionTime").max'), '1.5', 'Use the selected clip duration rather than the old action duration');
+  assert.equal(await evaluate('document.getElementById("override-Feedback.Slash.SlashVFXStartTime").min'), '-1');
+  assert.equal(await evaluate('document.getElementById("time-settings").open'), true, 'Out-of-range timings open for correction');
+  await change('override-Execution.ComboTransitionTime', 1.3);
+  assert.equal(await evaluate('document.getElementById("override-Execution.ComboTransitionTime").getAttribute("aria-invalid")'), null);
   await change('save-reviewed-check', true);
   await until('!document.getElementById("preview-change").disabled', 'reviewed preview');
   await click('preview-change');
   await until('!!document.getElementById("apply-change")', 'change preview');
   assert.equal(saveCount, 0, 'Preview must not save');
   assert.match(await evaluate('document.getElementById("save-panel").textContent'), /기본 피해 계수/);
+  assert.match(await evaluate('document.getElementById("duration-diff").textContent'), /1\.833 s.*1\.500 s/);
+  assert.equal(await evaluate('!!document.getElementById("clip-assignment-diff")'), false, 'Keeping the same clip only corrects the action duration and settings');
+  assert.equal(await evaluate('document.getElementById("override-Execution.ComboTransitionTime").value'), '1.3', 'Draft timing overrides take priority over preview field defaults');
   await screenshot('03-mock-save-diff');
   await click('apply-change');
   await until('document.getElementById("save-panel").textContent.includes("저장된 에셋")', 'saved assets');
@@ -150,17 +193,84 @@ async function main() {
   selected().pendingSave = null; selected().error = ''; selected().status = 'saved'; publish();
   await until('document.getElementById("notice").textContent.includes("저장 결과를 확인했습니다")', 'late save receipt notice');
   await click('tab-save');
+  const emptyOption = await evaluate(`(() => {const option = [...document.getElementById('target-select').options].find(item => item.value === 'Actions[1]');return {disabled: option.disabled, label: option.textContent};})()`);
+  assert.equal(emptyOption.disabled, false, 'An existing state without Motion must remain selectable');
+  assert.match(emptyOption.label, /클립 없음 · 저장 시 연결/);
+  await change('target-select', 'Actions[1]');
+  assert.deepEqual(selected().timeOverrides, [], 'Changing the target clears timing overrides from the previous attack');
+  assert.equal(await evaluate('document.getElementById("override-Execution.ComboTransitionTime").value'), '0.9');
+  assert.match(await evaluate('document.getElementById("clip-assignment-notice").textContent'), /Attack_Empty/);
+  assert.match(await evaluate('document.getElementById("clip-assignment-notice").textContent'), /Sword_Slash_01/);
+  await change('save-reviewed-check', true);
+  await click('preview-change');
+  await until('!!document.getElementById("clip-assignment-diff")', 'missing clip assignment preview');
+  const assignmentDiff = await evaluate('document.getElementById("clip-assignment-diff").textContent');
+  assert.match(assignmentDiff, /클립 없음 → \[모의\] Sword_Slash_01/);
+  assert.match(assignmentDiff, /복제한 Animator Controller/);
+  assert.equal(saveCount, 1, 'Assignment preview must not save');
+  assert.equal(state.targets[1].needsClipAssignment, true);
+  await change('copy-check', false);
+  assert.equal(await evaluate('!!document.getElementById("apply-change")'), false, 'Changing copy mode invalidates the assignment preview');
+  await change('save-reviewed-check', true);
+  await click('preview-change');
+  await until('!!document.getElementById("apply-change")', 'original controller assignment preview');
+  assert.match(await evaluate('document.getElementById("clip-assignment-diff").textContent'), /원본 Animator Controller/);
+  await evaluate('document.getElementById("clip-assignment-diff").scrollIntoView({block:"center"})');
+  await screenshot('05-mock-missing-clip-diff');
+  await click('apply-change');
+  await until('!document.getElementById("clip-assignment-notice") && document.getElementById("save-panel").textContent.includes("Result.controller")', 'missing clip assignment saved');
+  assert.equal(saveCount, 2);
+  assert.equal(state.targets[1].needsClipAssignment, false);
+  const attachmentPreview = calls.filter(call => call.name === 'previewChange').at(-1).args[0];
+  assert.equal(attachmentPreview.mode, 'update');
+  assert.equal(attachmentPreview.actionPath, 'Actions[1]');
+  assert.equal(attachmentPreview.copy, false);
+  await change('target-select', 'Actions[2]');
+  assert.match(await evaluate('document.getElementById("clip-assignment-notice").textContent'), /Sword_Old.*교체/);
+  assert.match(await evaluate('document.getElementById("attack-duration-change").textContent'), /1\.833 s.*1\.500 s/);
+  await change('override-Execution.ComboTransitionTime', 1.3);
+  await change('override-Execution.Movement.MovementStartTime', .15);
+  await change('copy-check', true);
+  await change('save-reviewed-check', true);
+  await click('preview-change');
+  await until('!!document.getElementById("apply-change")', 'occupied clip replacement copy preview');
+  assert.match(await evaluate('document.getElementById("clip-assignment-diff").textContent'), /기존 클립 교체.*Sword_Old → \[모의\] Sword_Slash_01.*Old\.fbx.*복제한 Animator Controller/);
+  assert.equal(saveCount, 2, 'Occupied clip replacement preview must not save');
+  await click('apply-change');
+  await until('document.getElementById("save-panel").textContent.includes("Result.controller") && !document.getElementById("apply-change")', 'occupied clip replacement copied');
+  assert.equal(saveCount, 3);
+  assert.equal(state.targets[2].currentClip.name, oldClip.name, 'Copy mode leaves the original clip unchanged');
+  assert.equal(state.targets[2].duration, 1.833);
+  assert.equal(state.targets[2].timeSettings[0].value, 1.7);
+  await change('copy-check', false);
+  await change('save-reviewed-check', true);
+  await click('preview-change');
+  await until('!!document.getElementById("apply-change")', 'occupied clip replacement original preview');
+  assert.match(await evaluate('document.getElementById("clip-assignment-diff").textContent'), /원본 Animator Controller/);
+  await evaluate('document.getElementById("clip-assignment-diff").scrollIntoView({block:"center"})');
+  await screenshot('06-mock-existing-attack-edit');
+  await click('apply-change');
+  await until('!document.getElementById("clip-assignment-notice") && !document.getElementById("apply-change")', 'occupied clip replacement original saved');
+  assert.equal(saveCount, 4);
+  assert.equal(state.targets[2].animationName, 'Attack_Replace', 'Keep the existing state name');
+  assert.equal(state.targets[2].currentClip.name, clip.name);
+  assert.equal(state.targets[2].duration, 1.5);
+  assert.equal(state.targets[2].timeSettings[0].value, 1.3);
+  assert.equal(state.targets[2].timeSettings[1].value, .15);
+  assert.deepEqual(calls.filter(call => call.name === 'previewChange').at(-1).args[0].timeOverrides, [{ path: 'Execution.ComboTransitionTime', value: 1.3 }, { path: 'Execution.Movement.MovementStartTime', value: .15 }]);
   await evaluate('document.querySelector("[data-save-mode=register]").click()');
   await until('!!document.getElementById("template-select")', 'register mode');
   assert.equal(selected().mode, 'register');
   await change('template-select', 'Actions[0]');
+  assert.deepEqual(selected().timeOverrides, [], 'Changing to a different template clears prior attack timing edits');
+  await change('override-Execution.ComboTransitionTime', 1.3);
   requireTimeOverrides = true;
   await change('save-reviewed-check', true);
   await click('preview-change');
   await until('!!document.getElementById("override-Feedback.Slash.SlashVFXStartTime")', 'time override editor');
   assert.equal(await evaluate('document.getElementById("override-Feedback.Slash.SlashVFXStartTime").min'), '-1');
   await change('override-Feedback.Slash.SlashVFXStartTime', -1);
-  assert.deepEqual(selected().timeOverrides, [{ path: 'Feedback.Slash.SlashVFXStartTime', value: -1 }]);
+  assert.deepEqual(selected().timeOverrides, [{ path: 'Execution.ComboTransitionTime', value: 1.3 }, { path: 'Feedback.Slash.SlashVFXStartTime', value: -1 }]);
   assert.equal(await evaluate('!!document.getElementById("override-Feedback.Slash.SlashVFXStartTime")'), true, 'Override remains editable when preview invalidates');
   await change('save-reviewed-check', true);
   await click('preview-change');
@@ -174,9 +284,9 @@ async function main() {
   await evaluate('document.querySelector("[data-result=\\"0\\"]").click()');
   await click('add-search-results');
   await until('document.getElementById("job-count").textContent === "2"', 'queued search selection');
-  assert.equal(saveCount, 1, 'Register preview and search must not auto-save');
+  assert.equal(saveCount, 4, 'Register preview and search must not auto-save');
   assert.deepEqual(errors, [], 'Renderer console errors');
-  fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify({ kind: 'mock-ui-smoke', actualUnityCapture: false, actualAiAnalysis: false, checks: ['empty state', 'real sandboxed preload IPC', 'composite preview', 'playback and frame step', 'manual hit edit/add/delete', 'sparse existing hit mapping', 'review gate', 'damage and mapping diff', 'explicit apply only', 'uncertain save editing/removal/reanalysis lock', 'late receipt success notice', 'registration mode', 'negative time sentinel', 'override draft persistence', '950px responsive layout', 'multiple search result selection'], calls: calls.map(call => call.name), screenshots: ['01-empty.png', '02-mock-review.png', '03-mock-save-diff.png', '04-mock-narrow.png'] }, null, 2));
+  fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify({ kind: 'mock-ui-smoke', actualUnityCapture: false, actualAiAnalysis: false, checks: ['empty state', 'real sandboxed preload IPC', 'composite preview', 'playback and frame step', 'manual hit edit/add/delete', 'sparse existing hit mapping', 'review gate', 'damage and mapping diff', 'explicit apply only', 'uncertain save editing/removal/reanalysis lock', 'late receipt success notice', 'missing Motion target selection', 'clip attachment preview with copy/original controller', 'explicit existing-state clip attachment apply', 'existing occupied clip replacement in copy and original modes', 'all attack timing fields editable before preview', 'selected clip duration bounds', 'same clip duration correction', 'timing draft priority and target isolation', 'registration mode', 'negative time sentinel', 'override draft persistence', '950px responsive layout', 'multiple search result selection'], calls: calls.map(call => call.name), screenshots: ['01-empty.png', '02-mock-review.png', '03-mock-save-diff.png', '04-mock-narrow.png', '05-mock-missing-clip-diff.png', '06-mock-existing-attack-edit.png'] }, null, 2));
   console.log('MOCK UI SMOKE PASSED: ' + output);
   app.exit(0);
 }

@@ -225,6 +225,18 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
             }
         }
 
+        public static JArray TimeSettings(WeaponActionData action, float length)
+        {
+            var result = new JArray();
+            foreach (string path in TimePaths)
+            {
+                var owner = TimeOwner(action, path, out var field);
+                result.Add(new JObject { ["path"] = path, ["label"] = path, ["value"] = (float)field.GetValue(owner),
+                    ["min"] = path == "Feedback.Slash.SlashVFXStartTime" ? -1 : 0, ["max"] = length });
+            }
+            return result;
+        }
+
         public static JArray InvalidTimes(WeaponActionData action, float length)
         {
             var result = new JArray();

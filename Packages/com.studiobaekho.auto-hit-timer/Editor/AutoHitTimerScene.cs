@@ -117,6 +117,9 @@ namespace StudioBaekho.AutoHitTimer
                     copy.rootBone = skin.rootBone && map.TryGetValue(skin.rootBone, out var bone) ? bone : null;
                     copy.localBounds = skin.localBounds;
                     copy.updateWhenOffscreen = true;
+                    // Manual Playable sampling and two preview cameras can render multiple poses
+                    // within one editor update. Do not reuse the previous pose's skinning matrices.
+                    copy.forceMatrixRecalculationPerRender = true;
                     copy.quality = skin.quality;
                     if (skin.sharedMesh) for (var i = 0; i < skin.sharedMesh.blendShapeCount; i++) copy.SetBlendShapeWeight(i, skin.GetBlendShapeWeight(i));
                     CopyRenderer(skin, copy);

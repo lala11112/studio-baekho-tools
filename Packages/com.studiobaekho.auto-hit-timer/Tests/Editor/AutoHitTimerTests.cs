@@ -198,5 +198,123 @@ namespace StudioBaekho.AutoHitTimer.Tests
                 AssetDatabase.DeleteAsset(folder);
             }
         }
+
+        [Test, Category("Graphics")]
+        public void ConsecutiveCapturesUpdateSkinnedPoseInBothViewsWithoutMovingSource()
+        {
+            if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) Assert.Ignore("실제 렌더 검증에는 그래픽 장치가 필요합니다.");
+            var folder = "Assets/AutoHitTimerSkinTest_" + Guid.NewGuid().ToString("N");
+            AssetDatabase.CreateFolder("Assets", Path.GetFileName(folder));
+            var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+            AutoHitTimerCapture capture = null;
+            var images = new[] { new Texture2D(2, 2), new Texture2D(2, 2) };
+            try
+            {
+                var actor = new GameObject("SkinnedActor");
+                SceneManager.MoveGameObjectToScene(actor, scene);
+                var animator = actor.AddComponent<Animator>();
+                var lower = new GameObject("Lower").transform;
+                lower.SetParent(actor.transform, false);
+                var upper = new GameObject("Upper").transform;
+                upper.SetParent(lower, false);
+                upper.localPosition = Vector3.up;
+                var skin = new GameObject("Skin").AddComponent<SkinnedMeshRenderer>();
+                skin.transform.SetParent(actor.transform, false);
+                var mesh = TwoBoneMesh(skin.transform, lower, upper);
+                AssetDatabase.CreateAsset(mesh, folder + "/skin.asset");
+                skin.sharedMesh = mesh;
+                skin.bones = new[] { lower, upper };
+                skin.rootBone = lower;
+                skin.localBounds = new Bounds(new Vector3(0, 1, 0.5f), new Vector3(1, 3, 2));
+                skin.sharedMaterial = AssetDatabase.GetBuiltinExtraResource<Material>("Default-Material.mat");
+                skin.forceMatrixRecalculationPerRender = false;
+
+                // Only bend the upper bone. Root movement must not make a frozen skin pass.
+                var clip = new AnimationClip();
+                clip.SetCurve("Lower/Upper", typeof(Transform), "m_LocalRotation.x", AnimationCurve.Linear(0, 0, 1, Mathf.Sin(Mathf.PI / 4)));
+                clip.SetCurve("Lower/Upper", typeof(Transform), "m_LocalRotation.w", AnimationCurve.Linear(0, 1, 1, Mathf.Cos(Mathf.PI / 4)));
+                AssetDatabase.CreateAsset(clip, folder + "/bend.anim");
+                EditorSceneManager.SaveScene(scene, folder + "/preview.unity");
+                var sourceBounds = skin.localBounds;
+                var request = new JObject { ["actorId"] = GlobalObjectId.GetGlobalObjectIdSlow(animator).ToString(), ["clip"] = AutoHitTimerAssets.ClipRef(clip), ["fps"] = 24, ["times"] = new JArray(0, 1) };
+                capture = new AutoHitTimerCapture(request);
+
+                // No yield or editor frame between renders: skin matrices must refresh per render.
+                Assert.That(capture.Step(out _), Is.False);
+                Assert.That(capture.Step(out var result), Is.True);
+                capture.Dispose(); capture = null;
+                for (var i = 0; i < images.Length; i++)
+                    Assert.That(images[i].LoadImage(File.ReadAllBytes((string)result["frames"][i]["path"])), Is.True);
+                Assert.That(images[0].width, Is.EqualTo(1024));
+                Assert.That(images[0].height, Is.EqualTo(512));
+                Assert.That(images[1].width, Is.EqualTo(images[0].width));
+                Assert.That(images[1].height, Is.EqualTo(images[0].height));
+                var before = images[0].GetPixels32();
+                var after = images[1].GetPixels32();
+                var halfWidth = images[0].width / 2;
+                for (var view = 0; view < 2; view++)
+                {
+                    var changed = 0;
+                    for (var y = 0; y < images[0].height; y++)
+                    for (var x = view * halfWidth; x < (view + 1) * halfWidth; x++)
+                    {
+                        var pixel = y * images[0].width + x;
+                        if (!before[pixel].Equals(after[pixel])) changed++;
+                    }
+                    Assert.That(changed, Is.GreaterThan(100), "The skinned pose must change in view " + view + ".");
+                }
+
+                Assert.That(actor.transform.position, Is.EqualTo(Vector3.zero));
+                Assert.That(actor.transform.rotation, Is.EqualTo(Quaternion.identity));
+                Assert.That(lower.localPosition, Is.EqualTo(Vector3.zero));
+                Assert.That(lower.localRotation, Is.EqualTo(Quaternion.identity));
+                Assert.That(upper.localPosition, Is.EqualTo(Vector3.up));
+                Assert.That(upper.localRotation, Is.EqualTo(Quaternion.identity));
+                Assert.That(skin.sharedMesh, Is.SameAs(mesh));
+                CollectionAssert.AreEqual(new[] { lower, upper }, skin.bones);
+                Assert.That(skin.localBounds, Is.EqualTo(sourceBounds));
+                Assert.That(skin.forceMatrixRecalculationPerRender, Is.False);
+                Assert.That(scene.isDirty, Is.False);
+            }
+            finally
+            {
+                capture?.Dispose();
+                foreach (var image in images) UnityEngine.Object.DestroyImmediate(image);
+                EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+                AssetDatabase.DeleteAsset(folder);
+            }
+        }
+
+        static Mesh TwoBoneMesh(Transform renderer, Transform lower, Transform upper)
+        {
+            var vertices = new Vector3[16];
+            var weights = new BoneWeight[16];
+            var corners = new[]
+            {
+                new Vector3(-0.25f, 0, -0.25f), new Vector3(0.25f, 0, -0.25f),
+                new Vector3(0.25f, 1, -0.25f), new Vector3(-0.25f, 1, -0.25f),
+                new Vector3(-0.25f, 0, 0.25f), new Vector3(0.25f, 0, 0.25f),
+                new Vector3(0.25f, 1, 0.25f), new Vector3(-0.25f, 1, 0.25f)
+            };
+            var boxTriangles = new[] { 0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2 };
+            for (var bone = 0; bone < 2; bone++)
+            for (var vertex = 0; vertex < corners.Length; vertex++)
+            {
+                var index = bone * corners.Length + vertex;
+                vertices[index] = corners[vertex] + Vector3.up * bone;
+                weights[index] = new BoneWeight { boneIndex0 = bone, weight0 = 1 };
+            }
+            var mesh = new Mesh
+            {
+                name = "Two-bone skin regression",
+                vertices = vertices,
+                triangles = boxTriangles.Concat(boxTriangles.Select(index => index + 8)).ToArray(),
+                boneWeights = weights,
+                bindposes = new[] { lower.worldToLocalMatrix * renderer.localToWorldMatrix, upper.worldToLocalMatrix * renderer.localToWorldMatrix }
+            };
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
     }
 }

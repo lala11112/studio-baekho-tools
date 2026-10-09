@@ -25,6 +25,8 @@
   let previewJobId = null;
   let previewFingerprint = '';
   let overrideFields = [];
+  let timeSettingsContext = '';
+  let timeSettingsOpen = false;
   let pendingOperations = 0;
   let localNotice = null;
   let drag = null;
@@ -39,6 +41,8 @@
   const connectionReady = () => Boolean(state.connection?.ready);
   const canAnalyze = () => connectionReady() && Boolean(state.ai?.available) && state.ai?.authenticated !== false && !analysisActive();
   const targetFor = item => (state.targets || []).find(target => target.sourceGuid === item?.sourceGuid && target.actionPath === (item?.mode === 'register' ? item?.templatePath : item?.actionPath));
+  const targetIdentity = item => JSON.stringify([item?.sourceGuid, item?.mode === 'register' ? item?.templatePath : item?.actionPath]);
+  const sameClip = (left, right) => left && right && left.guid === right.guid && String(left.localId) === String(right.localId);
   const fingerprint = item => JSON.stringify([state.actorId, state.settings?.weaponId, state.settings?.weaponBone, item?.windows, item?.reviewed, item?.sourceGuid, item?.actionPath, item?.mode, item?.group, item?.templatePath, item?.copy, item?.outputFolder, item?.timeOverrides]);
   const option = (value, label, selected, disabled = false) => `<option value="${esc(value)}"${String(value) === String(selected ?? '') ? ' selected' : ''}${disabled ? ' disabled' : ''}>${esc(label)}</option>`;
   const emptyInspector = message => `<div class="inspector-empty"><div class="empty-icon" aria-hidden="true">≋</div><h3>아직 선택한 작업이 없습니다</h3><p>${esc(message)}</p></div>`;
@@ -63,6 +67,7 @@
     const selected = job();
     if (previous?.pendingSave && selected?.id === previous.id && !selected.pendingSave && selected.status === 'saved') localNotice = { message: 'Unity 저장 결과를 확인했습니다. 저장된 에셋을 확인하세요.', kind: 'success' };
     if (selected?.pendingSave) preview = null;
+    if (previous?.id === selected?.id && targetIdentity(previous) !== targetIdentity(selected)) overrideFields = [];
     if (lastJobId !== selected?.id) {
       stopPlayback();
       currentTime = 0;
@@ -260,16 +265,27 @@
     const groups = (state.groups || []).filter(group => !selected.sourceGuid || group.sourceGuid === selected.sourceGuid);
     const group = groups.find(item => String(item.id) === String(selected.group));
     const target = targetFor(selected);
-    const targetOptions = sourceTargets.map(item => option(item.actionPath, `${item.label || item.actionPath}${item.supported === false ? ' · 지원 제외' : ''}`, isNew ? selected.templatePath : selected.actionPath)).join('');
+    const targetOptions = sourceTargets.map(item => {
+      const status = item.supported === false ? ' · 지원 제외' : item.needsClipAssignment ? ` · 클립 없음${isNew ? '' : ' · 저장 시 연결'}` : '';
+      return option(item.actionPath, `${item.label || item.actionPath}${status}`, isNew ? selected.templatePath : selected.actionPath);
+    }).join('');
+    const changesClip = target?.needsClipAssignment || (target?.currentClip && !sameClip(target.currentClip, selected.clip));
+    const clipAssignment = !isNew && changesClip && target.supported !== false
+      ? `<div id="clip-assignment-notice" class="callout" style="margin-top:12px">${target.currentClip ? `기존 클립 <strong>${esc(target.currentClip.name)}</strong>을 교체합니다.` : '이 공격 상태에 애니메이션 클립이 없습니다.'}<br>저장하면 <strong>${esc(target.animationName)}</strong> 상태에 분석한 <strong>${esc(selected.clip?.name)}</strong> 클립을 연결하고 히트 구간을 적용합니다. 상태 이름과 전이는 유지합니다.</div>` : '';
+    const currentClip = target?.currentClip ? `<p class="field-note" style="margin-top:7px;overflow-wrap:anywhere">현재 클립: ${esc(target.currentClip.name)}<br>${esc(target.currentClip.path)}</p>` : '';
+    const attackDuration = target ? `<p id="attack-duration-change" class="field-note" style="margin-top:8px">공격 길이: ${seconds(target.duration)} s → ${seconds(duration(selected))} s<br>저장할 공격 길이를 분석한 클립에 맞춥니다.</p>` : '';
     const savedAssets = selected.savedAssets || [];
-    $('save-panel').innerHTML = `${selected.pendingSave ? `<div class="callout warning">이전 저장 요청의 결과를 확인하고 있습니다.${selected.error ? '<br><br>' + esc(selected.error) : '<br>Unity 연결이 복구되면 결과를 자동으로 확인합니다.'}</div>` : ''}<div class="save-mode" role="group" aria-label="저장 방식"><button data-save-mode="update" class="${!isNew ? 'active' : ''}">기존 공격 수정</button><button data-save-mode="register" class="${isNew ? 'active' : ''}">새 공격 등록</button></div><div class="field"><label for="source-select">대상 폼 / ScriptableObject</label><select id="source-select">${option('', sources.length ? '대상 폼을 선택하세요' : '공격 데이터가 없습니다', selected.sourceGuid)}${sources.map(item => option(item.guid, item.label || item.name || item.guid, selected.sourceGuid)).join('')}</select></div>${isNew ? `<div class="field"><label for="group-select">등록할 공격 종류</label><select id="group-select">${option('', '공격 종류 선택', selected.group)}${groups.map(item => option(item.id, `${item.label}${item.supported === false ? ' · 지원 제외' : ''}`, selected.group)).join('')}</select></div><div class="field"><label for="template-select">기존 공격 템플릿</label><select id="template-select">${option('', '밸런스 · 피드백을 복사할 공격 선택', selected.templatePath)}${targetOptions}</select><p class="field-note">템플릿을 복사하고 새 애니메이션과 히트 구간을 연결합니다. 목록형 공격은 단계 추가, 단일 공격은 생성·교체합니다.</p></div>` : `<div class="field"><label for="target-select">수정할 공격 단계</label><select id="target-select">${option('', '공격 단계 선택', selected.actionPath)}${targetOptions}</select></div>`}${target?.animationName ? `<p class="field-note" style="margin-top:8px">현재 상태: ${esc(target.animationName)} · ${seconds(target.duration)} s</p>` : ''}${target?.supported === false || group?.supported === false ? `<div class="callout warning" style="margin-top:12px">${esc(target?.reason || group?.reason || '이 공격은 별도 판정 로직을 사용하므로 자동 적용을 지원하지 않습니다.')}</div>` : ''}${renderOverrideFields(selected)}<hr class="form-separator"><label class="checkbox-field"><input id="copy-check" type="checkbox" ${selected.copy ? 'checked' : ''}> 복사본에 저장</label><p class="field-note" style="margin-top:7px">${selected.copy ? 'ScriptableObject를 복제하고, 변경이 필요한 Animator Controller도 함께 복제합니다.' : '선택한 원본을 수정합니다. Unity Undo와 변경 전 스냅샷을 제공합니다.'}</p>${selected.copy ? `<div class="field"><label for="output-folder">복사본 저장 폴더</label><input id="output-folder" value="${esc(selected.outputFolder || '')}" placeholder="Assets/AutoHitTimer/Generated"><p class="field-note">Unity 프로젝트의 Assets 내부 경로</p></div>` : ''}<div class="callout" style="margin-top:15px;margin-bottom:0">기존 타격의 데미지와 피드백을 유지합니다. 신규 타격은 기본 공격 값을 상속하며, 타수 증가에 따른 피해 변화를 저장 전에 검토합니다.</div>${renderDiff(selected)}<div class="review-box"><label class="review-check"><input id="save-reviewed-check" type="checkbox" ${selected.reviewed ? 'checked' : ''} ${busyJob(selected) ? 'disabled' : ''}><span><strong>저장할 구간과 타격 대응을 확인했습니다</strong><small>타격 수, 값 상속 및 보정한 시간 설정을 함께 검토합니다.</small></span></label></div>${savedAssets.length ? `<hr class="form-separator"><div class="diff-title">저장된 에셋</div>${savedAssets.map(asset => { const path = typeof asset === 'string' ? asset : asset.path; return `<div class="saved-asset"><span>${esc(path || asset.label || '에셋')}</span>${path ? `<button class="text-button" data-reveal-asset="${esc(path)}">열기 ↗</button>` : ''}</div>`; }).join('')}` : ''}`;
+    $('save-panel').innerHTML = `${selected.pendingSave ? `<div class="callout warning">이전 저장 요청의 결과를 확인하고 있습니다.${selected.error ? '<br><br>' + esc(selected.error) : '<br>Unity 연결이 복구되면 결과를 자동으로 확인합니다.'}</div>` : ''}<div class="save-mode" role="group" aria-label="저장 방식"><button data-save-mode="update" class="${!isNew ? 'active' : ''}">기존 공격 수정</button><button data-save-mode="register" class="${isNew ? 'active' : ''}">새 공격 등록</button></div><div class="field"><label for="source-select">대상 폼 / ScriptableObject</label><select id="source-select">${option('', sources.length ? '대상 폼을 선택하세요' : '공격 데이터가 없습니다', selected.sourceGuid)}${sources.map(item => option(item.guid, item.label || item.name || item.guid, selected.sourceGuid)).join('')}</select></div>${isNew ? `<div class="field"><label for="group-select">등록할 공격 종류</label><select id="group-select">${option('', '공격 종류 선택', selected.group)}${groups.map(item => option(item.id, `${item.label}${item.supported === false ? ' · 지원 제외' : ''}`, selected.group)).join('')}</select></div><div class="field"><label for="template-select">기존 공격 템플릿</label><select id="template-select">${option('', '밸런스 · 피드백을 복사할 공격 선택', selected.templatePath)}${targetOptions}</select><p class="field-note">템플릿을 복사하고 새 애니메이션과 히트 구간을 연결합니다. 목록형 공격은 단계 추가, 단일 공격은 생성·교체합니다.</p></div>` : `<div class="field"><label for="target-select">수정할 공격 단계</label><select id="target-select">${option('', '공격 단계 선택', selected.actionPath)}${targetOptions}</select></div>`}${target?.animationName ? `<p class="field-note" style="margin-top:8px">현재 상태: ${esc(target.animationName)} · ${target.needsClipAssignment ? '클립 없음' : seconds(target.duration) + ' s'}</p>` : ''}${target?.supported === false || group?.supported === false ? `<div class="callout warning" style="margin-top:12px">${esc(target?.reason || group?.reason || '이 공격은 별도 판정 로직을 사용하므로 자동 적용을 지원하지 않습니다.')}</div>` : ''}${currentClip}${clipAssignment}${attackDuration}${renderOverrideFields(selected)}<hr class="form-separator"><label class="checkbox-field"><input id="copy-check" type="checkbox" ${selected.copy ? 'checked' : ''}> 복사본에 저장</label><p class="field-note" style="margin-top:7px">${selected.copy ? 'ScriptableObject를 복제하고, 변경이 필요한 Animator Controller도 함께 복제합니다.' : '선택한 원본을 수정합니다. Unity Undo와 변경 전 스냅샷을 제공합니다.'}</p>${selected.copy ? `<div class="field"><label for="output-folder">복사본 저장 폴더</label><input id="output-folder" value="${esc(selected.outputFolder || '')}" placeholder="Assets/AutoHitTimer/Generated"><p class="field-note">Unity 프로젝트의 Assets 내부 경로</p></div>` : ''}<div class="callout" style="margin-top:15px;margin-bottom:0">기존 타격의 데미지와 피드백을 유지합니다. 신규 타격은 기본 공격 값을 상속하며, 타수 증가에 따른 피해 변화를 저장 전에 검토합니다.</div>${renderDiff(selected)}<div class="review-box"><label class="review-check"><input id="save-reviewed-check" type="checkbox" ${selected.reviewed ? 'checked' : ''} ${busyJob(selected) ? 'disabled' : ''}><span><strong>저장할 구간과 타격 대응을 확인했습니다</strong><small>타격 수, 값 상속 및 보정한 시간 설정을 함께 검토합니다.</small></span></label></div>${savedAssets.length ? `<hr class="form-separator"><div class="diff-title">저장된 에셋</div>${savedAssets.map(asset => { const path = typeof asset === 'string' ? asset : asset.path; return `<div class="saved-asset"><span>${esc(path || asset.label || '에셋')}</span>${path ? `<button class="text-button" data-reveal-asset="${esc(path)}">열기 ↗</button>` : ''}</div>`; }).join('')}` : ''}`;
   }
 
   function renderOverrideFields(selected) {
     const existing = selected.timeOverrides || [];
-    const fields = [...overrideFields];
-    for (const item of existing) if (!fields.some(field => field.path === item.path)) fields.push({ ...item, label: item.path, min: 0, max: duration(selected) });
+    const fields = [...(targetFor(selected)?.timeSettings || []), ...overrideFields];
+    for (const item of existing) if (!fields.some(field => field.path === item.path)) fields.push({ ...item, label: item.path, min: item.path === 'Feedback.Slash.SlashVFXStartTime' ? -1 : 0 });
     if (!fields.length) return '';
+    const context = selected.id + ':' + targetIdentity(selected);
+    timeSettingsOpen = context === timeSettingsContext ? $('time-settings')?.open ?? timeSettingsOpen : false;
+    timeSettingsContext = context;
     const labels = {
       'Execution.ComboTransitionTime': '다음 콤보 전환',
       'Execution.Movement.MovementStartTime': '이동 시작',
@@ -280,10 +296,14 @@
       'Feedback.Trail.TrailEndTime': '트레일 종료',
       'Feedback.Slash.SlashVFXStartTime': '슬래시 이펙트 시작'
     };
-    return '<hr class="form-separator"><div class="diff-title">템플릿 시간 보정</div><p class="field-note">새 동작 길이에 맞게 조정한 뒤 다시 검토해 주세요.</p>' + [...new Map(fields.map(item => [item.path, item])).values()].map(item => {
+    const settings = [...new Map(fields.map(item => [item.path, item])).values()].map(item => ({
+      ...item, max: duration(selected), value: existing.find(override => override.path === item.path)?.value ?? item.value ?? ''
+    }));
+    const invalid = item => item.value !== '' && (number(item.value) < number(item.min) || number(item.value) > item.max);
+    return '<details id="time-settings" style="margin-top:16px"' + (timeSettingsOpen || settings.some(invalid) ? ' open' : '') + '><summary class="diff-title">공격 시간 설정 (' + settings.length + '개)</summary><p class="field-note">콤보 전환, 이동과 이펙트 시간을 수정할 수 있습니다. 분석한 클립 길이 안에서 설정하세요.</p>' + settings.map(item => {
       const path = item.path;
-      return '<div class="field"><label for="override-' + esc(path) + '">' + esc(labels[path] || item.label || path) + ' (초)</label><input id="override-' + esc(path) + '" data-time-override="' + esc(path) + '" type="number" min="' + number(item.min) + '" max="' + number(item.max, duration(selected)) + '" step="0.001" value="' + esc(existing.find(override => override.path === path)?.value ?? item.value ?? '') + '"><p class="field-note">허용 범위 ' + number(item.min) + '–' + seconds(number(item.max, duration(selected))) + '초</p></div>';
-    }).join('');
+      return '<div class="field"><label for="override-' + esc(path) + '">' + esc(labels[path] || item.label || path) + ' (초)</label><input id="override-' + esc(path) + '" data-time-override="' + esc(path) + '" type="number" min="' + number(item.min) + '" max="' + item.max + '" step="0.001" value="' + esc(item.value) + '"' + (invalid(item) ? ' aria-invalid="true"' : '') + '><p class="' + (invalid(item) ? 'hit-error' : 'field-note') + '">허용 범위 ' + number(item.min) + '–' + seconds(item.max) + '초</p></div>';
+    }).join('') + '</details>';
   }
 
   function renderDiff(selected) {
@@ -294,11 +314,18 @@
     let summary = preview.summary;
     if (typeof summary === 'object') summary = Object.entries(summary || {}).map(([key, value]) => key + ': ' + (typeof value === 'object' ? JSON.stringify(value) : value)).join('\n');
     const mapping = preview.mapping;
+    const clipAssignment = preview.clipAssignment;
+    const affectedAttacks = preview.affectedAttacks || [];
+    const durationChange = Number.isFinite(preview.before?.duration) && Number.isFinite(preview.after?.duration)
+      ? '<div id="duration-diff" class="diff-counts">공격 길이 <strong>' + seconds(preview.before.duration) + ' s</strong><span>→</span><strong>' + seconds(preview.after.duration) + ' s</strong></div>' : '';
     const damage = Number.isFinite(preview.damageBefore) && Number.isFinite(preview.damageAfter)
       ? '<div class="diff-counts">기본 피해 계수 <strong>' + esc(preview.damageBefore) + '</strong><span>→</span><strong>' + esc(preview.damageAfter) + '</strong></div><p class="field-note" style="margin-top:7px">' + esc(preview.damageNote) + '</p>' : '';
     return '<div class="diff-box"><div class="diff-title">' + (preview.canApply ? '변경 내용 검토' : '적용 전 확인 필요') + '</div><p class="diff-summary">' + esc(summary || '확정한 히트 구간과 대상의 변경 내용을 확인하세요.').replace(/\n/g, '<br>') + '</p><div class="diff-counts">타격 수 <strong>' + esc(beforeCount) + '</strong><span>→</span><strong>' + esc(afterCount) + '</strong></div>' + damage +
       (mapping ? '<p class="field-note" style="margin-top:10px">기존 값 유지 ' + esc(mapping.retained ?? mapping.preserved ?? mapping.kept ?? 0) + '개 · 제거 ' + esc(mapping.removed ?? 0) + '개 · 신규 상속 ' + esc(mapping.added ?? 0) + '개</p>' : '') +
       (preview.proposedStateName ? '<div class="diff-detail">새 Animator 상태: ' + esc(preview.proposedStateName) + '</div>' : '') +
+      durationChange +
+      (affectedAttacks.length ? '<div id="shared-state-notice" class="callout warning"><strong>같은 Animator 상태를 사용하는 공격</strong><ul>' + affectedAttacks.map(item => '<li>' + esc(item.sourceName) + ' / ' + esc(item.label) + '</li>').join('') + '</ul>이 Controller를 사용하는 해당 공격들의 재생 클립도 바뀝니다. 각 공격의 히트 구간과 시간 설정은 별도로 수정해야 합니다.</div>' : '') +
+      (clipAssignment ? '<div id="clip-assignment-diff" class="diff-detail"><strong>' + (clipAssignment.previousClipName ? '기존 클립 교체' : '기존 상태에 클립 연결') + '</strong><br>상태: ' + esc(clipAssignment.stateName) + '<br>' + esc(clipAssignment.previousClipName || '클립 없음') + ' → ' + esc(clipAssignment.clipName) + (clipAssignment.previousClipPath ? '<br>기존: ' + esc(clipAssignment.previousClipPath) : '') + (clipAssignment.clipPath ? '<br>연결: ' + esc(clipAssignment.clipPath) : '') + '<br>' + (selected.copy ? '복제한 Animator Controller에 클립을 연결합니다.' : '원본 Animator Controller에 클립을 연결합니다.') + '</div>' : '') +
       (issues.length ? '<ul class="diff-issues">' + issues.map(issue => '<li>' + esc(typeof issue === 'string' ? issue : issue.message || issue.reason || JSON.stringify(issue)) + '</li>').join('') + '</ul>' : '') +
       (preview.before || preview.after ? '<details class="diff-detail"><summary>변경 데이터 자세히 보기</summary><div>' + esc(JSON.stringify({ before: preview.before, after: preview.after }, null, 2)) + '</div></details>' : '') + '</div>';
   }
@@ -349,6 +376,7 @@
     const selected = job();
     if (!selected || lockedJob(selected)) return;
     preview = null;
+    if (targetIdentity({ ...selected, ...patch }) !== targetIdentity(selected)) patch = { ...patch, timeOverrides: [] };
     if (Object.keys(patch).some(key => !['timeOverrides', 'reviewed'].includes(key))) overrideFields = [];
     await run('작업 수정 실패', () => api.updateJob(selected.id, patch));
     render();
@@ -499,7 +527,7 @@
       const result = await run('변경 내용 확인 실패', () => api.previewChange({ jobId: selected.id, mode: selected.mode || 'update', sourceGuid: selected.sourceGuid, actionPath: selected.actionPath, group: selected.group, templatePath: selected.templatePath, copy: Boolean(selected.copy), outputFolder: selected.outputFolder, timeOverrides: selected.timeOverrides || [] }));
       if (result && job()?.id === selected.id && fingerprint(job()) === beforeFingerprint) {
         preview = result;
-        overrideFields = Array.isArray(result.requiredTimeOverrides) ? result.requiredTimeOverrides : [];
+        overrideFields = [...(Array.isArray(result.editableTimeSettings) ? result.editableTimeSettings : []), ...(Array.isArray(result.requiredTimeOverrides) ? result.requiredTimeOverrides : [])];
         previewJobId = selected.id;
         previewFingerprint = fingerprint(job());
         renderSave(); renderFooter(); renderButtons();

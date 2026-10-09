@@ -49,10 +49,14 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 {
                     if (slot.Action == null) continue;
                     string reason = FourTigerHitMapping.UnsupportedReason(source, slot.Group);
-                    if (reason == null) reason = StateIssue(animator, slot, null);
+                    var stateIssue = StateIssue(animator, slot, out var state);
+                    if (reason == null) reason = stateIssue;
                     targets.Add(new JObject { ["sourceGuid"] = guid, ["actionPath"] = slot.Path, ["group"] = slot.Group,
                         ["label"] = source.name + " / " + slot.Label, ["animationName"] = slot.Action.AnimationName,
                         ["duration"] = slot.Action.Duration, ["supported"] = reason == null, ["reason"] = reason,
+                        ["needsClipAssignment"] = state != null && state.State.motion == null,
+                        ["currentClip"] = state?.State.motion is AnimationClip currentClip ? AutoHitTimerAssets.ClipRef(currentClip) : null,
+                        ["timeSettings"] = FourTigerHitMapping.TimeSettings(slot.Action, slot.Action.Duration),
                         ["windows"] = FourTigerHitMapping.Windows(slot.Action), ["snapshot"] = snapshot });
                 }
             }
@@ -66,7 +70,8 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
             string id = Guid.NewGuid().ToString("N");
             string summary = prepared.Register
                 ? prepared.Source.name + " / " + FourTigerHitMapping.GroupLabel(prepared.Group) + "에 공격 등록"
-                : prepared.Source.name + " / " + prepared.Slot.Label + " 히트 타이밍 변경";
+                : prepared.Source.name + " / " + prepared.Slot.Label + " 공격 및 시간 설정 변경";
+            if (prepared.AssignClip) summary += prepared.PreviousClip == null ? " 및 빈 Animator 상태에 클립 연결" : " 및 Animator 클립 교체";
             var response = new JObject {
                 ["changeId"] = id, ["snapshot"] = prepared.Snapshot, ["summary"] = summary,
                 ["before"] = Describe(prepared.Before), ["after"] = Describe(prepared.After),
@@ -74,6 +79,13 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 ["hitCountBefore"] = FourTigerHitMapping.Windows(prepared.Before).Count,
                 ["hitCountAfter"] = FourTigerHitMapping.Windows(prepared.After).Count,
                 ["proposedStateName"] = prepared.Register ? prepared.StateName : null, ["requiredTimeOverrides"] = prepared.InvalidTimes,
+                ["editableTimeSettings"] = FourTigerHitMapping.TimeSettings(prepared.After, prepared.Clip.length),
+                ["clipAssignment"] = prepared.AssignClip ? new JObject { ["stateName"] = prepared.StatePath,
+                    ["clipName"] = prepared.Clip.name, ["clipPath"] = AssetDatabase.GetAssetPath(prepared.Clip),
+                    ["previousClipName"] = prepared.PreviousClip != null ? prepared.PreviousClip.name : null,
+                    ["previousClipPath"] = prepared.PreviousClip != null ? AssetDatabase.GetAssetPath(prepared.PreviousClip) : null } : null,
+                ["controllerChanged"] = prepared.ChangesController,
+                ["affectedAttacks"] = AffectedAttacks(prepared),
                 ["damageBefore"] = FourTigerHitMapping.DamageSum(prepared.Before),
                 ["damageAfter"] = FourTigerHitMapping.DamageSum(prepared.After),
                 ["damageNote"] = "한 대상에 모든 히트가 적중했을 때의 기본 피해 계수 합계입니다. 공격력·치명타·폼 효과는 제외합니다.",
@@ -121,10 +133,10 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
             string sourcePath = AssetDatabase.GetAssetPath(source);
             string controllerPath = AssetDatabase.GetAssetPath(controller);
             if (!prepared.Copy) originals.Add(sourcePath);
-            if (prepared.Register && !prepared.Copy) originals.Add(controllerPath);
+            if (prepared.ChangesController && !prepared.Copy) originals.Add(controllerPath);
             // Save only the assets the confirmed change is about to modify. Backups then include existing inspector edits.
             if (!prepared.Copy) AssetDatabase.SaveAssetIfDirty(source);
-            if (prepared.Register && !prepared.Copy)
+            if (prepared.ChangesController && !prepared.Copy)
                 foreach (var obj in AssetDatabase.LoadAllAssetsAtPath(controllerPath)) AssetDatabase.SaveAssetIfDirty(obj);
             string backupDir = Path.Combine(Store, "snapshots", id);
             Directory.CreateDirectory(backupDir);
@@ -145,7 +157,7 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 }
                 sourcePath = UniqueOutputPath(prepared.OutputFolder + "/" + Path.GetFileNameWithoutExtension(sourcePath) + "_HitTiming.asset");
                 created.Add(sourcePath);
-                if (prepared.Register)
+                if (prepared.ChangesController)
                 {
                     controllerPath = UniqueOutputPath(prepared.OutputFolder + "/" + Path.GetFileNameWithoutExtension(controllerPath) + "_HitTiming.controller");
                     created.Add(controllerPath);
@@ -174,7 +186,7 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                     source.name = Path.GetFileNameWithoutExtension(sourcePath);
                     AssetDatabase.CreateAsset(source, sourcePath);
                     Undo.RegisterCreatedObjectUndo(source, "Auto Hit Timer copy");
-                    if (prepared.Register)
+                    if (prepared.ChangesController)
                     {
                         if (!AssetDatabase.CopyAsset(AssetDatabase.GetAssetPath(prepared.Controller), controllerPath))
                             throw new IOException("Animator Controller 복사에 실패했습니다.");
@@ -201,17 +213,33 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                     EditorUtility.SetDirty(machine);
                     EditorUtility.SetDirty(controller);
                 }
+                else if (prepared.AssignClip)
+                {
+                    // Resolve on the destination controller so copy-saving never edits the original state.
+                    var state = States(controller.layers[0].stateMachine, controller.layers[0].name)
+                        .Single(entry => entry.Path == prepared.StatePath).State;
+                    // CopyAsset can clone controller-owned clip subassets, so their destination identity differs.
+                    // The source controller snapshot has already been revalidated before copying.
+                    if (!prepared.Copy && state.motion != prepared.PreviousClip)
+                        throw new InvalidOperationException("상태 클립이 검토 이후 변경되었습니다. 대상 목록을 새로 불러오세요.");
+                    Undo.RegisterCompleteObjectUndo(state, "Auto Hit Timer assign clip");
+                    state.motion = prepared.Clip;
+                    EditorUtility.SetDirty(state);
+                    EditorUtility.SetDirty(controller);
+                }
                 string actionPath = FourTigerHitMapping.Put(source, prepared.Slot?.Path, prepared.Group,
                     prepared.Register, prepared.After);
                 EditorUtility.SetDirty(source);
                 BeforePersistForTests?.Invoke();
                 AssetDatabase.SaveAssetIfDirty(source);
-                if (prepared.Register)
+                if (prepared.ChangesController)
                     foreach (var obj in AssetDatabase.LoadAllAssetsAtPath(controllerPath)) AssetDatabase.SaveAssetIfDirty(obj);
                 var assets = new JArray { AssetInfo(source) };
-                if (prepared.Register) assets.Add(AssetInfo(controller));
+                if (prepared.ChangesController) assets.Add(AssetInfo(controller));
                 var result = new JObject { ["assets"] = assets, ["actionPath"] = actionPath,
-                    ["summary"] = prepared.Copy ? "복사 저장 완료. 반환된 SO와 Controller를 게임에 연결하세요." : "원본 저장 완료. Unity Undo로 되돌릴 수 있습니다.",
+                    ["summary"] = prepared.Copy
+                        ? prepared.ChangesController ? "복사 저장 완료. 반환된 SO와 Controller를 게임에 연결하세요." : "복사 저장 완료. 반환된 SO를 게임에 연결하세요."
+                        : "원본 저장 완료. Unity Undo로 되돌릴 수 있습니다.",
                     ["snapshotFolder"] = backupDir, ["changeId"] = id };
                 record["afterSource"] = EditorJsonUtility.ToJson(source, true);
                 record["status"] = "complete";
@@ -272,9 +300,10 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
             public WeaponActionData MappingSource;
             public WeaponActionData After;
             public AnimatorController Controller;
-            public AnimationClip Clip;
-            public string Snapshot, StateName, Group, OutputFolder;
-            public bool Register, Copy;
+            public AnimationClip Clip, PreviousClip;
+            public string Snapshot, StateName, StatePath, Group, OutputFolder;
+            public bool Register, Copy, AssignClip;
+            public bool ChangesController => Register || AssignClip;
             public JArray Issues = new JArray();
             public JArray InvalidTimes = new JArray();
         }
@@ -323,15 +352,8 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 result.After = FourTigerHitMapping.Map(result.MappingSource, request["windows"] as JArray, result.Clip.length);
                 result.After.AnimationName = result.StateName;
                 result.After.Duration = result.Clip.length;
-                FourTigerHitMapping.ApplyTimeOverrides(result.After, request["timeOverrides"] as JArray);
-                result.InvalidTimes = FourTigerHitMapping.InvalidTimes(result.After, result.Clip.length);
-                if (result.InvalidTimes.Count > 0) result.Issues.Add("템플릿의 시간 설정을 새 클립 길이에 맞게 수정하세요.");
-                if (result.Controller != null && !AssetDatabase.GetAssetPath(result.Controller).StartsWith("Assets/", StringComparison.Ordinal))
-                    result.Issues.Add("Assets 안의 Animator Controller만 변경할 수 있습니다.");
                 if (result.Controller != null && result.Controller.layers.Length > 0 && result.Controller.layers[0].syncedLayerIndex >= 0)
                     result.Issues.Add("동기화된 기본 레이어는 지원하지 않습니다.");
-                if (result.Copy && result.Controller != null && AssetDatabase.LoadAllAssetsAtPath(AssetDatabase.GetAssetPath(result.Controller)).Any(EditorUtility.IsDirty))
-                    result.Issues.Add("Controller의 미저장 편집 내용을 Unity에서 저장한 뒤 복사하세요.");
             }
             else
             {
@@ -339,13 +361,26 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 result.Group = result.Slot.Group;
                 result.Before = result.Slot.Action;
                 result.MappingSource = result.Before;
-                string reason = FourTigerHitMapping.UnsupportedReason(result.Source, result.Group) ?? StateIssue(animator, result.Slot, result.Clip);
+                var stateIssue = StateIssue(animator, result.Slot, out var state);
+                string reason = FourTigerHitMapping.UnsupportedReason(result.Source, result.Group) ?? stateIssue;
                 if (reason != null) result.Issues.Add(reason);
+                result.PreviousClip = state?.State.motion as AnimationClip;
+                result.AssignClip = state != null && stateIssue == null && state.State.motion != result.Clip;
+                result.StatePath = state?.Path;
                 if (result.Before == null) throw new ArgumentException("비어 있는 공격은 새 공격 등록을 사용하세요.");
                 result.StateName = result.Before.AnimationName;
-                result.After = FourTigerHitMapping.Map(result.Before, request["windows"] as JArray, Mathf.Min(result.Clip.length, result.Before.Duration));
-                if (request["timeOverrides"] is JArray overrides && overrides.Count > 0)
-                    throw new ArgumentException("기존 공격에서는 히트 타이밍만 변경할 수 있습니다.");
+                result.After = FourTigerHitMapping.Map(result.Before, request["windows"] as JArray, result.Clip.length);
+                result.After.Duration = result.Clip.length;
+            }
+            FourTigerHitMapping.ApplyTimeOverrides(result.After, request["timeOverrides"] as JArray);
+            result.InvalidTimes = FourTigerHitMapping.InvalidTimes(result.After, result.Clip.length);
+            if (result.InvalidTimes.Count > 0) result.Issues.Add("공격의 시간 설정을 선택한 클립 길이에 맞게 수정하세요.");
+            if (result.ChangesController && result.Controller != null)
+            {
+                if (!AssetDatabase.GetAssetPath(result.Controller).StartsWith("Assets/", StringComparison.Ordinal))
+                    result.Issues.Add("Assets 안의 Animator Controller만 변경할 수 있습니다.");
+                if (result.Copy && AssetDatabase.LoadAllAssetsAtPath(AssetDatabase.GetAssetPath(result.Controller)).Any(EditorUtility.IsDirty))
+                    result.Issues.Add("Controller의 미저장 편집 내용을 Unity에서 저장한 뒤 복사하세요.");
             }
             return result;
         }
@@ -404,8 +439,9 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 foreach (var entry in States(child.stateMachine, prefix + "." + child.stateMachine.name)) yield return entry;
         }
 
-        private static string StateIssue(Animator animator, FourTigerHitMapping.ActionSlot slot, AnimationClip selected)
+        private static string StateIssue(Animator animator, FourTigerHitMapping.ActionSlot slot, out StateEntry entry)
         {
+            entry = null;
             if (slot.Action == null) return "공격 데이터가 없습니다.";
             var controller = animator != null ? animator.runtimeAnimatorController as AnimatorController : null;
             if (controller == null || controller.layers.Length == 0) return "기본 AnimatorController를 선택하세요. Override Controller는 v1에서 지원하지 않습니다.";
@@ -415,9 +451,10 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
             if (layer.syncedLayerIndex >= 0) return "동기화된 기본 레이어는 지원하지 않습니다.";
             var matches = States(layer.stateMachine, layer.name).Where(s => s.State.name == name || s.Path == name).ToArray();
             if (matches.Length != 1) return matches.Length == 0 ? "기본 레이어에서 Animator 상태를 찾지 못했습니다: " + name : "동일한 이름의 Animator 상태가 여러 개입니다: " + name;
-            var state = matches[0].State;
-            if (!(state.motion is AnimationClip clip)) return "Blend Tree 또는 클립 없는 상태는 자동 적용할 수 없습니다.";
-            if (selected != null && clip != selected) return "분석한 클립과 공격의 Animator 상태 클립이 다릅니다.";
+            entry = matches[0];
+            var state = entry.State;
+            // Keep the state and its transitions; only a simple clip motion can be assigned or replaced.
+            if (state.motion != null && !(state.motion is AnimationClip)) return "Blend Tree 상태는 자동 적용할 수 없습니다.";
             if (!Mathf.Approximately(state.speed, 1) || state.speedParameterActive || state.timeParameterActive)
                 return "상태 속도 1이며 동적 속도·시간 파라미터가 없는 상태만 지원합니다.";
             if (!Mathf.Approximately(state.cycleOffset, 0) || state.cycleOffsetParameterActive)
@@ -453,6 +490,26 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 ["windows"] = FourTigerHitMapping.Windows(action), ["baseDamage"] = action.Damage,
                 ["damageSum"] = FourTigerHitMapping.DamageSum(action),
                 ["serialized"] = JObject.Parse(JsonUtility.ToJson(action)) };
+        }
+
+        private static JArray AffectedAttacks(Prepared prepared)
+        {
+            var result = new JArray();
+            if (!prepared.AssignClip) return result;
+            var state = States(prepared.Controller.layers[0].stateMachine, prepared.Controller.layers[0].name)
+                .Single(entry => entry.Path == prepared.StatePath);
+            foreach (string guid in AssetDatabase.FindAssets("t:WeaponActionDataSO").OrderBy(g => AssetDatabase.GUIDToAssetPath(g)))
+            {
+                var source = LoadSource(guid);
+                foreach (var slot in FourTigerHitMapping.Slots(source))
+                {
+                    if (source == prepared.Source && slot.Path == prepared.Slot.Path) continue;
+                    if (slot.Action == null || (slot.Action.AnimationName != state.State.name && slot.Action.AnimationName != state.Path)) continue;
+                    result.Add(new JObject { ["sourceName"] = source.name, ["sourcePath"] = AssetDatabase.GetAssetPath(source),
+                        ["actionPath"] = slot.Path, ["label"] = slot.Label });
+                }
+            }
+            return result;
         }
 
         private static JObject MappingSummary(WeaponActionData before, JArray windows)

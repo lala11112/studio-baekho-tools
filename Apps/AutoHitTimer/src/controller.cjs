@@ -51,6 +51,18 @@ class Controller extends EventEmitter {
         if (this.state.actorId) {
           const result = await this.client.command('targets', { actorId: this.state.actorId, adapterId: 'four-tiger-sword' });
           this.state.sources = result.sources || []; this.state.targets = result.targets || []; this.state.groups = result.groups || [];
+          for (const job of this.state.jobs) {
+            if (job.pendingSave) continue;
+            const actionPath = job.mode === 'register' ? job.templatePath : job.actionPath;
+            const target = this.state.targets.find(item => item.sourceGuid === job.sourceGuid && item.actionPath === actionPath);
+            if (!target?.snapshot || job.expectedSnapshot === target.snapshot) continue;
+            if (job.expectedSnapshot) {
+              job.reviewed = false;
+              this.invalidatePreview();
+              this.state.notice = 'Unity의 최신 공격 데이터를 불러왔습니다. 히트 대응과 시간 설정을 다시 확인하세요.';
+            }
+            job.expectedSnapshot = target.snapshot;
+          }
         } else { this.state.sources = []; this.state.targets = []; this.state.groups = []; }
       }
     } catch (error) { this.state.notice = error.message; }
