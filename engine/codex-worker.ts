@@ -21,10 +21,16 @@ export type WorkerConnectionContext = {
   capability?: "studio" | "video" | "motion";
   videoUrl?: string;
   recoveryOnly?: boolean;
+  /** Explicit image execution path; absent means the existing native worker. */
+  imageBackend?: "codex" | "chatgpt-web";
+  /** Host-frozen original references and user-facing ChatGPT request. */
+  referencePaths?: string[];
+  webPrompt?: string;
   /** Host-frozen existing-model edit; cannot submit a fresh model generation. */
   modelEdit?: { scope: "all" | "part"; target?: string };
 };
 export type WorkerConnection = {
+  imageBackend?: "chatgpt-web";
   args?: string[];
   env?: Record<string, string>;
   capabilities?: WorkerCapabilities;
@@ -39,6 +45,9 @@ export type WorkerTask = {
   requestedModel?: "gpt-6-astra";
   /** Recovery may inspect/download existing work, never create another paid submission. */
   recoveryOnly?: boolean;
+  imageBackend?: "codex" | "chatgpt-web";
+  referencePaths?: string[];
+  webPrompt?: string;
   modelEdit?: { scope: "all" | "part"; target?: string };
   /** Host-selected existing project folders, never supplied by worker output. */
   allowedWritePaths?: string[];
@@ -53,8 +62,21 @@ export type WorkerTask = {
   }) => void;
 };
 export type StageReceipt = {
+  imageBackend?: "chatgpt-web";
+  submission?: { state: string; conversationUrl?: string };
   charges: { state: string; cost: number }[];
-  downloads: { state: string; file: string; sha256?: string; bytes?: number }[];
+  downloads: {
+    state: string;
+    file: string;
+    sha256?: string;
+    bytes?: number;
+    id?: string;
+    sourcePage?: string;
+    imageLabel?: string;
+    runId?: string;
+    stageId?: string;
+    attempt?: number;
+  }[];
 };
 export interface ProductionWorker {
   probe(): Promise<ProductionProbe>;
@@ -107,7 +129,7 @@ export function codexArguments(task: WorkerTask, extraArgs: string[] = []) {
     args.push("--model", task.requestedModel ?? "gpt-6-astra");
   // A local repair can inspect existing images but must not consume another
   // image-generation request. This override applies only to this child process.
-  if (task.recoveryOnly)
+  if (task.recoveryOnly || task.imageBackend === "chatgpt-web")
     args.push("--config", "features.image_generation=false");
   for (const directory of task.allowedWritePaths ?? [])
     args.push("--add-dir", directory);
@@ -263,8 +285,20 @@ export class CodexWorker implements ProductionWorker {
       capability: task.stage.capability,
       videoUrl: task.run.config.videoUrl,
       recoveryOnly: task.recoveryOnly,
+      imageBackend: task.imageBackend,
+      referencePaths: task.referencePaths,
+      webPrompt: task.webPrompt,
       modelEdit: task.modelEdit,
     });
+    if (
+      task.imageBackend === "chatgpt-web" &&
+      connection?.imageBackend !== "chatgpt-web"
+    ) {
+      await connection?.close?.();
+      throw new Error(
+        "ChatGPT 웹 이미지 연결이 준비되지 않았습니다. 다른 생성 경로로 전환하지 않습니다.",
+      );
+    }
     if (
       task.stage.capability &&
       !connection?.capabilities?.[task.stage.capability]

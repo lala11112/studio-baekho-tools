@@ -58,6 +58,10 @@ const separationStage = (role: string, view?: WorkbenchView) =>
   `separate-${role}${view ? `-${view}` : ""}`;
 const sheetStage = (role: string) => `separate-${role}-sheet-v1`;
 const multiviewStage = (role: string) => `separate-${role}-multiview-v1`;
+const usesChatGptWeb = (context: WorkbenchExecutionContext) =>
+  context.job.request.imageBackend === "chatgpt-web" &&
+  context.job.request.provider !== "tripo" &&
+  ["concept", "separate"].includes(context.job.step);
 const orderedViews: WorkbenchView[] = ["front", "back", "left", "right"];
 type SheetPlan = {
   jobId: string;
@@ -377,31 +381,34 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
   shutdown() {
     this.worker.shutdown?.();
   }
+  private receiptStageIds(job: WorkbenchJob) {
+    if (job.step === "surface")
+      return ["head", "hair", "body"].flatMap((role) => [
+        `${role}-uv`,
+        `${role}-texture`,
+      ]);
+    if (job.step === "separate" && job.request.imageBackend === "chatgpt-web")
+      return ["head", "hair", "body"].flatMap((role) => [
+        multiviewStage(role),
+        separationStage(role),
+        ...orderedViews.map((view) => separationStage(role, view)),
+      ]);
+    return [job.step];
+  }
   hasSubmission(job: WorkbenchJob) {
-    const ids =
-      job.step === "surface"
-        ? ["head", "hair", "body"].flatMap((role) => [
-            `${role}-uv`,
-            `${role}-texture`,
-          ])
-        : [job.step];
-    return ids.some((id) =>
-      Boolean(this.worker.stageReceipt?.(job.id, id, 1)?.charges.length),
-    );
+    return this.receiptStageIds(job).some((id) => {
+      const receipt = this.worker.stageReceipt?.(job.id, id, 1);
+      return Boolean(receipt?.charges.length || receipt?.submission);
+    });
   }
   hasConfirmedSubmission(job: WorkbenchJob) {
-    const ids =
-      job.step === "surface"
-        ? ["head", "hair", "body"].flatMap((role) => [
-            `${role}-uv`,
-            `${role}-texture`,
-          ])
-        : [job.step];
-    return ids.some((id) =>
-      this.worker
-        .stageReceipt?.(job.id, id, 1)
-        ?.charges.some((charge) => charge.state === "observed"),
-    );
+    return this.receiptStageIds(job).some((id) => {
+      const receipt = this.worker.stageReceipt?.(job.id, id, 1);
+      return (
+        receipt?.submission?.state === "observed" ||
+        receipt?.charges.some((charge) => charge.state === "observed")
+      );
+    });
   }
   private file(root: string, relative: string) {
     if (path.isAbsolute(relative))
@@ -616,11 +623,77 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     }
   }
   /** Metadata and file validation only; never invokes tools or edits source files. */
+  private chatGptInputSummary(
+    context: WorkbenchExecutionContext,
+    stageId: string,
+    summary: string,
+  ) {
+    if (
+      usesChatGptWeb(context) &&
+      /login|log.in|captcha|로그인|인증/i.test(summary) &&
+      !this.worker.stageReceipt?.(context.job.id, stageId, 1)?.submission
+    )
+      return `${summary} 이 단계의 앱 전송 기록은 없습니다. ChatGPT 창에서 로그인·인증을 완료한 뒤 새 생성 실행을 눌러 주세요. 현재 실행의 복구는 새 메시지를 보내지 않습니다.`;
+    return summary;
+  }
+  private verifyChatGptOriginal(
+    context: WorkbenchExecutionContext,
+    stageId: string,
+    file: string,
+  ) {
+    if (!usesChatGptWeb(context)) return;
+    const receipt = this.worker.stageReceipt?.(context.job.id, stageId, 1);
+    const sha256 = hash(file);
+    const native =
+      receipt?.imageBackend === "chatgpt-web" && receipt.submission
+        ? receipt.downloads.find((download) => {
+            let sourceIsChatGpt = false;
+            try {
+              const source = new URL(download.sourcePage ?? "");
+              sourceIsChatGpt =
+                source.protocol === "https:" &&
+                source.hostname === "chatgpt.com";
+              if (receipt.submission?.state === "observed") {
+                const conversation = new URL(
+                  receipt.submission.conversationUrl ?? "",
+                );
+                sourceIsChatGpt =
+                  sourceIsChatGpt &&
+                  conversation.protocol === "https:" &&
+                  conversation.hostname === "chatgpt.com" &&
+                  /^\/c\/[^/]+\/?$/.test(conversation.pathname) &&
+                  source.pathname.replace(/\/$/, "") ===
+                    conversation.pathname.replace(/\/$/, "");
+              }
+            } catch {
+              /* A missing source cannot establish web provenance. */
+              sourceIsChatGpt = false;
+            }
+            return (
+              download.state === "completed" &&
+              download.sha256 === sha256 &&
+              download.runId === context.job.id &&
+              download.stageId === stageId &&
+              sourceIsChatGpt &&
+              Boolean(download.imageLabel) &&
+              path.isAbsolute(download.file) &&
+              fs.existsSync(download.file) &&
+              fs.statSync(download.file).isFile() &&
+              hash(download.file) === sha256
+            );
+          })
+        : undefined;
+    if (!native)
+      throw Error(
+        "ChatGPT 원본 다운로드 기록과 일치하지 않는 이미지입니다. 화면 캡처나 재가공 이미지는 등록하지 않습니다.",
+      );
+  }
   private inspectPart(
     context: WorkbenchExecutionContext,
     role: string,
     saved: unknown,
     view?: WorkbenchView,
+    preservedInput = false,
   ): WorkbenchResult {
     const result: WorkbenchResult = resultSchema.parse(saved);
     result.checks = normalizeWorkbenchChecks("separate", result.checks);
@@ -669,6 +742,35 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       )
         readJson(file);
       if (artifact.kind === "image" || artifact.kind === "export") {
+        if (
+          artifact.kind === "image" &&
+          usesChatGptWeb(context) &&
+          !preservedInput
+        ) {
+          const checkpoint = this.loadCheckpoint(
+            context,
+            separationStage(role, view),
+          );
+          const group =
+            context.job.request.separationStrategy === "part-multiview-v1"
+              ? this.multiviewPlan(context, role)
+              : undefined;
+          if (
+            !checkpoint?.candidates.some((candidate) =>
+              candidate.artifacts.some(
+                (saved) =>
+                  saved.kind === "image" && saved.path === artifact.path,
+              ),
+            )
+          )
+            this.verifyChatGptOriginal(
+              context,
+              group?.views.includes(view ?? "front")
+                ? multiviewStage(role)
+                : separationStage(role, view),
+              file,
+            );
+        }
         const bytes = fs.readFileSync(file);
         if (!(
           bytes
@@ -1024,6 +1126,13 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       );
     const stageId = multiviewStage(plan.role),
       folder = path.resolve(context.workspace, `outputs/${stageId}`);
+    raw.summary = this.chatGptInputSummary(context, stageId, raw.summary);
+    if (
+      usesChatGptWeb(context) &&
+      this.worker.stageReceipt?.(context.job.id, stageId, 1)?.submission
+        ?.state === "reserved"
+    )
+      raw.status = "submission_unknown";
     const artifacts = raw.candidates[0]?.artifacts ?? [],
       images = artifacts.filter((a) => a.kind === "image");
     const issues = raw.checks
@@ -1112,6 +1221,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
           fs.statSync(file).size === 0
         )
           throw Error("현재 독립 멀티뷰 폴더에 원본 이미지가 없습니다.");
+        this.verifyChatGptOriginal(context, stageId, file);
         const bytes = fs.readFileSync(file),
           sourceSha256 = createHash("sha256").update(bytes).digest("hex");
         const { nativeWidth, nativeHeight, pixelSha } =
@@ -1345,16 +1455,29 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         } catch {
           /* Preserve the original failure and already verified draft, never regenerate. */
         }
-      const summary =
-        error instanceof Error ? error.message : "독립 멀티뷰 작업 확인 실패";
+      const summary = this.chatGptInputSummary(
+        context,
+        task.stage.id,
+        error instanceof Error ? error.message : "독립 멀티뷰 작업 확인 실패",
+      );
+      const ambiguous =
+        usesChatGptWeb(context) &&
+        this.worker.stageReceipt?.(context.job.id, task.stage.id, 1)?.submission
+          ?.state === "reserved";
       return {
-        status: "needs_input",
+        status: ambiguous ? "submission_unknown" : "needs_input",
         summary,
         candidates: prepared?.result.candidates ?? [],
         checks: prepared?.result.checks ?? [],
-        recovery: context.signal.aborted
-          ? { kind: "blocked", reason: "사용자 취소" }
-          : classifyWorkbenchFailure(summary),
+        recovery: ambiguous
+          ? {
+              kind: "blocked",
+              reason:
+                "ChatGPT 메시지 전송 여부가 불명확합니다. 기존 대화만 확인할 수 있습니다.",
+            }
+          : context.signal.aborted
+            ? { kind: "blocked", reason: "사용자 취소" }
+            : classifyWorkbenchFailure(summary),
       };
     }
   }
@@ -1542,7 +1665,9 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       `The actual failure to repair is: ${context.recovery?.error ?? "The previous worker did not complete. Inspect saved result.json, existing outputs and codex-events.jsonl to find its failure."}`,
       charged
         ? "The host retains the original Studio receipt. Inspect the existing submitted task only, wait/recheck its result or download the existing native outputs. Never press generate, retry, UV, texture or any other paid action. Retain unchanged native downloads for receipt verification. If task identity or submission is ambiguous, return submission_unknown."
-        : "Recover actual files already produced by the previous attempt. You may copy known completed generated files mentioned in its log, repair JSON/BOM/paths, and inspect/repackage existing outputs. Do not fabricate missing outputs or alter the requested character through procedural replacements. If a required generated image does not exist or its invocation is ambiguous, return needs_input with that exact reason.",
+        : usesChatGptWeb(context)
+          ? "This phase uses the user's actual ChatGPT web chat. Use only injected chatgpt_snapshot, chatgpt_navigate(current), chatgpt_click_image, chatgpt_download_image, chatgpt_downloads, chatgpt_scroll and bounded chatgpt_wait to find/download ALREADY generated originals from this phase's saved conversation. No fill, upload, submit, new chat, follow-up, regeneration, API or imagegen. Copy original download bytes unchanged. Inspect actual images and associated response labels to identify directions; never use download order. If submission or conversation identity remains ambiguous return submission_unknown. Login/CAPTCHA requires the user. Preserve every genuine partial original; missing directions require a later explicit user request."
+          : "Recover actual files already produced by the previous attempt. You may copy known completed generated files mentioned in its log, repair JSON/BOM/paths, and inspect/repackage existing outputs. Do not fabricate missing outputs or alter the requested character through procedural replacements. If a required generated image does not exist or its invocation is ambiguous, return needs_input with that exact reason.",
       multiviewPlan
         ? `Recover ONLY existing independent original files for '${multiviewPlan.role}', directions ${JSON.stringify(multiviewPlan.views)}. This is the same frozen grouped request. Return one candidate with each actual saved image tagged with its exact role and view. Preserve completed source bytes and register remaining already-generated files when discoverable in the existing logs. No image generation, batch or concurrent calls, contact sheets, cropping, mirroring, fabrication or downsampling. If any direction has no genuine existing original, keep valid partial outputs and return needs_input; missing views require a later explicit user request. Keep all truthful visual_quality warnings. Update result.json with actual partial files before further inspection.`
         : sheetPlan
@@ -1736,6 +1861,8 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     phase?: Phase,
   ) {
     const request = context.job.request;
+    if (usesChatGptWeb(context))
+      return this.chatGptWorkerPrompt(context, inputs, folder, phase);
     const imagePhase =
       context.job.step === "separate" ||
       context.job.step === "reference" ||
@@ -1812,6 +1939,49 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     ]
       .filter(Boolean)
       .join("\n\n");
+  }
+  /** This text goes to ChatGPT; orchestration, filesystem paths and credentials do not. */
+  private chatGptImagePrompt(
+    context: WorkbenchExecutionContext,
+    phase?: Phase,
+  ) {
+    const request = context.job.request;
+    const brief = `Character brief / requested correction: ${request.prompt}`;
+    if (context.job.step === "concept")
+      return [
+        brief,
+        "Create FOUR distinct full-body front-view character concept images in this single request. Return four separate original images, each one candidate. Use useful consistent framing and preserve the provided reference identity when supplied. Label each result candidate-1, candidate-2, candidate-3 or candidate-4 in adjacent text, not inside the image. Do not make a contact sheet, collage, grid or four panels in one image. Retain full image quality and resolution. If four separate images cannot be produced, say so without substituting a sheet.",
+      ].join("\n\n");
+    const role = phase!.role,
+      views = phase?.views ?? [phase?.view ?? "front"];
+    return [
+      brief,
+      `Create independent multiview originals of ONLY the '${role}' part from the attached character and same-part references. Requested directions ONLY: ${JSON.stringify(views)}. Return exactly ONE SEPARATE original image for each requested direction in this one request. Clearly label each image in adjacent text as '${role}-front', '${role}-back', '${role}-left', or '${role}-right' as applicable, without adding text to the image.`,
+      role === "head"
+        ? "Isolate face and skull without hair or body."
+        : role === "hair"
+          ? "Isolate the complete matching hair without face or body."
+          : "Isolate the neck-down body including the entire outfit without head or hair; preserve all limbs and clothing.",
+      "Left and right mean the character's own sides. Preserve identity, geometry, asymmetry, outfit, proportions and camera consistency. Use transparent backgrounds, consistent orthographic framing, centered placement and equal scale across these directions. Keep full original resolution and quality. Do not mirror or copy a direction, crop a sheet, make a collage/grid/composite, or redraw any unrequested direction. If separate images or transparent backgrounds are unavailable, say so; never replace them with a sheet or fabricate missing views.",
+    ].join("\n\n");
+  }
+  private chatGptWorkerPrompt(
+    context: WorkbenchExecutionContext,
+    inputs: InputFile[],
+    folder: string,
+    phase?: Phase,
+  ) {
+    const views = phase?.views ?? [phase?.view ?? "front"];
+    return [
+      "You are Partsmith's browser image operator. Execute only this user-requested image phase through the user's actual ChatGPT WEB CHAT using the injected chatgpt_* tools. Codex login is not ChatGPT web login. The native image-generation tool is disabled. No API, imagegen, alternate provider, shell/network browser bypass or credential access. Keep the configured model and reasoning effort unchanged. Never select a different ChatGPT model or quality setting silently.",
+      `Workspace: ${context.workspace}. Copy every genuine downloaded original UNCHANGED under '${folder}/'. Inputs: ${JSON.stringify(imageInputManifest(inputs))}. The host has frozen the exact ChatGPT image request and upload reference paths. Do not type any other prompt or add another conversation/request.`,
+      "Call chatgpt_snapshot and inspect the visible UI. Login, CAPTCHA, usage limits or an unsupported UI require needs_input with the exact reason. Use chatgpt_navigate(new) only before this phase has been submitted, then chatgpt_upload_references for the host-approved originals and chatgpt_fill_prompt for the host-frozen image request. Confirm attachments and prompt are visibly present; send exactly ONCE using chatgpt_submit. One chat request may produce several images. Do not send follow-ups, regenerate, retry, edit the sent prompt or create another chat if results are missing or the submission is ambiguous. The adapter keeps a durable pre-send journal. Use submission_unknown when it cannot identify the submitted conversation.",
+      "Wait with bounded chatgpt_wait and fresh snapshots. Use chatgpt_click_image on each actual generated image, then its observed original-image download control through chatgpt_download_image. chatgpt_downloads returns host-owned download records. Save each native downloaded original immediately and update result.json atomically with all completed files. Screenshots, previews, uploads, blobs extracted via network, or synthesized files are not output originals. Never crop, resize, stitch, re-encode, mirror or strip alpha. Preserve genuine partial originals even when later results are missing.",
+      context.job.step === "concept"
+        ? "Return FOUR candidates, each containing exactly one separate original image artifact and a short factual report. Keep partial candidates and needs_input if fewer than four original images were actually returned."
+        : `Requested independent original directions ONLY: ${JSON.stringify(views)}. Return ONE candidate with an image artifact for each existing requested original, role '${phase!.role}', exact view front/back/left/right. Map views using the visibly associated response labels and visual inspection of the actual downloaded image; never infer orientation from download order, generic filenames or thumbnail position. If a direction remains uncertain, keep its downloaded file but do not label or register it as a confirmed view; return needs_input. Never fabricate missing directions.`,
+      "Inspect each actual original once for identity, isolation, direction, asymmetry, cross-view consistency, scale, framing and alpha edges. Keep aesthetic observations as visual_quality, passed=false, severity=warning, visualCategory alignment/alpha_edges/appearance/view_consistency/semantic_isolation, and concrete detail under 600 characters. Integrity, duplicate files and wrong role/view are blocking. Aesthetic warnings never trigger regeneration. The host verifies every output hash against actual native download receipts. Do not compute hashes or produce long logs. Never accept a result or advance stages. Return strict JSON matching the provided schema with actual files and truthful checks.",
+    ].join("\n\n");
   }
   private async phase(
     context: WorkbenchExecutionContext,
@@ -1927,6 +2097,14 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         if (event.message) onProgress(event.message.slice(0, 1800));
       },
     };
+    if (usesChatGptWeb(context)) {
+      task.imageBackend = "chatgpt-web";
+      task.referencePaths = inputs
+        .filter((input) => input.kind === "image")
+        .map((input) => this.file(context.workspace, input.localPath));
+      task.imagePaths = [...task.referencePaths];
+      task.webPrompt = this.chatGptImagePrompt(context, phase);
+    }
     if (context.job.step === "unity") {
       const unity = this.services.unityPath(context.workbench.projectId);
       if (unity && fs.existsSync(unity)) task.allowedWritePaths = [unity];
@@ -1984,9 +2162,10 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       // BOM parsing). Revalidate the saved result before considering execution.
       const rawCompleted =
         existing?.status === "completed" ? existing : undefined;
-      const priorReceipt = charged
-        ? this.worker.stageReceipt?.(run.id, stageId, 1)
-        : undefined;
+      const priorReceipt =
+        charged || usesChatGptWeb(context)
+          ? this.worker.stageReceipt?.(run.id, stageId, 1)
+          : undefined;
       if (priorReceipt?.charges.some((charge) => charge.state !== "observed"))
         return {
           status: "submission_unknown",
@@ -2000,7 +2179,10 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         };
       const started = this.journal(context, stageId);
       const priorExecution = Boolean(
-        started || fs.existsSync(resultPath) || priorReceipt?.charges.length,
+        started ||
+        fs.existsSync(resultPath) ||
+        priorReceipt?.charges.length ||
+        priorReceipt?.submission,
       );
       const repair =
         forceRepair ||
@@ -2054,7 +2236,37 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         this.saveJournal(context, stageId, true);
       }
       let result: WorkbenchResult = resultSchema.parse(response.result);
+      result.summary = this.chatGptInputSummary(
+        context,
+        stageId,
+        result.summary,
+      );
       result.checks = normalizeWorkbenchChecks(context.job.step, result.checks);
+      if (usesChatGptWeb(context)) {
+        const hashes = new Set<string>();
+        for (const candidate of result.candidates) {
+          const images = candidate.artifacts.filter(
+            (artifact) => artifact.kind === "image",
+          );
+          if (context.job.step === "concept" && images.length !== 1)
+            throw Error(
+              "ChatGPT 콘셉트 후보마다 독립 원본 이미지 한 장이 필요합니다.",
+            );
+          for (const image of images) {
+            const file = this.file(context.workspace, image.path);
+            this.verifyChatGptOriginal(context, stageId, file);
+            const sha256 = hash(file);
+            if (hashes.has(sha256))
+              throw Error("ChatGPT 원본 이미지가 중복 등록됐습니다.");
+            hashes.add(sha256);
+          }
+        }
+        if (
+          this.worker.stageReceipt?.(run.id, stageId, 1)?.submission?.state ===
+          "reserved"
+        )
+          result.status = "submission_unknown";
+      }
       if (
         (phase?.kind === "separate" || phase?.kind === "separate-sheet") &&
         (result.status === "completed" ||
@@ -2193,13 +2405,18 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       this.saveCheckpoint(context, stageId, result);
       return result;
     } catch (error) {
-      const receipt = charged
-        ? this.worker.stageReceipt?.(run.id, stageId, 1)
-        : undefined;
-      const summary = error instanceof Error ? error.message : "작업 실행 실패";
-      const ambiguous = receipt?.charges.some(
-        (charge) => charge.state !== "observed",
+      const receipt =
+        charged || usesChatGptWeb(context)
+          ? this.worker.stageReceipt?.(run.id, stageId, 1)
+          : undefined;
+      const summary = this.chatGptInputSummary(
+        context,
+        stageId,
+        error instanceof Error ? error.message : "작업 실행 실패",
       );
+      const ambiguous =
+        receipt?.submission?.state === "reserved" ||
+        receipt?.charges.some((charge) => charge.state !== "observed");
       const tampered = /완료된 단계 파일이 변경/.test(summary);
       return {
         status:
@@ -2380,7 +2597,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
           ],
           checks: this.inheritedChecks(context, role),
         };
-        this.inspectPart(context, role, output, view);
+        this.inspectPart(context, role, output, view, true);
         this.saveCheckpoint(context, separationStage(role, view), output);
         parts.push({ role, view, result: output });
       }

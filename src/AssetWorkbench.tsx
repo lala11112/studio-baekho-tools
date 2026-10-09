@@ -17,7 +17,7 @@ import {
   Square,
   Upload,
 } from "lucide-react";
-import type { Command, Project } from "../shared/types";
+import type { ChatGptStatus, Command, Project } from "../shared/types";
 import type {
   Workbench,
   WorkbenchAction,
@@ -251,6 +251,12 @@ export function AssetWorkbench({
   const [provider, setProvider] = useState<"gpt" | "tripo">(
     w?.jobs.find((j) => j.step === "concept")?.request.provider ?? "gpt",
   );
+  const [imageBackend, setImageBackend] = useState<"chatgpt-web" | "codex">(
+    w?.jobs.find(
+      (j) => ["concept", "separate"].includes(j.step) && j.request.imageBackend,
+    )?.request.imageBackend ?? "chatgpt-web",
+  );
+  const [chatGptStatus, setChatGptStatus] = useState<ChatGptStatus>();
   const [prompt, setPrompt] = useState(
     w?.jobs.find((j) => j.step === "concept")?.request.prompt ?? "",
   );
@@ -323,6 +329,7 @@ export function AssetWorkbench({
       partMode,
       motionMode,
       provider,
+      imageBackend,
       prompt,
       separationPrompt,
       modelPrompt,
@@ -552,7 +559,11 @@ export function AssetWorkbench({
     setCompareId("");
     await action({
       kind: "execute",
-      request,
+      request:
+        ["concept", "separate"].includes(request.step) &&
+        request.provider !== "tripo"
+          ? { ...request, imageBackend }
+          : request,
       approval: {
         accepted: paid ? approved : true,
         studioCreditLimit: usesStudio ? studioLimit : 0,
@@ -905,6 +916,15 @@ export function AssetWorkbench({
       </div>
     );
   }
+  function imageConnectionHelp() {
+    return (
+      <p className="wb-note" data-testid="workbench-image-backend-help">
+        {imageBackend === "chatgpt-web"
+          ? "본인 계정의 ChatGPT 웹 채팅에서 생성하고 원본을 가져옵니다. 위의 ChatGPT 연결에서 로그인하세요. Codex 로그인과는 별도이며, 웹 화면의 모델 설정을 유지합니다."
+          : "기존 Codex 로그인으로 내장 이미지 도구를 실행합니다. ChatGPT 웹 채팅과는 다른 경로이며, 설정된 모델과 추론 수준을 유지합니다."}
+      </p>
+    );
+  }
   return (
     <main ref={scrollHost} className="asset-workbench" data-testid="workbench">
       <div className="wb-intro">
@@ -914,6 +934,28 @@ export function AssetWorkbench({
           선택하거나 탭을 옮겨도 다음 작업은 자동으로 시작하지 않습니다.
         </p>
         <div className="wb-connections">
+          <button
+            data-testid="workbench-chatgpt-open"
+            disabled={busy}
+            onClick={async () => {
+              const status = await run({ type: "chatgpt.open" });
+              if (status && typeof status.ready === "boolean")
+                setChatGptStatus(status);
+            }}
+          >
+            ChatGPT 연결
+          </button>
+          <button
+            data-testid="workbench-chatgpt-status"
+            disabled={busy}
+            onClick={async () => {
+              const status = await run({ type: "chatgpt.status" });
+              if (status && typeof status.ready === "boolean")
+                setChatGptStatus(status);
+            }}
+          >
+            ChatGPT 상태 확인
+          </button>
           <button onClick={() => run({ type: "studio.open" })}>
             Tripo 연결
           </button>
@@ -935,6 +977,15 @@ export function AssetWorkbench({
         </div>
       </div>
       {probe && <p className="wb-note">{probe}</p>}
+      {chatGptStatus && (
+        <p
+          className="wb-note"
+          data-testid="workbench-chatgpt-connection-status"
+        >
+          ChatGPT 웹 · {chatGptStatus.ready ? "연결 준비됨" : "확인 필요"} —{" "}
+          {chatGptStatus.reason}
+        </p>
+      )}
       <nav className="wb-steps" aria-label="에셋 제작 단계">
         {pages.map((s, i) => (
           <button
@@ -1089,15 +1140,23 @@ export function AssetWorkbench({
                   <span>이미지 생성 도구</span>
                   <select
                     data-testid="workbench-provider"
-                    value={provider}
-                    onChange={(e) =>
-                      setProvider(e.target.value as "gpt" | "tripo")
-                    }
+                    value={provider === "tripo" ? "tripo" : imageBackend}
+                    onChange={(e) => {
+                      if (e.target.value === "tripo") setProvider("tripo");
+                      else {
+                        setProvider("gpt");
+                        setImageBackend(
+                          e.target.value as "chatgpt-web" | "codex",
+                        );
+                      }
+                    }}
                   >
-                    <option value="gpt">GPT · Codex 연동</option>
+                    <option value="chatgpt-web">GPT · ChatGPT 웹</option>
+                    <option value="codex">GPT · Codex 내장</option>
                     <option value="tripo">Tripo</option>
                   </select>
                 </label>
+                {provider === "gpt" && imageConnectionHelp()}
                 <label className="field">
                   <span>캐릭터 이미지 프롬프트</span>
                   <textarea
@@ -1175,11 +1234,31 @@ export function AssetWorkbench({
                 )}
                 {partMode === "separate" ? (
                   <>
+                    <label className="field">
+                      <span>이미지 생성 도구</span>
+                      <select
+                        data-testid="workbench-separation-backend"
+                        value={imageBackend}
+                        onChange={(e) =>
+                          setImageBackend(
+                            e.target.value as "chatgpt-web" | "codex",
+                          )
+                        }
+                      >
+                        <option value="chatgpt-web">GPT · ChatGPT 웹</option>
+                        <option value="codex">GPT · Codex 내장</option>
+                      </select>
+                    </label>
+                    {imageConnectionHelp()}
                     <p data-testid="workbench-separation-batch-help">
-                      파츠마다 GPT(Codex 연동)에 정면·후면·좌·우 멀티뷰를 한 번
-                      요청하고 방향별 독립 이미지 4장을 받습니다.
-                      머리·머리카락·몸통 3개 파츠를 각각 요청해 총 12장을
-                      만듭니다. 사진을 확인하고 채택한 뒤 모델을 만듭니다.
+                      파츠마다{" "}
+                      {imageBackend === "chatgpt-web"
+                        ? "ChatGPT 웹 채팅"
+                        : "GPT(Codex 내장)"}
+                      에 정면·후면·좌·우 멀티뷰를 한 번 요청하고 방향별 독립
+                      이미지 4장을 받습니다. 머리·머리카락·몸통 3개 파츠를 각각
+                      요청해 총 12장을 만듭니다. 사진을 확인하고 채택한 뒤
+                      모델을 만듭니다.
                     </p>
                     <div className="wb-pair">
                       <label className="field">

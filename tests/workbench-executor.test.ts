@@ -904,6 +904,268 @@ function multiviewFixture() {
   f.context.job.request.separationStrategy = "part-multiview-v1";
   return f;
 }
+function recordChatGptDownloads(
+  worker: Worker,
+  task: WorkerTask,
+  result: WorkbenchResult,
+  state = "observed",
+) {
+  worker.receipts.set(task.stage.id, {
+    imageBackend: "chatgpt-web",
+    submission: {
+      state,
+      conversationUrl: "https://chatgpt.com/c/offline-fixture",
+    },
+    charges: [],
+    downloads: result.candidates.flatMap((candidate) =>
+      candidate.artifacts
+        .filter((artifact) => artifact.kind === "image")
+        .map((artifact) => {
+          const file = path.join(task.run.workspace, artifact.path);
+          return {
+            state: "completed",
+            file,
+            sha256: digest(file),
+            bytes: fs.statSync(file).size,
+            runId: task.run.id,
+            stageId: task.stage.id,
+            sourcePage: "https://chatgpt.com/c/offline-fixture",
+            imageLabel: "Generated image (explicit offline fixture)",
+          };
+        }),
+    ),
+  });
+}
+test("actual-chat routing requests four concepts once and requires matching native download provenance", async () => {
+  const f = fixture("concept"),
+    worker = new Worker();
+  f.context.job.request.imageBackend = "chatgpt-web";
+  f.context.job.request.prompt = "Distinctive character brief";
+  worker.hook = (task) => {
+    const candidates = [0, 1, 2, 3].map((index) => {
+      const file = path.join(
+        path.dirname(task.resultPath),
+        `candidate-${index}.png`,
+      );
+      const png = new PNG({ width: 4, height: 4 });
+      png.data.fill(10 + index);
+      fs.writeFileSync(file, PNG.sync.write(png));
+      return {
+        id: `candidate-${index}`,
+        label: "Offline fixture",
+        artifacts: [
+          {
+            kind: "image" as const,
+            path: path.relative(task.run.workspace, file).replaceAll("\\", "/"),
+          },
+        ],
+        objects: [],
+      };
+    });
+    const result: WorkbenchResult = {
+      status: "completed",
+      summary: "Offline fixture",
+      candidates,
+      checks: [],
+    };
+    recordChatGptDownloads(worker, task, result);
+    return result;
+  };
+  const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(result.status, "completed", result.summary);
+  assert.equal(result.candidates.length, 4);
+  assert.equal(worker.calls.length, 1);
+  const task = worker.calls[0];
+  assert.equal(task.imageBackend, "chatgpt-web");
+  assert.match(task.webPrompt!, /Distinctive character brief/);
+  assert.match(task.webPrompt!, /FOUR.*single request/);
+  assert(!task.webPrompt!.includes(f.context.workspace));
+  assert.match(task.prompt, /send exactly ONCE/);
+  assert(!task.prompt.includes("Use FOUR separate built-in calls"));
+  assert(codexArguments(task).includes("features.image_generation=false"));
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+test("ChatGPT multiview verifies three chat phases and twelve independent unchanged originals", async () => {
+  const f = multiviewFixture(),
+    worker = new Worker();
+  f.context.job.request.imageBackend = "chatgpt-web";
+  worker.hook = (task) => {
+    const result = multiviewOutput(task);
+    recordChatGptDownloads(worker, task, result);
+    return result;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const result = await executor.execute(f.context, () => {});
+  assert.equal(result.status, "completed", result.summary);
+  assert.equal(worker.calls.length, 3);
+  assert.equal(
+    result.candidates[0].artifacts.filter(
+      (artifact) => artifact.kind === "image",
+    ).length,
+    12,
+  );
+  for (const task of worker.calls) {
+    assert.equal(task.imageBackend, "chatgpt-web");
+    assert.match(task.webPrompt!, /ONE SEPARATE original image/);
+    assert.match(task.prompt, /never infer orientation from download order/);
+    assert.deepEqual(task.referencePaths, task.imagePaths);
+  }
+  assert.equal(executor.hasSubmission(f.context.job), true);
+  assert.equal(executor.hasConfirmedSubmission(f.context.job), true);
+  const inspected = await executor.inspectSaved(f.context);
+  assert.equal(inspected.status, "completed");
+  assert.equal(worker.calls.length, 3);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+test("ChatGPT login before submission is an unsent blocked request and recovery cannot send after login", async () => {
+  const f = fixture("concept"),
+    worker = new Worker();
+  f.context.job.request.imageBackend = "chatgpt-web";
+  worker.hook = () => ({
+    status: "needs_input",
+    summary: "ChatGPT 로그인 필요",
+    candidates: [],
+    checks: [],
+  });
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const first = await executor.execute(f.context, () => {});
+  assert.equal(first.status, "needs_input");
+  assert.equal(first.recovery?.kind, "blocked");
+  assert.match(first.summary, /앱 전송 기록은 없습니다/);
+  assert.match(first.summary, /새 생성 실행/);
+  assert.equal(executor.hasSubmission(f.context.job), false);
+  worker.hook = (task) => {
+    assert.equal(task.recoveryOnly, true);
+    assert.match(task.prompt, /No fill, upload, submit, new chat/);
+    return {
+      status: "needs_input",
+      summary: "No existing submitted conversation",
+      candidates: [],
+      checks: [],
+    };
+  };
+  await executor.recover(
+    {
+      ...f.context,
+      recovery: { attempt: 1, error: "Login completed by user", mode: "retry" },
+    },
+    () => {},
+  );
+  assert.equal(worker.calls.length, 2);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+test("ChatGPT originals without genuine stage provenance cannot become drafts or complete", async () => {
+  for (const failure of [
+    "no-receipt",
+    "different-stage",
+    "different-hash",
+    "wrong-source",
+    "wrong-conversation",
+  ] as const) {
+    const f = multiviewFixture(),
+      worker = new Worker();
+    f.context.job.request.imageBackend = "chatgpt-web";
+    worker.hook = (task) => {
+      const result = multiviewOutput(task);
+      if (failure !== "no-receipt") {
+        recordChatGptDownloads(worker, task, result);
+        for (const download of worker.receipts.get(task.stage.id)!.downloads) {
+          if (failure === "different-stage") download.stageId = "other-stage";
+          if (failure === "different-hash") download.sha256 = "0".repeat(64);
+          if (failure === "wrong-source")
+            download.sourcePage = "https://other.invalid/image";
+          if (failure === "wrong-conversation")
+            download.sourcePage = "https://chatgpt.com/c/another-conversation";
+        }
+      }
+      return result;
+    };
+    const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+      f.context,
+      () => {},
+    );
+    assert.equal(result.status, "needs_input", failure);
+    assert.equal(result.candidates.length, 0, failure);
+    assert.match(result.summary, /ChatGPT 원본 다운로드 기록/, failure);
+    assert.equal(worker.calls.length, 1, failure);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+test("ChatGPT partial originals remain available and a started chat resumes only download inspection", async () => {
+  const f = multiviewFixture(),
+    worker = new Worker();
+  f.context.job.request.imageBackend = "chatgpt-web";
+  f.context.job.request.role = "head";
+  let originals: WorkbenchResult;
+  worker.hook = (task) => {
+    originals = multiviewOutput(task);
+    recordChatGptDownloads(worker, task, originals);
+    const partial = structuredClone(originals);
+    partial.status = "needs_input";
+    partial.candidates[0].artifacts = partial.candidates[0].artifacts.slice(
+      0,
+      2,
+    );
+    return partial;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const partial = await executor.execute(f.context, () => {});
+  assert.equal(
+    partial.candidates[0].artifacts.filter(
+      (artifact) => artifact.kind === "image",
+    ).length,
+    2,
+  );
+  const originalPrompt = worker.calls[0].webPrompt;
+  worker.hook = (task) => {
+    assert.equal(task.recoveryOnly, true);
+    assert.equal(task.imageBackend, "chatgpt-web");
+    assert.equal(task.webPrompt, originalPrompt);
+    assert.match(task.prompt, /No fill, upload, submit, new chat/);
+    return originals!;
+  };
+  const recovered = await executor.recover(
+    {
+      ...f.context,
+      recovery: { attempt: 1, error: "download interrupted", mode: "retry" },
+    },
+    () => {},
+  );
+  assert.equal(
+    recovered.candidates[0].artifacts.filter(
+      (artifact) => artifact.kind === "image",
+    ).length,
+    4,
+  );
+  assert.equal(worker.calls.length, 2);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+test("an ambiguous web submission retains native downloads but cannot be marked complete or resubmitted", async () => {
+  const f = multiviewFixture(),
+    worker = new Worker();
+  f.context.job.request.imageBackend = "chatgpt-web";
+  worker.hook = (task) => {
+    const result = multiviewOutput(task);
+    recordChatGptDownloads(worker, task, result, "reserved");
+    return result;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  const result = await executor.execute(f.context, () => {});
+  assert.equal(result.status, "submission_unknown");
+  assert.equal(worker.calls.length, 1);
+  assert.equal(executor.hasSubmission(f.context.job), true);
+  assert.equal(executor.hasConfirmedSubmission(f.context.job), false);
+  assert.equal(
+    result.candidates[0].artifacts.filter(
+      (artifact) => artifact.kind === "image",
+    ).length,
+    4,
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
 function multiviewOutput(
   task: WorkerTask,
   onlyViews?: string[],
@@ -1210,6 +1472,49 @@ test("independent multiview single-view revision preserves eleven images and ret
     const kept = result.candidates[0].artifacts.find(
       (a) =>
         a.kind === "image" && a.role === source.role && a.view === source.view,
+    )!;
+    assert.equal(
+      digest(path.join(f.context.workspace, kept.path)),
+      source.sha256,
+    );
+  }
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+test("ChatGPT single-view correction preserves eleven prior images without requiring new receipts for old inputs", async () => {
+  const f = multiviewFixture(),
+    worker = new Worker();
+  Object.assign(f.context.job.request, {
+    imageBackend: "chatgpt-web",
+    role: "hair",
+    view: "left",
+    prompt: "Change only the left hair tip",
+  });
+  const base = addSeparationBase(f);
+  worker.hook = (task) => {
+    const result = partOutput(task);
+    recordChatGptDownloads(worker, task, result);
+    return result;
+  };
+  const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+    f.context,
+    () => {},
+  );
+  assert.equal(result.status, "completed", result.summary);
+  assert.equal(worker.calls.length, 1);
+  assert.equal(worker.calls[0].stage.id, "separate-hair-left");
+  assert.match(worker.calls[0].webPrompt!, /Change only the left hair tip/);
+  assert.match(
+    worker.calls[0].webPrompt!,
+    /Requested directions ONLY: \["left"\]/,
+  );
+  for (const source of base.filter(
+    (image) => image.role !== "hair" || image.view !== "left",
+  )) {
+    const kept = result.candidates[0].artifacts.find(
+      (image) =>
+        image.kind === "image" &&
+        image.role === source.role &&
+        image.view === source.view,
     )!;
     assert.equal(
       digest(path.join(f.context.workspace, kept.path)),

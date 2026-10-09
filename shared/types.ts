@@ -190,6 +190,12 @@ export type AppState = {
   dataDir: string;
   catalog: typeof import("./catalog").catalog;
 };
+export type ChatGptStatus = {
+  available: boolean;
+  ready: boolean;
+  reason: string;
+  url?: string;
+};
 export type Command =
   | { type: "state" }
   | {
@@ -221,6 +227,7 @@ export type Command =
     }
   | { type: "production.probe" }
   | { type: "studio.open" | "studio.status" }
+  | { type: "chatgpt.open" | "chatgpt.status" }
   | { type: "project.create"; name: string; demo?: boolean }
   | { type: "project.delete"; id: string }
   | {

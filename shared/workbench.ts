@@ -47,6 +47,9 @@ export type WorkbenchRequest = {
   step: WorkbenchStep;
   prompt: string;
   provider?: "gpt" | "tripo";
+  /** Frozen execution route for concept/separate GPT jobs. Absent on legacy
+   * saved jobs means Codex; only new requests default to the ChatGPT website. */
+  imageBackend?: "chatgpt-web" | "codex";
   role?: WorkbenchRole;
   /** New separation jobs always freeze all four views; absent on legacy jobs. */
   views?: WorkbenchView[];

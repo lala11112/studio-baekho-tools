@@ -252,6 +252,7 @@ test("guided steps require chosen inputs and explicit generation scope; default 
   assert.equal(x.executor.calls.length, 0);
   const job = await x.execute({ step: "concept", prompt: "hero" });
   assert.equal(job.request.provider, "gpt");
+  assert.equal(job.request.imageBackend, "chatgpt-web");
   assert.equal(job.candidates.length, 4);
   assert.equal(job.status, "review");
   assert.deepEqual(x.engine.get(x.w.id).selections, {});
@@ -1326,6 +1327,7 @@ test("new separation freezes twelve role/view images and models have one result"
   );
   assert.deepEqual(split.request.views, ["front", "back", "left", "right"]);
   assert.equal(split.request.provider, "gpt");
+  assert.equal(split.request.imageBackend, "chatgpt-web");
   assert.equal(split.request.separationStrategy, "part-multiview-v1");
   assert.equal(
     split.candidates[0].artifacts.filter((a) => a.kind === "image").length,
@@ -1442,6 +1444,58 @@ test("new GPT separation defaults to independent multiview requests and rejects 
   );
 });
 
+test("GPT image backend is explicit, defaults only for new image stages, and remains frozen on retry", async (t) => {
+  const x = await setup(t);
+  for (const request of [
+    {
+      step: "concept",
+      prompt: "hero",
+      provider: "tripo",
+      imageBackend: "chatgpt-web",
+    },
+    {
+      step: "separate",
+      prompt: "split",
+      provider: "tripo",
+      imageBackend: "codex",
+    },
+    { step: "concept", prompt: "hero", imageBackend: "unknown" },
+    { step: "reference", prompt: "move", imageBackend: "chatgpt-web" },
+    { step: "assembly", prompt: "assemble", imageBackend: "codex" },
+  ])
+    assert.throws(
+      () => x.engine.execute(x.w.id, request as WorkbenchRequest),
+      /GPT 이미지 연결/,
+    );
+  assert.equal(x.executor.calls.length, 0);
+  const codex = await x.execute({
+    step: "concept",
+    prompt: "keep configured Codex",
+    imageBackend: "codex",
+  });
+  assert.equal(codex.request.imageBackend, "codex");
+  const tripo = await x.execute({
+    step: "concept",
+    prompt: "Studio",
+    provider: "tripo",
+  });
+  assert.equal(tripo.request.imageBackend, undefined);
+  x.executor.hook = (_, result) => ({
+    ...result,
+    status: "needs_input",
+    candidates: [],
+  });
+  const web = await x.execute({ step: "separate", prompt: "web split" });
+  assert.equal(web.request.imageBackend, "chatgpt-web");
+  x.executor.hook = undefined;
+  x.engine.retry(x.w.id, web.id);
+  await x.engine.wait(x.w.id);
+  assert.equal(
+    x.executor.calls.at(-1)!.job.request.imageBackend,
+    "chatgpt-web",
+  );
+});
+
 test("retry and restart preserve a legacy separation plan without automatic strategy migration", async (t) => {
   const x = await setup(t);
   x.executor.hook = (_, result) => ({
@@ -1454,6 +1508,7 @@ test("retry and restart preserve a legacy separation plan without automatic stra
   const legacy = stored.jobs.find((job) => job.id === stopped.id)!;
   delete legacy.request.separationStrategy;
   delete legacy.request.provider;
+  delete legacy.request.imageBackend;
   legacy.status = "running";
   stored.activeJobId = legacy.id;
   const frozen = structuredClone(legacy.request);

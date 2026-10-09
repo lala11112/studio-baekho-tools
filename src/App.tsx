@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { version as appVersion } from "../package.json";
 import {
   Box,
   Boxes,
@@ -329,7 +330,7 @@ export function App() {
             />
           </button>
           <div className="version">
-            PROTOTYPE <span>v0.5.3</span>
+            PROTOTYPE <span>v{appVersion}</span>
           </div>
         </div>
       </aside>

@@ -22,6 +22,7 @@ import { CodexWorkbenchExecutor } from "../engine/workbench-executor";
 import { parseJsonText, readJsonFile } from "../engine/json";
 import { CodexWorker } from "../engine/codex-worker";
 import { StudioBrowser } from "./studio-browser";
+import { ChatGptBrowser } from "./chatgpt-browser";
 import { Tripo } from "../engine/tripo";
 import { LocalPipeline } from "../engine/local";
 import { Vault } from "./vault";
@@ -49,6 +50,7 @@ let engine: Engine;
 let production: ProductionEngine;
 let workbench: WorkbenchEngine;
 let studio: StudioBrowser;
+let chatgpt: ChatGptBrowser;
 let local: LocalPipeline;
 let vault: Vault;
 const projectCommands = new Map<string, number>();
@@ -127,6 +129,18 @@ async function dispatch(c: Command): Promise<unknown> {
         workbenches: workbench.list(),
       };
     case "workbench.action":
+      if (
+        c.action.kind === "execute" &&
+        ["concept", "separate"].includes(c.action.request.step) &&
+        c.action.request.provider !== "tripo" &&
+        (c.action.request.imageBackend ?? "chatgpt-web") === "chatgpt-web"
+      ) {
+        const status = await chatgpt.status();
+        if (!status.ready)
+          throw new Error(
+            `ChatGPT 연결에서 먼저 웹 로그인을 확인하세요. ${status.reason} 아직 생성 작업을 시작하지 않았습니다.`,
+          );
+      }
       return workbench.action(c.id, c.action);
     case "workbench.probe":
       return workbench.probe();
@@ -191,6 +205,10 @@ async function dispatch(c: Command): Promise<unknown> {
       return production.probe();
     case "studio.open":
       return studio.open(true);
+    case "chatgpt.open":
+      return chatgpt.open(true);
+    case "chatgpt.status":
+      return chatgpt.status();
     case "studio.status":
       return studio.status();
     case "project.create":
@@ -586,11 +604,19 @@ app.whenReady().then(async () => {
       local.previewModel(projectId, nativeRelative),
   );
   studio = new StudioBrowser();
+  chatgpt = new ChatGptBrowser();
   const worker = new CodexWorker({
-    connectionFactory: (context) => studio.workerConnection(context),
+    connectionFactory: (context) =>
+      context.imageBackend === "chatgpt-web"
+        ? chatgpt.workerConnection(context)
+        : studio.workerConnection(context),
     probeConnections: () => studio.probeConnections(),
-    stageReceipt: (runId, stageId, attempt) =>
-      studio.stageReceipt(runId, stageId, attempt),
+    stageReceipt: (runId, stageId, attempt) => {
+      const chatgptReceipt = chatgpt.stageReceipt(runId, stageId, attempt);
+      return chatgptReceipt.submission || chatgptReceipt.downloads.length
+        ? chatgptReceipt
+        : studio.stageReceipt(runId, stageId, attempt);
+    },
   });
   production = new ProductionEngine(store, worker);
   workbench = new WorkbenchEngine(
@@ -739,6 +765,7 @@ app.whenReady().then(async () => {
     production.shutdown();
     workbench.shutdown();
     studio.close();
+    chatgpt.close();
   });
 });
 app.on("second-instance", () => {

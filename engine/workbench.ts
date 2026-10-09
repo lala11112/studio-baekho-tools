@@ -410,6 +410,18 @@ export class WorkbenchEngine {
       throw new Error(
         "파츠 묶음 생성 방식은 분리 단계에서만 사용할 수 있습니다.",
       );
+    if (
+      r.imageBackend !== undefined &&
+      (!["chatgpt-web", "codex"].includes(r.imageBackend) ||
+        !["concept", "separate"].includes(r.step) ||
+        r.provider !== "gpt")
+    )
+      throw new Error(
+        "GPT 이미지 연결 방식은 이미지·파츠 분리 단계의 GPT 요청에서만 선택할 수 있습니다.",
+      );
+    // New submissions freeze their backend. retry() never normalizes stored jobs.
+    if (["concept", "separate"].includes(r.step) && r.provider === "gpt")
+      r.imageBackend ??= "chatgpt-web";
     if (r.step === "surface" && r.role && !r.baseJobId)
       throw new Error("한 파츠 텍스처 수정에는 기준 결과가 필요합니다.");
     if (r.step === "model") {

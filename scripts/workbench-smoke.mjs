@@ -25,6 +25,18 @@ const glbFunction = old
   )
   .replace("function tinyGlb()", "function baseGlb()");
 const mockFile = path.join(fixture, "mock-executor.ts");
+const mockChatGptFile = path.join(fixture, "mock-chatgpt-browser.ts");
+fs.writeFileSync(
+  mockChatGptFile,
+  `export class ChatGptBrowser {
+  ready = false;
+  constructor() {} close() {}
+  async status() { return {available:true, ready:this.ready, reason:this.ready?'MOCK ChatGPT login only':'MOCK login required', url:'https://chatgpt.com/'}; }
+  async open() { this.ready=true; return this.status(); }
+  workerConnection() { return {}; }
+  stageReceipt() { return {charges:[],downloads:[]}; }
+}`,
+);
 fs.writeFileSync(
   mockFile,
   `import fs from 'node:fs'; import path from 'node:path'; import {nativeImage} from 'electron';
@@ -107,6 +119,9 @@ await build({
       setup(b) {
         b.onResolve({ filter: /workbench-executor$/ }, () => ({
           path: mockFile,
+        }));
+        b.onResolve({ filter: /chatgpt-browser$/ }, () => ({
+          path: mockChatGptFile,
         }));
       },
     },
@@ -222,6 +237,45 @@ try {
   await page.getByTestId("workbench").waitFor();
   const project = (await state()).projects[0];
   assert.equal(invocations().length, 0);
+  assert.equal(
+    await page.getByTestId("workbench-provider").inputValue(),
+    "chatgpt-web",
+  );
+  await page
+    .getByTestId("workbench-concept-prompt")
+    .fill("MOCK disconnected request must not start");
+  await page.getByTestId("workbench-approve").check();
+  await page.getByTestId("workbench-execute-concept").click();
+  await page.getByRole("alert").waitFor();
+  assert.match(await page.getByRole("alert").textContent(), /먼저 웹 로그인/);
+  assert.equal(
+    invocations().length,
+    0,
+    "Login preflight must not start a worker",
+  );
+  assert.equal(
+    (await state()).workbenches.flatMap((workbench) => workbench.jobs).length,
+    0,
+    "Login preflight must not leave an unsent job stranded in recovery",
+  );
+  await page.getByTestId("workbench-chatgpt-open").click();
+  await page.getByTestId("workbench-chatgpt-connection-status").waitFor();
+  assert.match(
+    await page.getByTestId("workbench-chatgpt-connection-status").textContent(),
+    /MOCK ChatGPT login only/,
+  );
+  await page.getByTestId("workbench-chatgpt-status").click();
+  assert.equal(
+    invocations().length,
+    0,
+    "Connecting or checking login must never generate",
+  );
+  await page.getByTestId("workbench-provider").selectOption("codex");
+  assert.match(
+    await page.getByTestId("workbench-image-backend-help").textContent(),
+    /다른 경로/,
+  );
+  await page.getByTestId("workbench-provider").selectOption("chatgpt-web");
   await page
     .getByTestId("workbench-concept-prompt")
     .fill("MOCK UI test. Four distinct options, no real request.");
@@ -230,6 +284,7 @@ try {
   await jobDone();
   await page.getByTestId("workbench-candidate-3").waitFor();
   assert.equal(invocations().length, 1);
+  assert.equal(invocations()[0].imageBackend, "chatgpt-web");
   assert.deepEqual((await state()).workbenches[0].selections, {});
   await page.screenshot({
     path: "artifacts/screenshots/workbench-mock-candidates.png",
@@ -256,7 +311,11 @@ try {
   );
   assert.match(
     await page.getByTestId("workbench-separation-batch-help").textContent(),
-    /파츠마다 GPT\(Codex 연동\)에 정면·후면·좌·우 멀티뷰를 한 번 요청/,
+    /파츠마다 ChatGPT 웹 채팅에 정면·후면·좌·우 멀티뷰를 한 번 요청/,
+  );
+  assert.equal(
+    await page.getByTestId("workbench-separation-backend").inputValue(),
+    "chatgpt-web",
   );
   assert.match(
     await page.getByTestId("workbench-separation-batch-help").textContent(),
@@ -299,6 +358,12 @@ try {
       .filter((request) => request.step === "separate")
       .every((request) => request.separationStrategy === "part-multiview-v1"),
     "New separation and recovery must receive the same frozen grouped strategy",
+  );
+  assert(
+    invocations()
+      .filter((request) => request.step === "separate")
+      .every((request) => request.imageBackend === "chatgpt-web"),
+    "Separation and recovery preserve the selected ChatGPT backend",
   );
   await page.getByTestId("workbench-visual-warnings").waitFor();
   assert(await page.getByTestId("workbench-accept-separate").isEnabled());
@@ -416,6 +481,7 @@ try {
   );
   assert.equal(oldImages.length, 12);
   await page.getByTestId("workbench-tab-separate").click();
+  await page.getByTestId("workbench-separation-backend").selectOption("codex");
   await page.getByTestId("workbench-edit-head-left").click();
   await page
     .getByTestId("workbench-separate-prompt")
@@ -427,6 +493,11 @@ try {
   assert.equal(rerolled.request.view, "left");
   assert.equal(rerolled.request.baseJobId, oldSeparation.id);
   assert.equal(rerolled.request.reuseExisting, false);
+  assert.equal(
+    rerolled.request.imageBackend,
+    "codex",
+    "A new targeted reroll uses the explicitly selected route",
+  );
   assert.equal(
     (await state()).workbenches[0].selections.separate.jobId,
     oldSeparation.id,

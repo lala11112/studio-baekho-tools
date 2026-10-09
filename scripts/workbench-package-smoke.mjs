@@ -8,7 +8,7 @@ const data = path.resolve(
   "artifacts/runtime",
   `workbench-package-${randomUUID()}`,
 );
-const executablePath = path.resolve("release/0.5.4/win-unpacked/Partsmith.exe");
+const executablePath = path.resolve("release/0.6.0/win-unpacked/Partsmith.exe");
 const app = await electron.launch({
   executablePath,
   env: { ...process.env, PARTSMITH_DATA: data },
@@ -22,7 +22,7 @@ try {
     isPackaged: app.isPackaged,
     version: app.getVersion(),
   }));
-  assert.equal(info.version, "0.5.4");
+  assert.equal(info.version, "0.6.0");
   assert(info.isPackaged);
   const state = await page.evaluate(() =>
     window.desktop.call({ type: "state" }),
@@ -42,6 +42,54 @@ try {
     .click();
   await page.getByTestId("workbench").waitFor();
   assert(await page.getByTestId("workbench-provider").isVisible());
+  assert.equal(
+    await page.getByTestId("workbench-provider").inputValue(),
+    "chatgpt-web",
+  );
+  assert(await page.getByTestId("workbench-chatgpt-open").isVisible());
+  const webStatus = await page.evaluate(() =>
+    window.desktop.call({ type: "chatgpt.status" }),
+  );
+  assert.equal(webStatus.available, true);
+  assert.equal(
+    webStatus.ready,
+    false,
+    "The isolated package profile is not logged in",
+  );
+  const projectId = (
+    await page.evaluate(() => window.desktop.call({ type: "state" }))
+  ).projects[0].id;
+  await assert.rejects(
+    () =>
+      page.evaluate(
+        (id) =>
+          window.desktop.call({
+            type: "workbench.action",
+            id,
+            action: {
+              kind: "execute",
+              request: {
+                step: "concept",
+                provider: "gpt",
+                imageBackend: "chatgpt-web",
+                prompt: "PACKAGE TEST — must not submit",
+              },
+              approval: {
+                accepted: true,
+                studioCreditLimit: 0,
+                imageCreditLimit: 0,
+              },
+            },
+          }),
+        projectId,
+      ),
+    /먼저 웹 로그인을 확인/,
+  );
+  assert.equal(
+    (await page.evaluate(() => window.desktop.call({ type: "state" })))
+      .workbenches.reduce((count, workbench) => count + workbench.jobs.length, 0),
+    0,
+  );
   const probe = await page.evaluate(() =>
     window.desktop.call({ type: "workbench.probe" }),
   );
@@ -65,7 +113,10 @@ try {
         isolatedStore: true,
         workbenchDefaultScreen: true,
         cliAvailable: probe.codex.available,
-        chatgptLoginDetected: probe.codex.authenticated,
+        codexLoginDetected: probe.codex.authenticated,
+        chatgptWebDefault: true,
+        chatgptWebReady: webStatus.ready,
+        loginPreflightCreatedJobs: 0,
         workerInferenceCalls: 0,
         paidRequests: 0,
         actualProductionVerified: false,
@@ -76,7 +127,7 @@ try {
     ),
   );
   console.log(
-    "Packaged 0.5.4 app: UI, SQLite, guided workbench entry, Codex login probe passed; no generation.",
+    "Packaged 0.6.0 app: UI, SQLite, guided workbench entry, Codex login probe passed; no generation.",
   );
 } finally {
   await app.close();
