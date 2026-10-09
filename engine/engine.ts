@@ -118,6 +118,8 @@ function outputExtension(
 }
 export class Engine {
   private busy = new Set<string>();
+  private batches = new Map<string, number>();
+  private submissions = new Set<string>();
   private imageQueueBusy = false;
   constructor(
     public store: Store,
@@ -493,6 +495,28 @@ export class Engine {
     return jobs;
   }
   private async runBatch(id: string, jobIds: string[]) {
+    this.batches.set(id, (this.batches.get(id) ?? 0) + 1);
+    try {
+      await this.runBatchTasks(id, jobIds);
+    } finally {
+      const count = (this.batches.get(id) ?? 1) - 1;
+      if (count) this.batches.set(id, count);
+      else this.batches.delete(id);
+    }
+  }
+  isProjectActive(id: string) {
+    return (
+      this.batches.has(id) ||
+      [...this.submissions].some((key) => key.startsWith(id + ":")) ||
+      [...this.busy].some((key) => key.startsWith(id + ":")) ||
+      this.store
+        .project(id)
+        .jobs.some((j) =>
+          ["queued", "submitting", "running"].includes(j.status),
+        )
+    );
+  }
+  private async runBatchTasks(id: string, jobIds: string[]) {
     if (
       ["image", "edit"].includes(
         this.store.project(id).jobs.find((job) => job.id === jobIds[0])!.kind,
@@ -588,6 +612,15 @@ export class Engine {
     return j;
   }
   private async submit(id: string, jid: string) {
+    const lock = id + ":" + jid;
+    this.submissions.add(lock);
+    try {
+      await this.submitTask(id, jid);
+    } finally {
+      this.submissions.delete(lock);
+    }
+  }
+  private async submitTask(id: string, jid: string) {
     let p = this.store.project(id),
       j = p.jobs.find((x) => x.id === jid)!;
     if (j.status !== "queued") return;
@@ -796,7 +829,7 @@ export class Engine {
     }
   }
   async poll(id: string, jid: string) {
-    const lock = id + jid;
+    const lock = id + ":" + jid;
     if (this.busy.has(lock)) return;
     const p = this.store.project(id),
       j = p.jobs.find((x) => x.id === jid);

@@ -133,6 +133,14 @@ export class WorkbenchEngine {
   getForProject(projectId: string) {
     return this.list(projectId)[0];
   }
+  isProjectActive(projectId: string) {
+    return this.list(projectId).some(
+      (w) =>
+        this.active.has(w.id) ||
+        !!w.activeJobId ||
+        w.jobs.some((j) => j.status === "running"),
+    );
+  }
   create(projectId: string) {
     this.store.project(projectId);
     const existing = this.getForProject(projectId);

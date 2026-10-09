@@ -14,6 +14,35 @@ const input: Generation = {
   size: "2K",
   count: 1,
 };
+
+test("project stays active while a cancelled poll still owns its files", async () => {
+  let finish!: (value: unknown) => void;
+  const { engine, store, p } = await setup({
+    task: () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  });
+  p.jobs.push({
+    id: "poll-delete-test",
+    quoteId: "q",
+    kind: "image",
+    status: "running",
+    progress: 0,
+    remoteId: "task_delete_test",
+    request: input,
+    createdAt: new Date().toISOString(),
+    revision: p.revision,
+  });
+  store.save(p);
+  const polling = engine.poll(p.id, p.jobs[0].id);
+  engine.cancel(p.id, p.jobs[0].id);
+  assert.equal(store.project(p.id).jobs[0].status, "paused");
+  assert.equal(engine.isProjectActive(p.id), true);
+  finish({ status: "failed" });
+  await polling;
+  assert.equal(engine.isProjectActive(p.id), false);
+});
 async function setup(fake: any = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "partsmith-test-"));
   const store = new Store(root);

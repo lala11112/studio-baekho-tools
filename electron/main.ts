@@ -26,7 +26,7 @@ import { Tripo } from "../engine/tripo";
 import { LocalPipeline } from "../engine/local";
 import { Vault } from "./vault";
 import { catalog } from "../shared/catalog";
-import type { Command, Project } from "../shared/types";
+import type { Command, Project, Quote } from "../shared/types";
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "asset",
@@ -51,6 +51,39 @@ let workbench: WorkbenchEngine;
 let studio: StudioBrowser;
 let local: LocalPipeline;
 let vault: Vault;
+const projectCommands = new Map<string, number>();
+const deletionDialogs = new Set<string>();
+function commandProjectId(c: Command): string | undefined {
+  if ("id" in c) return c.id;
+  if (c.type === "generation.approve")
+    return store.get<Quote>("quote", c.quoteId)?.projectId;
+  if ("runId" in c) return production.get(c.runId).projectId;
+}
+function assertProjectIdle(id: string) {
+  store.assertProjectAvailable(id);
+  if (
+    projectCommands.has(id) ||
+    engine.isProjectActive(id) ||
+    workbench.isProjectActive(id) ||
+    production.isProjectActive(id)
+  )
+    throw new Error(
+      "이 프로젝트의 작업이 실행 중입니다. 작업을 중지하고 종료될 때까지 기다린 뒤 삭제하세요.",
+    );
+}
+async function dispatchTracked(c: Command) {
+  const id = commandProjectId(c);
+  if (!id || c.type === "project.delete") return dispatch(c);
+  store.assertProjectAvailable(id);
+  projectCommands.set(id, (projectCommands.get(id) ?? 0) + 1);
+  try {
+    return await dispatch(c);
+  } finally {
+    const count = (projectCommands.get(id) ?? 1) - 1;
+    if (count) projectCommands.set(id, count);
+    else projectCommands.delete(id);
+  }
+}
 const finite = z.number().finite();
 const vec = z.tuple([finite, finite, finite]);
 const transform = z.object({
@@ -162,6 +195,38 @@ async function dispatch(c: Command): Promise<unknown> {
       return studio.status();
     case "project.create":
       return engine.create(c.name, !!c.demo);
+    case "project.delete": {
+      if (deletionDialogs.has(c.id))
+        throw new Error("이미 이 프로젝트의 삭제를 확인하고 있습니다.");
+      assertProjectIdle(c.id);
+      const project = store.project(c.id);
+      deletionDialogs.add(c.id);
+      try {
+        const result = await dialog.showMessageBox(win, {
+          type: "warning",
+          title: "프로젝트 삭제",
+          message: `“${project.name}” 프로젝트를 삭제할까요?`,
+          detail:
+            "프로젝트 목록과 제작 기록을 제거하고 앱에 저장된 이미지·모델·작업 파일을 Windows 휴지통으로 보냅니다.\n\n가져온 원본 파일, 내보낸 백업, Unity 프로젝트와 Tripo 웹사이트의 모델은 삭제하지 않습니다. 외부 서비스에서 진행 중인 작업을 취소하는 기능은 아닙니다.",
+          buttons: ["취소", "프로젝트 삭제"],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+        if (result.response !== 1) return { deleted: false };
+        assertProjectIdle(c.id);
+        if (store.project(c.id).updatedAt !== project.updatedAt)
+          throw new Error(
+            "확인 중 프로젝트가 변경됐습니다. 내용을 확인한 뒤 다시 삭제하세요.",
+          );
+        await store.deleteProject(c.id, (directory) =>
+          shell.trashItem(directory),
+        );
+        return { deleted: true };
+      } finally {
+        deletionDialogs.delete(c.id);
+      }
+    }
     case "project.update": {
       const p = store.project(c.id),
         patch = projectPatch.parse(c.patch);
@@ -656,7 +721,7 @@ app.whenReady().then(async () => {
     )
       return { ok: false, error: "허용되지 않은 호출자" };
     try {
-      return { ok: true, value: await dispatch(c) };
+      return { ok: true, value: await dispatchTracked(c) };
     } catch (e) {
       const raw = e instanceof Error ? e.message : "작업 실패";
       return {

@@ -190,6 +190,25 @@ export function App() {
     setTab(p.demo ? "assembly" : "workbench");
     setPreview("");
   }
+  async function deleteProject(project: Project) {
+    const result = await run<{ deleted: boolean }>({
+      type: "project.delete",
+      id: project.id,
+    });
+    if (!result?.deleted) return;
+    if (id === project.id) {
+      setId("");
+      setPartId("");
+      setTab("home");
+      setPreview("");
+      setRemoteId("");
+    }
+    if (id === project.id || quote?.projectId === project.id) {
+      setQuote(undefined);
+      setAccepted(false);
+    }
+    setMessage(`“${project.name}” 프로젝트를 삭제했습니다.`);
+  }
   async function request(r: Generation) {
     if (!p) return;
     const q = await run<Quote>({
@@ -310,7 +329,7 @@ export function App() {
             />
           </button>
           <div className="version">
-            PROTOTYPE <span>v0.5.2</span>
+            PROTOTYPE <span>v0.5.3</span>
           </div>
         </div>
       </aside>
@@ -427,40 +446,89 @@ export function App() {
               </button>
             </div>
             <div className="project-grid">
-              {state.projects.map((project) => (
-                <button
-                  className="project-card"
-                  key={project.id}
-                  onClick={() => open(project)}
-                >
-                  <div className="project-cover">
-                    {project.selectedImageId ? (
-                      <AssetImage
-                        p={project}
-                        a={project.assets.find(
-                          (a) => a.id === project.selectedImageId,
+              {state.projects.map((project) => {
+                const running =
+                  project.jobs.some((job) =>
+                    ["queued", "submitting", "running"].includes(job.status),
+                  ) ||
+                  state.workbenches?.some(
+                    (workbench) =>
+                      workbench.projectId === project.id &&
+                      workbench.jobs.some((job) => job.status === "running"),
+                  ) ||
+                  state.productionRuns?.some(
+                    (production) =>
+                      production.projectId === project.id &&
+                      (production.status === "running" ||
+                        production.stages.some(
+                          (stage) => stage.status === "running",
+                        )),
+                  );
+                return (
+                  <article
+                    className="project-card"
+                    key={project.id}
+                    data-testid="project-card"
+                    data-project-id={project.id}
+                  >
+                    <button
+                      type="button"
+                      className="project-open"
+                      data-testid="project-open"
+                      data-project-id={project.id}
+                      aria-label={`${project.name} 프로젝트 열기`}
+                      onClick={() => open(project)}
+                    >
+                      <div className="project-cover">
+                        {project.selectedImageId ? (
+                          <AssetImage
+                            p={project}
+                            a={project.assets.find(
+                              (a) => a.id === project.selectedImageId,
+                            )}
+                          />
+                        ) : (
+                          <Boxes size={52} strokeWidth={1} />
                         )}
-                      />
-                    ) : (
-                      <Boxes size={52} strokeWidth={1} />
-                    )}
-                    <Badge tone={project.demo ? "amber" : "neutral"}>
-                      {project.demo ? "데모 프로젝트" : "개인 프로젝트"}
-                    </Badge>
-                  </div>
-                  <div className="project-meta">
-                    <h3>{project.name}</h3>
-                    <p>
-                      {project.parts.length}개 파츠 · {project.assets.length}개
-                      에셋
-                    </p>
-                    <small>
-                      {new Date(project.updatedAt).toLocaleDateString("ko-KR")}{" "}
-                      <ChevronRight size={15} />
-                    </small>
-                  </div>
-                </button>
-              ))}
+                        <Badge tone={project.demo ? "amber" : "neutral"}>
+                          {project.demo ? "데모 프로젝트" : "개인 프로젝트"}
+                        </Badge>
+                      </div>
+                      <div className="project-meta">
+                        <h3>{project.name}</h3>
+                        <p>
+                          {project.parts.length}개 파츠 ·{" "}
+                          {project.assets.length}개 에셋
+                        </p>
+                        <small>
+                          {new Date(project.updatedAt).toLocaleDateString(
+                            "ko-KR",
+                          )}{" "}
+                          <ChevronRight size={15} />
+                        </small>
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      className="project-delete"
+                      data-testid="project-delete"
+                      data-project-id={project.id}
+                      aria-label={`${project.name} 프로젝트 삭제`}
+                      title={
+                        running
+                          ? "프로젝트 작업이 진행 중이라 삭제할 수 없습니다."
+                          : busy
+                            ? "작업 처리 후 삭제할 수 있습니다."
+                            : "프로젝트 삭제"
+                      }
+                      disabled={busy || Boolean(running)}
+                      onClick={() => void deleteProject(project)}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </article>
+                );
+              })}
               <button className="new-project" onClick={() => setCreate(true)}>
                 <Plus size={28} />
                 <span>새로운 캐릭터 만들기</span>

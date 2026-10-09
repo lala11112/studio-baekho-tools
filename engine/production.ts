@@ -479,6 +479,14 @@ export class ProductionEngine {
     if (!run) throw new Error("자동 제작 작업이 없습니다.");
     return run;
   }
+  isProjectActive(projectId: string) {
+    return this.list(projectId).some(
+      (run) =>
+        this.active.has(run.id) ||
+        run.status === "running" ||
+        run.stages.some((stage) => stage.status === "running"),
+    );
+  }
   probe() {
     return this.worker.probe();
   }

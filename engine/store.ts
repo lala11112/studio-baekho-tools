@@ -5,10 +5,14 @@ import { randomUUID } from "node:crypto";
 import type { Project, Quote, Settings } from "../shared/types";
 export class Store {
   db!: Database;
+  private createDatabase!: (data?: Uint8Array) => Database;
+  private deletingProjects = new Set<string>();
+  private deletedProjects = new Set<string>();
   constructor(public root: string) {}
   async open(wasmPath: string) {
     fs.mkdirSync(this.root, { recursive: true });
     const SQL = await initSqlJs({ locateFile: () => wasmPath });
+    this.createDatabase = (data) => new SQL.Database(data);
     const file = path.join(this.root, "workbench.db");
     this.db = new SQL.Database(
       fs.existsSync(file) ? fs.readFileSync(file) : undefined,
@@ -16,6 +20,7 @@ export class Store {
     this.db.run(
       "CREATE TABLE IF NOT EXISTS records (kind TEXT NOT NULL,id TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(kind,id))",
     );
+    this.recoverProjectDeletions();
     for (const p of this.projects()) {
       let changed = false;
       for (const j of p.jobs) {
@@ -55,6 +60,12 @@ export class Store {
     }
   }
   put(kind: string, id: string, value: unknown) {
+    if (kind === "project" || kind === "unity-request")
+      this.assertProjectAvailable(id);
+    else if (["quote", "workbench", "production"].includes(kind)) {
+      const projectId = (value as { projectId?: string } | null)?.projectId;
+      if (projectId) this.assertProjectAvailable(projectId);
+    }
     this.db.run("INSERT OR REPLACE INTO records VALUES (?,?,?)", [
       kind,
       id,
@@ -76,6 +87,7 @@ export class Store {
     return p;
   }
   save(p: Project) {
+    this.assertProjectAvailable(p.id);
     p.updatedAt = new Date().toISOString();
     this.put("project", p.id, p);
     this.write(p.id, "project.json", JSON.stringify(p, null, 2));
@@ -93,11 +105,142 @@ export class Store {
     return resolved;
   }
   write(id: string, relative: string, data: string | Uint8Array) {
+    this.assertProjectAvailable(id);
     const file = this.file(id, relative);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file + ".tmp", data);
     fs.renameSync(file + ".tmp", file);
     return file;
+  }
+  isProjectDeleting(id: string) {
+    return (
+      this.deletingProjects.has(id) || Boolean(this.get("project-deletion", id))
+    );
+  }
+  assertProjectAvailable(id: string) {
+    this.directory(id);
+    if (this.isProjectDeleting(id))
+      throw new Error("프로젝트를 삭제 중입니다. 작업을 시작할 수 없습니다.");
+    if (this.deletedProjects.has(id))
+      throw new Error("이미 삭제된 프로젝트입니다.");
+  }
+  /** Commit records together; a failed atomic file replacement restores memory too. */
+  private persistTransaction(change: () => void) {
+    const before = this.db.export();
+    try {
+      this.db.run("BEGIN TRANSACTION");
+      change();
+      this.db.run("COMMIT");
+      this.flush();
+    } catch (error) {
+      this.db.close();
+      this.db = this.createDatabase(before);
+      throw error;
+    }
+  }
+  /** Reject junctions/symlinks in every parent, including a dangling target link. */
+  private deletionDirectory(id: string): string | undefined {
+    const target = path.resolve(this.directory(id));
+    const projects = path.resolve(this.root, "projects");
+    if (path.dirname(target) !== projects)
+      throw new Error("프로젝트 밖 폴더 삭제 거부");
+    const volume = path.parse(target).root;
+    let current = volume;
+    for (const segment of path.relative(volume, target).split(path.sep)) {
+      current = path.join(current, segment);
+      let stat: fs.Stats;
+      try {
+        stat = fs.lstatSync(current);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT")
+          return undefined;
+        throw error;
+      }
+      if (
+        stat.isSymbolicLink() ||
+        !stat.isDirectory() ||
+        path.relative(current, fs.realpathSync(current)) !== ""
+      )
+        throw new Error("연결된 폴더 또는 프로젝트 밖 폴더 삭제 거부");
+    }
+    return target;
+  }
+  private removeProjectRecords(id: string) {
+    const related: [string, string][] = [];
+    const statement = this.db.prepare(
+      "SELECT kind,id,json FROM records WHERE kind IN ('quote','workbench','production')",
+    );
+    try {
+      while (statement.step()) {
+        const row = statement.getAsObject();
+        if (JSON.parse(row.json as string).projectId === id)
+          related.push([row.kind as string, row.id as string]);
+      }
+    } finally {
+      statement.free();
+    }
+    this.persistTransaction(() => {
+      for (const [kind, recordId] of related)
+        this.db.run("DELETE FROM records WHERE kind=? AND id=?", [
+          kind,
+          recordId,
+        ]);
+      for (const kind of ["project", "unity-request", "project-deletion"])
+        this.db.run("DELETE FROM records WHERE kind=? AND id=?", [kind, id]);
+    });
+    this.deletedProjects.add(id);
+  }
+  private cancelDeletionIntent(id: string) {
+    this.persistTransaction(() => {
+      this.db.run(
+        "DELETE FROM records WHERE kind='project-deletion' AND id=?",
+        [id],
+      );
+    });
+  }
+  private recoverProjectDeletions() {
+    for (const intent of this.all<{ projectId: string }>("project-deletion")) {
+      const id = intent.projectId;
+      if (this.deletionDirectory(id)) this.cancelDeletionIntent(id);
+      else this.removeProjectRecords(id);
+      this.deletingProjects.delete(id);
+    }
+  }
+  async deleteProject(
+    id: string,
+    trash: (absolutePath: string) => Promise<void>,
+  ) {
+    this.assertProjectAvailable(id);
+    this.project(id);
+    this.deletionDirectory(id);
+    this.deletingProjects.add(id);
+    try {
+      this.persistTransaction(() => {
+        this.db.run("INSERT INTO records VALUES ('project-deletion',?,?)", [
+          id,
+          JSON.stringify({
+            projectId: id,
+            createdAt: new Date().toISOString(),
+          }),
+        ]);
+      });
+      const directory = this.deletionDirectory(id);
+      if (directory) {
+        await trash(directory);
+        if (this.deletionDirectory(id))
+          throw new Error("프로젝트 폴더의 휴지통 이동을 확인하지 못했습니다.");
+      }
+      this.removeProjectRecords(id);
+      return { deleted: true };
+    } catch (error) {
+      // A missing source is ambiguous after a failed move/flush: keep the durable
+      // intent so restart only reconciles records and never repeats the move.
+      if (this.get("project-deletion", id) && this.deletionDirectory(id))
+        this.cancelDeletionIntent(id);
+      throw error;
+    } finally {
+      if (!this.get("project-deletion", id)) this.deletingProjects.delete(id);
+    }
   }
   quote(q: Quote) {
     this.put("quote", q.id, q);

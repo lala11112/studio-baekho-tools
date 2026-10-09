@@ -222,6 +222,7 @@ export type Command =
   | { type: "production.probe" }
   | { type: "studio.open" | "studio.status" }
   | { type: "project.create"; name: string; demo?: boolean }
+  | { type: "project.delete"; id: string }
   | {
       type: "project.update";
       id: string;

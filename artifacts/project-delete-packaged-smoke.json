@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "packaged": true,
+  "isolatedStore": true,
+  "cancellationPreservesProject": true,
+  "pendingLocalCommandBlocksDelete": true,
+  "trashFailurePreservesProject": true,
+  "actualWindowsTrashOfSyntheticProject": true,
+  "otherProjectAndExternalFilePreserved": true,
+  "deletedProjectStaysDeletedAfterRestart": true,
+  "remoteRequests": 0,
+  "errors": []
+}
