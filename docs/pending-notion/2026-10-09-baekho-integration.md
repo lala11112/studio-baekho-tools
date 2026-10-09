@@ -8,3 +8,6 @@
 - 주요 파일: `src/StudioShell.tsx`, `src/App.tsx`, `electron/studio-host.ts`, `engine/studio-summary.ts`, `Desktop/src/main.cjs`, `Desktop/renderer/app.js`.
 - 검사와 한계: [통합 검증 기록](../STUDIO-VERIFICATION.md). 개발 앱·패키지 EXE의 로컬 fixture 검사이며 유료 생성과 실제 게임 실행은 하지 않았습니다.
 - 게시 시 기존 기록을 보존하고 통합 브랜치 작업임을 구분해야 합니다.
+
+구현 커밋: https://github.com/lala11112/studio-baekho-tools/commit/3701fc786d919d8b86f36b9e63a27bfb8a2e1a1b
+통합 브랜치를 원격에 게시했고 Windows CI가 성공했습니다.

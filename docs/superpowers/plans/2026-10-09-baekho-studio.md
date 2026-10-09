@@ -18,7 +18,7 @@
 - [x] Common shell: src/StudioShell.tsx, src/studio.css, src/main.tsx. Shared typed bridge, real lists, loading/errors, two persistent workspaces.
 - [x] Host integration: shared/studio.ts, engine/studio-summary.ts, electron/studio-host.ts, electron/main.ts, preload.ts, packaging and focused tests.
 - [x] Run both existing suites, build, inspect real Electron UI including persistent drafts and lists, package and smoke test, final independent review.
-- [ ] Update README and verification record, commit and push integration branch.
+- [x] Update README and verification record, commit and push integration branch.
 
 ## Review focus
 - Rapid navigation during asynchronous view loading must not overlay the wrong screen.

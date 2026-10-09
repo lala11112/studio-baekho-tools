@@ -52,3 +52,5 @@
 - Vite는 기존 Three.js/도구 UI 번들이 500kB보다 크다는 경고를 표시합니다. 빌드와 실행은 통과했습니다.
 
 GitHub Actions는 Windows에서 두 테스트 모음과 빌드를 검사하도록 추가했습니다. 로컬 기록과 원격 CI 결과는 별도로 확인합니다.
+
+원격 CI 확인: 구현 커밋 3701fc786d919d8b86f36b9e63a27bfb8a2e1a1b의 [Windows 자동 검사](https://github.com/lala11112/studio-baekho-tools/actions/runs/37881533639)가 2026-10-09 성공했습니다. 두 테스트 모음과 빌드를 모두 통과했습니다. 이후 이 완료 기록만 추가했습니다.
