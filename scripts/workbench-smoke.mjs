@@ -250,6 +250,15 @@ try {
       action: { kind: "accept", jobId: job.id },
     });
   await page.getByTestId("workbench-step-parts").click();
+  assert.equal(
+    await page.getByTestId("workbench-group-separation-views").isChecked(),
+    false,
+  );
+  assert.match(
+    await page.getByTestId("workbench-separation-batch-help").textContent(),
+    /기본은 방향별 개별 생성/,
+  );
+  await page.getByTestId("workbench-group-separation-views").check();
   assert.match(
     await page.getByTestId("workbench-separation-batch-help").textContent(),
     /총 3회 생성 후 12장/,

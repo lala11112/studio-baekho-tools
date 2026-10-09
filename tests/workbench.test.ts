@@ -1325,7 +1325,7 @@ test("new separation freezes twelve role/view images and models have one result"
   );
   assert.deepEqual(split.request.views, ["front", "back", "left", "right"]);
   assert.equal(split.request.provider, "gpt");
-  assert.equal(split.request.separationStrategy, "part-sheet-v1");
+  assert.equal(split.request.separationStrategy, undefined);
   assert.equal(
     split.candidates[0].artifacts.filter((a) => a.kind === "image").length,
     12,
@@ -1358,7 +1358,7 @@ test("new separation freezes twelve role/view images and models have one result"
   );
 });
 
-test("grouped separation strategy is validated only for new GPT separation requests", async (t) => {
+test("grouped separation requires explicit GPT opt-in and individual generation stays the default", async (t) => {
   const x = await setup(t);
   for (const request of [
     {
@@ -1387,9 +1387,11 @@ test("grouped separation strategy is validated only for new GPT separation reque
   const request: WorkbenchRequest = {
     step: "separate",
     prompt: "new GPT batch",
+    separationStrategy: "part-sheet-v1",
   };
+  const originalRequest = structuredClone(request);
   const grouped = await x.execute(request);
-  assert.equal(request.separationStrategy, undefined, "Input is not mutated");
+  assert.deepEqual(request, originalRequest, "Input is not mutated");
   assert.equal(grouped.request.separationStrategy, "part-sheet-v1");
   assert.equal(
     x.executor.calls[0].job.request.separationStrategy,
@@ -1397,12 +1399,37 @@ test("grouped separation strategy is validated only for new GPT separation reque
   );
   assert.equal(grouped.status, "review");
   assert.equal(x.engine.get(x.w.id).selections.separate, undefined);
+  const individual = await x.execute({
+    step: "separate",
+    prompt: "default views",
+  });
+  assert.equal(individual.request.provider, "gpt");
+  assert.equal(individual.request.separationStrategy, undefined);
+  assert.equal(
+    x.executor.calls.at(-1)!.job.request.separationStrategy,
+    undefined,
+  );
   const tripo = await x.execute({
     step: "separate",
     provider: "tripo",
     prompt: "legacy provider",
   });
   assert.equal(tripo.request.separationStrategy, undefined);
+  const stored = x.engine.get(x.w.id);
+  stored.jobs.find((job) => job.id === grouped.id)!.status = "failed";
+  x.store.put("workbench", stored.id, stored);
+  x.engine.retry(x.w.id, grouped.id);
+  const resumed = await x.engine.wait(x.w.id);
+  assert.equal(
+    resumed.jobs.find((job) => job.id === grouped.id)!.request
+      .separationStrategy,
+    "part-sheet-v1",
+  );
+  assert.equal(
+    x.executor.calls.at(-1)!.job.request.separationStrategy,
+    "part-sheet-v1",
+    "Retry preserves the explicit sheet choice even though new requests default to individual views",
+  );
 });
 
 test("retry and restart preserve a legacy separation plan without automatic strategy migration", async (t) => {
@@ -1557,6 +1584,7 @@ test("stopped partial separation is a verified base for filling missing views on
   const filled = await x.execute({
     step: "separate",
     prompt: "fill missing",
+    separationStrategy: "part-sheet-v1",
     baseJobId: stopped.id,
     reuseExisting: true,
   });
@@ -1993,7 +2021,11 @@ test("sheet source exports accompany unselectable drafts and survive full review
     });
     return result;
   };
-  x.engine.execute(x.w.id, { step: "separate", prompt: "grouped views" });
+  x.engine.execute(x.w.id, {
+    step: "separate",
+    prompt: "grouped views",
+    separationStrategy: "part-sheet-v1",
+  });
   await new Promise((resolve) => setImmediate(resolve));
   const draft = x.engine.get(x.w.id).jobs[0];
   assert.equal(draft.status, "running");
@@ -2114,7 +2146,9 @@ test("sheet source export validation rejects arbitrary drafts and complete outpu
     const job = await x.execute({
       step: "separate",
       prompt: "grouped views",
-      ...(fault === "legacy" ? { provider: "tripo" as const } : {}),
+      ...(fault === "legacy"
+        ? {}
+        : { separationStrategy: "part-sheet-v1" as const }),
     });
     assert.equal(job.status, "failed", fault);
     assert.equal(job.draftCandidates, undefined, fault);

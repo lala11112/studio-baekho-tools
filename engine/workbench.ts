@@ -373,9 +373,9 @@ export class WorkbenchEngine {
         (r.separationStrategy !== "part-sheet-v1" || r.provider !== "gpt")
       )
         throw new Error("지원하지 않는 GPT 파츠 묶음 생성 방식입니다.");
-      // Only new execute requests are normalized. Saved retry/recovery jobs keep
-      // their frozen strategy, including legacy jobs where this field is absent.
-      if (r.provider === "gpt") r.separationStrategy = "part-sheet-v1";
+      // A sheet shares its source pixels between views, so batching requires an
+      // explicit choice. Undefined keeps individual generation; retry/recovery
+      // preserves whichever strategy was frozen on the original job.
       if (
         r.views !== undefined &&
         (r.views.length !== 4 ||
