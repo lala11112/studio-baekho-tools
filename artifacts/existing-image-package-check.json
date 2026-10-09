@@ -1,0 +1,72 @@
+{
+  "date": "2026-10-09T12:33:15.172Z",
+  "passed": true,
+  "version": "0.6.3",
+  "source": {
+    "file": "C:\\Users\\김민준\\Desktop\\3D tool\\artifacts\\runtime\\guided-image-smoke\\candidate.png",
+    "sha256": "141dab150b4805a17dafb4eaac6ac63b3e6f86d19fcc9bf10d4e694fad5e04d8",
+    "bytes": 1352005,
+    "dimensions": {
+      "width": 1024,
+      "height": 1536
+    }
+  },
+  "isolatedUserData": "C:\\Users\\김민준\\Desktop\\3D tool\\artifacts\\runtime\\existing-image-package-96a7379d-0408-4212-bc6e-a33658146c44",
+  "automationSeam": "Native file-picker response selects the existing real PNG; packaged import, persistence and UI are unmodified. No worker mock.",
+  "limitations": [
+    "Model input means the selected source shown in the whole-model UI, not an executed or frozen Tripo submission.",
+    "No new image generation, Studio submission, model output, Blender, rigging or animation was tested."
+  ],
+  "checks": [
+    "Real original imported, copied without byte changes, decoded and visibly selected in concept UI without authenticated ChatGPT.",
+    "Whole-image modeling page displays the exact selected original as input; no model action was submitted.",
+    "After closing and reopening the packaged app, selection, whole-model input, native dimensions and stored/original SHA-256 are unchanged."
+  ],
+  "errors": [],
+  "firstRun": {
+    "projectId": "b10ec81d-a683-4a19-ba5c-669e19e894ef",
+    "workbenchId": "dcb68ec0-9a53-4bd1-a0bb-f0fb7c0bdc60",
+    "jobId": "c24dcfdc-ef36-4fa3-a71d-b590dc5bc99c",
+    "selection": {
+      "jobId": "c24dcfdc-ef36-4fa3-a71d-b590dc5bc99c",
+      "candidateId": "3ed2c932-b3a3-4e5e-acd6-098b2e45c60d"
+    },
+    "sourceArtifact": {
+      "path": "workbench/dcb68ec0-9a53-4bd1-a0bb-f0fb7c0bdc60/jobs/c24dcfdc-ef36-4fa3-a71d-b590dc5bc99c/reference.png",
+      "kind": "image",
+      "role": "front",
+      "sha256": "141dab150b4805a17dafb4eaac6ac63b3e6f86d19fcc9bf10d4e694fad5e04d8",
+      "bytes": 1352005
+    },
+    "conceptDisplay": {
+      "src": "asset://project/b10ec81d-a683-4a19-ba5c-669e19e894ef/workbench/dcb68ec0-9a53-4bd1-a0bb-f0fb7c0bdc60/jobs/c24dcfdc-ef36-4fa3-a71d-b590dc5bc99c/reference.png",
+      "width": 1024,
+      "height": 1536,
+      "complete": true
+    },
+    "modelInputDisplay": {
+      "src": "asset://project/b10ec81d-a683-4a19-ba5c-669e19e894ef/workbench/dcb68ec0-9a53-4bd1-a0bb-f0fb7c0bdc60/jobs/c24dcfdc-ef36-4fa3-a71d-b590dc5bc99c/reference.png",
+      "width": 1024,
+      "height": 1536,
+      "complete": true
+    },
+    "pickerCalls": 1,
+    "deniedHttpOrigins": []
+  },
+  "reopened": {
+    "input": {
+      "src": "asset://project/b10ec81d-a683-4a19-ba5c-669e19e894ef/workbench/dcb68ec0-9a53-4bd1-a0bb-f0fb7c0bdc60/jobs/c24dcfdc-ef36-4fa3-a71d-b590dc5bc99c/reference.png",
+      "width": 1024,
+      "height": 1536,
+      "complete": true
+    },
+    "jobs": 1,
+    "browserOpened": false
+  },
+  "generation": {
+    "newImageCalls": 0,
+    "submittedModelJobs": 0,
+    "paidRequests": 0,
+    "mockedWorkers": 0
+  }
+}

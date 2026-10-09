@@ -2,6 +2,15 @@
 
 검증일: 2026-10-09, Windows. 실제 API 생성과 로컬 데모 검증을 구분합니다.
 
+## 2026-10-09 — 기존 실제 이미지의 배포 앱 전달 확인
+
+- **방향 수정:** 사용자는 내장 ChatGPT 로그인 수정에 계속 시간을 쓰는 대신 실제 에셋 전달을 먼저 확인하도록 요청했습니다. 내장 로그인 추가 수정은 중단하고 일반 브라우저 연결과 현재 Codex 세션을 사용하는 방향으로 확인합니다. 기존 앱 버튼에서 현재 대화를 호출하는 연결이나 외부 브라우저 자동 제어가 구현됐다는 뜻은 아닙니다.
+- **실행:** `node scripts/existing-image-package-check.mjs` 통과. 기존 `release/0.6.3/win-unpacked/Partsmith.exe`를 새 격리 데이터 폴더에서 실행했습니다. 이전에 실제 GPT 도구로 생성한 파란 로봇 PNG(1024×1536, 1,352,005바이트)를 재사용했습니다. 새 빌드나 이미지 생성은 하지 않았습니다.
+- **확인:** 화면의 기존 이미지 가져오기 → 원본 디코딩·선택 → 분리 없는 전체 모델 입력 화면 → 앱 종료·재실행 후 같은 선택과 원본 표시가 통과했습니다. 입력 원본, 프로젝트 에셋, 제작실 참조 파일의 SHA-256이 모두 `141dab150b4805a17dafb4eaac6ac63b3e6f86d19fcc9bf10d4e694fad5e04d8`로 일치했습니다. 두 화면도 직접 확인했습니다.
+- **검사의 경계:** 파일 선택 창 응답만 실제 파일 경로로 주입했습니다. 가져오기·저장·제작실·화면은 배포 앱 구현이며 모의 생성 작업자는 없습니다. 사용자 프로필은 변경하지 않았습니다. 새 이미지 생성·모델 작업 제출·유료 요청은 0회입니다. 모델 입력 확인은 앱 화면의 선택 원본까지이며 Tripo 업로드·생성·Blender 전달 성공을 뜻하지 않습니다.
+- **남은 조건:** 현재 도구에는 일반 Chrome/Edge가 연결돼 있지 않고 Chrome 열기도 `Browser is not available: chrome`으로 실패했습니다. [공식 확장 안내](https://learn.chatgpt.com/docs/chrome-extension)의 설정 → Computer Use → 브라우저 설치/연결 경로를 안내했습니다. 설치된 앱에도 해당 설정 화면 코드가 있지만 계정에서의 메뉴 표시와 연결 완료는 미확인입니다. 실제 Tripo 모델을 확보한 뒤 Blender 전달을 확인해야 합니다.
+- **근거:** `artifacts/existing-image-package-check.json`, `artifacts/screenshots/existing-image-concept-package.png`, `artifacts/screenshots/existing-image-model-input-package.png`. `AGENTS.md`에 검증 우선 방향과 외부 브라우저/CLI/현재 대화 사이의 연결 한계를 기록했습니다. 모델·추론 강도·이미지 품질 설정은 변경하지 않았으며 토큰 절감률은 주장하지 않습니다.
+
 ## 0.6.3 — 실제 Google 버튼의 인증 경로 누락 수정
 
 - **증상·확정 원인:** 0.6.2에서 Google 버튼이 로딩 상태로 멈췄습니다. 사용자가 `BLOCKED_NAVIGATION · chatgpt.com /auth/[redacted]` 진단을 전달했고, 별도 새 Electron 프로필의 실제 ChatGPT 공개 화면에서도 같은 오류를 재현했습니다. 실제 Google 링크는 `/auth/login_with`로 이동하는데 기존 허용 목록에 이 경로가 빠져 있었습니다. 0.6.2의 모의 팝업 검사만으로는 실제 버튼 경로 누락을 발견하지 못했습니다.
