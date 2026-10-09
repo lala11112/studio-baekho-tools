@@ -376,14 +376,17 @@ export class WorkbenchEngine {
       r.provider ??= "gpt";
       if (!["gpt", "tripo"].includes(r.provider))
         throw new Error("지원하지 않는 이미지 제공자입니다.");
+      if (r.separationStrategy === "part-sheet-v1")
+        throw new Error(
+          "시트 생성 방식은 더 이상 실행할 수 없습니다. 파츠별 독립 멀티뷰 이미지 방식으로 새 요청을 실행하세요. 기존 사진은 저장된 사진 확인으로 열 수 있습니다.",
+        );
       if (
         r.separationStrategy !== undefined &&
-        (r.separationStrategy !== "part-sheet-v1" || r.provider !== "gpt")
+        (r.separationStrategy !== "part-multiview-v1" || r.provider !== "gpt")
       )
         throw new Error("지원하지 않는 GPT 파츠 묶음 생성 방식입니다.");
-      // A sheet shares its source pixels between views, so batching requires an
-      // explicit choice. Undefined keeps individual generation; retry/recovery
-      // preserves whichever strategy was frozen on the original job.
+      // Only new requests are normalized. Saved legacy requests keep their plan.
+      if (r.provider === "gpt") r.separationStrategy = "part-multiview-v1";
       if (
         r.views !== undefined &&
         (r.views.length !== 4 ||
@@ -1455,6 +1458,10 @@ export class WorkbenchEngine {
     this.idle(w);
     this.workerIdle();
     const job = this.job(w, jobId);
+    if (job.request.separationStrategy === "part-sheet-v1")
+      throw new Error(
+        "이전 시트 작업은 다시 실행할 수 없습니다. 저장된 사진 확인·기존 결과 다시 검사·사진 크기 정리를 사용하세요. 없는 사진은 새 멀티뷰 요청으로 채울 수 있습니다.",
+      );
     if (
       !["failed", "needs_input", "submission_unknown", "cancelled"].includes(
         job.status,

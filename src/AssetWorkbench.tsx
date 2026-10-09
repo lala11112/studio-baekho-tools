@@ -247,7 +247,6 @@ export function AssetWorkbench({
   const [separationView, setSeparationView] = useState<WorkbenchView | "all">(
     "all",
   );
-  const [groupSeparationViews, setGroupSeparationViews] = useState(false);
   const [surfaceRole, setSurfaceRole] = useState<WorkbenchRole | "all">("all");
   const [provider, setProvider] = useState<"gpt" | "tripo">(
     w?.jobs.find((j) => j.step === "concept")?.request.provider ?? "gpt",
@@ -341,7 +340,6 @@ export function AssetWorkbench({
       role,
       separationRole,
       separationView,
-      groupSeparationViews,
       surfaceRole,
       viewJobId,
     ],
@@ -820,7 +818,7 @@ export function AssetWorkbench({
             {step === "concept"
               ? "이미지 후보 4장"
               : step === "separate"
-                ? `머리·머리카락·몸통 × 4방향, 총 12장. ${groupSeparationViews ? "같은 파츠의 방향을 한 원본에 묶어 생성합니다." : "각 방향을 개별 이미지로 생성합니다."} 현재 선택 범위 ${rerollSeparationCount}장 수정 또는 누락 ${missingSeparationCount}장만 생성합니다.`
+                ? `머리·머리카락·몸통 × 4방향, 총 12장. 파츠마다 GPT에 한 번 요청해 방향별 독립 이미지를 받습니다. 현재 선택 범위 ${rerollSeparationCount}장 수정 또는 누락 ${missingSeparationCount}장만 생성합니다.`
                 : `정면·측면·후면 각 ${referenceFrameCount}장, 총 ${referenceFrameCount * 3}장 · ${duration}초 동작의 주요 시점`}
           </small>
         )}
@@ -1096,7 +1094,7 @@ export function AssetWorkbench({
                       setProvider(e.target.value as "gpt" | "tripo")
                     }
                   >
-                    <option value="gpt">GPT</option>
+                    <option value="gpt">GPT · Codex 연동</option>
                     <option value="tripo">Tripo</option>
                   </select>
                 </label>
@@ -1178,23 +1176,11 @@ export function AssetWorkbench({
                 {partMode === "separate" ? (
                   <>
                     <p data-testid="workbench-separation-batch-help">
-                      {groupSeparationViews
-                        ? "파츠마다 정면·후면·왼쪽·오른쪽을 한 번에 묶어 만듭니다. 머리·머리카락·몸통 총 3회 생성 후 12장으로 자동 분리합니다."
-                        : "기본은 방향별 개별 생성입니다. 머리·머리카락·몸통의 정면·후면·왼쪽·오른쪽을 각각 생성해 총 12장을 만듭니다."}{" "}
-                      사진을 확인하고 채택한 뒤 모델을 만듭니다.
+                      파츠마다 GPT(Codex 연동)에 정면·후면·좌·우 멀티뷰를 한 번
+                      요청하고 방향별 독립 이미지 4장을 받습니다.
+                      머리·머리카락·몸통 3개 파츠를 각각 요청해 총 12장을
+                      만듭니다. 사진을 확인하고 채택한 뒤 모델을 만듭니다.
                     </p>
-                    <label className="wb-checkbox">
-                      <input
-                        data-testid="workbench-group-separation-views"
-                        type="checkbox"
-                        checked={groupSeparationViews}
-                        disabled={locked}
-                        onChange={(e) =>
-                          setGroupSeparationViews(e.target.checked)
-                        }
-                      />
-                      4방향 묶음 생성(원본 크기 공유)
-                    </label>
                     <div className="wb-pair">
                       <label className="field">
                         <span>수정할 파츠</span>
@@ -1246,16 +1232,6 @@ export function AssetWorkbench({
                         onChange={(e) => setSeparationPrompt(e.target.value)}
                       />
                     </label>
-                    <p
-                      className="wb-note"
-                      data-testid="workbench-sheet-resolution-note"
-                    >
-                      묶음을 선택하면 4방향이 한 원본 이미지 크기를 공유하므로
-                      방향별 원본 크기가 작아질 수 있습니다. 기존 개별 생성과
-                      같은 세부 품질을 보장하지 않으며, 결과의 원본 크기와
-                      외형을 확인한 뒤 채택하세요. 특정 방향은 수정 지시로 개별
-                      리롤할 수 있습니다.
-                    </p>
                     {approvalBox()}
                     {separationBase && missingSeparationCount > 0 && (
                       <>
@@ -1264,10 +1240,7 @@ export function AssetWorkbench({
                           data-testid="workbench-reuse-scope"
                         >
                           기존 {presentSeparationPairs.size}장은 유지합니다.
-                          없는 {missingSeparationCount}장만
-                          {groupSeparationViews
-                            ? " 같은 파츠끼리 묶어"
-                            : " 방향별로 개별 생성해"}{" "}
+                          없는 {missingSeparationCount}장만 같은 파츠끼리 요청해{" "}
                           추가합니다.
                         </div>
                         {launch(
@@ -1276,9 +1249,7 @@ export function AssetWorkbench({
                             step: "separate",
                             prompt: separationPrompt,
                             provider: "gpt",
-                            ...(groupSeparationViews
-                              ? { separationStrategy: "part-sheet-v1" as const }
-                              : {}),
+                            separationStrategy: "part-multiview-v1",
                             views: [...WORKBENCH_VIEWS],
                             baseJobId: separationBase.id,
                             reuseExisting: true,
@@ -1291,16 +1262,12 @@ export function AssetWorkbench({
                     {launch(
                       separationBase
                         ? `선택한 ${rerollSeparationCount}장 수정 · 리롤`
-                        : groupSeparationViews
-                          ? "파츠별 4방향 묶음 만들기 · 총 12장"
-                          : "파츠 4방향 개별 이미지 만들기 · 총 12장",
+                        : "파츠별 멀티뷰 이미지 만들기 · 총 12장",
                       {
                         step: "separate",
                         prompt: separationPrompt,
                         provider: "gpt",
-                        ...(groupSeparationViews
-                          ? { separationStrategy: "part-sheet-v1" as const }
-                          : {}),
+                        separationStrategy: "part-multiview-v1",
                         baseJobId: separationBase?.id,
                         views: [...WORKBENCH_VIEWS],
                         role:
@@ -1316,12 +1283,10 @@ export function AssetWorkbench({
                     )}
                     {separationBase && (
                       <small className="wb-muted">
-                        한 파츠의 한 방향만 선택하면 한 장만 리롤합니다.
-                        {groupSeparationViews
-                          ? " 여러 방향은 같은 파츠끼리 묶어 만듭니다."
-                          : " 여러 방향도 각각 개별 이미지로 만듭니다."}{" "}
-                        다른 파츠·방향의 사진은 그대로 사용합니다. 결과는 새
-                        버전에 저장됩니다.
+                        한 파츠의 한 방향만 선택하면 한 장만 리롤합니다. 여러
+                        방향은 같은 파츠끼리 요청해 독립 이미지로 만듭니다. 다른
+                        파츠·방향의 사진은 그대로 사용합니다. 결과는 새 버전에
+                        저장됩니다.
                       </small>
                     )}
                   </>

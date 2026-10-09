@@ -16,6 +16,7 @@ import type {
   WorkbenchResult,
   WorkbenchView,
   WorkbenchArtifact,
+  WorkbenchJob,
 } from "../shared/workbench";
 
 // These are synthetic fixtures for host state-machine validation, not generation-quality evidence.
@@ -1325,7 +1326,7 @@ test("new separation freezes twelve role/view images and models have one result"
   );
   assert.deepEqual(split.request.views, ["front", "back", "left", "right"]);
   assert.equal(split.request.provider, "gpt");
-  assert.equal(split.request.separationStrategy, undefined);
+  assert.equal(split.request.separationStrategy, "part-multiview-v1");
   assert.equal(
     split.candidates[0].artifacts.filter((a) => a.kind === "image").length,
     12,
@@ -1358,7 +1359,7 @@ test("new separation freezes twelve role/view images and models have one result"
   );
 });
 
-test("grouped separation requires explicit GPT opt-in and individual generation stays the default", async (t) => {
+test("new GPT separation defaults to independent multiview requests and rejects legacy sheet execution", async (t) => {
   const x = await setup(t);
   for (const request of [
     {
@@ -1370,44 +1371,53 @@ test("grouped separation requires explicit GPT opt-in and individual generation 
       step: "separate",
       prompt: "wrong provider",
       provider: "tripo",
-      separationStrategy: "part-sheet-v1",
+      separationStrategy: "part-multiview-v1",
     },
     {
       step: "concept",
       prompt: "wrong stage",
-      separationStrategy: "part-sheet-v1",
+      separationStrategy: "part-multiview-v1",
     },
   ])
     assert.throws(
       () => x.engine.execute(x.w.id, request as WorkbenchRequest),
       /묶음 생성 방식/,
     );
+  assert.throws(
+    () =>
+      x.engine.execute(x.w.id, {
+        step: "separate",
+        prompt: "old sheet request",
+        separationStrategy: "part-sheet-v1",
+      }),
+    /시트 생성 방식.*실행할 수 없습니다.*독립 멀티뷰/,
+  );
   assert.equal(x.executor.calls.length, 0);
   assert.equal(x.engine.get(x.w.id).jobs.length, 1);
   const request: WorkbenchRequest = {
     step: "separate",
     prompt: "new GPT batch",
-    separationStrategy: "part-sheet-v1",
+    separationStrategy: "part-multiview-v1",
   };
   const originalRequest = structuredClone(request);
   const grouped = await x.execute(request);
   assert.deepEqual(request, originalRequest, "Input is not mutated");
-  assert.equal(grouped.request.separationStrategy, "part-sheet-v1");
+  assert.equal(grouped.request.separationStrategy, "part-multiview-v1");
   assert.equal(
     x.executor.calls[0].job.request.separationStrategy,
-    "part-sheet-v1",
+    "part-multiview-v1",
   );
   assert.equal(grouped.status, "review");
   assert.equal(x.engine.get(x.w.id).selections.separate, undefined);
-  const individual = await x.execute({
+  const defaulted = await x.execute({
     step: "separate",
     prompt: "default views",
   });
-  assert.equal(individual.request.provider, "gpt");
-  assert.equal(individual.request.separationStrategy, undefined);
+  assert.equal(defaulted.request.provider, "gpt");
+  assert.equal(defaulted.request.separationStrategy, "part-multiview-v1");
   assert.equal(
     x.executor.calls.at(-1)!.job.request.separationStrategy,
-    undefined,
+    "part-multiview-v1",
   );
   const tripo = await x.execute({
     step: "separate",
@@ -1423,12 +1433,12 @@ test("grouped separation requires explicit GPT opt-in and individual generation 
   assert.equal(
     resumed.jobs.find((job) => job.id === grouped.id)!.request
       .separationStrategy,
-    "part-sheet-v1",
+    "part-multiview-v1",
   );
   assert.equal(
     x.executor.calls.at(-1)!.job.request.separationStrategy,
-    "part-sheet-v1",
-    "Retry preserves the explicit sheet choice even though new requests default to individual views",
+    "part-multiview-v1",
+    "Retry preserves the frozen independent multiview strategy",
   );
 });
 
@@ -1584,12 +1594,12 @@ test("stopped partial separation is a verified base for filling missing views on
   const filled = await x.execute({
     step: "separate",
     prompt: "fill missing",
-    separationStrategy: "part-sheet-v1",
+    separationStrategy: "part-multiview-v1",
     baseJobId: stopped.id,
     reuseExisting: true,
   });
   assert.equal(filled.status, "review", filled.summary);
-  assert.equal(filled.request.separationStrategy, "part-sheet-v1");
+  assert.equal(filled.request.separationStrategy, "part-multiview-v1");
   assert.equal(
     x.engine.get(x.w.id).jobs.find((job) => job.id === stopped.id)!.request
       .separationStrategy,
@@ -2000,45 +2010,83 @@ function attachSheetExport(
   return source;
 }
 
-test("sheet source exports accompany unselectable drafts and survive full review, reroll and backup", async (t) => {
-  const x = await setup(t);
-  let release!: () => void;
-  x.executor.hook = async (ctx, result) => {
-    attachSheetExport(ctx, result);
-    ctx.onDraft!({
-      ...result,
-      candidates: [
-        {
-          ...result.candidates[0],
-          artifacts: result.candidates[0].artifacts.filter(
-            (a) => a.role === "head",
-          ),
-        },
-      ],
-    });
-    await new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    return result;
-  };
-  x.engine.execute(x.w.id, {
+function savedSheetFixture(x: Awaited<ReturnType<typeof setup>>) {
+  const w = x.engine.get(x.w.id);
+  const job: WorkbenchJob = {
+    ...structuredClone(w.jobs[0]),
+    id: "legacy-sheet",
     step: "separate",
-    prompt: "grouped views",
-    separationStrategy: "part-sheet-v1",
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  const draft = x.engine.get(x.w.id).jobs[0];
-  assert.equal(draft.status, "running");
-  assert.equal(
-    draft.draftCandidates?.[0].artifacts.filter((a) => a.kind === "image")
-      .length,
-    4,
+    slot: "separate",
+    request: {
+      step: "separate",
+      prompt: "saved legacy sheet fixture",
+      provider: "gpt",
+      separationStrategy: "part-sheet-v1",
+      views: ["front", "back", "left", "right"],
+    },
+    dependencies: { concept: w.selections.concept },
+    status: "cancelled",
+    candidates: [],
+    checks: [],
+  };
+  w.jobs.unshift(job);
+  x.store.put("workbench", w.id, w);
+  const workspace = x.store.file(
+    x.project.id,
+    `workbench/${w.id}/jobs/${job.id}`,
   );
-  const raw = draft.draftCandidates![0].artifacts.find(
+  fs.mkdirSync(workspace, { recursive: true });
+  const ctx: WorkbenchExecutionContext = {
+    workbench: w,
+    job,
+    workspace,
+    inputs: w.jobs[1].candidates[0].artifacts,
+    signal: new AbortController().signal,
+  };
+  const result = x.executor.fixture(ctx);
+  attachSheetExport(ctx, result);
+  x.executor.inspectSaved = async () => structuredClone(result);
+  return { ctx, result, job };
+}
+
+test("saved sheet requests cannot retry but local inspection, normalization, reroll and backup preserve history", async (t) => {
+  const x = await setup(t, true, [0, 0, 0], normalizedFixture);
+  const { job } = savedSheetFixture(x);
+  const frozen = structuredClone(x.engine.get(x.w.id));
+  assert.throws(
+    () => x.engine.retry(x.w.id, job.id),
+    /시트 작업.*실행할 수 없습니다.*저장된 사진 확인/,
+  );
+  assert.deepEqual(
+    x.engine.get(x.w.id),
+    frozen,
+    "Blocked retry must not mutate saved history",
+  );
+  assert.equal(x.executor.calls.length, 0);
+  x.engine.inspectSaved(x.w.id, job.id);
+  const completed = (await x.engine.wait(x.w.id)).jobs[0];
+  assert.equal(completed.status, "review", completed.summary);
+  assert.deepEqual(completed.request, job.request);
+  assert.equal(
+    completed.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    12,
+  );
+  assert.equal(
+    x.executor.calls.length,
+    0,
+    "Saved inspection never starts generation",
+  );
+  const raw = completed.candidates[0].artifacts.find(
     (a) => a.kind === "export",
   )!;
-  assert.ok(raw);
-  assert.throws(() => x.engine.accept(x.w.id, draft.id));
+  x.engine.normalizeImages(x.w.id, job.id);
+  assert.equal(
+    x.executor.calls.length,
+    0,
+    "Local normalization never starts generation",
+  );
+  assert.deepEqual(x.engine.get(x.w.id).jobs[0].request, job.request);
+  x.engine.accept(x.w.id, completed.id);
   const backup = path.join(x.root, "sheet-backup");
   fs.cpSync(x.store.directory(x.project.id), backup, { recursive: true });
   const other = new Store(path.join(x.root, "sheet-restored"));
@@ -2053,15 +2101,6 @@ test("sheet source exports accompany unselectable drafts and survive full review
     image("original source-sheet bytes"),
   );
   assert.equal(executor.calls.length, 0);
-  release();
-  const completed = (await x.engine.wait(x.w.id)).jobs[0];
-  assert.equal(completed.status, "review", completed.summary);
-  assert.equal(
-    completed.candidates[0].artifacts.filter((a) => a.kind === "image").length,
-    12,
-  );
-  x.engine.accept(x.w.id, completed.id);
-  x.executor.hook = undefined;
   const corrected = await x.execute({
     step: "separate",
     prompt: "hair back only",
@@ -2070,6 +2109,7 @@ test("sheet source exports accompany unselectable drafts and survive full review
     baseJobId: completed.id,
   });
   assert.equal(corrected.status, "review", corrected.summary);
+  assert.equal(corrected.request.separationStrategy, "part-multiview-v1");
   assert.equal(
     x.engine
       .get(x.w.id)
@@ -2087,9 +2127,9 @@ test("sheet source exports accompany unselectable drafts and survive full review
   assert.throws(() => restored.restoreFromBackup(x.project.id, backup), /손상/);
 });
 
-test("sheet source export validation rejects arbitrary drafts and complete outputs", async (t) => {
+test("saved sheet inspection still blocks invalid source paths, roles, formats and duplicates", async (t) => {
   for (const fault of [
-    "legacy",
+    "new-strategy",
     "path",
     "role",
     "view",
@@ -2098,61 +2138,61 @@ test("sheet source export validation rejects arbitrary drafts and complete outpu
     "unpaired",
   ] as const) {
     const x = await setup(t);
-    x.executor.hook = (ctx, result) => {
-      const source = attachSheetExport(ctx, result);
-      if (fault === "path") {
-        const dest = "unrelated.png";
-        fs.copyFileSync(
-          path.join(ctx.workspace, source.path),
-          path.join(ctx.workspace, dest),
-        );
-        source.path = dest;
-      }
-      if (fault === "role") source.role = "hair";
-      if (fault === "view") (source as { view?: WorkbenchView }).view = "front";
-      if (fault === "format")
-        fs.writeFileSync(path.join(ctx.workspace, source.path), "not a PNG");
-      if (fault === "duplicate") {
-        const back = result.candidates[0].artifacts.find(
-          (a) => a.kind === "image" && a.role === "head" && a.view === "back",
-        )!;
-        const folder = "outputs/separate-head-back";
-        fs.mkdirSync(path.join(ctx.workspace, folder), { recursive: true });
-        fs.copyFileSync(
-          path.join(ctx.workspace, back.path),
-          path.join(ctx.workspace, folder, "part.png"),
-        );
-        back.path = `${folder}/part.png`;
-        const duplicate = { ...source, path: `${folder}/source-sheet.png` };
-        fs.copyFileSync(
-          path.join(ctx.workspace, source.path),
-          path.join(ctx.workspace, duplicate.path),
-        );
-        result.candidates[0].artifacts.push(duplicate);
-      }
-      if (fault === "unpaired") {
-        const front = result.candidates[0].artifacts.find(
-          (a) => a.kind === "image" && a.role === "head" && a.view === "front",
-        )!;
-        fs.copyFileSync(
-          path.join(ctx.workspace, front.path),
-          path.join(ctx.workspace, "front.png"),
-        );
-        front.path = "front.png";
-      }
-      ctx.onDraft!(result);
-      return result;
-    };
-    const job = await x.execute({
-      step: "separate",
-      prompt: "grouped views",
-      ...(fault === "legacy"
-        ? {}
-        : { separationStrategy: "part-sheet-v1" as const }),
-    });
-    assert.equal(job.status, "failed", fault);
+    const { ctx, result, job: saved } = savedSheetFixture(x);
+    const source = result.candidates[0].artifacts.find(
+      (a) => a.kind === "export",
+    )!;
+    if (fault === "new-strategy") {
+      const w = x.engine.get(x.w.id);
+      w.jobs[0].request.separationStrategy = "part-multiview-v1";
+      x.store.put("workbench", w.id, w);
+    }
+    if (fault === "path") {
+      const dest = "unrelated.png";
+      fs.copyFileSync(
+        path.join(ctx.workspace, source.path),
+        path.join(ctx.workspace, dest),
+      );
+      source.path = dest;
+    }
+    if (fault === "role") source.role = "hair";
+    if (fault === "view") (source as { view?: WorkbenchView }).view = "front";
+    if (fault === "format")
+      fs.writeFileSync(path.join(ctx.workspace, source.path), "not a PNG");
+    if (fault === "duplicate") {
+      const back = result.candidates[0].artifacts.find(
+        (a) => a.kind === "image" && a.role === "head" && a.view === "back",
+      )!;
+      const folder = "outputs/separate-head-back";
+      fs.mkdirSync(path.join(ctx.workspace, folder), { recursive: true });
+      fs.copyFileSync(
+        path.join(ctx.workspace, back.path),
+        path.join(ctx.workspace, folder, "part.png"),
+      );
+      back.path = `${folder}/part.png`;
+      const duplicate = { ...source, path: `${folder}/source-sheet.png` };
+      fs.copyFileSync(
+        path.join(ctx.workspace, source.path),
+        path.join(ctx.workspace, duplicate.path),
+      );
+      result.candidates[0].artifacts.push(duplicate);
+    }
+    if (fault === "unpaired") {
+      const front = result.candidates[0].artifacts.find(
+        (a) => a.kind === "image" && a.role === "head" && a.view === "front",
+      )!;
+      fs.copyFileSync(
+        path.join(ctx.workspace, front.path),
+        path.join(ctx.workspace, "front.png"),
+      );
+      front.path = "front.png";
+    }
+    x.engine.inspectSaved(x.w.id, saved.id);
+    const job = (await x.engine.wait(x.w.id)).jobs[0];
+    assert.equal(job.status, "cancelled", fault);
     assert.equal(job.draftCandidates, undefined, fault);
     assert.equal(job.candidates.length, 0, fault);
     assert.match(job.summary, /멀티뷰 시트 원본/, fault);
+    assert.equal(x.executor.calls.length, 0, fault);
   }
 });

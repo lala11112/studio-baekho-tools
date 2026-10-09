@@ -17,6 +17,7 @@
   "singleModelResult": true,
   "existingModelPartialEditRequest": true,
   "fourViewsPerPart": true,
+  "independentMultiviewDefaultWithoutSheetToggle": true,
   "promptTargetsOnePartView": true,
   "rerollPreservesElevenImages": true,
   "partialAndAllTwelveImagesDecoded": true,

@@ -251,17 +251,16 @@ try {
     });
   await page.getByTestId("workbench-step-parts").click();
   assert.equal(
-    await page.getByTestId("workbench-group-separation-views").isChecked(),
-    false,
+    await page.getByTestId("workbench-group-separation-views").count(),
+    0,
   );
   assert.match(
     await page.getByTestId("workbench-separation-batch-help").textContent(),
-    /기본은 방향별 개별 생성/,
+    /파츠마다 GPT\(Codex 연동\)에 정면·후면·좌·우 멀티뷰를 한 번 요청/,
   );
-  await page.getByTestId("workbench-group-separation-views").check();
   assert.match(
     await page.getByTestId("workbench-separation-batch-help").textContent(),
-    /총 3회 생성 후 12장/,
+    /방향별 독립 이미지 4장/,
   );
   await page.getByTestId("workbench-approve").check();
   await page.getByTestId("workbench-execute-separate").click();
@@ -298,7 +297,7 @@ try {
   assert(
     invocations()
       .filter((request) => request.step === "separate")
-      .every((request) => request.separationStrategy === "part-sheet-v1"),
+      .every((request) => request.separationStrategy === "part-multiview-v1"),
     "New separation and recovery must receive the same frozen grouped strategy",
   );
   await page.getByTestId("workbench-visual-warnings").waitFor();
@@ -315,10 +314,9 @@ try {
       labels.every((n) => n.textContent.includes("원본 32 × 32"))
     );
   });
-  assert(
-    (
-      await page.getByTestId("workbench-sheet-resolution-note").textContent()
-    ).includes("보장하지 않으며"),
+  assert.equal(
+    await page.getByTestId("workbench-sheet-resolution-note").count(),
+    0,
   );
   const alignedImages = await page
     .getByTestId("workbench-separation-views")
@@ -571,7 +569,12 @@ try {
   await assert.rejects(
     () =>
       call({ type: "production.start", runId: "old", budgetAccepted: true }),
-    /이전 자동 제작/,
+    /자동 제작 작업이 없습니다/,
+  );
+  assert.equal(
+    invocations().length,
+    count,
+    "An unknown legacy run must not start authoring",
   );
   assert.deepEqual(errors, []);
   fs.writeFileSync(
@@ -596,6 +599,7 @@ try {
         singleModelResult: true,
         existingModelPartialEditRequest: true,
         fourViewsPerPart: true,
+        independentMultiviewDefaultWithoutSheetToggle: true,
         promptTargetsOnePartView: true,
         rerollPreservesElevenImages: true,
         partialAndAllTwelveImagesDecoded: true,

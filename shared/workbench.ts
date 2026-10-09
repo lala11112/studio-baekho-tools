@@ -50,10 +50,10 @@ export type WorkbenchRequest = {
   role?: WorkbenchRole;
   /** New separation jobs always freeze all four views; absent on legacy jobs. */
   views?: WorkbenchView[];
-  /** Explicit GPT opt-in: one source sheet per part shares pixels across its views.
-   * Absent by default and on legacy jobs: generate each view individually.
-   * Retry/recovery preserves the original choice without migrating saved jobs. */
-  separationStrategy?: "part-sheet-v1";
+  /** New GPT jobs request independent view images together per part.
+   * The sheet strategy and absent fields remain readable on saved legacy jobs;
+   * legacy sheets cannot start a worker again. Saved requests are not migrated. */
+  separationStrategy?: "part-multiview-v1" | "part-sheet-v1";
   /** Optional one-view correction within the frozen separation set. */
   view?: WorkbenchView;
   /** Preserve every existing image and generate only missing role/view pairs. */

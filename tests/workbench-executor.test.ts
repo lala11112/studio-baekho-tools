@@ -898,6 +898,65 @@ function sheetFixture() {
   f.context.job.request.separationStrategy = "part-sheet-v1";
   return f;
 }
+function multiviewFixture() {
+  const f = fixture("separate");
+  f.context.job.request.views = [...fourViews];
+  f.context.job.request.separationStrategy = "part-multiview-v1";
+  return f;
+}
+function multiviewOutput(
+  task: WorkerTask,
+  onlyViews?: string[],
+): WorkbenchResult {
+  const role = /^separate-(head|hair|body)-multiview-v1$/.exec(
+    task.stage.id,
+  )![1];
+  const views =
+    onlyViews ??
+    JSON.parse(
+      /Requested independent original directions ONLY: (\[[^\]]+\])/.exec(
+        task.prompt,
+      )![1],
+    );
+  const artifacts = views.map((view: string) => {
+    const index = fourViews.indexOf(view as (typeof fourViews)[number]);
+    const png = new PNG({ width: 62 + index * 4, height: 70 + index * 6 });
+    png.data.fill(0);
+    for (let y = 8; y < png.height - 8; y++)
+      for (let x = 6; x < png.width - 6; x++)
+        png.data.set(
+          [
+            30 + ["head", "hair", "body"].indexOf(role) * 60,
+            30 + index * 40,
+            70,
+            255,
+          ],
+          (y * png.width + x) * 4,
+        );
+    const file = path.join(path.dirname(task.resultPath), `${view}-native.png`);
+    fs.writeFileSync(file, PNG.sync.write(png));
+    return {
+      path: path.relative(task.run.workspace, file).replaceAll("\\", "/"),
+      kind: "image" as const,
+      role,
+      view: view as (typeof fourViews)[number],
+    };
+  });
+  return {
+    status: onlyViews ? "needs_input" : "completed",
+    summary: "Independent synthetic originals; no generation tool called",
+    candidates: [{ id: role, label: role, artifacts, objects: [] }],
+    checks: [
+      {
+        name: "visual_quality",
+        passed: false,
+        severity: "warning",
+        visualCategory: "view_consistency",
+        detail: role + " synthetic quality observation",
+      },
+    ],
+  };
+}
 function checkpointPath(f: ReturnType<typeof fixture>, stageId: string) {
   return path.join(
     f.services.checkpointRoot!,
@@ -1014,72 +1073,64 @@ test("four-view separation produces twelve independent photos and references ear
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
-test("new sheet strategy requests three workers, locally splits twelve images and retains three native sheets", async () => {
-  const f = sheetFixture(),
-    worker = new Worker(),
-    drafts: number[] = [];
-  worker.hook = sheetOutput;
-  f.context.onDraft = (result) =>
+test("independent multiview uses three logical workers and retains twelve full native originals without cropping", async () => {
+  const f = multiviewFixture(),
+    worker = new Worker();
+  worker.hook = multiviewOutput;
+  const drafts: number[] = [];
+  f.context.onDraft = (r) =>
     drafts.push(
-      result.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+      r.candidates[0].artifacts.filter((a) => a.kind === "image").length,
     );
   const executor = new CodexWorkbenchExecutor(worker, f.services),
     result = await executor.execute(f.context, () => {});
   assert.equal(result.status, "completed");
   assert.deepEqual(
     worker.calls.map((t) => t.stage.id),
-    ["head", "hair", "body"].map((r) => `separate-${r}-sheet-v1`),
+    ["head", "hair", "body"].map((role) => `separate-${role}-multiview-v1`),
   );
-  assert.deepEqual(drafts, [4, 8, 12]);
-  const artifacts = result.candidates[0].artifacts;
-  assert.equal(artifacts.filter((a) => a.kind === "image").length, 12);
-  assert.equal(artifacts.filter((a) => a.kind === "export").length, 3);
-  for (const artifact of artifacts.filter((a) => a.kind === "export")) {
-    assert.equal(
-      digest(path.join(f.context.workspace, artifact.path)),
-      digest(
-        path.join(
-          f.context.workspace,
-          `outputs/separate-${artifact.role}-sheet-v1/sheet.png`,
-        ),
-      ),
-    );
-  }
+  const images = result.candidates[0].artifacts.filter(
+    (a) => a.kind === "image",
+  );
+  assert.equal(images.length, 12);
   assert.equal(
-    new Set(
-      artifacts
-        .filter((a) => a.kind === "image")
-        .map((a) => digest(path.join(f.context.workspace, a.path))),
-    ).size,
+    new Set(images.map((a) => digest(path.join(f.context.workspace, a.path))))
+      .size,
     12,
   );
-  for (const task of worker.calls) {
-    assert.match(
-      task.prompt,
-      /exactly ONE built-in image_gen\/imagegen tool call/,
+  for (const artifact of images) {
+    const native = path.join(
+      f.context.workspace,
+      `outputs/separate-${artifact.role}-multiview-v1/${artifact.view}-native.png`,
     );
-    assert.match(task.prompt, /transparent_background=true/);
-    assert.match(task.prompt, /character's own LEFT/);
-    assert(
-      !task.prompt.includes(
-        "Never substitute procedural drawings/SVG/placeholders or a composite/contact sheet",
+    const image = PNG.sync.read(
+        fs.readFileSync(path.join(f.context.workspace, artifact.path)),
       ),
+      i = fourViews.indexOf(artifact.view!);
+    assert.equal(image.width, 62 + i * 4);
+    assert.equal(image.height, 70 + i * 6);
+    assert.equal(
+      digest(native),
+      digest(path.join(f.context.workspace, artifact.path)),
     );
   }
-  assert(
-    result.checks.length > 0 &&
-      result.checks.every((c) => !c.passed && c.severity === "warning"),
-  );
-  const report = JSON.parse(
-    fs.readFileSync(
-      path.join(
-        f.context.workspace,
-        artifacts.find((a) => a.kind === "report")!.path,
-      ),
-      "utf8",
-    ),
-  );
-  assert.equal(report.imageGenerationToolCalls, "not independently verified");
+  assert(drafts.includes(4) && drafts.includes(8) && drafts.includes(12));
+  assert(drafts.every((count, index) => !index || count >= drafts[index - 1]));
+  assert(!result.candidates[0].artifacts.some((a) => a.kind === "export"));
+  assert(result.checks.some((c) => !c.passed && c.severity === "warning"));
+  for (const task of worker.calls) {
+    assert.match(task.prompt, /ONE separate full-quality native image file/);
+    assert.match(task.prompt, /do not invent an n\/count argument/);
+    assert.match(
+      task.prompt,
+      /concurrently only when the actual tools support concurrency/,
+    );
+    assert(!task.prompt.includes("TOP LEFT"));
+    assert(
+      !task.prompt.includes("Make exactly ONE built-in image generation call"),
+    );
+    assert.equal(task.requestedModel, undefined);
+  }
   worker.probe = async () => {
     throw Error("inspection must not probe");
   };
@@ -1088,8 +1139,8 @@ test("new sheet strategy requests three workers, locally splits twelve images an
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
-test("missing-only sheet batches preserve saved fronts and generate only the frozen missing cells", async () => {
-  const f = sheetFixture(),
+test("independent multiview missing-only batches preserve every existing image and freeze only requested missing views", async () => {
+  const f = multiviewFixture(),
     worker = new Worker();
   f.context.job.request.reuseExisting = true;
   const sources = addSeparationBase(f, [
@@ -1098,7 +1149,7 @@ test("missing-only sheet batches preserve saved fronts and generate only the fro
     { role: "hair", view: undefined },
     { role: "body", view: "front" },
   ]);
-  worker.hook = sheetOutput;
+  worker.hook = multiviewOutput;
   const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
     f.context,
     () => {},
@@ -1107,11 +1158,7 @@ test("missing-only sheet batches preserve saved fronts and generate only the fro
   assert.equal(worker.calls.length, 3);
   assert.match(
     worker.calls[0].prompt,
-    /Requested generated cells ONLY: \["left","right"\]/,
-  );
-  assert.match(
-    worker.calls[1].prompt,
-    /Requested generated cells ONLY: \["back","left","right"\]/,
+    /Requested independent original directions ONLY: \["left","right"\]/,
   );
   for (const source of sources) {
     const kept = result.candidates[0].artifacts.find(
@@ -1129,22 +1176,24 @@ test("missing-only sheet batches preserve saved fronts and generate only the fro
       source.sha256,
     );
   }
-  const plan = JSON.parse(
-    fs.readFileSync(
-      checkpointPath(f, "separate-head-sheet-v1") + ".plan.json",
-      "utf8",
-    ),
+  assert.deepEqual(
+    JSON.parse(
+      fs.readFileSync(
+        checkpointPath(f, "separate-head-multiview-v1") + ".plan.json",
+        "utf8",
+      ),
+    ).views,
+    ["left", "right"],
   );
-  assert.deepEqual(plan.views, ["left", "right"]);
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
-test("new strategy single direction stays one image invocation and leaves eleven base images unchanged", async () => {
-  const f = sheetFixture(),
+test("independent multiview single-view revision preserves eleven images and retains the original one-view path", async () => {
+  const f = multiviewFixture(),
     worker = new Worker();
   f.context.job.request.role = "hair";
   f.context.job.request.view = "left";
-  const sources = addSeparationBase(f);
+  const base = addSeparationBase(f);
   worker.hook = partOutput;
   const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
     f.context,
@@ -1155,7 +1204,7 @@ test("new strategy single direction stays one image invocation and leaves eleven
     worker.calls.map((t) => t.stage.id),
     ["separate-hair-left"],
   );
-  for (const source of sources.filter(
+  for (const source of base.filter(
     (a) => a.role !== "hair" || a.view !== "left",
   )) {
     const kept = result.candidates[0].artifacts.find(
@@ -1170,106 +1219,156 @@ test("new strategy single direction stays one image invocation and leaves eleven
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
-test("a crop checkpoint interruption is recovered from the original sheet without replay or changed scope", async () => {
-  const f = sheetFixture(),
-    worker = new Worker();
-  worker.hook = sheetOutput;
-  const executor = new CodexWorkbenchExecutor(worker, f.services),
-    internal = executor as any;
-  const save = internal.saveCheckpoint.bind(executor);
-  let once = true;
-  internal.saveCheckpoint = (
-    context: WorkbenchExecutionContext,
-    stage: string,
-    result: WorkbenchResult,
-  ) => {
-    if (stage === "separate-head-back" && once) {
-      once = false;
-      throw Error("Synthetic interruption after the first local crop");
-    }
-    return save(context, stage, result);
+test("independent multiview partial progress remains visible and recovery only finds already generated originals", async () => {
+  const f = multiviewFixture(),
+    worker = new Worker(),
+    executor = new CodexWorkbenchExecutor(worker, f.services);
+  let full: WorkbenchResult | undefined;
+  const drafts: number[] = [];
+  f.context.onDraft = (r) =>
+    drafts.push(
+      r.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    );
+  worker.hook = (task) => {
+    full = multiviewOutput(task);
+    const partial = structuredClone(full);
+    partial.status = "needs_input";
+    partial.candidates[0].artifacts = partial.candidates[0].artifacts.slice(
+      0,
+      2,
+    );
+    fs.writeFileSync(task.resultPath, JSON.stringify(partial));
+    task.onEvent({ type: "partial", message: "two originals saved" });
+    assert(drafts.includes(2));
+    return partial;
   };
-  const stopped = await executor.execute(f.context, () => {});
-  assert.equal(stopped.status, "needs_input");
-  assert.equal(worker.calls.length, 1);
-  assert(fs.existsSync(checkpointPath(f, "separate-head-sheet-v1")));
-  assert(fs.existsSync(checkpointPath(f, "separate-head-front")));
-  const source = path.join(
-      f.context.workspace,
-      "outputs/separate-head-sheet-v1/sheet.png",
-    ),
-    sha = digest(source);
-  const inspect = await executor.inspectSaved(f.context);
+  const first = await executor.execute(f.context, () => {});
+  assert.equal(first.status, "needs_input");
   assert.equal(
-    inspect.candidates[0].artifacts.filter((a) => a.kind === "image").length,
-    4,
+    first.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    2,
   );
   assert.equal(worker.calls.length, 1);
-  assert.equal(digest(source), sha);
-  const resumed = await executor.recover(
+  const before = full!.candidates[0].artifacts.map((a) =>
+    digest(path.join(f.context.workspace, a.path)),
+  );
+  const inspected = await executor.inspectSaved(f.context);
+  assert.equal(
+    inspected.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    2,
+  );
+  assert.equal(worker.calls.length, 1);
+  worker.hook = (task) => {
+    if (task.stage.id === "separate-head-multiview-v1") {
+      assert.equal(task.recoveryOnly, true);
+      assert(codexArguments(task).includes("features.image_generation=false"));
+      assert.match(
+        task.prompt,
+        /Recover ONLY existing independent original files/,
+      );
+      return full!;
+    }
+    return multiviewOutput(task);
+  };
+  const recovered = await executor.recover(
     {
       ...f.context,
-      recovery: { attempt: 1, error: "local crop interruption", mode: "retry" },
+      recovery: { attempt: 1, error: "find existing files", mode: "retry" },
     },
     () => {},
   );
-  assert.equal(resumed.status, "completed");
-  assert.equal(worker.calls.length, 3);
+  assert.equal(recovered.status, "completed");
+  assert.equal(worker.calls.length, 4);
   assert.deepEqual(
-    worker.calls.map((t) => t.stage.id),
-    [
-      "separate-head-sheet-v1",
-      "separate-hair-sheet-v1",
-      "separate-body-sheet-v1",
-    ],
-  );
-  const plan = JSON.parse(
-    fs.readFileSync(
-      checkpointPath(f, "separate-head-sheet-v1") + ".plan.json",
-      "utf8",
+    full!.candidates[0].artifacts.map((a) =>
+      digest(path.join(f.context.workspace, a.path)),
     ),
+    before,
   );
-  assert.deepEqual(plan.views, [...fourViews]);
+  assert.equal(
+    worker.calls.filter((t) => t.stage.id === "separate-head-multiview-v1")
+      .length,
+    2,
+  );
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
-test("saved sheet result before its host checkpoint can be inspected and split without a worker", async () => {
-  const f = sheetFixture(),
-    worker = new Worker();
-  worker.hook = sheetOutput;
-  const executor = new CodexWorkbenchExecutor(worker, f.services),
-    internal = executor as any,
-    save = internal.saveCheckpoint.bind(executor);
-  let once = true;
-  internal.saveCheckpoint = (
-    context: WorkbenchExecutionContext,
-    stage: string,
-    result: WorkbenchResult,
-  ) => {
-    if (stage === "separate-head-sheet-v1" && once) {
-      once = false;
-      throw Error("Synthetic failure before host checkpoint");
-    }
-    return save(context, stage, result);
-  };
-  assert.equal(
-    (await executor.execute(f.context, () => {})).status,
-    "needs_input",
+test("saved independent multiview result before host checkpoint is recovered without a worker", async () => {
+  const f = multiviewFixture(),
+    worker = new Worker(),
+    executor = new CodexWorkbenchExecutor(worker, f.services),
+    internal = executor as any;
+  internal.multiviewPlan(f.context, "head", [...fourViews]);
+  const folder = path.join(
+    f.context.workspace,
+    "outputs/separate-head-multiview-v1",
   );
-  assert.equal(worker.calls.length, 1);
-  assert(!fs.existsSync(checkpointPath(f, "separate-head-sheet-v1")));
-  const result = await executor.inspectSaved(f.context);
+  fs.mkdirSync(folder, { recursive: true });
+  const task = {
+    run: { workspace: f.context.workspace },
+    stage: { id: "separate-head-multiview-v1" },
+    resultPath: path.join(folder, "result.json"),
+    prompt:
+      'Requested independent original directions ONLY: ["front","back","left","right"]',
+  } as WorkerTask;
+  const raw = multiviewOutput(task),
+    hashes = raw.candidates[0].artifacts.map((a) =>
+      digest(path.join(f.context.workspace, a.path)),
+    );
+  fs.writeFileSync(task.resultPath, JSON.stringify(raw));
+  worker.probe = async () => {
+    throw Error("must not probe");
+  };
+  const inspected = await executor.inspectSaved(f.context);
+  assert.equal(inspected.status, "needs_input");
   assert.equal(
-    result.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    inspected.candidates[0].artifacts.filter((a) => a.kind === "image").length,
     4,
   );
-  assert.equal(worker.calls.length, 1);
-  assert(fs.existsSync(checkpointPath(f, "separate-head-sheet-v1")));
+  assert.equal(worker.calls.length, 0);
+  assert.deepEqual(
+    raw.candidates[0].artifacts.map((a) =>
+      digest(path.join(f.context.workspace, a.path)),
+    ),
+    hashes,
+  );
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
-test("ambiguous started sheet remains the same recovery-only phase with generation disabled", async () => {
-  const f = sheetFixture(),
+test("cancelling an independent multiview group preserves its saved original and never starts other parts", async () => {
+  const f = multiviewFixture(),
+    worker = new Worker(),
+    abort = new AbortController();
+  f.context.signal = abort.signal;
+  worker.hook = (task) => {
+    const result = multiviewOutput(task, ["front"]);
+    fs.writeFileSync(task.resultPath, JSON.stringify(result));
+    task.onEvent({ type: "partial" });
+    abort.abort();
+    throw Error("User cancelled");
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services),
+    stopped = await executor.execute(f.context, () => {});
+  assert.equal(stopped.status, "needs_input");
+  assert.equal(worker.calls.length, 1);
+  assert.equal(
+    stopped.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    1,
+  );
+  const result = await executor.inspectSaved({
+    ...f.context,
+    signal: new AbortController().signal,
+  });
+  assert.equal(
+    result.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    1,
+  );
+  assert.equal(worker.calls.length, 1);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("an ambiguous independent multiview invocation cannot fall back to new individual generation", async () => {
+  const f = multiviewFixture(),
     worker = new Worker();
   worker.hook = () => {
     throw Error("network connection reset");
@@ -1279,92 +1378,88 @@ test("ambiguous started sheet remains the same recovery-only phase with generati
     (await executor.execute(f.context, () => {})).status,
     "needs_input",
   );
-  worker.hook = () => ({
-    status: "needs_input",
-    summary: "The genuine prior sheet is unavailable",
-    candidates: [],
-    checks: [],
-  });
-  const retry = await executor.recover(
-    {
-      ...f.context,
-      recovery: {
-        attempt: 1,
-        error: "network connection reset",
-        mode: "retry",
-      },
-    },
-    () => {},
-  );
-  assert.equal(retry.status, "needs_input");
-  assert.equal(worker.calls.length, 2);
-  assert.equal(worker.calls[1].stage.id, "separate-head-sheet-v1");
-  assert.equal(worker.calls[1].recoveryOnly, true);
-  assert(
-    codexArguments(worker.calls[1]).includes("features.image_generation=false"),
-  );
-  assert.match(
-    worker.calls[1].prompt,
-    /Recover the EXISTING generated 2x2 PNG/,
-  );
-  fs.rmSync(f.root, { recursive: true, force: true });
-});
-
-test("invalid split preserves the sheet checkpoint and subsequent attempts do not generate again", async () => {
-  const f = sheetFixture(),
-    worker = new Worker();
   worker.hook = (task) => {
-    const result = sheetOutput(task),
-      file = path.join(
-        task.run.workspace,
-        result.candidates[0].artifacts[0].path,
-      ),
-      png = PNG.sync.read(fs.readFileSync(file));
-    png.data.set([1, 2, 3, 255], (16 * 64 + 31) * 4);
-    fs.writeFileSync(file, PNG.sync.write(png));
-    return result;
+    assert.equal(task.recoveryOnly, true);
+    return {
+      status: "needs_input",
+      summary: "Existing independent originals unavailable",
+      candidates: [],
+      checks: [],
+    };
   };
-  const executor = new CodexWorkbenchExecutor(worker, f.services),
-    first = await executor.execute(f.context, () => {});
-  assert.equal(first.status, "needs_input");
-  assert.equal(first.recovery?.kind, "blocked");
-  assert(fs.existsSync(checkpointPath(f, "separate-head-sheet-v1")));
-  const source = path.join(
-      f.context.workspace,
-      "outputs/separate-head-sheet-v1/sheet.png",
-    ),
-    sha = digest(source);
-  const second = await executor.execute(f.context, () => {});
-  assert.equal(second.status, "needs_input");
-  assert.equal(worker.calls.length, 1);
-  assert.equal(digest(source), sha);
-  const inspected = await executor.inspectSaved(f.context);
-  assert.equal(inspected.candidates.length, 0);
-  assert.equal(worker.calls.length, 1);
+  assert.equal(
+    (
+      await executor.recover(
+        {
+          ...f.context,
+          recovery: { attempt: 1, error: "network", mode: "retry" },
+        },
+        () => {},
+      )
+    ).status,
+    "needs_input",
+  );
+  assert.deepEqual(
+    worker.calls.map((t) => t.stage.id),
+    ["separate-head-multiview-v1", "separate-head-multiview-v1"],
+  );
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
-test("changed original sheet never falls back to generated crops or another invocation", async () => {
-  const f = sheetFixture(),
+test("independent multiview rejects duplicate or wrong-role originals and does not claim twelve valid files", async () => {
+  for (const failure of ["duplicate", "role", "missing"]) {
+    const f = multiviewFixture(),
+      worker = new Worker();
+    worker.hook = (task) => {
+      const r = multiviewOutput(task),
+        images = r.candidates[0].artifacts;
+      if (failure === "duplicate")
+        fs.copyFileSync(
+          path.join(task.run.workspace, images[0].path),
+          path.join(task.run.workspace, images[1].path),
+        );
+      if (failure === "role") images[1].role = "hair";
+      if (failure === "missing")
+        fs.unlinkSync(path.join(task.run.workspace, images[1].path));
+      return r;
+    };
+    const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+      f.context,
+      () => {},
+    );
+    assert.equal(result.status, "needs_input");
+    assert.equal(worker.calls.length, 1);
+    assert.equal(
+      result.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+      3,
+    );
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("tampered independent originals block recovery without hiding unaffected completed parts", async () => {
+  const f = multiviewFixture(),
     worker = new Worker();
-  worker.hook = sheetOutput;
+  worker.hook = multiviewOutput;
   const executor = new CodexWorkbenchExecutor(worker, f.services);
   assert.equal(
     (await executor.execute(f.context, () => {})).status,
     "completed",
   );
   fs.appendFileSync(
-    path.join(f.context.workspace, "outputs/separate-head-sheet-v1/sheet.png"),
+    path.join(
+      f.context.workspace,
+      "outputs/separate-head-multiview-v1/front-native.png",
+    ),
     "tampered",
   );
-  const saved = await executor.inspectSaved(f.context);
-  assert.equal(saved.status, "needs_input");
-  assert.match(saved.summary, /파일이 변경/);
+  const inspected = await executor.inspectSaved(f.context);
+  assert.equal(inspected.status, "needs_input");
+  assert.match(inspected.summary, /파일이 변경/);
   assert.equal(
-    saved.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    inspected.candidates[0].artifacts.filter((a) => a.kind === "image").length,
     8,
   );
-  assert.equal(worker.calls.length, 3);
   assert.equal(
     (await executor.execute(f.context, () => {})).status,
     "needs_input",
@@ -1373,8 +1468,201 @@ test("changed original sheet never falls back to generated crops or another invo
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
-test("separation sends every distinct relevant reference once without unrelated reports or internal metadata", async () => {
+test("historical sheet generation stays disabled but existing native sheet inspection remains local", async () => {
   const f = sheetFixture(),
+    worker = new Worker(),
+    executor = new CodexWorkbenchExecutor(worker, f.services),
+    internal = executor as any;
+  assert.equal(
+    (await executor.execute(f.context, () => {})).status,
+    "needs_input",
+  );
+  assert.equal(worker.calls.length, 0);
+  internal.sheetPlan(f.context, "head", [...fourViews]);
+  const folder = path.join(
+    f.context.workspace,
+    "outputs/separate-head-sheet-v1",
+  );
+  fs.mkdirSync(folder, { recursive: true });
+  const task = {
+    run: { workspace: f.context.workspace },
+    stage: { id: "separate-head-sheet-v1" },
+    resultPath: path.join(folder, "result.json"),
+    prompt: 'Requested generated cells ONLY: ["front","back","left","right"]',
+  } as WorkerTask;
+  const raw = sheetOutput(task);
+  fs.writeFileSync(task.resultPath, JSON.stringify(raw));
+  const sha = digest(
+    path.join(f.context.workspace, raw.candidates[0].artifacts[0].path),
+  );
+  worker.probe = async () => {
+    throw Error("must not probe");
+  };
+  const inspected = await executor.inspectSaved(f.context);
+  assert.equal(
+    inspected.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    4,
+  );
+  assert.equal(
+    inspected.candidates[0].artifacts.filter((a) => a.kind === "export").length,
+    1,
+  );
+  assert.equal(worker.calls.length, 0);
+  assert.equal(
+    digest(path.join(f.context.workspace, raw.candidates[0].artifacts[0].path)),
+    sha,
+  );
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("independent multiview final visual observations merge into already checkpointed images and remain false", async () => {
+  const f = multiviewFixture(),
+    worker = new Worker();
+  worker.hook = (task) => {
+    const result = multiviewOutput(task),
+      partial = structuredClone(result);
+    partial.status = "needs_input";
+    partial.checks = [];
+    fs.writeFileSync(task.resultPath, JSON.stringify(partial));
+    task.onEvent({ type: "partial" });
+    result.checks = [
+      {
+        name: "visual_quality",
+        passed: false,
+        severity: "warning",
+        visualCategory: "appearance",
+        detail: `${task.stage.id} final-only observation`,
+      },
+    ];
+    return result;
+  };
+  const executor = new CodexWorkbenchExecutor(worker, f.services),
+    result = await executor.execute(f.context, () => {});
+  assert.equal(result.status, "completed");
+  for (const role of ["head", "hair", "body"])
+    assert(
+      result.checks.some(
+        (c) =>
+          c.detail === `separate-${role}-multiview-v1 final-only observation` &&
+          !c.passed,
+      ),
+    );
+  const saved = await executor.inspectSaved(f.context);
+  assert(
+    saved.checks.some(
+      (c) => c.detail?.includes("final-only observation") && !c.passed,
+    ),
+  );
+  for (const view of fourViews) {
+    const saved = JSON.parse(
+      fs.readFileSync(checkpointPath(f, `separate-head-${view}`), "utf8"),
+    );
+    assert(
+      saved.result.checks.some(
+        (c: any) => c.detail?.includes("final-only observation") && !c.passed,
+      ),
+    );
+  }
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("independent multiview rejects same visible pixels even when an incremental original has different PNG metadata or invisible RGB", async () => {
+  for (const variant of ["metadata", "invisible-rgb"]) {
+    const f = multiviewFixture(),
+      worker = new Worker();
+    worker.hook = (task) => {
+      const partial = multiviewOutput(task, ["front", "left", "right"]);
+      fs.writeFileSync(task.resultPath, JSON.stringify(partial));
+      task.onEvent({ type: "partial" });
+      const result = multiviewOutput(task, ["back"]),
+        front = path.join(
+          task.run.workspace,
+          partial.candidates[0].artifacts[0].path,
+        ),
+        back = path.join(
+          task.run.workspace,
+          result.candidates[0].artifacts[0].path,
+        );
+      const png = PNG.sync.read(fs.readFileSync(front));
+      if (variant === "metadata") png.gamma = 0.45;
+      else png.data[0] = 125;
+      fs.writeFileSync(back, PNG.sync.write(png));
+      assert.notEqual(digest(front), digest(back));
+      result.status = "completed";
+      return result;
+    };
+    const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
+      f.context,
+      () => {},
+    );
+    assert.equal(result.status, "needs_input");
+    assert.match(result.summary, /같은 원본 이미지/);
+    assert.equal(
+      result.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+      3,
+    );
+    assert.equal(worker.calls.length, 1);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("historical sheet local crop checkpoint recovery never invokes a worker or changes the original sheet", async () => {
+  const f = sheetFixture(),
+    worker = new Worker(),
+    executor = new CodexWorkbenchExecutor(worker, f.services),
+    internal = executor as any;
+  internal.sheetPlan(f.context, "head", [...fourViews]);
+  const folder = path.join(
+    f.context.workspace,
+    "outputs/separate-head-sheet-v1",
+  );
+  fs.mkdirSync(folder, { recursive: true });
+  const task = {
+      run: { workspace: f.context.workspace },
+      stage: { id: "separate-head-sheet-v1" },
+      resultPath: path.join(folder, "result.json"),
+      prompt: 'Requested generated cells ONLY: ["front","back","left","right"]',
+    } as WorkerTask,
+    raw = sheetOutput(task);
+  fs.writeFileSync(task.resultPath, JSON.stringify(raw));
+  const original = path.join(
+      f.context.workspace,
+      raw.candidates[0].artifacts[0].path,
+    ),
+    sha = digest(original),
+    save = internal.saveCheckpoint.bind(executor);
+  let once = true;
+  internal.saveCheckpoint = (
+    context: WorkbenchExecutionContext,
+    id: string,
+    result: WorkbenchResult,
+  ) => {
+    if (id === "separate-head-back" && once) {
+      once = false;
+      throw Error("Synthetic interrupted local crop");
+    }
+    return save(context, id, result);
+  };
+  const interrupted = await executor.inspectSaved(f.context);
+  assert.equal(interrupted.status, "needs_input");
+  assert(fs.existsSync(checkpointPath(f, "separate-head-front")));
+  const recovered = await executor.inspectSaved(f.context);
+  assert.equal(
+    recovered.candidates[0].artifacts.filter((a) => a.kind === "image").length,
+    4,
+  );
+  assert.equal(worker.calls.length, 0);
+  assert.equal(digest(original), sha);
+  fs.appendFileSync(original, "tampered");
+  const blocked = await executor.inspectSaved(f.context);
+  assert.match(blocked.summary, /파일이 변경/);
+  assert.equal(blocked.candidates.length, 0);
+  assert.equal(worker.calls.length, 0);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test("separation sends every distinct relevant reference once without unrelated reports or internal metadata", async () => {
+  const f = multiviewFixture(),
     worker = new Worker();
   f.context.job.request.role = "head";
   const base = addSeparationBase(f);
@@ -1424,7 +1712,7 @@ test("separation sends every distinct relevant reference once without unrelated 
     sha256: digest(report),
     bytes: fs.statSync(report).size,
   });
-  worker.hook = sheetOutput;
+  worker.hook = multiviewOutput;
   const result = await new CodexWorkbenchExecutor(worker, f.services).execute(
     f.context,
     () => {},
@@ -1453,10 +1741,10 @@ test("separation sends every distinct relevant reference once without unrelated 
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
-test("a missing frozen sheet plan cannot fall back to a single-view generation after partial crops", async () => {
-  const f = sheetFixture(),
+test("a missing frozen independent multiview plan cannot fall back to a single-view generation", async () => {
+  const f = multiviewFixture(),
     worker = new Worker();
-  worker.hook = sheetOutput;
+  worker.hook = multiviewOutput;
   f.context.job.request.reuseExisting = true;
   addSeparationBase(f, []);
   const executor = new CodexWorkbenchExecutor(worker, f.services),
@@ -1476,7 +1764,7 @@ test("a missing frozen sheet plan cannot fall back to a single-view generation a
     "needs_input",
   );
   assert.equal(worker.calls.length, 1);
-  fs.unlinkSync(checkpointPath(f, "separate-head-sheet-v1") + ".plan.json");
+  fs.unlinkSync(checkpointPath(f, "separate-head-multiview-v1") + ".plan.json");
   await assert.rejects(
     () => executor.execute(f.context, () => {}),
     /고정 계획이 없습니다/,
