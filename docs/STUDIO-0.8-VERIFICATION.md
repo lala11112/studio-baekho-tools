@@ -40,3 +40,7 @@
 현재 UI는 모델링 프로젝트, Combat Lab 프로젝트, AutoHitTimer 프로젝트를 도구별로 선택합니다. 기존 다른 브랜치의 추가 변경은 이번 새 기능 병합의 범위에 포함하지 않았습니다.
 
 코드 서명/설치 프로그램은 없으며 `release/win-unpacked` 폴더 전체가 필요합니다. 기존 큰 프런트엔드 번들에 대한 Vite 경고는 남아 있지만 빌드와 실행은 통과했습니다.
+
+## 원격 확인
+
+구현 커밋 [c3f681c](https://github.com/lala11112/studio-baekho-tools/commit/c3f681c650d9cb4f37b28dd6fd5dfa0e17e9cbeb)의 [Windows CI](https://github.com/lala11112/studio-baekho-tools/actions/runs/38016420784)가 2026-10-10 성공했습니다. 세 테스트 모음과 빌드를 통과했고, 이후 이 완료 기록만 추가했습니다.
