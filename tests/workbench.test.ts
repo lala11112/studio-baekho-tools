@@ -668,10 +668,16 @@ test("assembly edits preserve versions and explicit restore invalidates downstre
       step: "rig",
       prompt: "rig",
       rigTargets: [{ objectId: "hair", extraBones: true }],
+      rigProfile: "quadruped",
+      rigControls: { ears: true, tail: true },
     },
     true,
   );
   const targets = rig.request.rigTargets!;
+  assert.equal(x.executor.calls.at(-1)!.job.request.rigProfile,"quadruped");
+  assert.deepEqual(x.engine.get(x.w.id).jobs.find(j=>j.id===rig.id)!.request.rigControls,{ears:true,tail:true});
+  assert.throws(()=>x.engine.execute(x.w.id,{step:"rig",prompt:"bad",rigControls:{ears:"true" as any,tail:true}}),/귀·꼬리/);
+  assert.throws(()=>x.engine.execute(x.w.id,{step:"rig",prompt:"bad",rigProfile:"human" as any}),/체형/);
   assert.equal(targets.find((t) => t.objectId === "hair")?.extraBones, true);
   assert.equal(targets.find((t) => t.objectId === "skirt")?.extraBones, false);
   assert.throws(

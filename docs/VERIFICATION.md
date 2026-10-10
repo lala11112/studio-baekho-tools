@@ -388,3 +388,16 @@ Unity 검증 스크립트는 명시된 테스트 프로젝트의 Partsmith 관�
 - 잘못 차단된 상태의 복구가 외형 한계를 true로 재서술한 결과는 별도 보존하고, 실제 제작자가 반환했던 원본 completed 결과의 false 경고를 복원해 재검증했다. 수정된 앱의 기존 작업 재확인 버튼으로 등록했으며 codex-events.jsonl SHA가 전후 동일하여 추가 GPT 실행이 없음을 확인했다. 결과 파일/원본을 재생성하지 않았다.
 - 최종 npm test239/239, npm run build 및 별도 release/0.6.14/win-unpacked 패키징 통과. scripts/rabbit-assembly-result-check.ts는 실파일 복사본으로 산출물·상위 입력 해시, GLB 응답200, 콘솔/페이지 오류0, 재시작 결과/선택 보존, Astra 수정 요청 버튼 표시를 확인했다. artifacts/runtime/rabbit-assembly-result-check.json, rabbit-assembly-result.png, rabbit-assembly-live.png에 로컬 증거를 남겼다.
 - 현재 surface는 채택됨, 보정본은 review/미채택이다. 앱에서 오브젝트 선택·명령·Astra 수정 요청 또는 결과 채택이 가능하다. 작은 볼/수염 뿌리 색 차이, 일부 수염 밝기 차이와 원본 저폴리 윤곽·어깨 텍스처 경계는 false 경고로 표시한다. 외부 엔진 수염 그림자, 리깅·애니메이션·Unity 재생은 아직 검증하지 않았다.
+
+### 2026-10-11 — 0.6.15 앱 버튼으로 실제 Astra 네 발 토끼 리깅
+
+- 사용자의 요청에 따라 보정본 `94716773-5d3b-4c05-9a48-52a2d256aab4 / rabbit_local_repair_v2`를 앱에서 채택했다. 네 발 체형·귀 ON·꼬리 ON을 설정하고 `workbench-execute-rig` 버튼으로 실제 `gpt-6-astra` 작업 `a79d117c-027f-468f-b4c1-445e31c97117`을 실행했다. 기본 추론 설정은 유지했으며 Tripo 추가 작업/과금0이다.
+- `shared/workbench.ts`, `engine/workbench.ts`, `src/AssetWorkbench.tsx`: 체형과 귀·꼬리 제어를 요청에 고정하고 재시작 후 복원한다. 몸체의 귀·꼬리 제어는 의상/머리카락 오브젝트 추가 뼈 토글과 구분한다. 실제 토끼 수염의 추가 뼈는 OFF로 두고 머리에 연결했다.
+- `engine/workbench-executor.ts`, `engine/rig-inspect.ts`, `integrations/blender/workbench_inspect.py`: 채택한 packed blend를 Astra에 전달한다. 호스트가 실제 Generic 뼈대, 네 다리의 연결된 변형 뼈, 귀·꼬리의 실제 웨이트, 전체 정점의 정규화를 검사한다. 이름만 있는 비변형/무웨이트 뼈, 누락 다리, 잘못된 체형/토글은 통과시키지 않는다.
+- 실제 산출물 `rabbit-rig-v3`: 25개 뼈의 FK 리그. 앞다리별 Upper/Forearm/Paw, 뒷다리별 Thigh/Shin/Hock/Paw, 양 귀별 Root/Tip, Tail, 골반/척추/목/머리. 원본 몸체4560정점과 수염449정점 모두 정규화된 최대4개 영향으로 연결됐으며 총5605면, UV, 정점 좌표, 오브젝트ID와 4096 텍스처 바이트를 보존했다. 호스트 검사 invalidWeightVertices0, missingImages0, actions0.
+- 네 다리·양 귀·꼬리의 7개 실제 포즈를 렌더해 확인했다. 초기 꼬리 웨이트가 엉덩이 일부를 끌어당겨 범위를 줄였고 귀 뿌리 전이를 조정했다. 무영향 정점 이동0, 수염 머리 추종 오차8.56e-8m. 원래 거친 토폴로지를 유지하므로 일부 관절의 국소 에지 늘어남 최대2.17배와 귀 압축이 남는다. FK라 자동 발 고정/관절 제한이 없다는 점도 false 검토 경고로 표시한다. 실패한 검사 값을 true로 바꾸지 않았다.
+- 중립 자세의 packed `rabbit_rig_v3.blend`, `rabbit_rig_v3.fbx`와 동반4K PNG, 스킨 GLB, 정면/좌우/후면 및 포즈 렌더, `rig_evidence.json`을 등록했다. 실제 FBX 재임포트에서25뼈/5009스킨정점/정규화 오차4.66e-8/4096텍스처/액션0을 확인했다. 기존 보정본·상위 결과는 그대로 보존했다.
+- 실제 CLI 스트림이 완성 result.json 저장 후 끊겼고 복구 연결도 실패했다. 진행을 중지한 뒤 기존 completed 응답과 파일을 로컬 재검증해 등록했다. 등록 전후 codex-events.jsonl SHA256 `ACC4F4BA4190C22EB13AF16C3DDCD8B10F71893572851D07054B6C371D0872DA` 동일: 등록을 위해 추가 Astra 제작을 실행하지 않았다. `result.original-completed.json`도 보존했다.
+- 실행기는 rig 단계의 stream/websocket 종료에 한해 완성된 저장 응답을 읽고 기존 파일·GLB·호스트 뼈대 검사를 계속한다. 미완성 파일/파일 누락/취소/권한 거절은 성공으로 취급하지 않는다. 웹/유료 제출 경로는 변경하지 않았다. `shared/workbench-checks.ts`는 rig의 명시적인 remaining_limitations 경고만 false/검토 상태로 보존하고 웨이트·포즈·무결성·알 수 없는 실패는 계속 차단한다.
+- 최종 npm test **243/243**, npm run build와 별도 `release/0.6.15/win-unpacked/Partsmith.exe` 패키징 통과. `scripts/rabbit-rig-result-check.ts`로 실제 결과의 상위/출력 SHA, 스킨 GLB200, 실제 뼈대/웨이트, 오류0, 재시작 후 설정/결과/채택 상태 유지, 자동 채택/실행 없음 확인. 증거: `artifacts/runtime/rabbit-rig-dispatch.json`, `rabbit-rig-result-check.json`, `rabbit-rig-result.png`, `rabbit-rig-live.png`.
+- 현재 리깅은 review/미채택이며 앱에서 수정 지시 또는 채택이 가능하다. 기존 수염 밝기·뿌리 색 차이·어깨 텍스처 경계는 리깅으로 수정하지 않았다. IK/물리/제작 애니메이션은 생성하지 않았고 Unity 실제 재생도 아직 미검증이다.

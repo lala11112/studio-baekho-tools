@@ -411,6 +411,11 @@ export class WorkbenchEngine {
     if (typeof request.prompt !== "string" || request.prompt.length > 12000)
       throw new Error("작업 지시는 12,000자 이내로 작성하세요.");
     const r = structuredClone(request);
+    if (r.rigProfile !== undefined && (r.step !== "rig" || !["automatic", "quadruped"].includes(r.rigProfile)))
+      throw new Error("잘못된 리깅 체형 설정입니다.");
+    if (r.rigControls !== undefined && (r.step !== "rig" || !r.rigControls ||
+        typeof r.rigControls.ears !== "boolean" || typeof r.rigControls.tail !== "boolean"))
+      throw new Error("귀·꼬리 제어 설정을 확인하세요.");
     if (r.executionMode !== undefined && !["worker", "codex-session", "codex-app"].includes(r.executionMode))
       throw new Error("알 수 없는 실행 연결입니다.");
     r.prompt = r.prompt.trim();

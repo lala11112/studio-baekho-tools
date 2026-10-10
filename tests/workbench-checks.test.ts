@@ -2,6 +2,17 @@ import {test} from "node:test";
 import assert from "node:assert/strict";
 import {blocksWorkbenchCheck,normalizeWorkbenchChecks,workbenchWarningMessages} from "../shared/workbench-checks";
 
+test("rig motion-range warning remains false; weights, failed poses and unknown checks still block",()=>{
+  const warning={name:"remaining_limitations",passed:false,severity:"warning" as const,detail:"FK has no automatic foot lock; local joint compression remains."};
+  const checks=normalizeWorkbenchChecks("rig",[warning]);
+  assert.equal(checks[0].passed,false);assert.equal(blocksWorkbenchCheck("rig",checks[0]),false);
+  assert.match(workbenchWarningMessages("rig",checks)[0],/compression/);
+  assert.equal(blocksWorkbenchCheck("animation",warning),true);
+  assert.equal(blocksWorkbenchCheck("rig",{...warning,severity:"error"}),true);
+  for(const name of ["normalized_skin_weights","independent_pose_tests","file_integrity","unknown_check"])
+    assert.equal(blocksWorkbenchCheck("rig",{...warning,name}),true,name);
+});
+
 test("assembly accepts a passed finite-category observation without mistaking its label for failure",()=>{
   assert.equal(blocksWorkbenchCheck("assembly",{name:"cheek_defect_removed",passed:true,visualCategory:"appearance"}),false);
   assert.equal(blocksWorkbenchCheck("assembly",{name:"geometry_preserved",passed:true,visualCategory:"view_consistency"}),false);

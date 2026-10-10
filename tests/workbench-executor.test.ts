@@ -264,6 +264,29 @@ test("ambiguous receipt prevents another worker submission even when the user re
   assert.equal(worker.calls.length, 0);
   fs.rmSync(f.root, { recursive: true, force: true });
 });
+test("rig collects a completed file after stream loss but still validates files and honors cancellation/denial", async () => {
+  for (const mode of ["complete", "missing-file", "incomplete", "cancelled", "denied"] as const) {
+    const f=fixture("rig"), worker=new Worker(), controller=new AbortController();
+    f.context.signal=controller.signal;
+    worker.run=async(task)=>{
+      worker.calls.push(task);
+      const result=output(task);
+      if(mode==="incomplete") result.status="needs_input";
+      fs.writeFileSync(task.resultPath,JSON.stringify(result));
+      if(mode==="missing-file") fs.unlinkSync(path.join(task.run.workspace,result.candidates[0].artifacts[0].path));
+      if(mode==="cancelled") controller.abort();
+      throw Error(mode==="denied"?"approval denied":"stream disconnected before completion: websocket closed by server");
+    };
+    try {
+      const executor=new CodexWorkbenchExecutor(worker,f.services);
+      // Exercise collection/file validation alone; the separate real Blender
+      // inspector and packaged rabbit checks cover host scene validation.
+      const result=await (executor as any).phase(f.context,[],()=>{});
+      assert.equal(result.status,mode==="complete"?"completed":"needs_input",mode);
+      assert.equal(worker.calls.length,1);
+    } finally { fs.rmSync(f.root,{recursive:true,force:true}); }
+  }
+});
 test("a saved UTF-8 BOM completed result is revalidated without regenerating candidates", async () => {
   const f = fixture("model"),
     worker = new Worker();

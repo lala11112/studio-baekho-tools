@@ -73,6 +73,11 @@ const isVisualObservation = (check: WorkbenchCheck) => {
 const isAssemblyAppearanceReview = (check: WorkbenchCheck) =>
   (check.name === "visual_quality" || check.name === "remaining_visual_limits") &&
   (check.visualCategory === undefined || check.visualCategory === "appearance");
+// A completed FK rig can have a documented motion range for user review.
+// This compatibility warning never substitutes for the separate skin/pose checks.
+const isRigLimitsReview = (check: WorkbenchCheck) =>
+  check.name === "remaining_limitations" && check.severity === "warning" &&
+  check.visualCategory === undefined;
 
 export function blocksWorkbenchCheck(
   step: WorkbenchStep,
@@ -92,6 +97,7 @@ export function blocksWorkbenchCheck(
     return true;
   return (
     check.passed !== true &&
+    !(step === "rig" && isRigLimitsReview(check)) &&
     !(step === "assembly" && isAssemblyAppearanceReview(check)) &&
     !(step === "separate" && isVisualObservation(check)) &&
     !(step === "surface" && (Object.hasOwn(surfaceReviewChecks,check.name) ||
@@ -128,7 +134,7 @@ export function workbenchCheckLabel(check: WorkbenchCheck): string {
     check.visualCategory &&
     Object.hasOwn(visualCategories, check.visualCategory)
       ? visualCategories[check.visualCategory]
-      : (surfaceReviewChecks[key] ?? separationVisualChecks[key] ??
+      : ((key === "remaining_limitations" ? "리깅 제어 방식과 관절 변형 범위를 확인해 주세요." : undefined) ?? surfaceReviewChecks[key] ?? separationVisualChecks[key] ??
         (legacyView
           ? `${directionNames[legacyView[1]]} 사진의 형태·비율을 확인해 주세요.`
           : check.name));

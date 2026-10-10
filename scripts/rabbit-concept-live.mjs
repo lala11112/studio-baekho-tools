@@ -10,7 +10,7 @@ const prompt = `게임용 3D 캐릭터 제작을 위한 서로 다른 토끼 디
 후보 1: 작고 둥근 얼굴과 통통한 몸, 곧게 선 긴 귀로 귀여운 인상.
 후보 2: 조금 더 날렵한 얼굴과 탄력 있는 뒷다리, 귀 끝이 살짝 벌어진 생동감 있는 인상.
 각 결과 옆의 설명으로 후보 1과 후보 2를 구분하되 이미지 안에는 번호를 쓰지 마세요. 실제 이미지 두 장을 생성하고, 하나의 이미지를 복제하거나 자르지 마세요.`;
-const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.14/win-unpacked/Partsmith.exe") });
+const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.15/win-unpacked/Partsmith.exe") });
 const page = await app.firstWindow();
 await page.waitForSelector(".home");
 const call = c => page.evaluate(c => window.desktop.call(c), c);
@@ -77,7 +77,7 @@ for await (const line of readline.createInterface({input:process.stdin})) {
       const w=after.workbenches.find(w=>w.projectId===project.id);
       const job=w.jobs.find(j=>j.step==='assembly');
       if(!job || w.selections.surface?.jobId!==surface.id) throw Error('App did not dispatch refinement');
-      fs.writeFileSync('artifacts/runtime/rabbit-refinement-dispatch.json',JSON.stringify({appVersion:'0.6.14',trigger:'workbench-execute-assembly',surfaceSelection:w.selections.surface,job},null,2));
+      fs.writeFileSync('artifacts/runtime/rabbit-refinement-dispatch.json',JSON.stringify({appVersion:'0.6.15',trigger:'workbench-execute-assembly',surfaceSelection:w.selections.surface,job},null,2));
       console.log(JSON.stringify({assemblyJobId:job.id,status:job.status,dependencies:job.dependencies}));
     }
     else if(command.action==='show-assembly') {
@@ -86,11 +86,37 @@ for await (const line of readline.createInterface({input:process.stdin})) {
       const after=await call({type:'state'}), w=after.workbenches.find(w=>w.projectId===project.id);
       console.log(JSON.stringify({selection:w.selections.assembly,jobs:w.jobs.filter(j=>j.step==='assembly').map(j=>({id:j.id,status:j.status,summary:j.summary,candidates:j.candidates,checks:j.checks}))}));
     }
-    else if(command.action==='recheck-existing-assembly') {
-      const job=workbench.jobs.find(j=>j.step==='assembly');
+    else if(command.action==='start-rabbit-rig') {
+      const base=workbench.jobs.find(j=>j.id==='94716773-5d3b-4c05-9a48-52a2d256aab4');
+      if(project.id!=='26122336-8a7c-48b5-b15f-fa193ca157fd' || workbench.activeJobId ||
+         base?.status!=='review' || !base.candidates.some(c=>c.id==='rabbit_local_repair_v2') ||
+         workbench.jobs.some(j=>j.step==='rig')) throw Error('Exact accepted rabbit revision required; never duplicate rig work');
+      await page.getByTestId('workbench-step-assembly').click();
+      if(!workbench.selections.assembly) await page.getByTestId('workbench-accept-assembly').click();
+      await page.getByTestId('workbench-step-rig').click();
+      await page.getByTestId('workbench-rig-profile').selectOption('quadruped');
+      await page.getByTestId('workbench-rig-ears').check();
+      await page.getByTestId('workbench-rig-tail').check();
+      await page.getByTestId('workbench-rig-prompt').fill('채택한 보정본 rabbit_local_repair_v2.blend를 기준으로 실제 네 발 토끼 리그를 만들어 주세요. Unity Generic용 뼈대이며 골반·척추·목·머리와 앞다리 2개/뒷다리 2개 각각의 관절, 발 제어가 필요합니다. 네 다리는 토끼의 실제 해부학적 굽힘 방향과 관절 위치를 고려해 독립적으로 포즈를 잡을 수 있게 하세요. 왼쪽 귀·오른쪽 귀를 각각 숙이거나 벌릴 수 있는 뿌리/중간 또는 끝 제어, 짧은 꼬리의 흔들기 제어도 만들어 주세요. 귀와 꼬리는 몸체 메시의 영역으로 식별해 실제 웨이트를 연결하고 억지로 새 메시로 교체하지 마세요. 수염은 기존 16가닥과 별도 오브젝트를 유지하며 머리를 자연스럽게 따라갑니다. 수염 독립 뼈는 추가하지 않습니다. 보정된 볼·수염 외형, UV, 4K 텍스처, 중립 자세의 실제 메시 좌표와 기존 오브젝트 ID를 보존하세요. 모든 정점에 정규화된 실제 웨이트를 넣고, 한쪽 다리나 귀를 움직일 때 반대편이나 몸통 전체가 끌려오지 않도록 합니다. 각 다리 굽힘 4개와 양쪽 귀·꼬리 단독 포즈를 실제 Blender에서 검사하고 해당 렌더 및 수치 보고서를 남기세요. 발/귀/꼬리 관통·찢어짐·몸통 붕괴를 직접 보고 수정하세요. 편집 가능한 packed blend, 스킨 포함 GLB, FBX+동반 4096 텍스처를 새 버전으로 저장하고 FBX 재임포트로 뼈·웨이트·텍스처를 검증하세요. 최종 파일은 중립 자세로 되돌려 저장하세요. 포즈 테스트는 리깅 검사일 뿐이며 Idle/Jump 등 제작 애니메이션, 물리 시뮬레이션, Tripo 작업, 다음 단계는 실행하지 마세요. 기존 텍스처의 작은 색 차이 같은 미수정 외형 한계는 보고서에 그대로 기록하세요.');
+      await page.getByTestId('workbench-execute-rig').click();
+      await page.waitForTimeout(700);
+      const after=await call({type:'state'}), w=after.workbenches.find(w=>w.projectId===project.id), job=w.jobs.find(j=>j.step==='rig');
+      if(!job || w.selections.assembly?.jobId!==base.id) throw Error('App did not dispatch rigging');
+      fs.writeFileSync('artifacts/runtime/rabbit-rig-dispatch.json',JSON.stringify({appVersion:'0.6.15',trigger:'workbench-execute-rig',assemblySelection:w.selections.assembly,job},null,2));
+      console.log(JSON.stringify({rigJobId:job.id,status:job.status,request:job.request,dependencies:job.dependencies}));
+    }
+    else if(command.action==='show-rig') {
+      await page.getByTestId('workbench-step-rig').click();
+      await page.screenshot({path:'artifacts/runtime/rabbit-rig-live.png'});
+      const after=await call({type:'state'}), w=after.workbenches.find(w=>w.projectId===project.id), job=w.jobs.find(j=>j.step==='rig');
+      console.log(JSON.stringify({selection:w.selections.rig,jobId:job?.id,status:job?.status,summary:job?.summary,checks:job?.checks}));
+    }
+    else if(command.action==='recheck-existing-assembly' || command.action==='recheck-existing-rig') {
+      const step=command.action==='recheck-existing-rig'?'rig':'assembly';
+      const job=workbench.jobs.find(j=>j.step===step);
       if(workbench.activeJobId || job?.id!==command.jobId || !['needs_input','failed','cancelled'].includes(job.status))
         throw Error('Exact stopped existing assembly job required');
-      await page.getByTestId('workbench-step-assembly').click();
+      await page.getByTestId(`workbench-step-${step}`).click();
       await page.getByTestId('workbench-retry').click();
     }
     else if(command.action==='refine-reviewed-rabbit' || command.action==='correct-stopped-rabbit') {

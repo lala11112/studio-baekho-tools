@@ -87,6 +87,9 @@ export type WorkbenchRequest = {
   modelEditTarget?: string;
   objectIds?: string[];
   rigTargets?: WorkbenchRigTarget[];
+  /** Anatomical controls are independent of optional clothing/hair object bones. */
+  rigProfile?: "automatic" | "quadruped";
+  rigControls?: { ears: boolean; tail: boolean };
   motion?: string;
   fps?: number;
   duration?: number;

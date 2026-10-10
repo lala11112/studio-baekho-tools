@@ -422,6 +422,11 @@ export function AssetWorkbench({
       ?.request.rigTargets?.filter((t) => t.extraBones)
       .map((t) => t.objectId) ?? [],
   );
+  const [rigProfile, setRigProfile] = useState<"automatic" | "quadruped">(
+    w?.jobs.find(j => j.step === "rig")?.request.rigProfile ?? "automatic",
+  );
+  const [rigEars, setRigEars] = useState(w?.jobs.find(j => j.step === "rig")?.request.rigControls?.ears ?? false);
+  const [rigTail, setRigTail] = useState(w?.jobs.find(j => j.step === "rig")?.request.rigControls?.tail ?? false);
   const [recoveryAttempts, setRecoveryAttempts] = useState<
     Record<string, number>
   >({});
@@ -2289,6 +2294,17 @@ export function AssetWorkbench({
                   Blender + Astra
                 </div>
                 <h3>추가 뼈 · 웨이트</h3>
+                <label className="field">
+                  <span>몸체 체형</span>
+                  <select data-testid="workbench-rig-profile" value={rigProfile} onChange={e => setRigProfile(e.target.value as typeof rigProfile)}>
+                    <option value="automatic">원본 체형에 맞춤</option>
+                    <option value="quadruped">네 발 동물 · Unity Generic</option>
+                  </select>
+                </label>
+                <div className="wb-object-list">
+                  <label className="wb-object"><input data-testid="workbench-rig-ears" type="checkbox" role="switch" checked={rigEars} onChange={e => setRigEars(e.target.checked)} /><span>귀 제어<small>왼쪽·오른쪽 귀를 각각 움직이는 뼈와 웨이트</small></span></label>
+                  <label className="wb-object"><input data-testid="workbench-rig-tail" type="checkbox" role="switch" checked={rigTail} onChange={e => setRigTail(e.target.checked)} /><span>꼬리 제어<small>몸체에 붙어 있는 꼬리도 별도로 움직이기</small></span></label>
+                </div>
                 <div
                   className="wb-object-list"
                   data-testid="workbench-rig-targets"
@@ -2346,6 +2362,8 @@ export function AssetWorkbench({
                   editBase ? "리깅 수정 · 리롤" : "Blender + Astra로 리깅",
                   {
                     step: "rig",
+                    rigProfile,
+                    rigControls: { ears: rigEars, tail: rigTail },
                     prompt:
                       rigPrompt.trim() ||
                       "Unity 게임용 기본 몸체 리깅과 선택한 오브젝트의 추가 뼈 및 웨이트를 만들고 변형을 검사해 주세요.",
