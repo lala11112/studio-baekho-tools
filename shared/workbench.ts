@@ -45,6 +45,9 @@ export type WorkbenchCandidate = {
   objects?: WorkbenchObject[];
 };
 export type WorkbenchRequest = {
+  /** Independent whole-character views, reviewed as one set after design selection. */
+  conceptMode?: "design" | "turnaround";
+  executionMode?: "worker" | "codex-session";
   step: WorkbenchStep;
   prompt: string;
   provider?: "gpt" | "tripo";
@@ -106,6 +109,12 @@ export type WorkbenchCheck = {
   detail?: string;
 };
 export type WorkbenchJob = {
+  externalExecution?: {
+    state: "prepared" | "reserved" | "received";
+    requestHash: string;
+    reservedAt?: string;
+    conversationUrl?: string;
+  };
   id: string;
   step: WorkbenchStep;
   slot: string;
@@ -188,6 +197,9 @@ export interface WorkbenchExecutor {
   shutdown?(): void;
 }
 export type WorkbenchAction =
+  | { kind: "external-reserve"; jobId: string; requestHash: string }
+  | { kind: "external-receive"; jobId: string }
+  | { kind: "external-cancel"; jobId: string }
   | { kind: "execute"; request: WorkbenchRequest; approval?: WorkbenchApproval }
   | { kind: "select"; jobId: string; candidateId: string }
   | { kind: "accept"; jobId: string }
@@ -232,6 +244,7 @@ export function workbenchSeparationViews(
   return request.views ?? ["front"];
 }
 export function workbenchSlot(request: WorkbenchRequest): string {
+  if (request.step === "concept" && request.conceptMode === "turnaround") return "whole-reference";
   if (request.step === "model") return `model:${request.role}`;
   if (request.step === "reference" || request.step === "animation")
     return `${request.step}:${request.motion?.trim()}`;

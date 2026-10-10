@@ -131,6 +131,7 @@ async function dispatch(c: Command): Promise<unknown> {
     case "workbench.action":
       if (
         c.action.kind === "execute" &&
+        c.action.request.executionMode !== "codex-session" &&
         ["concept", "separate"].includes(c.action.request.step) &&
         c.action.request.provider !== "tripo" &&
         (c.action.request.imageBackend ?? "chatgpt-web") === "chatgpt-web"

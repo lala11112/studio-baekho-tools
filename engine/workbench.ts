@@ -180,7 +180,24 @@ export class WorkbenchEngine {
   }
   action(projectId: string, action: WorkbenchAction): Workbench {
     const w = this.getForProject(projectId) ?? this.create(projectId);
+    if (["retry", "retry-validation", "resolve-submission"].includes(action.kind) &&
+        "jobId" in action && this.job(w, action.jobId).externalExecution)
+      throw new Error("현재 대화 실행 작업은 새 작업자로 재시도하지 않습니다. 기존 대화의 결과만 등록하세요.");
     switch (action.kind) {
+      case "external-reserve":
+        return this.reserveExternal(w, action.jobId, action.requestHash);
+      case "external-receive":
+        return this.receiveExternal(w, action.jobId);
+      case "external-cancel": {
+        this.idle(w);
+        const j = this.job(w, action.jobId);
+        if (!j.externalExecution || j.status !== "needs_input")
+          throw new Error("중지할 외부 대기 작업이 아닙니다.");
+        j.status = "cancelled";
+        j.summary = "외부 작업 추적을 중지했습니다. 웹 요청 취소가 아니며 제출 기록은 보존합니다.";
+        j.updatedAt = now();
+        return this.save(w);
+      }
       case "execute":
         return this.execute(w.id, action.request, action.approval);
       case "select":
@@ -329,7 +346,7 @@ export class WorkbenchEngine {
   private dependencySlots(w: Workbench, request: WorkbenchRequest) {
     switch (request.step) {
       case "concept":
-        return [];
+        return request.conceptMode === "turnaround" ? ["concept"] : [];
       case "separate":
         return ["concept"];
       case "model":
@@ -368,7 +385,16 @@ export class WorkbenchEngine {
     if (typeof request.prompt !== "string" || request.prompt.length > 12000)
       throw new Error("작업 지시는 12,000자 이내로 작성하세요.");
     const r = structuredClone(request);
+    if (r.executionMode !== undefined && !["worker", "codex-session"].includes(r.executionMode))
+      throw new Error("알 수 없는 실행 연결입니다.");
     r.prompt = r.prompt.trim();
+    if (r.conceptMode !== undefined && (r.step !== "concept" || !["design", "turnaround"].includes(r.conceptMode)))
+      throw new Error("잘못된 전체 이미지 생성 모드입니다.");
+    if (r.conceptMode === "turnaround") {
+      if (r.executionMode !== "codex-session" || r.provider !== "gpt" || r.generationCount !== 1)
+        throw new Error("전체 4방향은 현재 대화에서 GPT 독립 원본 1세트로 실행하세요.");
+      r.views = [...WORKBENCH_VIEWS];
+    }
     if (["concept", "separate", "model"].includes(r.step)) {
       r.generationCount ??= r.step === "concept" ? 4 : 1;
       if (
@@ -594,6 +620,15 @@ export class WorkbenchEngine {
         );
     }
     const r = this.normalize(input);
+    if (r.step === "model" && r.modelInput === "whole" && !r.baseJobId &&
+        w.jobs.some(j => j.slot === "whole-reference" && j.status !== "cancelled" && this.current(w, j))) {
+      if (!w.selections["whole-reference"])
+        throw new Error("전체 4방향 이미지를 먼저 검토하고 채택하세요.");
+      throw new Error("전체 4방향의 Tripo 입력 지원·방향·비용을 현재 대화에서 확인해야 합니다. 단일 이미지로 대신 제출하지 않습니다.");
+    }
+    if (r.executionMode === "codex-session" &&
+        (r.step !== "concept" || r.provider === "tripo"))
+      throw new Error("현재 대화 실행 연결은 우선 GPT 컨셉 이미지 단계만 지원합니다.");
     if (r.step === "assembly") {
       const route = workbenchModelInput(this.chosen(w, "surface").job.request);
       if (r.modelInput !== undefined && r.modelInput !== route)
@@ -603,6 +638,10 @@ export class WorkbenchEngine {
       r.modelInput = route;
     }
     const slot = workbenchSlot(r);
+    if (w.jobs.some(j => j.slot === slot && j.externalExecution &&
+        (j.externalExecution.state === "reserved" ||
+          (j.externalExecution.state === "prepared" && j.status !== "cancelled"))))
+      throw new Error("이 단계의 외부 실행이 대기 중입니다. 기존 작업의 결과를 먼저 회수하세요.");
     if (
       w.jobs.some((j) => j.slot === slot && j.status === "submission_unknown")
     )
@@ -764,6 +803,19 @@ export class WorkbenchEngine {
     fs.mkdirSync(workspace, { recursive: true });
     const controller = new AbortController();
     const uniqueInputs = [...new Map(inputs.map((a) => [a.path, a])).values()];
+    if (r.executionMode === "codex-session") {
+      const packet = JSON.stringify({ schemaVersion: 1, projectId: w.projectId,
+        workbenchId: w.id, jobId: job.id, request: r, approval: accepted,
+        inputs: uniqueInputs, dependencies }, null, 2);
+      const requestHash = createHash("sha256").update(packet).digest("hex");
+      fs.writeFileSync(path.join(workspace, "external-request.json"), packet, { flag: "wx" });
+      job.externalExecution = { state: "prepared", requestHash };
+      job.status = "needs_input";
+      job.summary = "현재 Codex 대화 실행 대기 · 작업 명세를 저장했습니다. 아직 웹에 제출하지 않았습니다.";
+      delete w.activeJobId;
+      w.message = job.summary;
+      return this.save(w);
+    }
     const promise = Promise.resolve().then(() =>
       this.perform(w.id, job.id, workspace, uniqueInputs, controller),
     );
@@ -772,6 +824,48 @@ export class WorkbenchEngine {
   }
   private workspace(w: Workbench, job: WorkbenchJob) {
     return this.store.file(w.projectId, `workbench/${w.id}/jobs/${job.id}`);
+  }
+  private reserveExternal(w: Workbench, jobId: string, requestHash: string) {
+    this.idle(w);
+    const job = this.job(w, jobId), external = job.externalExecution;
+    if (job.status !== "needs_input" || external?.state !== "prepared" ||
+        requestHash !== external.requestHash || !this.current(w, job) ||
+        hash(path.join(this.workspace(w, job), "external-request.json")) !== requestHash)
+      throw new Error("실행 명세가 변경됐거나 이미 제출 예약된 작업입니다. 재제출하지 않습니다.");
+    external.state = "reserved";
+    external.reservedAt = now();
+    job.summary = "외부 제출 예약됨 · 현재 대화에서 한 번만 전송하고 기존 결과를 회수하세요. 재전송 금지.";
+    job.updatedAt = now();
+    return this.save(w);
+  }
+  private receiveExternal(w: Workbench, jobId: string) {
+    this.idle(w);
+    const job = this.job(w, jobId), external = job.externalExecution;
+    if (job.status !== "needs_input" || external?.state !== "reserved")
+      throw new Error("결과 회수를 기다리는 외부 실행 작업이 아닙니다.");
+    const workspace = this.workspace(w, job);
+    if (hash(path.join(workspace, "external-request.json")) !== external.requestHash)
+      throw new Error("고정 실행 명세가 변경되었습니다.");
+    const receipt = json<{jobId: string; requestHash: string; conversationUrl: string;
+      files: {path: string; sha256: string}[]; result: WorkbenchResult}>(safeRelative(workspace, "external-result.json"));
+    const url = new URL(receipt.conversationUrl);
+    if (receipt.jobId !== job.id || receipt.requestHash !== external.requestHash ||
+        url.protocol !== "https:" || url.hostname !== "chatgpt.com" || url.port ||
+        url.username || url.password || url.search || url.hash ||
+        !/^\/c\/[a-zA-Z0-9-]+$/.test(url.pathname) || receipt.result.status !== "completed")
+      throw new Error("외부 결과의 작업·명세·ChatGPT 대화 출처가 일치하지 않습니다.");
+    const artifacts = receipt.result.candidates.flatMap(c => c.artifacts);
+    if (!Array.isArray(receipt.files) || receipt.files.length !== artifacts.length ||
+        new Set(receipt.files.map(f => f.path)).size !== receipt.files.length ||
+        artifacts.some(a => !receipt.files.some(f => f.path === a.path &&
+          f.sha256 === hash(safeRelative(workspace, a.path)))))
+      throw new Error("다운로드 원본 목록 또는 해시가 일치하지 않습니다.");
+    this.applyResult(w, job, receipt.result);
+    external.state = "received";
+    external.conversationUrl = url.href;
+    job.updatedAt = now();
+    w.message = "실제 외부 결과를 등록했습니다. 이미지를 확인하고 직접 선택하세요.";
+    return this.save(w);
   }
   private async perform(
     id: string,
@@ -1326,6 +1420,13 @@ export class WorkbenchEngine {
       role?: string,
     ) => c.artifacts.some((a) => a.kind === kind && (!role || a.role === role));
     const primary = job.step === "concept" ? "image" : "model";
+    if (job.request.conceptMode === "turnaround") {
+      const images = candidates.flatMap(c => c.artifacts.filter(a => a.kind === "image"));
+      if (candidates.length !== 1 || images.length !== 4 ||
+          WORKBENCH_VIEWS.some(view => images.filter(a => a.role === "whole" && a.view === view).length !== 1) ||
+          new Set(images.map(a => a.sha256)).size !== 4)
+        throw new Error("전체 캐릭터 정면·후면·좌·우의 서로 다른 독립 이미지 4장이 필요합니다.");
+    }
     if (["concept", "model"].includes(job.step)) {
       if (candidates.some((c) => !has(c, primary)))
         throw new Error("각 후보에 실제 이미지 또는 모델이 필요합니다.");
@@ -1549,7 +1650,7 @@ export class WorkbenchEngine {
         w.jobs.some(
           (pending) =>
             pending.status !== "review" &&
-            this.executor.hasSubmission?.(pending) &&
+            (pending.externalExecution?.state === "reserved" || this.executor.hasSubmission?.(pending)) &&
             dependsOn(pending),
         )
       )

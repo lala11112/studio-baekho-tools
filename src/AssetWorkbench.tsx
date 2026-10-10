@@ -292,6 +292,11 @@ export function AssetWorkbench({
       (j) => ["concept", "separate"].includes(j.step) && j.request.imageBackend,
     )?.request.imageBackend ?? "chatgpt-web",
   );
+  const [externalConcept, setExternalConcept] = useState(
+    w?.jobs.find(j => j.step === "concept")?.request.executionMode === "codex-session",
+  );
+  const [turnaround, setTurnaround] = useState(w?.jobs[0]?.request.conceptMode === "turnaround");
+  const [turnaroundPrompt, setTurnaroundPrompt] = useState("채택한 캐릭터를 그대로 유지한 정면·후면·캐릭터의 왼쪽 측면·오른쪽 측면 독립 원본 4장을 한 요청으로 생성하세요. 시트·콜라주·크롭·복제·좌우 반전은 금지합니다. 동일한 중립 자세, 체형·귀·꼬리·색상, 같은 캔버스·확대 비율·중심·발 높이, 전체 몸이 잘리지 않는 직교 시점, 단색 배경을 사용하세요. 각 이미지의 방향은 이미지 밖에서 명시하세요.");
   const [chatGptStatus, setChatGptStatus] = useState<ChatGptStatus>();
   const [chatGptConnecting, setChatGptConnecting] = useState(false);
   const [chatGptWatch, setChatGptWatch] = useState(0);
@@ -593,7 +598,7 @@ export function AssetWorkbench({
         ? motionMode
         : page;
   const slot =
-    step === "model"
+    step === "concept" && turnaround ? "whole-reference" : step === "model"
       ? `model:${modelRole}`
       : ["reference", "animation"].includes(step)
         ? `${step}:${motion.trim()}`
@@ -780,7 +785,8 @@ export function AssetWorkbench({
       request:
         ["concept", "separate"].includes(request.step) &&
         request.provider !== "tripo"
-          ? { ...request, imageBackend }
+          ? { ...request, imageBackend,
+              executionMode: request.step === "concept" && externalConcept ? "codex-session" : "worker" }
           : request,
       approval: {
         accepted: paid ? approved : true,
@@ -1058,7 +1064,7 @@ export function AssetWorkbench({
           <small>
             기존 ChatGPT 계정의 사용량을 사용합니다.
             <br />
-            {step === "concept"
+            {step === "concept" && turnaround ? "전체 캐릭터 4방향 독립 이미지 1세트" : step === "concept"
               ? `이미지 후보 ${conceptCount}장`
               : step === "separate"
                 ? `머리·머리카락·몸통 × ${requestedSeparationViews.length}방향 × ${separationCount}세트. ${correctionBase ? `현재 선택 범위 ${rerollSeparationCount}장 수정 또는 누락 ${missingSeparationCount}장만 생성합니다.` : `총 ${rerollSeparationCount}장 생성합니다.`}`
@@ -1157,6 +1163,10 @@ export function AssetWorkbench({
     );
   }
   function imageConnectionHelp() {
+    if (page === "concept" && externalConcept) return <p className="wb-note">
+      앱은 요청을 저장합니다. 현재 Codex 대화에서 연결된 Chrome으로 실행한 뒤 원본을 등록합니다.
+      이 버튼이 대화에 자동 명령을 보내거나 내장 로그인 창을 여는 것은 아닙니다.
+    </p>;
     return (
       <p className="wb-note" data-testid="workbench-image-backend-help">
         {imageBackend === "chatgpt-web"
@@ -1244,7 +1254,7 @@ export function AssetWorkbench({
         </div>
       </div>
       {probe && <p className="wb-note">{probe}</p>}
-      {chatGptStatus && (
+      {chatGptStatus && !(page === "concept" && externalConcept) && (
         <div
           className={`wb-note${chatGptStatus.state === "failed" ? " warning" : ""}`}
           data-testid="workbench-chatgpt-connection-status"
@@ -1299,7 +1309,7 @@ export function AssetWorkbench({
           )}
           <div>
             <strong>
-              {statuses[currentStatus.status]}
+              {currentStatus.externalExecution ? "현재 대화 실행 · 원본 회수 대기" : statuses[currentStatus.status]}
               {active
                 ? ` · ${Math.floor(elapsed / 60)}분 ${elapsed % 60}초`
                 : ""}
@@ -1308,6 +1318,16 @@ export function AssetWorkbench({
               {currentStatus.summary ||
                 "작업자가 현재 단계의 결과를 준비하고 있습니다."}
             </p>
+            {currentStatus.externalExecution && <div>
+              <p>작업 ID: {currentStatus.id}</p>
+              <p>프로젝트 폴더의 workbench/{w?.id}/jobs/{currentStatus.id}/external-request.json을 현재 대화에 전달하세요.</p>
+              <button onClick={() => void run({ type: "workbench.open", id: p.id })}>작업 폴더 열기</button>
+              <button data-testid="workbench-external-receive"
+                disabled={currentStatus.externalExecution.state !== "reserved" || locked}
+                onClick={() => void action({kind: "external-receive", jobId: currentStatus.id})}>기존 대화 결과 등록</button>
+              <button disabled={currentStatus.status !== "needs_input" || locked}
+                onClick={() => void action({kind: "external-cancel", jobId: currentStatus.id})}>외부 작업 추적 중지</button>
+            </div>}
             {recovery && (
               <div
                 className={`wb-recovery ${recovery.state}`}
@@ -1463,14 +1483,19 @@ export function AssetWorkbench({
                     <option value="tripo">Tripo</option>
                   </select>
                 </label>
+                {provider === "gpt" && <label className="wb-note">
+                  <input type="checkbox" data-testid="workbench-external-concept"
+                    checked={externalConcept} onChange={e => { setExternalConcept(e.target.checked); setApproved(false); }} />
+                  현재 Codex 대화에서 Chrome으로 실행 · 컨셉 이미지
+                </label>}
                 {provider === "gpt" && imageConnectionHelp()}
-                {countInput(
+                {!turnaround && countInput(
                   "생성할 이미지 수",
                   conceptCount,
                   setConceptCount,
                   "workbench-concept-count",
                 )}
-                <label className="field">
+                {!turnaround && <label className="field">
                   <span>캐릭터 이미지 프롬프트</span>
                   <textarea
                     data-testid="workbench-concept-prompt"
@@ -1479,17 +1504,29 @@ export function AssetWorkbench({
                     onChange={(e) => setPrompt(e.target.value)}
                     placeholder="정면 전신 캐릭터, 원하는 외형·의상·스타일…"
                   />
-                </label>
+                </label>}
+                {concept && externalConcept && provider === "gpt" && <label className="field">
+                  <span>이미지 작업</span>
+                  <select data-testid="workbench-concept-mode" value={turnaround ? "turnaround" : "design"}
+                    onChange={e => { setTurnaround(e.target.value === "turnaround"); setApproved(false); setViewJobId(""); }}>
+                    <option value="design">초기 디자인 후보</option>
+                    <option value="turnaround">채택한 디자인의 전체 4방향 · 분리 안 함</option>
+                  </select>
+                </label>}
+                {turnaround && <label className="field"><span>전체 4방향 지시문 · 정면/후면/좌/우 1세트</span>
+                  <textarea data-testid="workbench-turnaround-prompt" value={turnaroundPrompt} onChange={e => setTurnaroundPrompt(e.target.value)} />
+                </label>}
                 {approvalBox()}
                 {launch(
-                  `이미지 후보 ${conceptCount}장 만들기`,
+                  turnaround ? "전체 4방향 원본 만들기" : `이미지 후보 ${conceptCount}장 만들기`,
                   {
                     step: "concept",
                     provider,
-                    prompt,
-                    generationCount: conceptCount,
+                    prompt: turnaround ? turnaroundPrompt : prompt,
+                    generationCount: turnaround ? 1 : conceptCount,
+                    conceptMode: turnaround ? "turnaround" : "design",
                   },
-                  !prompt.trim(),
+                  turnaround ? !turnaroundPrompt.trim() || !concept || !externalConcept || provider !== "gpt" : !prompt.trim(),
                 )}
                 <hr />
                 <button
@@ -2530,7 +2567,7 @@ export function AssetWorkbench({
                 ((step === "model" || step === "separate") &&
                   viewing.candidates.length > 1) ? (
                   <div
-                    className={`wb-candidates ${step === "separate" ? "wb-candidate-sets" : ""}`}
+                    className={`wb-candidates ${step === "separate" || viewing.request.conceptMode === "turnaround" ? "wb-candidate-sets" : ""}`}
                   >
                     {viewing.candidates.map((c, i) => {
                       const selected =
@@ -2545,7 +2582,11 @@ export function AssetWorkbench({
                           key={c.id}
                           data-testid={`workbench-candidate-${i}`}
                         >
-                          {step === "separate"
+                          {viewing.request.conceptMode === "turnaround" ? <div className="wb-whole-views">
+                            {c.artifacts.filter(a => a.kind === "image").map(a => <figure key={a.path}>
+                              <img src={url(a)} alt={`전체 ${a.view ? viewLabels[a.view] : ""}`} /><figcaption>{a.view ? viewLabels[a.view] : ""}</figcaption>
+                            </figure>)}
+                          </div> : step === "separate"
                             ? separationGallery(
                                 c.artifacts.filter((a) => a.kind === "image"),
                                 false,
