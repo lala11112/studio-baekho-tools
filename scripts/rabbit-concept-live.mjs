@@ -10,7 +10,7 @@ const prompt = `게임용 3D 캐릭터 제작을 위한 서로 다른 토끼 디
 후보 1: 작고 둥근 얼굴과 통통한 몸, 곧게 선 긴 귀로 귀여운 인상.
 후보 2: 조금 더 날렵한 얼굴과 탄력 있는 뒷다리, 귀 끝이 살짝 벌어진 생동감 있는 인상.
 각 결과 옆의 설명으로 후보 1과 후보 2를 구분하되 이미지 안에는 번호를 쓰지 마세요. 실제 이미지 두 장을 생성하고, 하나의 이미지를 복제하거나 자르지 마세요.`;
-const app = await electron.launch({ executablePath: path.resolve("release/0.6.4/win-unpacked/Partsmith.exe") });
+const app = await electron.launch({ executablePath: path.resolve("release/0.6.5/win-unpacked/Partsmith.exe") });
 const page = await app.firstWindow();
 await page.waitForSelector(".home");
 const call = c => page.evaluate(c => window.desktop.call(c), c);
@@ -41,10 +41,11 @@ const snapshot = async () => {
   const job=workbench.jobs.find(j=>j.request.executionMode==="codex-session");
   const info={projectId:project.id,workbenchId:workbench.id,jobId:job.id,
     workspace:path.join(state.dataDir,"projects",project.id,"workbench",workbench.id,"jobs",job.id),
-    status:job.status,external:job.externalExecution,candidates:job.candidates,selection:workbench.selections.concept};
+    status:job.status,external:job.externalExecution,candidates:job.candidates,selection:workbench.selections.concept,
+    wholeReference:workbench.selections['whole-reference']};
   fs.mkdirSync("artifacts/runtime",{recursive:true});
   fs.writeFileSync("artifacts/runtime/rabbit-session.json",JSON.stringify(info,null,2));
-  console.log(JSON.stringify({jobId:job.id,status:job.status,external:job.externalExecution?.state,candidates:job.candidates.length,selection:info.selection}));
+  console.log(JSON.stringify({jobId:job.id,status:job.status,external:job.externalExecution?.state,candidates:job.candidates.length,selection:info.selection,wholeReference:info.wholeReference}));
   return info;
 };
 await snapshot();
@@ -56,6 +57,29 @@ for await (const line of readline.createInterface({input:process.stdin})) {
       action:{kind:"external-reserve",jobId:info.jobId,requestHash:info.external.requestHash}});
     else if(command.action==="receive") await page.getByTestId("workbench-external-receive").click();
     else if(command.action==="select-rounded") await page.getByTestId("workbench-select-0").click();
+    else if(command.action==="select-version") {
+      const selectedJob=workbench.jobs.find(j=>j.id===command.jobId && j.status==='review');
+      if(!selectedJob?.candidates.some(c=>c.id===command.candidateId)) throw Error('Reviewed candidate not found');
+      await call({type:'workbench.action',id:project.id,action:{kind:'select',jobId:command.jobId,candidateId:command.candidateId}});
+    }
+    else if(command.action==='model-settings' || command.action==='prepare-model') {
+      if(!info.wholeReference) throw Error('Accept the four-view set first');
+      await page.getByTestId('workbench-step-parts').click();
+      await page.getByTestId('workbench-model-input').selectOption('whole');
+      await page.getByTestId('workbench-external-model').check();
+      await page.getByTestId('workbench-model-count').fill('1');
+      await page.getByTestId('workbench-polygon-count').fill('10000');
+      await page.getByTestId('workbench-studio-topology').selectOption('quad');
+      await page.getByTestId('workbench-observed-model-cost').fill('100');
+      await page.getByTestId('workbench-credit-limit').fill('100');
+      if(command.action==='prepare-model') {
+        if(command.costApproved!==true) throw Error('Explicit approval of observed 100-credit scope is required');
+        await page.getByTestId('workbench-approve').check();
+        await page.getByTestId('workbench-execute-model').click();
+        await page.getByTestId('workbench-external-receive').waitFor();
+      }
+      await page.screenshot({path:'artifacts/runtime/rabbit-model-app.png'});
+    }
     else if(command.action==="turnaround") {
       await page.getByTestId("workbench-concept-mode").selectOption("turnaround");
       await page.getByTestId("workbench-approve").check();

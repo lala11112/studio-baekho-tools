@@ -351,7 +351,7 @@ export class WorkbenchEngine {
         return ["concept"];
       case "model":
         return workbenchModelInput(request) === "whole"
-          ? ["concept"]
+          ? request.externalModel ? ["concept", "whole-reference"] : ["concept"]
           : ["concept", "separate"];
       case "surface":
         return workbenchModelInput(request) === "whole"
@@ -388,6 +388,15 @@ export class WorkbenchEngine {
     if (r.executionMode !== undefined && !["worker", "codex-session"].includes(r.executionMode))
       throw new Error("알 수 없는 실행 연결입니다.");
     r.prompt = r.prompt.trim();
+    if (r.externalModel !== undefined) {
+      const settings = r.externalModel;
+      if (r.executionMode !== "codex-session" || r.step !== "model" ||
+          r.modelInput !== "whole" || r.baseJobId || settings.model !== "P2.0" ||
+          !["quad", "triangle"].includes(settings.topology) ||
+          !Number.isSafeInteger(settings.observedCreditCost) || settings.observedCreditCost < 0)
+        throw new Error("외부 모델 실행에는 전체 4방향 입력과 확인한 P2.0 설정·비용이 필요합니다. 기존 모델 수정은 지원하지 않습니다.");
+      r.views = [...WORKBENCH_VIEWS];
+    }
     if (r.conceptMode !== undefined && (r.step !== "concept" || !["design", "turnaround"].includes(r.conceptMode)))
       throw new Error("잘못된 전체 이미지 생성 모드입니다.");
     if (r.conceptMode === "turnaround") {
@@ -624,11 +633,12 @@ export class WorkbenchEngine {
         w.jobs.some(j => j.slot === "whole-reference" && j.status !== "cancelled" && this.current(w, j))) {
       if (!w.selections["whole-reference"])
         throw new Error("전체 4방향 이미지를 먼저 검토하고 채택하세요.");
-      throw new Error("전체 4방향의 Tripo 입력 지원·방향·비용을 현재 대화에서 확인해야 합니다. 단일 이미지로 대신 제출하지 않습니다.");
+      if (!r.externalModel)
+        throw new Error("전체 4방향의 Tripo 입력 지원·방향·비용을 현재 대화에서 확인해야 합니다. 단일 이미지로 대신 제출하지 않습니다.");
     }
     if (r.executionMode === "codex-session" &&
-        (r.step !== "concept" || r.provider === "tripo"))
-      throw new Error("현재 대화 실행 연결은 우선 GPT 컨셉 이미지 단계만 지원합니다.");
+        !((r.step === "concept" && r.provider === "gpt") || (r.step === "model" && r.externalModel)))
+      throw new Error("현재 대화 실행 연결은 GPT 컨셉 이미지와 전체 4방향 P2 모델을 지원합니다.");
     if (r.step === "assembly") {
       const route = workbenchModelInput(this.chosen(w, "surface").job.request);
       if (r.modelInput !== undefined && r.modelInput !== route)
@@ -679,6 +689,8 @@ export class WorkbenchEngine {
       !accepted.accepted
     )
       throw new Error("현재 단계의 생성 범위와 비용 한도를 확인해 주세요.");
+    if (r.externalModel && r.externalModel.observedCreditCost > accepted.studioCreditLimit)
+      throw new Error("화면에서 확인한 Tripo 비용이 승인 한도를 넘습니다.");
     const dependencies: Record<string, WorkbenchSelection> = {};
     const inputs: WorkbenchArtifact[] = [];
     for (const dep of this.dependencySlots(w, r)) {
@@ -711,7 +723,14 @@ export class WorkbenchEngine {
           );
       }
       dependencies[dep] = selected.selected;
-      inputs.push(...selected.candidate.artifacts);
+      // The concept remains a lineage dependency, never an extra fifth upload.
+      if (!(r.externalModel && dep === "concept")) inputs.push(...selected.candidate.artifacts);
+      if (r.externalModel && dep === "whole-reference") {
+        const images = selected.candidate.artifacts.filter(a => a.kind === "image");
+        if (images.length !== 4 || new Set(images.map(a => a.sha256)).size !== 4 ||
+            WORKBENCH_VIEWS.some(view => images.filter(a => a.role === "whole" && a.view === view).length !== 1))
+          throw new Error("채택한 전체 4방향 원본이 모두 필요합니다.");
+      }
       if (
         r.step === "model" &&
         !r.baseJobId &&
@@ -832,6 +851,8 @@ export class WorkbenchEngine {
         requestHash !== external.requestHash || !this.current(w, job) ||
         hash(path.join(this.workspace(w, job), "external-request.json")) !== requestHash)
       throw new Error("실행 명세가 변경됐거나 이미 제출 예약된 작업입니다. 재제출하지 않습니다.");
+    const packet = json<{inputs: WorkbenchArtifact[]}>(path.join(this.workspace(w, job), "external-request.json"));
+    this.verifyArtifacts(w, packet.inputs);
     external.state = "reserved";
     external.reservedAt = now();
     job.summary = "외부 제출 예약됨 · 현재 대화에서 한 번만 전송하고 기존 결과를 회수하세요. 재전송 금지.";
@@ -846,14 +867,32 @@ export class WorkbenchEngine {
     const workspace = this.workspace(w, job);
     if (hash(path.join(workspace, "external-request.json")) !== external.requestHash)
       throw new Error("고정 실행 명세가 변경되었습니다.");
-    const receipt = json<{jobId: string; requestHash: string; conversationUrl: string;
+    const receipt = json<{jobId: string; requestHash: string; conversationUrl?: string;
+      studioModels?: {candidateId: string; modelId: string; url: string}[];
       files: {path: string; sha256: string}[]; result: WorkbenchResult}>(safeRelative(workspace, "external-result.json"));
-    const url = new URL(receipt.conversationUrl);
-    if (receipt.jobId !== job.id || receipt.requestHash !== external.requestHash ||
-        url.protocol !== "https:" || url.hostname !== "chatgpt.com" || url.port ||
-        url.username || url.password || url.search || url.hash ||
-        !/^\/c\/[a-zA-Z0-9-]+$/.test(url.pathname) || receipt.result.status !== "completed")
-      throw new Error("외부 결과의 작업·명세·ChatGPT 대화 출처가 일치하지 않습니다.");
+    if (receipt.jobId !== job.id || receipt.requestHash !== external.requestHash || receipt.result.status !== "completed")
+      throw new Error("외부 결과의 작업·명세가 일치하지 않습니다.");
+    if (job.request.externalModel) {
+      const sources = receipt.studioModels;
+      if (!Array.isArray(sources) || sources.length !== receipt.result.candidates.length ||
+          new Set(sources.map(s => s.modelId)).size !== sources.length ||
+          new Set(sources.map(s => s.candidateId)).size !== sources.length || sources.some(s => {
+            const url = new URL(s.url);
+            return !receipt.result.candidates.some(c => c.id === s.candidateId) ||
+              !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(s.modelId) ||
+              url.protocol !== "https:" || url.hostname !== "studio.tripo3d.ai" || url.port ||
+              url.username || url.password || url.search || url.hash ||
+              !/^\/(?:[a-z]{2}\/)?workspace\/generate\/[^/]+$/.test(url.pathname) ||
+              !url.pathname.endsWith(s.modelId);
+          })) throw new Error("Tripo 모델 ID·결과 주소·후보 연결이 일치하지 않습니다.");
+      if (receipt.result.candidates.some(c => !c.artifacts.some(a => a.kind === "model" && /\.fbx$/i.test(a.path))))
+        throw new Error("Tripo에서 다운로드한 FBX 원본을 함께 보존하세요.");
+    } else {
+      const url = new URL(receipt.conversationUrl ?? "");
+      if (url.protocol !== "https:" || url.hostname !== "chatgpt.com" || url.port ||
+          url.username || url.password || url.search || url.hash || !/^\/c\/[a-zA-Z0-9-]+$/.test(url.pathname))
+        throw new Error("외부 결과의 ChatGPT 대화 출처가 일치하지 않습니다.");
+    }
     const artifacts = receipt.result.candidates.flatMap(c => c.artifacts);
     if (!Array.isArray(receipt.files) || receipt.files.length !== artifacts.length ||
         new Set(receipt.files.map(f => f.path)).size !== receipt.files.length ||
@@ -862,9 +901,10 @@ export class WorkbenchEngine {
       throw new Error("다운로드 원본 목록 또는 해시가 일치하지 않습니다.");
     this.applyResult(w, job, receipt.result);
     external.state = "received";
-    external.conversationUrl = url.href;
+    if (job.request.externalModel) external.studioModels = structuredClone(receipt.studioModels);
+    else external.conversationUrl = receipt.conversationUrl;
     job.updatedAt = now();
-    w.message = "실제 외부 결과를 등록했습니다. 이미지를 확인하고 직접 선택하세요.";
+    w.message = "외부 결과 파일과 출처를 등록했습니다. 결과를 검토하고 직접 선택하세요.";
     return this.save(w);
   }
   private async perform(

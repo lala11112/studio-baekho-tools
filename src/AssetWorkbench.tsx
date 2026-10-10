@@ -295,6 +295,9 @@ export function AssetWorkbench({
   const [externalConcept, setExternalConcept] = useState(
     w?.jobs.find(j => j.step === "concept")?.request.executionMode === "codex-session",
   );
+  const [externalModel, setExternalModel] = useState(!!w?.jobs.find(j => j.step === "model")?.request.externalModel);
+  const [studioTopology, setStudioTopology] = useState<"quad" | "triangle">("quad");
+  const [observedModelCost, setObservedModelCost] = useState(0);
   const [turnaround, setTurnaround] = useState(w?.jobs[0]?.request.conceptMode === "turnaround");
   const [turnaroundPrompt, setTurnaroundPrompt] = useState("채택한 캐릭터를 그대로 유지한 정면·후면·캐릭터의 왼쪽 측면·오른쪽 측면 독립 원본 4장을 한 요청으로 생성하세요. 시트·콜라주·크롭·복제·좌우 반전은 금지합니다. 동일한 중립 자세, 체형·귀·꼬리·색상, 같은 캔버스·확대 비율·중심·발 높이, 전체 몸이 잘리지 않는 직교 시점, 단색 배경을 사용하세요. 각 이미지의 방향은 이미지 밖에서 명시하세요.");
   const [chatGptStatus, setChatGptStatus] = useState<ChatGptStatus>();
@@ -566,6 +569,7 @@ export function AssetWorkbench({
   const selectedSource = concept?.candidate.artifacts.find(
     (a) => a.kind === "image",
   );
+  const wholeReference = selection("whole-reference");
   const ready: Record<Page, boolean> = {
     concept: true,
     parts: !!concept,
@@ -787,7 +791,10 @@ export function AssetWorkbench({
         request.provider !== "tripo"
           ? { ...request, imageBackend,
               executionMode: request.step === "concept" && externalConcept ? "codex-session" : "worker" }
-          : request,
+          : request.step === "model" && externalModel && request.modelInput === "whole" && !request.baseJobId
+            ? { ...request, executionMode: "codex-session", externalModel: {
+                model: "P2.0", topology: studioTopology, observedCreditCost: observedModelCost } }
+            : request,
       approval: {
         accepted: paid ? approved : true,
         studioCreditLimit: usesStudio ? studioLimit : 0,
@@ -1595,7 +1602,12 @@ export function AssetWorkbench({
                     만들 수 있습니다. 경로를 바꿔도 기존 결과는 보존됩니다.
                   </small>
                 </label>
-                {selectedSource && (
+                {modelInput === "whole" && externalModel && wholeReference ? (
+                  <div className="wb-whole-views" data-testid="workbench-model-input-views">
+                    {wholeReference.candidate.artifacts.filter(a => a.kind === "image").map(a =>
+                      <figure key={a.path}><img src={url(a)} alt={`모델 입력 ${a.view}`} /><figcaption>{viewLabels[a.view!]}</figcaption></figure>)}
+                  </div>
+                ) : selectedSource && (
                   <img
                     className="wb-selected-source"
                     src={url(selectedSource)}
@@ -1868,6 +1880,26 @@ export function AssetWorkbench({
                   </>
                 ) : (
                   <>
+                    {modelInput === "whole" && !modelEditBase && <>
+                      <label className="wb-check">
+                        <input type="checkbox" data-testid="workbench-external-model" checked={externalModel}
+                          onChange={e => setExternalModel(e.target.checked)} />
+                        현재 Codex 대화에서 Chrome의 Tripo 실행
+                      </label>
+                      {externalModel && <>
+                        <small>채택한 전체 4방향 원본을 P2.0에 전달합니다. 이 버튼은 작업 명세만 저장합니다.
+                          Chrome의 방향·개수·면 수·비용을 확인한 뒤 현재 대화에서 한 번 제출하세요.</small>
+                        <label className="field"><span>Tripo에서 확인한 토폴로지</span>
+                          <select data-testid="workbench-studio-topology" value={studioTopology}
+                            onChange={e => setStudioTopology(e.target.value as "quad" | "triangle")}>
+                            <option value="quad">쿼드</option><option value="triangle">삼각형</option>
+                          </select></label>
+                        <label className="field"><span>현재 화면의 생성 비용 (크레딧)</span>
+                          <input data-testid="workbench-observed-model-cost" type="number" min={0} step={1}
+                            value={observedModelCost} onChange={e => setObservedModelCost(Number(e.target.value))} />
+                        </label>
+                      </>}
+                    </>}
                     <label className="field">
                       <span>이번에 생성할 모델</span>
                       <select
@@ -1979,7 +2011,7 @@ export function AssetWorkbench({
                       <br />
                       {modelEditBase
                         ? "사용 가능 횟수는 Tripo 화면에서 확인합니다. 횟수를 소진하면 멈춥니다. 이전 버전은 보존됩니다."
-                        : `${modelInput === "whole" ? "선택한 전체 이미지" : "채택한 파츠 이미지"}로 Tripo의 생성 개수 기능을 사용합니다. 화면에서 지원하지 않는 개수는 실행 전에 알려드립니다.`}
+                        : `${modelInput === "whole" ? externalModel ? "채택한 전체 4방향 원본" : "선택한 전체 이미지" : "채택한 파츠 이미지"}로 Tripo의 생성 개수 기능을 사용합니다. 화면에서 지원하지 않는 개수는 실행 전에 알려드립니다.`}
                     </div>
                     <small className="wb-muted">
                       {modelEditBase

@@ -48,6 +48,8 @@ export type WorkbenchRequest = {
   /** Independent whole-character views, reviewed as one set after design selection. */
   conceptMode?: "design" | "turnaround";
   executionMode?: "worker" | "codex-session";
+  /** Observed Studio settings for a manually executed whole-model submission. */
+  externalModel?: { model: "P2.0"; topology: "quad" | "triangle"; observedCreditCost: number };
   step: WorkbenchStep;
   prompt: string;
   provider?: "gpt" | "tripo";
@@ -114,6 +116,7 @@ export type WorkbenchJob = {
     requestHash: string;
     reservedAt?: string;
     conversationUrl?: string;
+    studioModels?: { candidateId: string; modelId: string; url: string }[];
   };
   id: string;
   step: WorkbenchStep;
