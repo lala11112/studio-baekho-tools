@@ -70,6 +70,9 @@ const isVisualObservation = (check: WorkbenchCheck) => {
     legacyViewObservation.test(key)
   );
 };
+const isAssemblyAppearanceReview = (check: WorkbenchCheck) =>
+  (check.name === "visual_quality" || check.name === "remaining_visual_limits") &&
+  (check.visualCategory === undefined || check.visualCategory === "appearance");
 
 export function blocksWorkbenchCheck(
   step: WorkbenchStep,
@@ -81,11 +84,15 @@ export function blocksWorkbenchCheck(
     typeof check.passed !== "boolean" ||
     (check.detail !== undefined &&
       (typeof check.detail !== "string" || check.detail.length > 600)) ||
-    (check.visualCategory !== undefined && !isVisualObservation(check))
+    (check.visualCategory !== undefined &&
+      !(step === "assembly"
+        ? Object.hasOwn(visualCategories, check.visualCategory)
+        : isVisualObservation(check)))
   )
     return true;
   return (
     check.passed !== true &&
+    !(step === "assembly" && isAssemblyAppearanceReview(check)) &&
     !(step === "separate" && isVisualObservation(check)) &&
     !(step === "surface" && (Object.hasOwn(surfaceReviewChecks,check.name) ||
       (check.name === "visual_quality" && check.visualCategory === "appearance")))

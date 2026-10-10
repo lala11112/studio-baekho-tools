@@ -386,7 +386,9 @@ export class WorkbenchEngine {
               ...WORKBENCH_ROLES.map((r) => `model:${r}`),
             ];
       case "assembly":
-        return ["concept", "surface"];
+        return ["concept",
+          ...(this.chosen(w, "surface").job.dependencies["whole-reference"] ? ["whole-reference"] : []),
+          "surface"];
       case "rig":
         return ["assembly"];
       case "reference":

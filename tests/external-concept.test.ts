@@ -8,13 +8,20 @@ import { Store } from "../engine/store";
 import { Engine } from "../engine/engine";
 import { WorkbenchEngine } from "../engine/workbench";
 import { buildWorkbenchGlb } from "./fixtures/workbench-glb";
+import type { WorkbenchExecutionContext } from "../shared/workbench";
 
 test("external concept freezes scope, reserves once, validates receipt and waits for selection", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "partsmith-external-"));
   const store = new Store(root);
   await store.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));
   let calls = 0;
-  const executor = {execute: async () => { calls++; throw new Error("must not start worker"); }};
+  let assemblyContext: WorkbenchExecutionContext | undefined;
+  const executor = {execute: async (context: WorkbenchExecutionContext) => {
+    calls++;
+    assert.equal(context.job.step, "assembly", "External stages must not start a worker");
+    assemblyContext = context;
+    return {status: "needs_input" as const, summary: "Mock stops after input capture; no Blender execution", candidates: [], checks: []};
+  }};
   const engine = new WorkbenchEngine(store, executor);
   t.after(() => { engine.shutdown(); store.db.close(); fs.rmSync(root, {recursive:true,force:true}); });
   const p = new Engine(store, {} as any).create("Synthetic external receipt test");
@@ -196,6 +203,17 @@ test("external concept freezes scope, reserves once, validates receipt and waits
   assert.equal(restartSurface.checks[1].passed,false);
   assert.equal(restartSurface.externalExecution!.surface!.texture.modelId,textureId);
   assert.equal(calls,0);
+  restored.action(p.id,{kind:"accept",jobId:surfaceJob.id});
+  const assembly = restored.action(p.id,{kind:"execute",request:{step:"assembly",prompt:"Inspect accepted references"},approval}).jobs[0];
+  for(let attempt=0;attempt<100 && restored.getForProject(p.id)!.activeJobId;attempt++)
+    await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(restored.getForProject(p.id)!.activeJobId,undefined);
+  assert.equal(calls,1);
+  assert.equal(assembly.dependencies["whole-reference"].jobId,viewsJob.id);
+  assert.equal(assembly.dependencies.surface.jobId,surfaceJob.id);
+  assert.deepEqual(assemblyContext!.inputs.filter(a=>a.view).map(a=>a.view).sort(),["back","front","left","right"]);
+  assert.deepEqual(assemblyContext!.inputs.filter(a=>a.view).map(a=>a.sha256).sort(),viewFiles.map(a=>a.sha256).sort());
+  assert.equal(restored.getForProject(p.id)!.selections.assembly,undefined);
   restored.action(p.id,{kind:"select",jobId:j.id,candidateId:"test-0"});
   assert.equal(restored.getForProject(p.id)!.selections["whole-reference"],undefined);
   let next=restored.action(p.id,{kind:"execute",request,approval}).jobs[0];
@@ -206,5 +224,5 @@ test("external concept freezes scope, reserves once, validates receipt and waits
   restored.action(p.id,{kind:"external-cancel",jobId:next.id});
   assert.throws(()=>restored.action(p.id,{kind:"execute",request,approval}),/외부 실행/);
   assert.throws(()=>restored.action(p.id,{kind:"external-receive",jobId:next.id}),/기다리는/);
-  assert.equal(calls,0);
+  assert.equal(calls,1);
 });

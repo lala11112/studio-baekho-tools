@@ -10,7 +10,7 @@ const prompt = `게임용 3D 캐릭터 제작을 위한 서로 다른 토끼 디
 후보 1: 작고 둥근 얼굴과 통통한 몸, 곧게 선 긴 귀로 귀여운 인상.
 후보 2: 조금 더 날렵한 얼굴과 탄력 있는 뒷다리, 귀 끝이 살짝 벌어진 생동감 있는 인상.
 각 결과 옆의 설명으로 후보 1과 후보 2를 구분하되 이미지 안에는 번호를 쓰지 마세요. 실제 이미지 두 장을 생성하고, 하나의 이미지를 복제하거나 자르지 마세요.`;
-const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.12/win-unpacked/Partsmith.exe") });
+const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.14/win-unpacked/Partsmith.exe") });
 const page = await app.firstWindow();
 await page.waitForSelector(".home");
 const call = c => page.evaluate(c => window.desktop.call(c), c);
@@ -61,6 +61,52 @@ for await (const line of readline.createInterface({input:process.stdin})) {
       await page.locator(".wb-model").first().scrollIntoViewIfNeeded();
       await page.waitForTimeout(1000);
       await page.screenshot({path:"artifacts/runtime/rabbit-surface-live.png"});
+    }
+    else if(command.action==='start-rabbit-refine') {
+      const surface=workbench.jobs.find(j=>j.id==='18e8e770-ad5c-4f7e-9cfc-ad310bbdf3d1');
+      if(project.id!=='26122336-8a7c-48b5-b15f-fa193ca157fd' || workbench.activeJobId ||
+         surface?.status!=='review' || !surface.candidates.some(c=>c.id==='surface-1') ||
+         workbench.jobs.some(j=>j.step==='assembly')) throw Error('Exact idle rabbit surface required; never duplicate refinement');
+      await page.getByTestId('workbench-step-surface').click();
+      if(!workbench.selections.surface) await page.getByTestId('workbench-accept-surface').click();
+      await page.getByTestId('workbench-step-assembly').click();
+      await page.getByTestId('workbench-assembly-prompt').fill('채택한 토끼의 수염과 볼만 Blender + Astra로 보정해 주세요. 수염의 점선처럼 깨지고 거친 경계, 볼의 접히거나 찌그러져 보이는 표면을 실제 모델과 참조에서 검사하고 국소 수정하세요. 전체 둥근 체형·얼굴 인상·눈·코·귀·발·꼬리·비율을 유지하세요. 정면/후면/좌/우 원본 모두를 확인하되 원본의 스타일을 보존하세요. 입력 중 textured 폴더의 실제 텍스처 FBX와 원본 4096×4096 basecolor JPEG가 기준이며 uv.fbx는 이전 체크포인트입니다. 4K 해상도와 UV를 보존하고 필요한 얼굴 국소 수정 외에는 텍스처를 변경하지 마세요. 수정 전후 동일 카메라/조명의 얼굴 및 수염 확대 비교, 전신 정면·측면·후면 렌더를 저장하고 직접 비교·검사하세요. 편집 가능한 packed .blend, FBX+동반 텍스처, GLB 미리보기와 실제 변경/검사 보고서를 새 버전으로 저장하세요. 원본은 수정하지 마세요. 리깅/애니메이션/다음 단계/Tripo 작업은 하지 마세요. 문제가 남으면 숨기지 말고 보고하세요.');
+      await page.getByTestId('workbench-execute-assembly').click();
+      await page.waitForTimeout(700);
+      const after=await call({type:'state'});
+      const w=after.workbenches.find(w=>w.projectId===project.id);
+      const job=w.jobs.find(j=>j.step==='assembly');
+      if(!job || w.selections.surface?.jobId!==surface.id) throw Error('App did not dispatch refinement');
+      fs.writeFileSync('artifacts/runtime/rabbit-refinement-dispatch.json',JSON.stringify({appVersion:'0.6.14',trigger:'workbench-execute-assembly',surfaceSelection:w.selections.surface,job},null,2));
+      console.log(JSON.stringify({assemblyJobId:job.id,status:job.status,dependencies:job.dependencies}));
+    }
+    else if(command.action==='show-assembly') {
+      await page.getByTestId('workbench-step-assembly').click();
+      await page.screenshot({path:'artifacts/runtime/rabbit-assembly-live.png'});
+      const after=await call({type:'state'}), w=after.workbenches.find(w=>w.projectId===project.id);
+      console.log(JSON.stringify({selection:w.selections.assembly,jobs:w.jobs.filter(j=>j.step==='assembly').map(j=>({id:j.id,status:j.status,summary:j.summary,candidates:j.candidates,checks:j.checks}))}));
+    }
+    else if(command.action==='recheck-existing-assembly') {
+      const job=workbench.jobs.find(j=>j.step==='assembly');
+      if(workbench.activeJobId || job?.id!==command.jobId || !['needs_input','failed','cancelled'].includes(job.status))
+        throw Error('Exact stopped existing assembly job required');
+      await page.getByTestId('workbench-step-assembly').click();
+      await page.getByTestId('workbench-retry').click();
+    }
+    else if(command.action==='refine-reviewed-rabbit' || command.action==='correct-stopped-rabbit') {
+      const base=workbench.jobs.find(j=>j.step==='assembly');
+      const stopped=command.action==='correct-stopped-rabbit';
+      if(workbench.activeJobId || base?.id!==command.baseJobId ||
+         (stopped ? base.status!=='needs_input' : base.status!=='review' || base.candidates.length!==1) ||
+         typeof command.prompt!=='string' || !command.prompt.trim())
+        throw Error('Exact stopped/reviewed rabbit revision and scoped correction required');
+      await page.getByTestId('workbench-step-assembly').click();
+      await page.getByTestId('workbench-assembly-prompt').fill(command.prompt);
+      await page.getByTestId('workbench-execute-assembly').click();
+      await page.waitForTimeout(700);
+      const after=await call({type:'state'}), w=after.workbenches.find(w=>w.projectId===project.id), job=w.jobs.find(j=>j.step==='assembly');
+      if(job?.id===base.id || (!stopped && job?.request.baseJobId!==base.id)) throw Error('App did not start a versioned revision');
+      console.log(JSON.stringify({assemblyJobId:job.id,baseJobId:job.request.baseJobId,status:job.status}));
     }
     else if(command.action==='run-surface') {
       const current=workbench.jobs.find(j=>j.id===info.jobId);
