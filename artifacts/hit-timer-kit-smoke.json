@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "date": "2026-10-10T02:15:07.086Z",
+  "checks": [
+    "packaged app and current source hashes match",
+    "Unity package, adapter and installer assets included",
+    "installer copies kit into isolated fixture",
+    "existing fixture source preserved"
+  ],
+  "actualUnityCompilation": false,
+  "actualGameModified": false
+}

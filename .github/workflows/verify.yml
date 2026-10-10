@@ -14,4 +14,5 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm test
       - run: npm run test:combat
+      - run: npm run test:hit-timer
       - run: npm run build

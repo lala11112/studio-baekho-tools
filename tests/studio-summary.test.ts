@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildStudioSummary } from "../engine/studio-summary";
+import { buildStudioSummary, type HitTimerSummary } from "../engine/studio-summary";
 import type { Project } from "../shared/types";
 import type { Workbench } from "../shared/workbench";
 
@@ -56,4 +56,36 @@ test("unknown statuses stay unknown and cannot be shown as success", () => {
   const summary = buildStudioSummary({ ...input(), combat: { ...combat, runs: [{ id: "future", status: "future-state", startedUtc: "", candidateCount: 0, completedCount: 0, actionId: "" }] } });
   assert.equal(summary.runs[0].status, "상태 확인 필요");
   assert.equal(summary.runs[0].tone, "neutral");
+});
+
+const hitJob = (patch: Partial<HitTimerSummary["jobs"][number]> = {}): HitTimerSummary["jobs"][number] => ({ id: "job1", clipName: "베기", status: "draft", analysisStatus: "", reviewed: false, pendingSave: false, hitCount: 0, frameCount: 0, savedAssetCount: 0, createdUtc: "2026-10-10T00:00:00Z", error: "", ...patch });
+const withHit = (jobs: HitTimerSummary["jobs"]) => ({ ...input(), hitTimer: { projectName: "사인검", projectPath: "C:/sword", connected: false, busy: false, error: "", jobs } });
+test("AutoHitTimer unfinished analysis and human review never imply saved output", () => {
+  const s = buildStudioSummary(withHit([hitJob(), hitJob({ id: "u", status: "review", analysisStatus: "uncertain", frameCount: 10 }), hitJob({ id: "n", status: "review", analysisStatus: "no-hit" }), hitJob({ id: "r", status: "review", analysisStatus: "hits", reviewed: true, hitCount: 2 })]));
+  const hitResults = s.results.filter(r => r.tool === "hit-timing");
+  assert.equal(hitResults.length, 3);
+  assert.ok(hitResults.every(r => r.tone === "review"));
+  assert.equal(s.runs.find(r => r.id.endsWith(":job1"))?.status, "분석 전");
+  assert.equal(s.hitTimer.experimental, true);
+});
+test("pending AutoHitTimer save takes precedence over saved labels and does not point to apply", () => {
+  const source = withHit([hitJob({ status: "saved", savedAssetCount: 1, pendingSave: true })]);
+  const before = JSON.stringify(source);
+  const result = buildStudioSummary(source).results.find(r => r.tool === "hit-timing")!;
+  assert.equal(result.status, "저장 결과 확인 중");
+  assert.equal(result.tone, "review");
+  assert.deepEqual(result.target, { tool: "hit-timing", projectPath: "C:/sword", jobId: "job1", tab: "hits" });
+  assert.equal(JSON.stringify(source), before);
+});
+test("only recorded AutoHitTimer saved assets appear as saved and keep exact job/project identity", () => {
+  const result = buildStudioSummary(withHit([hitJob({ status: "saved", savedAssetCount: 2, savedUtc: "2026-10-10T02:00:00Z" })])).results.find(r => r.tool === "hit-timing")!;
+  assert.equal(result.status, "저장됨");
+  assert.equal(result.tone, "success");
+  assert.deepEqual(result.target, { tool: "hit-timing", projectPath: "C:/sword", jobId: "job1", tab: "save" });
+});
+test("interrupted disk checkpoints are shown as needing verification rather than live analysis", () => {
+  const result = buildStudioSummary(withHit([hitJob({ status: "interrupted", frameCount: 4 })]));
+  assert.equal(result.runs.find(r => r.tool === "hit-timing")?.status, "이전 실행 확인 필요");
+  assert.equal(result.runs.find(r => r.tool === "hit-timing")?.tone, "review");
+  assert.equal(result.hitTimer.busy, false);
 });

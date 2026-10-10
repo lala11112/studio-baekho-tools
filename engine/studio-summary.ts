@@ -17,8 +17,33 @@ export interface SummaryInput {
   workbenches: Workbench[];
   productionRuns: ProductionRun[];
   combat: CombatSummary;
-  storage: StudioSummary["storage"];
+  hitTimer?: HitTimerSummary;
+  storage: Pick<StudioSummary["storage"], "modeling" | "combat"> & { hitTimer?: string };
   warnings?: string[];
+}
+export interface HitTimerSummary {
+  projectName: string;
+  projectPath: string;
+  connected: boolean;
+  busy: boolean;
+  error: string;
+  jobs: { id: string; clipName: string; status: string; analysisStatus: string; reviewed: boolean; pendingSave: boolean; hitCount: number; frameCount: number; savedAssetCount: number; createdUtc: string; savedUtc?: string; error: string }[];
+}
+
+function hitState(job: HitTimerSummary["jobs"][number]): Pick<StudioEntry, "status" | "tone"> {
+  if (job.pendingSave) return { status: "저장 결과 확인 중", tone: "review" };
+  if (job.status === "interrupted") return { status: "이전 실행 확인 필요", tone: "review" };
+  if (job.status === "capturing" || job.status === "analyzing") return { status: job.status === "capturing" ? "프레임 촬영 중" : "AI 분석 중", tone: "active" };
+  if (job.status === "failed") return { status: "실패", tone: "error" };
+  if (job.status === "cancelled") return { status: "분석 중지", tone: "neutral" };
+  if (job.status === "saved") return job.savedAssetCount > 0 ? { status: "저장됨", tone: "success" } : { status: "저장 결과 확인 필요", tone: "review" };
+  if (job.status === "draft") return { status: "분석 전", tone: "neutral" };
+  if (job.status === "review") {
+    if (job.analysisStatus === "uncertain") return { status: "판단 불확실 · 검토 필요", tone: "review" };
+    if (job.analysisStatus === "no-hit") return { status: "타격 없음 · 검토 필요", tone: "review" };
+    return { status: job.reviewed ? "검토 완료 · 미저장" : "검토 대기", tone: "review" };
+  }
+  return { status: "상태 확인 필요", tone: "neutral" };
 }
 
 const states: Record<string, [string, StudioEntry["tone"]]> = {
@@ -79,5 +104,13 @@ export function buildStudioSummary(input: SummaryInput): StudioSummary {
     runs.push(entry);
     results.push({ ...entry, id: `combat:report:${run.id}`, detail: `${entry.detail} · 비교 보고서` });
   }
-  return { version: input.version, projects: recent(projects), runs: recent(runs), results: recent(results), combat: { projectName: c.projectName, projectPath: c.projectPath, connected: !!c.connection.connected, running: !!c.connection.running, generating: c.generating, error: c.connection.error ?? "" }, storage: { ...input.storage }, warnings: [...(input.warnings ?? [])] };
+  const h = input.hitTimer ?? { projectName: "", projectPath: "", connected: false, busy: false, error: "", jobs: [] };
+  if (h.projectPath) projects.push({ id: `hit-timing:${h.projectPath}`, tool: "hit-timing", title: h.projectName, projectName: h.projectName, detail: "애니메이션 판정 구간", status: h.connected ? "Unity 연결됨" : "Unity 연결 필요", tone: "neutral", updatedAt: h.jobs.map(j => j.savedUtc || j.createdUtc).sort((a,b) => time(b) - time(a))[0] ?? "", target: { tool: "hit-timing", projectPath: h.projectPath } });
+  for (const job of h.jobs) {
+    const entry: StudioEntry = { id: `hit-timing:${h.projectPath}:${job.id}`, tool: "hit-timing", title: job.clipName || "애니메이션 타격 구간", projectName: h.projectName, detail: job.error || `구간 ${job.hitCount}개 · 프레임 ${job.frameCount}장`, ...hitState(job), updatedAt: job.savedUtc || job.createdUtc, target: { tool: "hit-timing", projectPath: h.projectPath, jobId: job.id, tab: "hits" } };
+    runs.push(entry);
+    if (job.frameCount || job.hitCount || job.analysisStatus || job.savedAssetCount || job.pendingSave)
+      results.push({ ...entry, id: `${entry.id}:result`, detail: job.savedAssetCount ? `저장된 에셋 ${job.savedAssetCount}개 · 원래 작업에서 확인` : entry.detail, target: { ...entry.target, tab: job.status === "saved" && !job.pendingSave ? "save" : "hits" } });
+  }
+  return { version: input.version, projects: recent(projects), runs: recent(runs), results: recent(results), combat: { projectName: c.projectName, projectPath: c.projectPath, connected: !!c.connection.connected, running: !!c.connection.running, generating: c.generating, error: c.connection.error ?? "" }, hitTimer: { projectName: h.projectName, projectPath: h.projectPath, connected: h.connected, busy: h.busy, error: h.error, experimental: true }, storage: { ...input.storage, hitTimer: input.storage.hitTimer ?? "" }, warnings: [...(input.warnings ?? [])] };
 }

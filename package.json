@@ -1,6 +1,6 @@
 {
   "name": "partsmith",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "Studio Baekho workspace for character production and combat feel experiments",
   "author": "Studio Baekho",
@@ -14,6 +14,7 @@
     "start:partsmith": "electron . --partsmith",
     "test": "tsx --test tests/*.test.ts",
     "test:combat": "node --test Desktop/tests/*.test.cjs",
+    "test:hit-timer": "node --test Apps/AutoHitTimer/tests/*.test.cjs",
     "test:integration": "node scripts/studio-smoke.mjs",
     "test:ui": "node scripts/smoke.mjs",
     "package": "npm run build && electron-builder --win dir"
@@ -55,10 +56,15 @@
       "dist-electron/**/*",
       "Desktop/src/**/*.cjs",
       "Desktop/renderer/**/*",
+      "Apps/AutoHitTimer/src/**/*.cjs",
+      "Apps/AutoHitTimer/renderer/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm",
       "package.json"
     ],
     "extraResources": [
+      { "from": "Packages/com.studiobaekho.auto-hit-timer", "to": "auto-hit-timer-kit/Packages/com.studiobaekho.auto-hit-timer" },
+      { "from": "Integrations/FourTigerSword/AutoHitTimer", "to": "auto-hit-timer-kit/Integrations/FourTigerSword/AutoHitTimer" },
+      { "from": "Installer", "to": "auto-hit-timer-kit/Installer" },
       {
         "from": "integrations",
         "to": "integrations"

@@ -29,6 +29,8 @@ import { catalog } from "../shared/catalog";
 import { installStudioHost } from "./studio-host";
 import type { Command, Project } from "../shared/types";
 protocol.registerSchemesAsPrivileged([
+  { scheme: "aht", privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  { scheme: "aht-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
   { scheme: "baekho", privileges: { standard: true, secure: true, supportFetchAPI: true } },
   { scheme: "baekho-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
   {
@@ -681,12 +683,21 @@ app.whenReady().then(async () => {
   else await win.loadFile(path.join(__dirname, "../dist/index.html"), standalone ? { query: { workspace: "partsmith" } } : {});
   const timer = setInterval(() => void engine.pollActive(), 10000);
   win.on("closed", () => app.quit());
-  app.on("before-quit", () => {
+  let shutdownStarted = false;
+  let shutdownComplete = false;
+  app.on("before-quit", event => {
+    if (shutdownComplete) return;
+    event.preventDefault();
+    if (shutdownStarted) return;
+    shutdownStarted = true;
     clearInterval(timer);
-    host.shutdown();
     production.shutdown();
     workbench.shutdown();
     studio.close();
+    void host.shutdown().catch(() => { console.error("백호툴 종료 중 일부 작업을 정리하지 못했습니다. 다음 실행에서 저장 상태를 확인하세요."); }).finally(() => {
+      shutdownComplete = true;
+      app.quit();
+    });
   });
 });
 app.on("second-instance", () => {

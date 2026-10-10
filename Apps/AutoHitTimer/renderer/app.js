@@ -2,6 +2,9 @@
 
 (() => {
   const api = window.autoHitTimer;
+  const embedded = new URLSearchParams(window.location.search).get('embedded') === '1';
+  document.documentElement.classList.toggle('embedded', embedded);
+  if (embedded) document.title = '타격 타이밍 · 백호툴';
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const number = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -30,7 +33,10 @@
   let pendingOperations = 0;
   let localNotice = null;
   let drag = null;
+  let navigationGeneration = 0;
+  let stateRevision = 0;
 
+  const projectIdentity = value => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   const job = () => (state.jobs || []).find(item => item.id === state.selectedJobId) || null;
   const duration = item => Math.max(0, number(item?.duration, number(item?.clip?.length)));
   const windows = item => Array.isArray(item?.windows) ? item.windows : [];
@@ -63,12 +69,15 @@
   function acceptState(next) {
     if (!next || !Array.isArray(next.jobs)) return;
     const previous = job();
+    const projectChanged = projectIdentity(state.projectPath) !== projectIdentity(next.projectPath);
+    stateRevision++;
     state = { ...state, ...next };
     const selected = job();
-    if (previous?.pendingSave && selected?.id === previous.id && !selected.pendingSave && selected.status === 'saved') localNotice = { message: 'Unity 저장 결과를 확인했습니다. 저장된 에셋을 확인하세요.', kind: 'success' };
+    if (!projectChanged && previous?.pendingSave && selected?.id === previous.id && !selected.pendingSave && selected.status === 'saved') localNotice = { message: 'Unity 저장 결과를 확인했습니다. 저장된 에셋을 확인하세요.', kind: 'success' };
     if (selected?.pendingSave) preview = null;
     if (previous?.id === selected?.id && targetIdentity(previous) !== targetIdentity(selected)) overrideFields = [];
-    if (lastJobId !== selected?.id) {
+    const selectionChanged = projectChanged || lastJobId !== (selected?.id || null);
+    if (selectionChanged) {
       stopPlayback();
       currentTime = 0;
       selectedWindowId = windows(selected)[0]?.id || null;
@@ -77,15 +86,57 @@
       preview = null;
       previewJobId = null;
       overrideFields = [];
+      timeSettingsContext = '';
+      timeSettingsOpen = false;
+      drag = null;
+    }
+    if (projectChanged) {
+      searchGeneration++;
+      searchResults = [];
+      searchSelection.clear();
+      searchMessage = '';
+      $('animation-query').value = '';
+      renderSearch();
     }
     if (preview && (previewJobId !== selected?.id || previewFingerprint !== fingerprint(selected))) preview = null;
     if (selectedWindowId && !windows(selected).some(window => window.id === selectedWindowId)) selectedWindowId = windows(selected)[0]?.id || null;
     currentTime = clamp(currentTime, 0, duration(selected));
-    render();
+    render({ preserveDraft: !selectionChanged });
   }
 
   async function refreshState() {
-    if (api) acceptState(await api.getState());
+    if (!api) return;
+    const generation = navigationGeneration;
+    const revision = stateRevision;
+    const next = await api.getState();
+    if (generation === navigationGeneration && revision === stateRevision) acceptState(next);
+  }
+
+  async function followNavigation(request) {
+    if (!request || typeof request.projectPath !== 'string' ||
+      (request.tab !== undefined && !['hits', 'save'].includes(request.tab)) ||
+      (request.jobId !== undefined && (typeof request.jobId !== 'string' || !request.jobId))) return;
+    const generation = ++navigationGeneration;
+    const revision = stateRevision;
+    try {
+      const next = await api.getState();
+      if (generation !== navigationGeneration) return;
+      // The service selects the requested job before publishing navigation. A newer
+      // state event is authoritative if this read finishes after another change.
+      if (revision === stateRevision) acceptState(next);
+      if (projectIdentity(state.projectPath) !== projectIdentity(request.projectPath)) {
+        showNotice('프로젝트가 변경되어 이전 결과를 열 수 없습니다. 현재 프로젝트에서 다시 선택하세요.', 'error');
+        return;
+      }
+      if (request.jobId && (state.selectedJobId !== request.jobId || job()?.id !== request.jobId)) {
+        showNotice('선택한 작업이 변경되어 결과를 열 수 없습니다. 작업 목록에서 다시 선택하세요.', 'error');
+        return;
+      }
+      const tab = request.tab || (request.jobId ? 'hits' : null);
+      if (tab) switchTab(tab);
+    } catch (error) {
+      if (generation === navigationGeneration) showNotice(`작업을 불러오지 못했습니다: ${error?.message || String(error)}`, 'error');
+    }
   }
 
   async function run(label, action, refresh = true) {
@@ -104,10 +155,11 @@
     }
   }
 
-  function render() {
+  function render({ preserveDraft = true } = {}) {
     const focused = document.activeElement;
     const focusId = focused?.id;
     const selection = focused && typeof focused.selectionStart === 'number' ? [focused.selectionStart, focused.selectionEnd] : null;
+    const draft = preserveDraft && focused?.matches('input:not([type="checkbox"]), textarea') ? focused.value : undefined;
     renderNotice();
     renderProject();
     renderJobs();
@@ -116,6 +168,7 @@
     renderSave();
     renderFooter();
     renderButtons();
+    if (draft !== undefined && focusId && $(focusId)) $(focusId).value = draft;
     if (focusId && $(focusId) && document.activeElement !== $(focusId)) {
       $(focusId).focus({ preventScroll: true });
       if (selection && typeof $(focusId).setSelectionRange === 'function') {
@@ -387,6 +440,7 @@
   }
 
   function switchTab(tab) {
+    if (!['hits', 'save'].includes(tab)) return;
     currentTab = tab;
     for (const name of ['hits', 'save']) {
       $(`tab-${name}`).classList.toggle('active', name === tab);
@@ -523,9 +577,10 @@
     if (button?.id === 'preview-change') {
       const selected = job();
       if (!selected) return;
+      const beforeProject = projectIdentity(state.projectPath);
       const beforeFingerprint = fingerprint(selected);
       const result = await run('변경 내용 확인 실패', () => api.previewChange({ jobId: selected.id, mode: selected.mode || 'update', sourceGuid: selected.sourceGuid, actionPath: selected.actionPath, group: selected.group, templatePath: selected.templatePath, copy: Boolean(selected.copy), outputFolder: selected.outputFolder, timeOverrides: selected.timeOverrides || [] }));
-      if (result && job()?.id === selected.id && fingerprint(job()) === beforeFingerprint) {
+      if (result && projectIdentity(state.projectPath) === beforeProject && job()?.id === selected.id && fingerprint(job()) === beforeFingerprint) {
         preview = result;
         overrideFields = [...(Array.isArray(result.editableTimeSettings) ? result.editableTimeSettings : []), ...(Array.isArray(result.requiredTimeOverrides) ? result.requiredTimeOverrides : [])];
         previewJobId = selected.id;
@@ -622,8 +677,16 @@
   render();
   if (!api) showNotice('데스크톱 연결을 찾을 수 없습니다. AutoHitTimer 앱을 통해 실행해 주세요.', 'error');
   else {
-    const unsubscribe = api.onState(acceptState);
-    window.addEventListener('beforeunload', () => { stopPlayback(); if (typeof unsubscribe === 'function') unsubscribe(); });
+    const unsubscribes = [
+      api.onState(acceptState),
+      api.onNavigate?.(followNavigation),
+      api.onVisibility?.(visible => { if (visible === false) stopPlayback(); }),
+    ];
+    window.addEventListener('beforeunload', () => {
+      navigationGeneration++;
+      stopPlayback();
+      for (const unsubscribe of unsubscribes) if (typeof unsubscribe === 'function') unsubscribe();
+    });
     run('앱 상태를 불러오지 못했습니다', refreshState, false);
   }
 })();

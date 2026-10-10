@@ -25,6 +25,7 @@ import { App } from "./App";
 import type {
   StudioBounds,
   StudioEntry,
+  StudioNativeTool,
   StudioPage,
   StudioSummary,
   StudioTarget,
@@ -60,6 +61,40 @@ const pageCopy: Record<StudioPage, { title: string; subtitle: string }> = {
 const toolNames: Record<StudioTool, string> = {
   modeling: "3D 모델링",
   combat: "타격감 찾기",
+  "hit-timing": "타격 타이밍",
+};
+const toolOrder = ["modeling", "combat", "hit-timing"] as const;
+const toolCopy: Record<
+  StudioTool,
+  {
+    category: string;
+    description: string;
+    flow: string;
+    input: string;
+    output: string;
+  }
+> = {
+  modeling: {
+    category: "ASSET CREATION",
+    description: "아이디어에서 게임에 쓸 3D 에셋까지.",
+    flow: "이미지 → 모델링 → Unity",
+    input: "입력: 콘셉트·참고 이미지",
+    output: "결과: 3D 모델·리깅·애니메이션",
+  },
+  combat: {
+    category: "GAME FEEL",
+    description: "직접 보고 비교하며, 원하는 손맛으로.",
+    flow: "수치 제안 → 실행·비교 → 설정 저장",
+    input: "입력: Unity 프로젝트·실험 조건",
+    output: "결과: 비교 영상·선택한 타격감 설정",
+  },
+  "hit-timing": {
+    category: "HIT TIMING",
+    description: "애니메이션의 공격 판정 구간을 제안하고 검토.",
+    flow: "프레임 촬영 → AI 제안 → 구간 검토",
+    input: "입력: Unity 프로젝트·공격 애니메이션",
+    output: "결과: 타이밍 제안·검토한 구간 설정",
+  },
 };
 const toneNames: Record<StudioEntry["tone"], string> = {
   neutral: "대기·준비",
@@ -93,9 +128,15 @@ function dateLabel(value: string) {
 function ToolIcon({ tool, size = 19 }: { tool: StudioTool; size?: number }) {
   return tool === "modeling" ? (
     <Box size={size} aria-hidden="true" />
+  ) : tool === "hit-timing" ? (
+    <Clock3 size={size} aria-hidden="true" />
   ) : (
     <Swords size={size} aria-hidden="true" />
   );
+}
+
+function ExperimentalBadge() {
+  return <span className="bkh-experimental-badge">개발 중</span>;
 }
 
 function TigerMark() {
@@ -119,6 +160,66 @@ function TigerMark() {
 }
 
 function ToolArt({ tool }: { tool: StudioTool }) {
+  if (tool === "hit-timing")
+    return (
+      <div className="bkh-tool-art bkh-tool-art-hit-timing" aria-hidden="true">
+        <svg viewBox="0 0 230 170">
+          <ellipse
+            cx="121"
+            cy="143"
+            rx="67"
+            ry="10"
+            fill="#bdcbd0"
+            opacity=".22"
+          />
+          <circle
+            cx="121"
+            cy="73"
+            r="47"
+            fill="#f5f8f7"
+            stroke="#91a5aa"
+            strokeWidth="1.5"
+          />
+          <path
+            d="M121 34a39 39 0 0 1 37 51"
+            fill="none"
+            stroke="#b6cbcd"
+            strokeWidth="8"
+            strokeLinecap="round"
+          />
+          <path
+            d="M121 45v28l22 12"
+            fill="none"
+            stroke="#718f95"
+            strokeWidth="3"
+            strokeLinecap="round"
+          />
+          <circle cx="121" cy="73" r="4" fill="#718f95" />
+          <path d="M46 122h150" stroke="#95aaaf" strokeWidth="1.5" />
+          <path
+            d="M55 116v12m19-12v12m19-12v12m19-12v12m19-12v12m19-12v12m19-12v12m19-12v12"
+            stroke="#a7b9bc"
+            strokeWidth="1.2"
+          />
+          <rect
+            x="92"
+            y="113"
+            width="60"
+            height="18"
+            rx="4"
+            fill="#bfd3d3"
+            stroke="#86a3a7"
+          />
+          <path d="M114 105v32" stroke="#c86c4f" strokeWidth="2.5" />
+          <path d="m109 102 5 6 5-6" fill="#c86c4f" />
+          <path
+            d="M59 57h9m-4-4v9m112-27h8m-4-4v8"
+            stroke="#adc0c2"
+            strokeWidth="1.4"
+          />
+        </svg>
+      </div>
+    );
   if (tool === "modeling")
     return (
       <div className="bkh-tool-art bkh-tool-art-modeling" aria-hidden="true">
@@ -256,7 +357,7 @@ function ToolCards({
     <div
       className={`bkh-tool-grid${detailed ? " bkh-tool-grid-detailed" : ""}`}
     >
-      {(["modeling", "combat"] as const).map((tool) => (
+      {toolOrder.map((tool) => (
         <button
           key={tool}
           data-testid={`tool-${tool}`}
@@ -265,9 +366,7 @@ function ToolCards({
           disabled={disabled}
         >
           <div className="bkh-tool-card-top">
-            <span className="bkh-tool-category">
-              {tool === "modeling" ? "ASSET CREATION" : "GAME FEEL"}
-            </span>
+            <span className="bkh-tool-category">{toolCopy[tool].category}</span>
             <ArrowUpRight size={19} />
           </div>
           <ToolArt tool={tool} />
@@ -275,35 +374,22 @@ function ToolCards({
             <span className="bkh-tool-card-icon">
               <ToolIcon tool={tool} />
             </span>
-            <h3 className="bkh-tool-name">{toolNames[tool]}</h3>
-            <p className="bkh-tool-description">
-              {tool === "modeling"
-                ? "아이디어에서 게임에 쓸 3D 에셋까지."
-                : "직접 보고 비교하며, 원하는 손맛으로."}
-            </p>
+            <div className="bkh-tool-title-row">
+              <h3 className="bkh-tool-name">{toolNames[tool]}</h3>
+              {tool === "hit-timing" && <ExperimentalBadge />}
+            </div>
+            <p className="bkh-tool-description">{toolCopy[tool].description}</p>
           </div>
           <div className="bkh-tool-card-footer">
-            <span>
-              {tool === "modeling"
-                ? "이미지 → 모델링 → Unity"
-                : "수치 제안 → 실행·비교 → 설정 저장"}
-            </span>
+            <span>{toolCopy[tool].flow}</span>
             <span className="bkh-tool-open">
               도구 열기 <ArrowRight size={16} />
             </span>
           </div>
           {detailed && (
             <div className="bkh-tool-requirements">
-              <span>
-                {tool === "modeling"
-                  ? "입력: 콘셉트·참고 이미지"
-                  : "입력: Unity 프로젝트·실험 조건"}
-              </span>
-              <span>
-                {tool === "modeling"
-                  ? "결과: 3D 모델·리깅·애니메이션"
-                  : "결과: 비교 영상·선택한 타격감 설정"}
-              </span>
+              <span>{toolCopy[tool].input}</span>
+              <span>{toolCopy[tool].output}</span>
             </div>
           )}
         </button>
@@ -376,14 +462,17 @@ function EntryList({
           key={`${entry.tool}:${entry.id}`}
           className="bkh-entry"
           onClick={() => open(entry.target)}
-          aria-label={`${entry.title}, ${toolNames[entry.tool]}, ${entry.status}, 열기`}
+          aria-label={`${entry.title}, ${toolNames[entry.tool]}${entry.tool === "hit-timing" ? ", 개발 중" : ""}, ${entry.status}, 열기`}
         >
           <span className="bkh-entry-main">
             <span className={`bkh-entry-icon bkh-entry-icon-${entry.tool}`}>
               <ToolIcon tool={entry.tool} />
             </span>
             <span className="bkh-entry-copy">
-              <span className="bkh-entry-title">{entry.title}</span>
+              <span className="bkh-entry-title">
+                {entry.title}
+                {entry.tool === "hit-timing" && <ExperimentalBadge />}
+              </span>
               <span className="bkh-entry-detail">
                 {toolNames[entry.tool]}
                 {entry.projectName && entry.projectName !== entry.title
@@ -413,23 +502,26 @@ export function StudioShell() {
   const [summaryError, setSummaryError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [actionError, setActionError] = useState("");
-  const [choosingProject, setChoosingProject] = useState(false);
+  const [choosingProject, setChoosingProject] =
+    useState<StudioNativeTool | null>(null);
   const [modelingMounted, setModelingMounted] = useState(false);
   const [modelingNavigation, setModelingNavigation] =
     useState<ModelingNavigation>({ key: 0, tab: "home" });
-  const [combatNavigation, setCombatNavigation] = useState<{
+  const [nativeNavigation, setNativeNavigation] = useState<{
     key: number;
     target: StudioTarget;
   }>({ key: 0, target: { tool: "combat" } });
-  const [combatError, setCombatError] = useState("");
+  const [nativeError, setNativeError] = useState("");
   const [toolFilter, setToolFilter] = useState<"all" | StudioTool>("all");
   const [statusFilter, setStatusFilter] = useState<"all" | StudioEntry["tone"]>(
     "all",
   );
-  const combatContainer = useRef<HTMLDivElement>(null);
+  const nativeContainer = useRef<HTMLDivElement>(null);
   const alive = useRef(true);
   const request = useRef<Promise<void> | null>(null);
-  const combatEpoch = useRef(0);
+  const nativeEpoch = useRef(0);
+  const nativeTool =
+    activeTool && activeTool !== "modeling" ? activeTool : null;
 
   const refresh = useCallback((): Promise<void> => {
     if (!bridge) return Promise.resolve();
@@ -464,34 +556,34 @@ export function StudioShell() {
     };
   }, [refresh]);
 
-  const hideCombat = useCallback(() => {
-    combatEpoch.current += 1;
+  const hideNativeTools = useCallback(() => {
+    nativeEpoch.current += 1;
     if (bridge)
-      void window.studio.hideCombat().catch((error: unknown) => {
+      void window.studio.hideTools().catch((error: unknown) => {
         if (alive.current)
-          setActionError(
-            `타격감 화면을 숨기지 못했습니다. ${errorText(error)}`,
-          );
+          setActionError(`도구 화면을 숨기지 못했습니다. ${errorText(error)}`);
       });
   }, [bridge]);
 
   const navigate = useCallback(
     (destination: StudioPage) => {
-      hideCombat();
+      hideNativeTools();
       setActiveTool(null);
       setPage(destination);
       setActionError("");
       void refresh();
     },
-    [hideCombat, refresh],
+    [hideNativeTools, refresh],
   );
 
   const open = useCallback(
     (target: StudioTarget) => {
       if (!bridge) return;
       setActionError("");
+      // Issue hide before changing React state so rapid native-to-native switches
+      // cannot leave the previous view over the newly selected workspace.
+      hideNativeTools();
       if (target.tool === "modeling") {
-        hideCombat();
         setModelingMounted(true);
         if (target.projectId || target.tab || target.create) {
           setModelingNavigation((previous) => ({
@@ -502,18 +594,18 @@ export function StudioShell() {
           }));
         }
       } else {
-        setCombatError("");
-        setCombatNavigation((previous) => ({ key: previous.key + 1, target }));
+        setNativeError("");
+        setNativeNavigation((previous) => ({ key: previous.key + 1, target }));
       }
       setActiveTool(target.tool);
     },
-    [bridge, hideCombat],
+    [bridge, hideNativeTools],
   );
 
   useEffect(() => {
-    if (activeTool !== "combat" || !bridge || !combatContainer.current) return;
-    const container = combatContainer.current;
-    const epoch = ++combatEpoch.current;
+    if (!nativeTool || !bridge || !nativeContainer.current) return;
+    const container = nativeContainer.current;
+    const epoch = ++nativeEpoch.current;
     let disposed = false;
     let frame = 0;
     let shown = false;
@@ -529,21 +621,21 @@ export function StudioShell() {
       };
     };
     const fail = (error: unknown) => {
-      if (disposed || combatEpoch.current !== epoch) return;
-      setCombatError(errorText(error));
-      void window.studio.hideCombat().catch(() => {});
+      if (disposed || nativeEpoch.current !== epoch) return;
+      setNativeError(errorText(error));
+      void window.studio.hideTools().catch(() => {});
     };
     const sync = () => {
-      if (disposed || combatEpoch.current !== epoch) return;
+      if (disposed || nativeEpoch.current !== epoch) return;
       const next = bounds();
       const key = JSON.stringify(next);
       if (!shown && !showing) {
         showing = true;
         lastBounds = key;
         void window.studio
-          .showCombat(next, combatNavigation.target)
+          .showTool(nativeTool, next, nativeNavigation.target)
           .then(() => {
-            if (disposed || combatEpoch.current !== epoch) return;
+            if (disposed || nativeEpoch.current !== epoch) return;
             shown = true;
             showing = false;
             sync();
@@ -551,7 +643,7 @@ export function StudioShell() {
           .catch(fail);
       } else if (shown && key !== lastBounds) {
         lastBounds = key;
-        void window.studio.resizeCombat(next).catch(fail);
+        void window.studio.resizeTool(nativeTool, next).catch(fail);
       }
     };
     const schedule = () => {
@@ -568,21 +660,22 @@ export function StudioShell() {
       observer.disconnect();
       window.removeEventListener("resize", schedule);
       // The native view is retained by the host; only its visibility changes.
-      void window.studio.hideCombat().catch(() => {});
+      void window.studio.hideTools().catch(() => {});
     };
-  }, [activeTool, combatNavigation, bridge]);
+  }, [nativeTool, nativeNavigation, bridge]);
 
-  const chooseCombatProject = async () => {
+  const chooseProject = async (tool: StudioNativeTool) => {
     if (!bridge || choosingProject) return;
-    setChoosingProject(true);
+    setChoosingProject(tool);
     setActionError("");
     try {
-      await window.studio.chooseCombatProject();
+      if (tool === "combat") await window.studio.chooseCombatProject();
+      else await window.studio.chooseHitTimerProject();
       await refresh();
     } catch (error) {
       if (alive.current) setActionError(errorText(error));
     } finally {
-      if (alive.current) setChoosingProject(false);
+      if (alive.current) setChoosingProject(null);
     }
   };
 
@@ -604,9 +697,13 @@ export function StudioShell() {
         subtitle:
           activeTool === "modeling"
             ? "이미지부터 모델링, 리깅, Unity 연결까지"
-            : summary?.combat.projectName
-              ? `Unity 프로젝트 · ${summary.combat.projectName}`
-              : "Unity 프로젝트를 연결하고 원하는 타격감을 찾아보세요.",
+            : activeTool === "hit-timing"
+              ? summary?.hitTimer.projectName
+                ? `Unity 프로젝트 · ${summary.hitTimer.projectName}`
+                : "애니메이션의 공격 판정 구간을 제안하고 검토"
+              : summary?.combat.projectName
+                ? `Unity 프로젝트 · ${summary.combat.projectName}`
+                : "Unity 프로젝트를 연결하고 원하는 타격감을 찾아보세요.",
       }
     : pageCopy[page];
 
@@ -655,7 +752,10 @@ export function StudioShell() {
           {activeTool && (
             <div className="bkh-current-tool">
               <span className="bkh-current-dot" />
-              <span>{toolNames[activeTool]} 사용 중</span>
+              <span>
+                {toolNames[activeTool]} 사용 중
+                {activeTool === "hit-timing" && <ExperimentalBadge />}
+              </span>
             </div>
           )}
           <div className="bkh-local-label">
@@ -679,7 +779,10 @@ export function StudioShell() {
                 ? "도구"
                 : pages.find((item) => item.id === page)?.label}
             </div>
-            <h1 className="bkh-page-title">{copy.title}</h1>
+            <div className="bkh-tool-title-row">
+              <h1 className="bkh-page-title">{copy.title}</h1>
+              {activeTool === "hit-timing" && <ExperimentalBadge />}
+            </div>
             <p className="bkh-page-subtitle">{copy.subtitle}</p>
           </div>
           <div className="bkh-header-actions">
@@ -692,21 +795,24 @@ export function StudioShell() {
                   <ArrowLeft size={16} />
                   모든 도구
                 </button>
-                <button
-                  className="bkh-button bkh-button-secondary"
-                  onClick={() =>
-                    open({
-                      tool: activeTool === "modeling" ? "combat" : "modeling",
-                    })
-                  }
-                >
-                  <ToolIcon
-                    tool={activeTool === "modeling" ? "combat" : "modeling"}
-                    size={16}
-                  />
-                  {toolNames[activeTool === "modeling" ? "combat" : "modeling"]}
-                  <ArrowUpRight size={14} />
-                </button>
+                <label className="bkh-select-label bkh-tool-switcher">
+                  <ToolIcon tool={activeTool} size={16} />
+                  <span className="bkh-sr-only">도구 전환</span>
+                  <select
+                    className="bkh-select"
+                    value={activeTool}
+                    onChange={(event) =>
+                      open({ tool: event.target.value as StudioTool })
+                    }
+                  >
+                    {toolOrder.map((tool) => (
+                      <option key={tool} value={tool}>
+                        {toolNames[tool]}
+                        {tool === "hit-timing" ? " · 개발 중" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </>
             ) : (
               <button
@@ -723,6 +829,16 @@ export function StudioShell() {
             )}
           </div>
         </header>
+
+        {activeTool === "hit-timing" && (
+          <div className="bkh-experimental-notice">
+            <CircleAlert size={17} />
+            <p>
+              AI 시각 분석으로 공격 구간을 제안합니다. 실제 충돌 판정·타수
+              정확도는 검증되지 않아 직접 검토가 필요합니다.
+            </p>
+          </div>
+        )}
 
         {(summaryError || actionError) && (
           <div className="bkh-alert" role="alert">
@@ -875,18 +991,17 @@ export function StudioShell() {
                   <section className="bkh-records">
                     <div className="bkh-records-top">
                       <div className="bkh-filter-tabs" aria-label="도구 필터">
-                        {(["all", "modeling", "combat"] as const).map(
-                          (tool) => (
-                            <button
-                              key={tool}
-                              className={`bkh-filter-tab${toolFilter === tool ? " bkh-filter-tab-active" : ""}`}
-                              aria-pressed={toolFilter === tool}
-                              onClick={() => setToolFilter(tool)}
-                            >
-                              {tool === "all" ? "모든 도구" : toolNames[tool]}
-                            </button>
-                          ),
-                        )}
+                        {(["all", ...toolOrder] as const).map((tool) => (
+                          <button
+                            key={tool}
+                            className={`bkh-filter-tab${toolFilter === tool ? " bkh-filter-tab-active" : ""}`}
+                            aria-pressed={toolFilter === tool}
+                            onClick={() => setToolFilter(tool)}
+                          >
+                            {tool === "all" ? "모든 도구" : toolNames[tool]}
+                            {tool === "hit-timing" && <ExperimentalBadge />}
+                          </button>
+                        ))}
                       </div>
                       <label className="bkh-select-label">
                         <SlidersHorizontal size={15} />
@@ -1032,12 +1147,12 @@ export function StudioShell() {
                         <div className="bkh-setting-actions">
                           <button
                             className="bkh-button bkh-button-secondary"
-                            disabled={choosingProject}
+                            disabled={choosingProject !== null}
                             onClick={() => {
-                              void chooseCombatProject();
+                              void chooseProject("combat");
                             }}
                           >
-                            {choosingProject ? (
+                            {choosingProject === "combat" ? (
                               <LoaderCircle className="bkh-spin" size={15} />
                             ) : (
                               <FolderOpen size={15} />
@@ -1051,6 +1166,61 @@ export function StudioShell() {
                             }
                           >
                             Unity 연결 설정
+                            <ArrowUpRight size={14} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="bkh-setting-row">
+                        <span className="bkh-entry-icon bkh-entry-icon-hit-timing">
+                          <Clock3 size={21} />
+                        </span>
+                        <div className="bkh-setting-copy">
+                          <h3 className="bkh-setting-title">
+                            타격 타이밍 <ExperimentalBadge />
+                          </h3>
+                          <p className="bkh-setting-description">
+                            {summary?.hitTimer.projectName
+                              ? `연결할 프로젝트: ${summary.hitTimer.projectName}`
+                              : "공격 애니메이션을 검토할 Unity 프로젝트 폴더를 선택하세요."}
+                          </p>
+                          {summary?.hitTimer.projectPath && (
+                            <span className="bkh-path">
+                              {summary.hitTimer.projectPath}
+                            </span>
+                          )}
+                          <span
+                            className={`bkh-inline-status${summary?.hitTimer.connected ? " bkh-inline-status-ready" : ""}`}
+                          >
+                            {summary?.hitTimer.connected ? (
+                              <Check size={13} />
+                            ) : (
+                              <span className="bkh-small-dot" />
+                            )}
+                            {summary?.hitTimer.connected
+                              ? "Unity 연결됨"
+                              : "Unity 연결 대기"}
+                          </span>
+                        </div>
+                        <div className="bkh-setting-actions">
+                          <button
+                            className="bkh-button bkh-button-secondary"
+                            disabled={choosingProject !== null}
+                            onClick={() => {
+                              void chooseProject("hit-timing");
+                            }}
+                          >
+                            {choosingProject === "hit-timing" ? (
+                              <LoaderCircle className="bkh-spin" size={15} />
+                            ) : (
+                              <FolderOpen size={15} />
+                            )}
+                            프로젝트 선택
+                          </button>
+                          <button
+                            className="bkh-text-button"
+                            onClick={() => open({ tool: "hit-timing" })}
+                          >
+                            도구 열기
                             <ArrowUpRight size={14} />
                           </button>
                         </div>
@@ -1089,11 +1259,30 @@ export function StudioShell() {
                               : "불러오는 중…")}
                         </code>
                       </div>
+                      <div className="bkh-storage-row">
+                        <span className="bkh-storage-label">
+                          <Clock3 size={16} />
+                          타격 타이밍
+                          <ExperimentalBadge />
+                        </span>
+                        <code className="bkh-storage-path">
+                          {summary?.storage.hitTimer ||
+                            (summaryError
+                              ? "저장 위치를 확인하지 못했습니다."
+                              : "불러오는 중…")}
+                        </code>
+                      </div>
                     </section>
                     {summary?.combat.error && (
                       <div className="bkh-setting-warning">
                         <CircleAlert size={17} />
                         <span>{summary.combat.error}</span>
+                      </div>
+                    )}
+                    {summary?.hitTimer.error && (
+                      <div className="bkh-setting-warning">
+                        <CircleAlert size={17} />
+                        <span>타격 타이밍: {summary.hitTimer.error}</span>
                       </div>
                     )}
                     {!!summary?.warnings.length && (
@@ -1124,24 +1313,24 @@ export function StudioShell() {
                 <App embedded navigation={modelingNavigation} />
               </div>
             )}
-            {activeTool === "combat" && (
+            {nativeTool && (
               <div
-                data-testid="workspace-combat"
-                className="bkh-combat"
-                ref={combatContainer}
+                data-testid={`workspace-${nativeTool}`}
+                className="bkh-native"
+                ref={nativeContainer}
               >
-                {combatError ? (
+                {nativeError ? (
                   <EmptyState
                     kind="error"
-                    title="타격감 도구를 열지 못했어요."
-                    detail={combatError}
+                    title={`${toolNames[nativeTool]} 도구를 열지 못했어요.`}
+                    detail={nativeError}
                     action="다시 열기"
-                    onAction={() => open(combatNavigation.target)}
+                    onAction={() => open(nativeNavigation.target)}
                   />
                 ) : (
                   <div className="bkh-loading" role="status">
                     <LoaderCircle className="bkh-spin" size={22} />
-                    타격감 작업 공간을 열고 있어요.
+                    {toolNames[nativeTool]} 작업 공간을 열고 있어요.
                   </div>
                 )}
               </div>

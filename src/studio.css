@@ -347,6 +347,10 @@
   background: #f7efe5;
   border-color: #e8d9c8;
 }
+.bkh-shell .bkh-tool-card-hit-timing {
+  background: #edf2f1;
+  border-color: #d2dfdf;
+}
 .bkh-shell .bkh-tool-card:hover {
   border-color: #96a280;
   background: #f0f2e8;
@@ -358,6 +362,11 @@
   background: #f7efe5;
   box-shadow: 0 4px 15px #73513c12;
 }
+.bkh-shell .bkh-tool-card-hit-timing:hover {
+  background: #edf2f1;
+  border-color: #8eaaad;
+  box-shadow: 0 4px 15px #49616a12;
+}
 .bkh-tool-card-top {
   display: flex;
   justify-content: space-between;
@@ -367,6 +376,57 @@
 }
 .bkh-tool-card-combat .bkh-tool-card-top {
   color: #b68361;
+}
+.bkh-tool-card-hit-timing .bkh-tool-card-top {
+  color: #77969c;
+}
+.bkh-tool-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+.bkh-experimental-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: 1px solid #dfcbae;
+  border-radius: 4px;
+  color: #936b38;
+  background: #f6ecd9;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.bkh-entry-title .bkh-experimental-badge,
+.bkh-setting-title .bkh-experimental-badge {
+  margin-left: 7px;
+}
+.bkh-current-tool .bkh-experimental-badge {
+  display: table;
+  margin-top: 6px;
+  font-size: 9px;
+}
+.bkh-experimental-notice {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 9px;
+  padding: 10px 28px;
+  border-bottom: 1px solid #e4d6bb;
+  color: #99754a;
+  background: #faf1df;
+}
+.bkh-experimental-notice > p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #8b7356;
+  word-break: keep-all;
 }
 .bkh-tool-category {
   font-size: 9px;
@@ -385,6 +445,12 @@
 .bkh-tool-art > svg {
   width: 100%;
   height: 100%;
+}
+.bkh-tool-art-hit-timing {
+  width: 180px;
+  height: 140px;
+  top: 23px;
+  right: 8px;
 }
 .bkh-tool-card-copy {
   position: relative;
@@ -409,6 +475,11 @@
   color: #b07957;
   background: #fbf2e7;
 }
+.bkh-tool-card-hit-timing .bkh-tool-card-icon {
+  border-color: #c8dada;
+  color: #72939a;
+  background: #f2f7f5;
+}
 .bkh-shell .bkh-tool-name {
   color: #303629;
   font-size: 22px;
@@ -423,12 +494,19 @@
   color: #7a836e;
   margin: 7px 0 0;
   word-break: keep-all;
+  min-height: 42px;
 }
 .bkh-tool-card-combat .bkh-tool-name {
   color: #493629;
 }
 .bkh-tool-card-combat .bkh-tool-description {
   color: #967e67;
+}
+.bkh-tool-card-hit-timing .bkh-tool-name {
+  color: #344b4f;
+}
+.bkh-tool-card-hit-timing .bkh-tool-description {
+  color: #748e92;
 }
 .bkh-tool-card-footer {
   display: flex;
@@ -447,6 +525,10 @@
   border-color: #e8d8c6;
   color: #a58a71;
 }
+.bkh-tool-card-hit-timing .bkh-tool-card-footer {
+  color: #819ca0;
+  border-color: #d4e0de;
+}
 .bkh-tool-open {
   display: flex;
   align-items: center;
@@ -458,6 +540,9 @@
 }
 .bkh-tool-card-combat .bkh-tool-open {
   color: #a56443;
+}
+.bkh-tool-card-hit-timing .bkh-tool-open {
+  color: #61878d;
 }
 .bkh-tool-requirements {
   display: flex;
@@ -471,6 +556,10 @@
 .bkh-tool-card-combat .bkh-tool-requirements {
   color: #99816a;
   border-color: #e8d8c6;
+}
+.bkh-tool-card-hit-timing .bkh-tool-requirements {
+  color: #7b9599;
+  border-color: #d4e0de;
 }
 .bkh-recent {
   margin-top: 33px;
@@ -558,6 +647,11 @@
   background: #f7eee2;
   border-color: #eadfcc;
   color: #b1845f;
+}
+.bkh-entry-icon-hit-timing {
+  background: #eaf2f0;
+  border-color: #d3e1df;
+  color: #7c9c9f;
 }
 .bkh-entry-copy {
   display: flex;
@@ -736,6 +830,7 @@
   justify-content: space-between;
   margin-bottom: 22px;
   gap: 16px;
+  flex-wrap: wrap;
 }
 .bkh-filter-tabs {
   display: flex;
@@ -885,7 +980,7 @@
 .bkh-storage-label {
   display: flex;
   align-items: center;
-  flex: 0 0 114px;
+  flex: 0 0 164px;
   gap: 9px;
   font-size: 11px;
   color: #82916f;
@@ -915,7 +1010,7 @@
   color: #e5e9e6;
   background: #101213;
 }
-.bkh-combat {
+.bkh-native {
   position: relative;
   flex: 1;
   min-width: 0;
@@ -923,8 +1018,8 @@
   overflow: hidden;
   background: #f6f6f1;
 }
-.bkh-combat > .bkh-loading,
-.bkh-combat > .bkh-empty {
+.bkh-native > .bkh-loading,
+.bkh-native > .bkh-empty {
   width: 100%;
   height: 100%;
   border: 0;
@@ -960,6 +1055,25 @@
     transform: rotate(360deg);
   }
 }
+@media (min-width: 1400px) {
+  .bkh-tool-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .bkh-tool-art {
+    width: 151px;
+    height: 128px;
+    top: 33px;
+    right: 4px;
+  }
+  .bkh-tool-card-copy {
+    max-width: 100%;
+  }
+  .bkh-tool-card-footer {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+}
 @media (min-width: 1600px) {
   .bkh-content {
     padding: 38px 48px;
@@ -972,9 +1086,9 @@
     margin-top: 36px;
   }
   .bkh-tool-art {
-    width: 232px;
-    height: 181px;
-    right: 16px;
+    width: 182px;
+    height: 149px;
+    right: 8px;
   }
 }
 @media (max-width: 1250px) {
@@ -1142,6 +1256,19 @@
     align-items: flex-start;
     flex-direction: column;
     gap: 12px;
+  }
+  .bkh-filter-tabs {
+    flex-wrap: wrap;
+  }
+  .bkh-tool-switcher {
+    max-width: 172px;
+  }
+  .bkh-tool-switcher .bkh-select {
+    min-width: 0;
+    width: 100%;
+  }
+  .bkh-experimental-notice {
+    padding: 9px 17px;
   }
   .bkh-settings-section {
     padding: 19px;
