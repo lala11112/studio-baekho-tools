@@ -20,3 +20,7 @@ CombatLabResults/
 Desktop/test-artifacts/
 /design/figma-state.json
 /design/verification-status.json
+
+test-artifacts/
+.test-unity/
+*.tmp
