@@ -67,7 +67,9 @@ for await (const line of readline.createInterface({input:process.stdin})) {
       await page.getByTestId('workbench-step-parts').click();
       await page.getByTestId('workbench-model-input').selectOption('whole');
       await page.getByTestId('workbench-external-model').check();
-      await page.getByTestId('workbench-model-count').fill('1');
+      const count=command.generationCount ?? 1;
+      if(!Number.isSafeInteger(count) || count<1 || count>16) throw Error('Invalid approved candidate count');
+      await page.getByTestId('workbench-model-count').fill(String(count));
       await page.getByTestId('workbench-polygon-count').fill('10000');
       await page.getByTestId('workbench-studio-topology').selectOption('quad');
       await page.getByTestId('workbench-observed-model-cost').fill('100');
@@ -79,6 +81,18 @@ for await (const line of readline.createInterface({input:process.stdin})) {
         await page.getByTestId('workbench-external-receive').waitFor();
       }
       await page.screenshot({path:'artifacts/runtime/rabbit-model-app.png'});
+    }
+    else if(command.action==='model-review') {
+      await page.getByTestId('workbench-step-parts').click();
+      const gallery=page.locator('.wb-candidates');
+      await gallery.scrollIntoViewIfNeeded();
+      await gallery.screenshot({path:'artifacts/runtime/rabbit-models-app-review.png'});
+      const images=await gallery.locator('img').evaluateAll(items=>items.map(i=>({width:i.naturalWidth,height:i.naturalHeight,complete:i.complete})));
+      await page.getByTestId('workbench-preview3d-0').click();
+      await page.getByTestId('workbench-preview3d-1').click();
+      await page.waitForTimeout(1500);
+      await gallery.screenshot({path:'artifacts/runtime/rabbit-models-app-3d.png'});
+      console.log(JSON.stringify({images,canvases:await gallery.locator('canvas').count(),selectedModel:workbench.selections['model:whole']??null}));
     }
     else if(command.action==="turnaround") {
       await page.getByTestId("workbench-concept-mode").selectOption("turnaround");
