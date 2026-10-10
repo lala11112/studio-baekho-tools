@@ -10,7 +10,7 @@ const prompt = `게임용 3D 캐릭터 제작을 위한 서로 다른 토끼 디
 후보 1: 작고 둥근 얼굴과 통통한 몸, 곧게 선 긴 귀로 귀여운 인상.
 후보 2: 조금 더 날렵한 얼굴과 탄력 있는 뒷다리, 귀 끝이 살짝 벌어진 생동감 있는 인상.
 각 결과 옆의 설명으로 후보 1과 후보 2를 구분하되 이미지 안에는 번호를 쓰지 마세요. 실제 이미지 두 장을 생성하고, 하나의 이미지를 복제하거나 자르지 마세요.`;
-const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.6/win-unpacked/Partsmith.exe") });
+const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.9/win-unpacked/Partsmith.exe") });
 const page = await app.firstWindow();
 await page.waitForSelector(".home");
 const call = c => page.evaluate(c => window.desktop.call(c), c);
@@ -38,7 +38,7 @@ if (!workbench?.jobs.length) {
 const snapshot = async () => {
   state = await call({type:"state"});
   workbench = state.workbenches.find(w=>w.projectId===project.id);
-  const job=workbench.jobs.find(j=>j.request.executionMode==="codex-session");
+  const job=workbench.jobs.find(j=>j.externalExecution);
   const info={projectId:project.id,workbenchId:workbench.id,jobId:job.id,
     workspace:path.join(state.dataDir,"projects",project.id,"workbench",workbench.id,"jobs",job.id),
     status:job.status,external:job.externalExecution,candidates:job.candidates,selection:workbench.selections.concept,
@@ -49,13 +49,37 @@ const snapshot = async () => {
   return info;
 };
 await snapshot();
-console.log("READY: accepts JSON lines with action reserve, receive, state, screenshot, close. Never sends browser requests.");
+console.log("READY: JSON commands control the Partsmith app. Explicit run/reply starts its Chrome worker.");
 for await (const line of readline.createInterface({input:process.stdin})) {
   try {
     const command=JSON.parse(line), info=await snapshot();
     if(command.action==="reserve") await call({type:"workbench.action",id:project.id,
       action:{kind:"external-reserve",jobId:info.jobId,requestHash:info.external.requestHash}});
     else if(command.action==="receive") await page.getByTestId("workbench-external-receive").click();
+    else if(command.action==='run-surface') {
+      const current=workbench.jobs.find(j=>j.id===info.jobId);
+      if(current.step!=='surface' || command.jobId!==info.jobId || command.costApproved!==true ||
+        current.request.externalSurface?.textureResolution!=='4K' || current.approval.studioCreditLimit!==40)
+        throw Error('Exact approved surface job required');
+      await page.getByTestId('workbench-step-surface').click();
+      await page.getByTestId('workbench-codex-run').click();
+    }
+    else if(command.action==='approve-tripo') {
+      const current=workbench.jobs.find(j=>j.id===command.jobId);
+      const approval=current?.externalExecution?.worker?.approval;
+      if(current?.status!=='running' || !approval || command.approvalId!==approval.id ||
+         approval.title!=='cua_repl 접근 확인' || approval.detail!=='Allow Browser use to access https://studio.tripo3d.ai/' ||
+         approval.fields.length!==0 || current.approval.studioCreditLimit!==40)
+        throw Error('Only the explicitly user-authorized Tripo site request for this rabbit is supported');
+      await page.getByTestId('workbench-step-surface').click();
+      await page.getByTestId('workbench-codex-approve').click();
+    }
+    else if(command.action==='reply') {
+      if(command.jobId!==info.jobId || typeof command.text!=='string') throw Error('Exact job and reply required');
+      await page.getByTestId('workbench-step-surface').click();
+      await page.getByTestId('workbench-codex-reply').fill(command.text);
+      await page.getByTestId('workbench-codex-run').click();
+    }
     else if(command.action==="select-rounded") await page.getByTestId("workbench-select-0").click();
     else if(command.action==="select-version") {
       const selectedJob=workbench.jobs.find(j=>j.id===command.jobId && j.status==='review');

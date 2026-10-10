@@ -47,7 +47,7 @@ export type WorkbenchCandidate = {
 export type WorkbenchRequest = {
   /** Independent whole-character views, reviewed as one set after design selection. */
   conceptMode?: "design" | "turnaround";
-  executionMode?: "worker" | "codex-session";
+  executionMode?: "worker" | "codex-session" | "codex-app";
   /** Observed Studio settings for a manually executed whole-model submission. */
   externalModel?: { model: "P2.0"; topology: "quad" | "triangle"; observedCreditCost: number };
   /** Initial whole-model Smart UV followed by texture, executed in the current chat. */
@@ -125,6 +125,7 @@ export type WorkbenchJob = {
     conversationUrl?: string;
     studioModels?: { candidateId: string; modelId: string; url: string }[];
     surface?: WorkbenchSurfaceReceipt;
+    worker?: { attempt: number; startedAt?:string; threadId?: string; question?: string; lastReply?: string; usage?: unknown; approval?: WorkbenchRuntimeApproval };
   };
   id: string;
   step: WorkbenchStep;
@@ -213,7 +214,27 @@ export interface WorkbenchExecutor {
   probe?(): Promise<unknown>;
   shutdown?(): void;
 }
+export interface ExternalWorkbenchRunner {
+  run(context: WorkbenchExecutionContext & { reply?: string; requestApproval?: (approval: WorkbenchRuntimeApproval) => Promise<WorkbenchRuntimeAnswer> }, onProgress: (message: string) => void): Promise<{
+    status: "completed" | "needs_input" | "submission_unknown";
+    summary: string;
+    question?: string;
+    threadId?: string;
+    usage?: unknown;
+  }>;
+  verifyReceipt(context: WorkbenchExecutionContext): void;
+  shutdown?(): void;
+}
+export type WorkbenchRuntimeApproval = {
+  id: string;
+  title: string;
+  detail: string;
+  fields: {id:string;label:string;required:boolean;options?:{value:string;label:string}[]}[];
+};
+export type WorkbenchRuntimeAnswer = {accepted:boolean;values:Record<string,string>};
 export type WorkbenchAction =
+  | {kind:"external-approval";jobId:string;approvalId:string;answer:WorkbenchRuntimeAnswer}
+  | { kind: "external-run"; jobId: string; reply?: string }
   | { kind: "external-reserve"; jobId: string; requestHash: string }
   | { kind: "external-receive"; jobId: string }
   | { kind: "external-cancel"; jobId: string }

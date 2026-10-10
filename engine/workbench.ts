@@ -23,6 +23,9 @@ import {
   type WorkbenchCandidate,
   type WorkbenchExecutionContext,
   type WorkbenchExecutor,
+  type ExternalWorkbenchRunner,
+  type WorkbenchRuntimeApproval,
+  type WorkbenchRuntimeAnswer,
   type WorkbenchJob,
   type WorkbenchRequest,
   type WorkbenchRecovery,
@@ -40,6 +43,7 @@ const equal = (a?: WorkbenchSelection, b?: WorkbenchSelection) =>
   a?.jobId === b?.jobId && a?.candidateId === b?.candidateId;
 const external = (job: WorkbenchJob) =>
   ["concept", "model", "surface", "reference"].includes(job.step);
+const externalMode = (mode?: string) => mode === "codex-session" || mode === "codex-app";
 const safeRelative = (root: string, relative: string) => {
   if (!relative || path.isAbsolute(relative))
     throw new Error("산출물은 작업 폴더 안의 상대 경로여야 합니다.");
@@ -73,11 +77,13 @@ const waitForRecovery = (milliseconds: number, signal: AbortSignal) =>
 
 /** Persistent user-driven workflow. Recovery only continues the current job, never another stage. */
 export class WorkbenchEngine {
+  private pendingApprovals = new Map<string,{jobId:string;approvalId:string;resolve:(answer:WorkbenchRuntimeAnswer)=>void}>();
   private active = new Map<
     string,
     { controller: AbortController; promise: Promise<void> }
   >();
   private readonly recoveryDelaysMs: readonly number[];
+  private readonly externalRunner?: ExternalWorkbenchRunner;
   private readonly prepareSeparationImages?: (
     artifacts: WorkbenchArtifact[],
     workspace: string,
@@ -87,6 +93,7 @@ export class WorkbenchEngine {
     private store: Store,
     private executor: WorkbenchExecutor,
     options: {
+      externalRunner?: ExternalWorkbenchRunner;
       recoveryDelaysMs?: readonly number[];
       prepareSeparationImages?: (
         artifacts: WorkbenchArtifact[],
@@ -102,11 +109,13 @@ export class WorkbenchEngine {
     )
       throw new Error("자동 복구 대기 시간은 0 이상인 세 값이어야 합니다.");
     this.recoveryDelaysMs = [...delays];
+    this.externalRunner = options.externalRunner;
     this.prepareSeparationImages = options.prepareSeparationImages;
     for (const w of this.list()) {
       let changed = false;
       for (const j of w.jobs)
         if (j.status === "running") {
+          if (j.externalExecution?.worker) delete j.externalExecution.worker.approval;
           j.status = external(j) ? "submission_unknown" : "failed";
           j.summary = external(j)
             ? "앱이 종료되어 제출 여부를 확인해야 합니다. 중복 생성하지 않습니다."
@@ -185,6 +194,20 @@ export class WorkbenchEngine {
         "jobId" in action && this.job(w, action.jobId).externalExecution)
       throw new Error("현재 대화 실행 작업은 새 작업자로 재시도하지 않습니다. 기존 대화의 결과만 등록하세요.");
     switch (action.kind) {
+      case "external-approval": {
+        const pending=this.pendingApprovals.get(w.id);
+        if(!pending || pending.jobId!==action.jobId || pending.approvalId!==action.approvalId ||
+           w.activeJobId!==action.jobId || this.job(w,action.jobId).status!=="running")
+          throw new Error("이 권한 요청은 이미 끝났거나 현재 작업의 요청이 아닙니다.");
+        if(!action.answer || typeof action.answer.accepted!=="boolean" || !action.answer.values ||
+           Object.entries(action.answer.values).some(([key,value])=>key.length>200 || typeof value!=="string" || value.length>6000))
+          throw new Error("권한 확인 답변이 올바르지 않습니다.");
+        this.pendingApprovals.delete(w.id);
+        delete this.job(w,action.jobId).externalExecution!.worker!.approval;
+        this.save(w);pending.resolve(action.answer);return w;
+      }
+      case "external-run":
+        return this.runExternal(w, action.jobId, action.reply);
       case "external-reserve":
         return this.reserveExternal(w, action.jobId, action.requestHash);
       case "external-receive":
@@ -386,12 +409,12 @@ export class WorkbenchEngine {
     if (typeof request.prompt !== "string" || request.prompt.length > 12000)
       throw new Error("작업 지시는 12,000자 이내로 작성하세요.");
     const r = structuredClone(request);
-    if (r.executionMode !== undefined && !["worker", "codex-session"].includes(r.executionMode))
+    if (r.executionMode !== undefined && !["worker", "codex-session", "codex-app"].includes(r.executionMode))
       throw new Error("알 수 없는 실행 연결입니다.");
     r.prompt = r.prompt.trim();
     if (r.externalModel !== undefined) {
       const settings = r.externalModel;
-      if (r.executionMode !== "codex-session" || r.step !== "model" ||
+      if (!externalMode(r.executionMode) || r.step !== "model" ||
           r.modelInput !== "whole" || r.baseJobId || settings.model !== "P2.0" ||
           !["quad", "triangle"].includes(settings.topology) ||
           !Number.isSafeInteger(settings.observedCreditCost) || settings.observedCreditCost < 0)
@@ -400,7 +423,7 @@ export class WorkbenchEngine {
     }
     if (r.externalSurface !== undefined) {
       const s = r.externalSurface;
-      if (r.executionMode !== "codex-session" || r.step !== "surface" || r.modelInput !== "whole" ||
+      if (!externalMode(r.executionMode) || r.step !== "surface" || r.modelInput !== "whole" ||
           r.baseJobId || !s || ![s.observedUvCost, s.observedTextureCost].every(n => Number.isSafeInteger(n) && n >= 0) ||
           !["2K", "4K", "8K"].includes(s.textureResolution) || typeof s.removeLighting !== "boolean")
         throw new Error("외부 UV·텍스처는 채택한 전체 모델의 최초 작업과 확인한 설정·비용만 지원합니다.");
@@ -408,7 +431,7 @@ export class WorkbenchEngine {
     if (r.conceptMode !== undefined && (r.step !== "concept" || !["design", "turnaround"].includes(r.conceptMode)))
       throw new Error("잘못된 전체 이미지 생성 모드입니다.");
     if (r.conceptMode === "turnaround") {
-      if (r.executionMode !== "codex-session" || r.provider !== "gpt" || r.generationCount !== 1)
+      if (!externalMode(r.executionMode) || r.provider !== "gpt" || r.generationCount !== 1)
         throw new Error("전체 4방향은 현재 대화에서 GPT 독립 원본 1세트로 실행하세요.");
       r.views = [...WORKBENCH_VIEWS];
     }
@@ -644,7 +667,7 @@ export class WorkbenchEngine {
       if (!r.externalModel)
         throw new Error("전체 4방향의 Tripo 입력 지원·방향·비용을 현재 대화에서 확인해야 합니다. 단일 이미지로 대신 제출하지 않습니다.");
     }
-    if (r.executionMode === "codex-session" &&
+    if (externalMode(r.executionMode) &&
         !((r.step === "concept" && r.provider === "gpt") || (r.step === "model" && r.externalModel) ||
           (r.step === "surface" && r.externalSurface)))
       throw new Error("현재 대화 실행 연결은 GPT 이미지, 전체 P2 모델과 최초 UV·텍스처를 지원합니다.");
@@ -657,6 +680,8 @@ export class WorkbenchEngine {
       r.modelInput = route;
     }
     const slot = workbenchSlot(r);
+    if (r.executionMode === "codex-app" && !this.externalRunner)
+      throw new Error("앱 Codex 실행 연결을 사용할 수 없습니다. 아직 제출하지 않았습니다.");
     if (w.jobs.some(j => j.slot === slot && j.externalExecution &&
         (j.externalExecution.state === "reserved" ||
           (j.externalExecution.state === "prepared" && j.status !== "cancelled"))))
@@ -838,7 +863,7 @@ export class WorkbenchEngine {
     fs.mkdirSync(workspace, { recursive: true });
     const controller = new AbortController();
     const uniqueInputs = [...new Map(inputs.map((a) => [a.path, a])).values()];
-    if (r.executionMode === "codex-session") {
+    if (externalMode(r.executionMode)) {
       const packet = JSON.stringify({ schemaVersion: 1, projectId: w.projectId,
         workbenchId: w.id, jobId: job.id, request: r, approval: accepted,
         inputs: uniqueInputs, dependencies, ...(sourceStudioModel ? {sourceStudioModel} : {}) }, null, 2);
@@ -849,7 +874,8 @@ export class WorkbenchEngine {
       job.summary = "현재 Codex 대화 실행 대기 · 작업 명세를 저장했습니다. 아직 웹에 제출하지 않았습니다.";
       delete w.activeJobId;
       w.message = job.summary;
-      return this.save(w);
+      this.save(w);
+      return r.executionMode === "codex-app" ? this.runExternal(w, job.id) : w;
     }
     const promise = Promise.resolve().then(() =>
       this.perform(w.id, job.id, workspace, uniqueInputs, controller),
@@ -859,6 +885,86 @@ export class WorkbenchEngine {
   }
   private workspace(w: Workbench, job: WorkbenchJob) {
     return this.store.file(w.projectId, `workbench/${w.id}/jobs/${job.id}`);
+  }
+  private runExternal(w: Workbench, jobId: string, reply?: string) {
+    this.idle(w);
+    const job = this.job(w, jobId), external = job.externalExecution;
+    if (!this.externalRunner || !external || !this.current(w, job) ||
+        !["needs_input", "submission_unknown"].includes(job.status) || external.state === "received")
+      throw new Error("앱에서 이어서 실행할 외부 작업이 아닙니다.");
+    if (reply !== undefined && (typeof reply !== "string" || reply.length > 6000))
+      throw new Error("답변은 6,000자 이내로 작성하세요.");
+    if (external.state === "reserved" && !external.worker)
+      throw new Error("수동 제출 예약은 새 작업자로 재실행하지 않습니다. 기존 결과를 등록하세요.");
+    if ((external.worker?.attempt ?? 0) >= 3)
+      throw new Error("이 작업의 실행·복구 3회에 도달했습니다. 제출 기록을 먼저 확인하세요.");
+    const workspace = this.workspace(w, job);
+    if (hash(path.join(workspace, "external-request.json")) !== external.requestHash)
+      throw new Error("실행 명세가 변경되었습니다.");
+    const packet = json<{inputs: WorkbenchArtifact[]}>(path.join(workspace, "external-request.json"));
+    this.verifyArtifacts(w, packet.inputs);
+    if (external.state === "prepared") this.reserveExternal(w, jobId, external.requestHash);
+    external.worker = { attempt: (external.worker?.attempt ?? 0) + 1, startedAt:now(), lastReply: reply };
+    delete external.worker.question;
+    delete external.worker.approval;
+    job.status = "running";
+    job.summary = "앱에서 Codex 실행 중 · 연결된 Chrome에서 현재 단계만 처리합니다.";
+    w.activeJobId = jobId;
+    this.save(w);
+    const controller = new AbortController();
+    const context = {workbench:structuredClone(w),job:structuredClone(job),workspace,
+      inputs:packet.inputs,signal:controller.signal,reply,
+      requestApproval:(approval:WorkbenchRuntimeApproval)=>new Promise<WorkbenchRuntimeAnswer>((resolve,reject)=>{
+        if(controller.signal.aborted || this.pendingApprovals.has(w.id)) {reject(Error("권한 요청이 취소되었거나 중복됐습니다."));return;}
+        const latest=this.get(w.id),current=this.job(latest,jobId);
+        current.externalExecution!.worker!.approval=approval;
+        current.summary="Codex가 실행 권한을 확인하고 있습니다. 아래 내용을 확인해 이 앱에서 답변하세요.";
+        const abort=()=>{
+          this.pendingApprovals.delete(w.id);
+          resolve({accepted:false,values:{}});
+        };
+        controller.signal.addEventListener("abort",abort,{once:true});
+        this.pendingApprovals.set(w.id,{jobId,approvalId:approval.id,resolve:answer=>{
+          controller.signal.removeEventListener("abort",abort);resolve(answer);
+        }});
+        this.save(latest);
+      })};
+    const promise = Promise.resolve().then(async () => {
+      try {
+        const result = await this.externalRunner!.run(context, message => {
+          if (controller.signal.aborted) return;
+          const latest = this.get(w.id), current = this.job(latest, jobId);
+          if (current.status !== "running") return;
+          if (!current.externalExecution?.worker?.approval) current.summary = String(message).slice(0,4000);
+          current.updatedAt = now(); this.save(latest);
+        });
+        if (controller.signal.aborted) return;
+        const latest = this.get(w.id), current = this.job(latest, jobId);
+        if (current.status !== "running") return;
+        delete current.externalExecution!.worker!.approval;
+        this.verifyArtifacts(latest, packet.inputs);
+        Object.assign(current.externalExecution!.worker!, {threadId:result.threadId,usage:result.usage,question:result.question});
+        current.status = result.status === "submission_unknown" ? "submission_unknown" : "needs_input";
+        current.summary = result.summary.slice(0,4000);
+        current.updatedAt = now(); delete latest.activeJobId;
+        this.active.delete(w.id); this.save(latest);
+        if (result.status === "completed") this.receiveExternal(latest, jobId);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          const latest = this.get(w.id), current = this.job(latest, jobId);
+          current.status = "needs_input";
+          delete current.externalExecution!.worker!.approval;
+          current.summary = `Codex 실행 확인 필요: ${messageOf(error)} 기존 제출을 재전송하지 않습니다.`;
+          delete latest.activeJobId; this.save(latest);
+        }
+      } finally {
+        const pending=this.pendingApprovals.get(w.id);
+        if(pending) {this.pendingApprovals.delete(w.id);pending.resolve({accepted:false,values:{}});}
+        this.active.delete(w.id);
+      }
+    });
+    this.active.set(w.id,{controller,promise});
+    return w;
   }
   private reserveExternal(w: Workbench, jobId: string, requestHash: string) {
     this.idle(w);
@@ -881,6 +987,10 @@ export class WorkbenchEngine {
     if (job.status !== "needs_input" || external?.state !== "reserved")
       throw new Error("결과 회수를 기다리는 외부 실행 작업이 아닙니다.");
     const workspace = this.workspace(w, job);
+    if (external.worker) {
+      if (!this.externalRunner) throw new Error("앱 실행 출처 검증 연결이 없습니다.");
+      this.externalRunner.verifyReceipt({workbench:w,job,workspace,inputs:[],signal:new AbortController().signal});
+    }
     if (hash(path.join(workspace, "external-request.json")) !== external.requestHash)
       throw new Error("고정 실행 명세가 변경되었습니다.");
     const receipt = json<{jobId: string; requestHash: string; conversationUrl?: string;
@@ -1971,6 +2081,7 @@ export class WorkbenchEngine {
     const active = this.active.get(id);
     if (w.activeJobId) {
       const j = this.job(w, w.activeJobId);
+      if(j.externalExecution?.worker) delete j.externalExecution.worker.approval;
       j.status = external(j) ? "submission_unknown" : "cancelled";
       j.summary = external(j)
         ? "작업을 중지했습니다. 외부 서비스의 제출 여부를 먼저 확인하세요."
@@ -2222,5 +2333,6 @@ export class WorkbenchEngine {
   shutdown() {
     for (const id of this.active.keys()) this.cancel(id);
     this.executor.shutdown?.();
+    this.externalRunner?.shutdown?.();
   }
 }

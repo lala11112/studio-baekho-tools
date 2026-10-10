@@ -1,0 +1,111 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  answerAppServerRequest,
+  approvalText,
+} from "../engine/codex-app-server-worker";
+
+test("browser form approval waits for an explicit app answer and preserves exact enum values", async () => {
+  let resolve!: (answer: any) => void;
+  const answer = new Promise<any>((r) => (resolve = r));
+  let settled = false;
+  const result = answerAppServerRequest(
+    {
+      id: 7,
+      method: "mcpServer/elicitation/request",
+      params: {
+        serverName: "browser",
+        mode: "openai/form",
+        message: "Allow https://studio.tripo3d.ai/ko?token=secret",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            access: { type: "boolean" },
+            lifetime: { type: "string", enum: ["turn", "thread"] },
+          },
+          required: ["access", "lifetime"],
+        },
+      },
+    },
+    async (request) => {
+      assert.ok(!request.detail.includes("secret"));
+      assert.deepEqual(
+        request.fields[1].options?.map((o) => o.value),
+        ["turn", "thread"],
+      );
+      return answer;
+    },
+  ).then((r) => {
+    settled = true;
+    return r;
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(settled, false);
+  resolve({ accepted: true, values: { access: "true", lifetime: "turn" } });
+  assert.deepEqual(await result, {
+    action: "accept",
+    content: { access: true, lifetime: "turn" },
+    _meta: null,
+  });
+});
+
+test("denial grants nothing, no session-wide command grant, unsupported identity request fails", async () => {
+  const declined = async () => ({ accepted: false, values: {} });
+  assert.deepEqual(
+    await answerAppServerRequest(
+      {
+        method: "item/permissions/requestApproval",
+        params: { permissions: { network: { enabled: true } } },
+      },
+      declined,
+    ),
+    { permissions: {}, scope: "turn" },
+  );
+  assert.deepEqual(
+    await answerAppServerRequest(
+      { method: "item/commandExecution/requestApproval" },
+      async () => ({ accepted: true, values: {} }),
+    ),
+    { decision: "accept" },
+  );
+  await assert.rejects(
+    () => answerAppServerRequest({ method: "attestation/generate" }, declined),
+    /지원하지/,
+  );
+  await assert.rejects(
+    () =>
+      answerAppServerRequest(
+        {
+          method: "item/tool/requestUserInput",
+          params: { questions: [{ isSecret: true }] },
+        },
+        declined,
+      ),
+    /비밀/,
+  );
+  assert.equal(
+    approvalText("https://example.com/auth?code=secret#token"),
+    "https://example.com/auth",
+  );
+});
+
+test("invalid form choices fail instead of widening requested permission", async () => {
+  await assert.rejects(
+    () =>
+      answerAppServerRequest(
+        {
+          method: "mcpServer/elicitation/request",
+          params: {
+            mode: "form",
+            requestedSchema: {
+              type: "object",
+              properties: { lifetime: { type: "string", enum: ["turn"] } },
+              required: ["lifetime"],
+            },
+          },
+        },
+        async () => ({ accepted: true, values: { lifetime: "forever" } }),
+      ),
+    /허용되지/,
+  );
+});

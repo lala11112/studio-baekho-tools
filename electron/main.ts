@@ -21,6 +21,7 @@ import { WorkbenchEngine } from "../engine/workbench";
 import { CodexWorkbenchExecutor } from "../engine/workbench-executor";
 import { parseJsonText, readJsonFile } from "../engine/json";
 import { CodexWorker } from "../engine/codex-worker";
+import { ChromeWorkbenchRunner } from "./chrome-workbench-runner";
 import { StudioBrowser } from "./studio-browser";
 import { ChatGptBrowser } from "./chatgpt-browser";
 import { Tripo } from "../engine/tripo";
@@ -131,7 +132,7 @@ async function dispatch(c: Command): Promise<unknown> {
     case "workbench.action":
       if (
         c.action.kind === "execute" &&
-        c.action.request.executionMode !== "codex-session" &&
+        !["codex-session", "codex-app"].includes(c.action.request.executionMode ?? "worker") &&
         ["concept", "separate"].includes(c.action.request.step) &&
         c.action.request.provider !== "tripo" &&
         (c.action.request.imageBackend ?? "chatgpt-web") === "chatgpt-web"
@@ -634,7 +635,11 @@ app.whenReady().then(async () => {
         ? path.join(process.resourcesPath, "integrations")
         : path.join(app.getAppPath(), "integrations"),
     }),
-    { prepareSeparationImages },
+    { prepareSeparationImages, externalRunner: new ChromeWorkbenchRunner({
+      journalRoot:path.join(root,"workbench-chrome-journals"),
+      bridgePath:path.join(__dirname,"production-mcp.cjs"),
+      projectRoot:id=>store.directory(id),blenderPath:()=>store.settings.blenderPath,
+    }) },
   );
   protocol.handle("asset", async (request) => {
     try {

@@ -37,6 +37,8 @@ export type WorkerConnection = {
   close?: () => Promise<void> | void;
 };
 export type WorkerTask = {
+  /** App-owned Chrome runner uses its own scoped connection, not embedded web. */
+  connectedChrome?: boolean;
   run: ProductionRun;
   stage: ProductionStage;
   prompt: string;
@@ -129,7 +131,7 @@ export function codexArguments(task: WorkerTask, extraArgs: string[] = []) {
     args.push("--model", task.requestedModel ?? "gpt-6-astra");
   // A local repair can inspect existing images but must not consume another
   // image-generation request. This override applies only to this child process.
-  if (task.recoveryOnly || task.imageBackend === "chatgpt-web")
+  if (task.recoveryOnly || task.imageBackend === "chatgpt-web" || task.connectedChrome)
     args.push("--config", "features.image_generation=false");
   for (const directory of task.allowedWritePaths ?? [])
     args.push("--add-dir", directory);
@@ -334,6 +336,12 @@ export class CodexWorker implements ProductionWorker {
       );
     }
     const env: NodeJS.ProcessEnv = { ...process.env };
+    if (task.connectedChrome) {
+      // A normally launched Partsmith must not depend on this desktop chat's identity.
+      for (const name of Object.keys(env))
+        if ((name.startsWith("CODEX_") && name !== "CODEX_HOME") || /^(BROWSER_USE_|CUA_)/.test(name))
+          delete env[name];
+    }
     // Never silently switch the existing ChatGPT login to a parent process's API credentials.
     for (const name of [
       "OPENAI_API_KEY",

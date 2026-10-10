@@ -292,9 +292,9 @@ export function AssetWorkbench({
       (j) => ["concept", "separate"].includes(j.step) && j.request.imageBackend,
     )?.request.imageBackend ?? "chatgpt-web",
   );
-  const [externalConcept, setExternalConcept] = useState(
-    w?.jobs.find(j => j.step === "concept")?.request.executionMode === "codex-session",
-  );
+  const [externalConcept, setExternalConcept] = useState(true);
+  const [externalReply, setExternalReply] = useState("");
+  const [runtimeValues, setRuntimeValues] = useState<{id:string;values:Record<string,string>}>({id:"",values:{}});
   const [externalModel, setExternalModel] = useState(!!w?.jobs.find(j => j.step === "model")?.request.externalModel);
   const savedSurface = w?.jobs.find(j => j.request.externalSurface)?.request.externalSurface;
   const [externalSurface, setExternalSurface] = useState(!!savedSurface || externalModel);
@@ -766,6 +766,10 @@ export function AssetWorkbench({
     active ??
     (latestJob && latestJob.status !== "review" ? latestJob : undefined);
   const recovery = currentStatus?.recovery;
+  const usesAppChrome = Boolean(currentStatus?.externalExecution?.worker) ||
+    (page === "concept" && externalConcept) ||
+    (page === "parts" && modelInput === "whole" && externalModel) ||
+    (page === "surface" && modelInput === "whole" && externalSurface);
   const submissionService =
     currentStatus?.request.imageBackend === "chatgpt-web"
       ? "ChatGPT"
@@ -781,7 +785,7 @@ export function AssetWorkbench({
     ? Math.max(0, Math.ceil((recoveryAt - now) / 1000))
     : undefined;
   const elapsed = active
-    ? Math.max(0, Math.floor((now - Date.parse(active.createdAt)) / 1000))
+    ? Math.max(0, Math.floor((now - Date.parse(active.externalExecution?.worker?.startedAt ?? active.createdAt)) / 1000))
     : 0;
 
   async function action(a: WorkbenchAction, message?: string) {
@@ -796,12 +800,12 @@ export function AssetWorkbench({
         ["concept", "separate"].includes(request.step) &&
         request.provider !== "tripo"
           ? { ...request, imageBackend,
-              executionMode: request.step === "concept" && externalConcept ? "codex-session" : "worker" }
+              executionMode: request.step === "concept" && externalConcept ? "codex-app" : "worker" }
           : request.step === "model" && externalModel && request.modelInput === "whole" && !request.baseJobId
-            ? { ...request, executionMode: "codex-session", externalModel: {
+            ? { ...request, executionMode: "codex-app", externalModel: {
                 model: "P2.0", topology: studioTopology, observedCreditCost: observedModelCost } }
             : request.step === "surface" && externalSurface && request.modelInput === "whole" && !request.baseJobId
-              ? { ...request, executionMode: "codex-session", externalSurface: {
+              ? { ...request, executionMode: "codex-app", externalSurface: {
                   observedUvCost, observedTextureCost, textureResolution, removeLighting } }
             : request,
       approval: {
@@ -1180,8 +1184,8 @@ export function AssetWorkbench({
   }
   function imageConnectionHelp() {
     if (page === "concept" && externalConcept) return <p className="wb-note">
-      앱은 요청을 저장합니다. 현재 Codex 대화에서 연결된 Chrome으로 실행한 뒤 원본을 등록합니다.
-      이 버튼이 대화에 자동 명령을 보내거나 내장 로그인 창을 여는 것은 아닙니다.
+      실행 버튼을 누르면 앱의 Codex 작업자가 연결된 Chrome에서 이미지를 만들고 원본을 가져옵니다.
+      Chrome에서 ChatGPT 로그인을 유지하세요. 진행 상황과 필요한 확인은 이 앱에 표시됩니다.
     </p>;
     return (
       <p className="wb-note" data-testid="workbench-image-backend-help">
@@ -1224,7 +1228,7 @@ export function AssetWorkbench({
           <br />
           선택하거나 탭을 옮겨도 다음 작업은 자동으로 시작하지 않습니다.
         </p>
-        <div className="wb-connections">
+        {!usesAppChrome && <div className="wb-connections">
           <button
             data-testid="workbench-chatgpt-open"
             disabled={busy || chatGptConnecting}
@@ -1267,10 +1271,10 @@ export function AssetWorkbench({
             <RefreshCw size={13} />
             연결 확인
           </button>
-        </div>
+        </div>}
       </div>
       {probe && <p className="wb-note">{probe}</p>}
-      {chatGptStatus && !(page === "concept" && externalConcept) && (
+      {chatGptStatus && !usesAppChrome && (
         <div
           className={`wb-note${chatGptStatus.state === "failed" ? " warning" : ""}`}
           data-testid="workbench-chatgpt-connection-status"
@@ -1325,7 +1329,7 @@ export function AssetWorkbench({
           )}
           <div>
             <strong>
-              {currentStatus.externalExecution ? "현재 대화 실행 · 원본 회수 대기" : statuses[currentStatus.status]}
+              {currentStatus.externalExecution ? currentStatus.status === "running" ? "Codex · Chrome 작업 중" : "Codex 실행 · 확인 필요" : statuses[currentStatus.status]}
               {active
                 ? ` · ${Math.floor(elapsed / 60)}분 ${elapsed % 60}초`
                 : ""}
@@ -1336,11 +1340,42 @@ export function AssetWorkbench({
             </p>
             {currentStatus.externalExecution && <div>
               <p>작업 ID: {currentStatus.id}</p>
-              <p>프로젝트 폴더의 workbench/{w?.id}/jobs/{currentStatus.id}/external-request.json을 현재 대화에 전달하세요.</p>
+              <p>현재 단계의 승인한 설정으로 Codex가 Chrome 작업을 실행하고 결과를 이 앱으로 가져옵니다.</p>
+              {currentStatus.externalExecution.worker?.question && <p data-testid="workbench-codex-question">{currentStatus.externalExecution.worker.question}</p>}
+              {currentStatus.externalExecution.worker?.approval && (()=>{
+                const approval=currentStatus.externalExecution!.worker!.approval!;
+                const values=runtimeValues.id===approval.id ? runtimeValues.values : {};
+                const change=(id:string,value:string)=>setRuntimeValues({id:approval.id,values:{...values,[id]:value}});
+                return <div className="wb-recovery" data-testid="workbench-codex-approval">
+                  <strong>{approval.title}</strong>
+                  <p style={{whiteSpace:"pre-wrap"}}>{approval.detail}</p>
+                  {approval.fields.map(field=><label className="field" key={field.id}>
+                    <span>{field.label}{field.required ? " (필수)" : ""}</span>
+                    {field.options ? <select aria-label={field.label} value={values[field.id] ?? ""} onChange={e=>change(field.id,e.target.value)}>
+                      <option value="">선택하세요</option>{field.options.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select> : <input aria-label={field.label} value={values[field.id] ?? ""} maxLength={12000} onChange={e=>change(field.id,e.target.value)} />}
+                  </label>)}
+                  <button data-testid="workbench-codex-approve" disabled={busy || approval.fields.some(f=>f.required && !values[f.id])}
+                    onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:true,values}})}>선택한 내용으로 계속</button>
+                  <button data-testid="workbench-codex-decline" disabled={busy}
+                    onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:false,values:{}}})}>허용하지 않음</button>
+                </div>;
+              })()}
+              {currentStatus.externalExecution.worker && currentStatus.status !== "running" && <label className="field">
+                <span>확인 답변 · 현재 작업에 대한 지시</span>
+                <textarea data-testid="workbench-codex-reply" value={externalReply} maxLength={6000}
+                  onChange={e=>setExternalReply(e.target.value)} placeholder="예: Chrome에서 로그인을 완료했습니다. 기존 결과를 이어서 확인해 주세요." />
+              </label>}
+              <button data-testid="workbench-codex-run" disabled={locked || !["needs_input","submission_unknown"].includes(currentStatus.status) ||
+                (currentStatus.externalExecution.state === "reserved" && !currentStatus.externalExecution.worker) ||
+                (currentStatus.externalExecution.worker?.attempt ?? 0) >= 3}
+                onClick={()=>{void action({kind:"external-run",jobId:currentStatus.id,reply:externalReply || undefined});setExternalReply("");}}>
+                {currentStatus.externalExecution.worker ? "답변하고 기존 작업 이어서 확인" : "Codex로 실행"}
+              </button>
               <button onClick={() => void run({ type: "workbench.open", id: p.id })}>작업 폴더 열기</button>
               <button data-testid="workbench-external-receive"
                 disabled={currentStatus.externalExecution.state !== "reserved" || locked}
-                onClick={() => void action({kind: "external-receive", jobId: currentStatus.id})}>기존 대화 결과 등록</button>
+                onClick={() => void action({kind: "external-receive", jobId: currentStatus.id})}>저장된 결과 다시 확인</button>
               <button disabled={currentStatus.status !== "needs_input" || locked}
                 onClick={() => void action({kind: "external-cancel", jobId: currentStatus.id})}>외부 작업 추적 중지</button>
             </div>}
@@ -1502,7 +1537,7 @@ export function AssetWorkbench({
                 {provider === "gpt" && <label className="wb-note">
                   <input type="checkbox" data-testid="workbench-external-concept"
                     checked={externalConcept} onChange={e => { setExternalConcept(e.target.checked); setApproved(false); }} />
-                  현재 Codex 대화에서 Chrome으로 실행 · 컨셉 이미지
+                  앱의 Codex로 Chrome에서 실행 · 컨셉 이미지
                 </label>}
                 {provider === "gpt" && imageConnectionHelp()}
                 {!turnaround && countInput(
@@ -1897,7 +1932,7 @@ export function AssetWorkbench({
                       </label>
                       {externalModel && <>
                         <small>채택한 전체 4방향 원본을 P2.0에 전달합니다. 이 버튼은 작업 명세만 저장합니다.
-                          Chrome의 방향·개수·면 수·비용을 확인한 뒤 현재 대화에서 한 번 제출하세요.</small>
+                          Codex가 Chrome의 방향·개수·면 수·비용을 확인하고 승인한 범위에서 한 번 제출합니다.</small>
                         <label className="field"><span>Tripo에서 확인한 토폴로지</span>
                           <select data-testid="workbench-studio-topology" value={studioTopology}
                             onChange={e => setStudioTopology(e.target.value as "quad" | "triangle")}>
@@ -2077,11 +2112,11 @@ export function AssetWorkbench({
                   <label className="wb-check">
                     <input type="checkbox" data-testid="workbench-external-surface" checked={externalSurface}
                       onChange={e => setExternalSurface(e.target.checked)} />
-                    현재 Codex 대화에서 Chrome의 UV·텍스처 실행
+                    앱의 Codex로 Chrome의 UV·텍스처 실행
                   </label>
                   {externalSurface && <>
                     <small>채택한 Tripo 모델에 Smart UV, 텍스처를 순서대로 적용할 작업 명세를 저장합니다.
-                      이 버튼은 현재 대화를 자동 실행하지 않습니다. 각 원본과 비용을 별도로 보존하고 결과를 직접 채택합니다.</small>
+                      앱이 Codex를 실행하고 각 원본과 비용을 보존합니다. 결과가 돌아오면 직접 채택하세요.</small>
                     <label className="field"><span>화면에서 확인한 Smart UV 비용</span>
                       <input data-testid="workbench-observed-uv-cost" type="number" min={0} step={1}
                         value={observedUvCost} onChange={e => setObservedUvCost(Number(e.target.value))} /></label>
