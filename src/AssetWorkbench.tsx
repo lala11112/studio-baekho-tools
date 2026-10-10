@@ -296,6 +296,12 @@ export function AssetWorkbench({
     w?.jobs.find(j => j.step === "concept")?.request.executionMode === "codex-session",
   );
   const [externalModel, setExternalModel] = useState(!!w?.jobs.find(j => j.step === "model")?.request.externalModel);
+  const savedSurface = w?.jobs.find(j => j.request.externalSurface)?.request.externalSurface;
+  const [externalSurface, setExternalSurface] = useState(!!savedSurface || externalModel);
+  const [observedUvCost, setObservedUvCost] = useState(savedSurface?.observedUvCost ?? 0);
+  const [observedTextureCost, setObservedTextureCost] = useState(savedSurface?.observedTextureCost ?? 0);
+  const [textureResolution, setTextureResolution] = useState<"2K" | "4K" | "8K">(savedSurface?.textureResolution ?? "8K");
+  const [removeLighting, setRemoveLighting] = useState(savedSurface?.removeLighting ?? false);
   const [studioTopology, setStudioTopology] = useState<"quad" | "triangle">("quad");
   const [observedModelCost, setObservedModelCost] = useState(0);
   const [turnaround, setTurnaround] = useState(w?.jobs[0]?.request.conceptMode === "turnaround");
@@ -794,6 +800,9 @@ export function AssetWorkbench({
           : request.step === "model" && externalModel && request.modelInput === "whole" && !request.baseJobId
             ? { ...request, executionMode: "codex-session", externalModel: {
                 model: "P2.0", topology: studioTopology, observedCreditCost: observedModelCost } }
+            : request.step === "surface" && externalSurface && request.modelInput === "whole" && !request.baseJobId
+              ? { ...request, executionMode: "codex-session", externalSurface: {
+                  observedUvCost, observedTextureCost, textureResolution, removeLighting } }
             : request,
       approval: {
         accepted: paid ? approved : true,
@@ -2064,6 +2073,31 @@ export function AssetWorkbench({
                     : "머리·머리카락·몸통"}
                   에 Smart UV와 텍스처를 적용합니다.
                 </p>
+                {modelInput === "whole" && !surfaceEditBase && <>
+                  <label className="wb-check">
+                    <input type="checkbox" data-testid="workbench-external-surface" checked={externalSurface}
+                      onChange={e => setExternalSurface(e.target.checked)} />
+                    현재 Codex 대화에서 Chrome의 UV·텍스처 실행
+                  </label>
+                  {externalSurface && <>
+                    <small>채택한 Tripo 모델에 Smart UV, 텍스처를 순서대로 적용할 작업 명세를 저장합니다.
+                      이 버튼은 현재 대화를 자동 실행하지 않습니다. 각 원본과 비용을 별도로 보존하고 결과를 직접 채택합니다.</small>
+                    <label className="field"><span>화면에서 확인한 Smart UV 비용</span>
+                      <input data-testid="workbench-observed-uv-cost" type="number" min={0} step={1}
+                        value={observedUvCost} onChange={e => setObservedUvCost(Number(e.target.value))} /></label>
+                    <label className="field"><span>화면에서 확인한 텍스처 비용</span>
+                      <input data-testid="workbench-observed-texture-cost" type="number" min={0} step={1}
+                        value={observedTextureCost} onChange={e => setObservedTextureCost(Number(e.target.value))} /></label>
+                    <label className="field"><span>텍스처 해상도</span>
+                      <select data-testid="workbench-texture-resolution" value={textureResolution}
+                        onChange={e => setTextureResolution(e.target.value as "2K" | "4K" | "8K")}>
+                        <option>2K</option><option>4K</option><option>8K</option>
+                      </select></label>
+                    <label className="wb-check"><input data-testid="workbench-remove-lighting" type="checkbox"
+                      checked={removeLighting} onChange={e => setRemoveLighting(e.target.checked)} />조명 제거</label>
+                    <small>현재 확인한 합계: {observedUvCost + observedTextureCost}크레딧</small>
+                  </>}
+                </>}
                 {selectedSource && (
                   <img
                     className="wb-selected-source"

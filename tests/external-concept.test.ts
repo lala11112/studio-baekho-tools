@@ -136,6 +136,58 @@ test("external concept freezes scope, reserves once, validates receipt and waits
   const restartModel=new WorkbenchEngine(store,executor).getForProject(p.id)!.jobs.find(j=>j.id===modelJob.id)!;
   assert.equal(restartModel.externalExecution!.studioModels![0].modelId,'11111111-1111-1111-1111-111111111111');
   assert.equal(calls,0);
+  // Surface handoff is a separate approved scope, never an automatic model follow-up.
+  const surfaceRequest = {step:'surface' as const,modelInput:'whole' as const,executionMode:'codex-session' as const,
+    prompt:'Synthetic UV/texture receipt contract',externalSurface:{observedUvCost:20,observedTextureCost:30,
+      textureResolution:'8K' as const,removeLighting:false}};
+  const surfaceApproval = {...approval,studioCreditLimit:50};
+  assert.throws(()=>restored.action(p.id,{kind:'execute',request:surfaceRequest,approval}),/한도/);
+  assert.throws(()=>restored.action(p.id,{kind:'execute',request:surfaceRequest,approval:surfaceApproval}),/채택|선택/);
+  restored.action(p.id,{kind:'select',jobId:modelJob.id,candidateId:'model'});
+  const surfaceJob=restored.action(p.id,{kind:'execute',request:surfaceRequest,approval:surfaceApproval}).jobs[0];
+  const surfaceWorkspace=store.file(p.id,`workbench/${w.id}/jobs/${surfaceJob.id}`);
+  const surfacePacket=JSON.parse(fs.readFileSync(path.join(surfaceWorkspace,'external-request.json'),'utf8'));
+  assert.equal(surfacePacket.sourceStudioModel.modelId,modelReceipt.studioModels[0].modelId);
+  assert.equal(surfacePacket.dependencies['model:whole'].candidateId,'model');
+  assert.equal(surfacePacket.request.externalSurface.textureResolution,'8K');
+  assert.equal(surfacePacket.inputs.filter((a:any)=>a.view).length,4);
+  restored.action(p.id,{kind:'external-reserve',jobId:surfaceJob.id,requestHash:surfaceJob.externalExecution!.requestHash});
+  assert.throws(()=>restored.action(p.id,{kind:'external-reserve',jobId:surfaceJob.id,requestHash:surfaceJob.externalExecution!.requestHash}),/명세/);
+  const surfaceFiles=[['uv.fbx',Buffer.from('Synthetic UV FBX fixture'),'export','uv'],
+    ['textured.fbx',Buffer.from('Synthetic texture FBX fixture'),'model','whole'],
+    ['color.png',png,'image','texture'],['textured.glb',buildWorkbenchGlb(35),'model','whole']] as const;
+  const sourceId=modelReceipt.studioModels[0].modelId,uvId='22222222-2222-2222-2222-222222222222',textureId='33333333-3333-3333-3333-333333333333';
+  const surfaceReceipt:any={jobId:surfaceJob.id,requestHash:surfaceJob.externalExecution!.requestHash,
+    surface:{sourceModelId:sourceId,uv:{sourceModelId:sourceId,modelId:uvId,
+      url:`https://studio.tripo3d.ai/ko/workspace/smart-uv/${uvId}`,fbxPath:'uv.fbx',creditCost:20},
+      texture:{sourceModelId:uvId,modelId:textureId,url:`https://studio.tripo3d.ai/ko/workspace/texture/${textureId}`,
+        fbxPath:'textured.fbx',texturePaths:['color.png'],creditCost:30,resolution:'8K',removeLighting:false}},
+    files:surfaceFiles.map(([name,bytes])=>{fs.writeFileSync(path.join(surfaceWorkspace,name),bytes);
+      return {path:name,sha256:createHash('sha256').update(bytes).digest('hex')};}),
+    result:{status:'completed',summary:'Synthetic surface receipt, not paid execution',checks:[],candidates:[{id:'surface',label:'Synthetic surface',
+      artifacts:surfaceFiles.map(([name,,kind,role])=>({path:name,kind,role}))}]}};
+  const saveSurface=()=>fs.writeFileSync(path.join(surfaceWorkspace,'external-result.json'),JSON.stringify(surfaceReceipt));
+  const receiveSurface=()=>restored.action(p.id,{kind:'external-receive',jobId:surfaceJob.id});
+  surfaceReceipt.surface.sourceModelId=textureId;saveSurface();assert.throws(receiveSurface,/단계별/);
+  surfaceReceipt.surface.sourceModelId=sourceId;
+  surfaceReceipt.surface.texture.sourceModelId=sourceId;saveSurface();assert.throws(receiveSurface,/단계별/);
+  surfaceReceipt.surface.texture.sourceModelId=uvId;
+  surfaceReceipt.surface.uv.creditCost=21;saveSurface();assert.throws(receiveSurface,/단계별/);
+  surfaceReceipt.surface.uv.creditCost=20;
+  surfaceReceipt.surface.texture.resolution='4K';saveSurface();assert.throws(receiveSurface,/단계별/);
+  surfaceReceipt.surface.texture.resolution='8K';
+  surfaceReceipt.surface.uv.fbxPath='missing.fbx';saveSurface();assert.throws(receiveSurface,/단계별/);
+  surfaceReceipt.surface.uv.fbxPath='uv.fbx';
+  surfaceReceipt.surface.texture.texturePaths=[];saveSurface();assert.throws(receiveSurface,/단계별/);
+  surfaceReceipt.surface.texture.texturePaths=['color.png'];saveSurface();
+  fs.appendFileSync(path.join(surfaceWorkspace,'color.png'),'tampered');assert.throws(receiveSurface,/해시/);
+  fs.writeFileSync(path.join(surfaceWorkspace,'color.png'),png);
+  receiveSurface();
+  assert.equal(restored.getForProject(p.id)!.selections.surface,undefined);
+  const restartSurface=new WorkbenchEngine(store,executor).getForProject(p.id)!.jobs.find(j=>j.id===surfaceJob.id)!;
+  assert.equal(restartSurface.status,'review');
+  assert.equal(restartSurface.externalExecution!.surface!.texture.modelId,textureId);
+  assert.equal(calls,0);
   restored.action(p.id,{kind:"select",jobId:j.id,candidateId:"test-0"});
   assert.equal(restored.getForProject(p.id)!.selections["whole-reference"],undefined);
   let next=restored.action(p.id,{kind:"execute",request,approval}).jobs[0];

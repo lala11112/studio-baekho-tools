@@ -10,7 +10,7 @@ const prompt = `게임용 3D 캐릭터 제작을 위한 서로 다른 토끼 디
 후보 1: 작고 둥근 얼굴과 통통한 몸, 곧게 선 긴 귀로 귀여운 인상.
 후보 2: 조금 더 날렵한 얼굴과 탄력 있는 뒷다리, 귀 끝이 살짝 벌어진 생동감 있는 인상.
 각 결과 옆의 설명으로 후보 1과 후보 2를 구분하되 이미지 안에는 번호를 쓰지 마세요. 실제 이미지 두 장을 생성하고, 하나의 이미지를 복제하거나 자르지 마세요.`;
-const app = await electron.launch({ executablePath: path.resolve("release/0.6.5/win-unpacked/Partsmith.exe") });
+const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.6/win-unpacked/Partsmith.exe") });
 const page = await app.firstWindow();
 await page.waitForSelector(".home");
 const call = c => page.evaluate(c => window.desktop.call(c), c);
@@ -61,6 +61,26 @@ for await (const line of readline.createInterface({input:process.stdin})) {
       const selectedJob=workbench.jobs.find(j=>j.id===command.jobId && j.status==='review');
       if(!selectedJob?.candidates.some(c=>c.id===command.candidateId)) throw Error('Reviewed candidate not found');
       await call({type:'workbench.action',id:project.id,action:{kind:'select',jobId:command.jobId,candidateId:command.candidateId}});
+    }
+    else if(command.action==='surface-settings' || command.action==='prepare-surface') {
+      if(!workbench.selections['model:whole']) throw Error('Accept the whole model first');
+      const {uvCost,textureCost,resolution,removeLighting}=command;
+      if(![uvCost,textureCost].every(n=>Number.isSafeInteger(n)&&n>=0) ||
+        !['2K','4K','8K'].includes(resolution) || typeof removeLighting!=='boolean') throw Error('Observed surface settings required');
+      await page.getByTestId('workbench-step-surface').click();
+      await page.getByTestId('workbench-external-surface').check();
+      await page.getByTestId('workbench-observed-uv-cost').fill(String(uvCost));
+      await page.getByTestId('workbench-observed-texture-cost').fill(String(textureCost));
+      await page.getByTestId('workbench-texture-resolution').selectOption(resolution);
+      await page.getByTestId('workbench-remove-lighting').setChecked(removeLighting);
+      await page.getByTestId('workbench-credit-limit').fill(String(uvCost+textureCost));
+      if(command.action==='prepare-surface') {
+        if(command.costApproved!==true) throw Error('Explicit surface cost approval is required');
+        await page.getByTestId('workbench-approve').check();
+        await page.getByTestId('workbench-execute-surface').click();
+        await page.getByTestId('workbench-external-receive').waitFor();
+      }
+      await page.screenshot({path:'artifacts/runtime/rabbit-surface-app.png'});
     }
     else if(command.action==='model-settings' || command.action==='prepare-model') {
       if(!info.wholeReference) throw Error('Accept the four-view set first');

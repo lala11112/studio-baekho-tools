@@ -28,6 +28,7 @@ import {
   type WorkbenchRecovery,
   type WorkbenchResult,
   type WorkbenchSelection,
+  type WorkbenchSurfaceReceipt,
 } from "../shared/workbench";
 
 const now = () => new Date().toISOString();
@@ -355,7 +356,7 @@ export class WorkbenchEngine {
           : ["concept", "separate"];
       case "surface":
         return workbenchModelInput(request) === "whole"
-          ? ["concept", "model:whole"]
+          ? request.externalSurface ? ["concept", "whole-reference", "model:whole"] : ["concept", "model:whole"]
           : [
               "concept",
               "separate",
@@ -396,6 +397,13 @@ export class WorkbenchEngine {
           !Number.isSafeInteger(settings.observedCreditCost) || settings.observedCreditCost < 0)
         throw new Error("외부 모델 실행에는 전체 4방향 입력과 확인한 P2.0 설정·비용이 필요합니다. 기존 모델 수정은 지원하지 않습니다.");
       r.views = [...WORKBENCH_VIEWS];
+    }
+    if (r.externalSurface !== undefined) {
+      const s = r.externalSurface;
+      if (r.executionMode !== "codex-session" || r.step !== "surface" || r.modelInput !== "whole" ||
+          r.baseJobId || !s || ![s.observedUvCost, s.observedTextureCost].every(n => Number.isSafeInteger(n) && n >= 0) ||
+          !["2K", "4K", "8K"].includes(s.textureResolution) || typeof s.removeLighting !== "boolean")
+        throw new Error("외부 UV·텍스처는 채택한 전체 모델의 최초 작업과 확인한 설정·비용만 지원합니다.");
     }
     if (r.conceptMode !== undefined && (r.step !== "concept" || !["design", "turnaround"].includes(r.conceptMode)))
       throw new Error("잘못된 전체 이미지 생성 모드입니다.");
@@ -637,8 +645,9 @@ export class WorkbenchEngine {
         throw new Error("전체 4방향의 Tripo 입력 지원·방향·비용을 현재 대화에서 확인해야 합니다. 단일 이미지로 대신 제출하지 않습니다.");
     }
     if (r.executionMode === "codex-session" &&
-        !((r.step === "concept" && r.provider === "gpt") || (r.step === "model" && r.externalModel)))
-      throw new Error("현재 대화 실행 연결은 GPT 컨셉 이미지와 전체 4방향 P2 모델을 지원합니다.");
+        !((r.step === "concept" && r.provider === "gpt") || (r.step === "model" && r.externalModel) ||
+          (r.step === "surface" && r.externalSurface)))
+      throw new Error("현재 대화 실행 연결은 GPT 이미지, 전체 P2 모델과 최초 UV·텍스처를 지원합니다.");
     if (r.step === "assembly") {
       const route = workbenchModelInput(this.chosen(w, "surface").job.request);
       if (r.modelInput !== undefined && r.modelInput !== route)
@@ -691,6 +700,13 @@ export class WorkbenchEngine {
       throw new Error("현재 단계의 생성 범위와 비용 한도를 확인해 주세요.");
     if (r.externalModel && r.externalModel.observedCreditCost > accepted.studioCreditLimit)
       throw new Error("화면에서 확인한 Tripo 비용이 승인 한도를 넘습니다.");
+    if (r.externalSurface && r.externalSurface.observedUvCost + r.externalSurface.observedTextureCost > accepted.studioCreditLimit)
+      throw new Error("화면에서 확인한 UV·텍스처 비용 합계가 승인 한도를 넘습니다.");
+    const surfaceSource = r.externalSurface ? this.chosen(w, "model:whole") : undefined;
+    const sourceStudioModel = surfaceSource?.job.externalExecution?.studioModels?.find(
+      s => s.candidateId === surfaceSource.candidate.id);
+    if (r.externalSurface && (!sourceStudioModel || !surfaceSource!.candidate.artifacts.some(a => /\.fbx$/i.test(a.path))))
+      throw new Error("채택한 모델의 실제 Tripo 모델 ID와 FBX 원본이 필요합니다.");
     const dependencies: Record<string, WorkbenchSelection> = {};
     const inputs: WorkbenchArtifact[] = [];
     for (const dep of this.dependencySlots(w, r)) {
@@ -825,7 +841,7 @@ export class WorkbenchEngine {
     if (r.executionMode === "codex-session") {
       const packet = JSON.stringify({ schemaVersion: 1, projectId: w.projectId,
         workbenchId: w.id, jobId: job.id, request: r, approval: accepted,
-        inputs: uniqueInputs, dependencies }, null, 2);
+        inputs: uniqueInputs, dependencies, ...(sourceStudioModel ? {sourceStudioModel} : {}) }, null, 2);
       const requestHash = createHash("sha256").update(packet).digest("hex");
       fs.writeFileSync(path.join(workspace, "external-request.json"), packet, { flag: "wx" });
       job.externalExecution = { state: "prepared", requestHash };
@@ -869,6 +885,7 @@ export class WorkbenchEngine {
       throw new Error("고정 실행 명세가 변경되었습니다.");
     const receipt = json<{jobId: string; requestHash: string; conversationUrl?: string;
       studioModels?: {candidateId: string; modelId: string; url: string}[];
+      surface?: WorkbenchSurfaceReceipt;
       files: {path: string; sha256: string}[]; result: WorkbenchResult}>(safeRelative(workspace, "external-result.json"));
     if (receipt.jobId !== job.id || receipt.requestHash !== external.requestHash || receipt.result.status !== "completed")
       throw new Error("외부 결과의 작업·명세가 일치하지 않습니다.");
@@ -887,6 +904,33 @@ export class WorkbenchEngine {
           })) throw new Error("Tripo 모델 ID·결과 주소·후보 연결이 일치하지 않습니다.");
       if (receipt.result.candidates.some(c => !c.artifacts.some(a => a.kind === "model" && /\.fbx$/i.test(a.path))))
         throw new Error("Tripo에서 다운로드한 FBX 원본을 함께 보존하세요.");
+    } else if (job.request.externalSurface) {
+      const s = receipt.surface, settings = job.request.externalSurface;
+      const packet = json<{sourceStudioModel: {modelId: string}}>(path.join(workspace, "external-request.json"));
+      const artifacts = receipt.result.candidates.flatMap(c => c.artifacts);
+      const fbx = (p: string) => typeof p === "string" && /\.fbx$/i.test(p) &&
+        artifacts.some(a => a.path === p && ["model", "export"].includes(a.kind));
+      const validUrl = (urlText: string, id: string, operation: string) => {
+        try {
+          const url = new URL(urlText);
+          return /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id) &&
+            url.protocol === "https:" && url.hostname === "studio.tripo3d.ai" && !url.port &&
+            !url.username && !url.password && !url.search && !url.hash &&
+            new RegExp(`^/(?:[a-z]{2}/)?workspace/(?:${operation}|generate)/[^/]+$`).test(url.pathname) &&
+            url.pathname.endsWith(id);
+        } catch { return false; }
+      };
+      if (!s?.uv || !s.texture || s.sourceModelId !== packet.sourceStudioModel.modelId ||
+          s.uv.sourceModelId !== s.sourceModelId || s.texture.sourceModelId !== s.uv.modelId ||
+          !validUrl(s.uv.url, s.uv.modelId, "smart-uv") || !validUrl(s.texture.url, s.texture.modelId, "texture") ||
+          !fbx(s.uv.fbxPath) || !fbx(s.texture.fbxPath) || s.uv.fbxPath === s.texture.fbxPath ||
+          ![s.uv.creditCost, s.texture.creditCost].every(n => Number.isSafeInteger(n) && n >= 0) ||
+          s.uv.creditCost > settings.observedUvCost || s.texture.creditCost > settings.observedTextureCost ||
+          s.texture.resolution !== settings.textureResolution || s.texture.removeLighting !== settings.removeLighting ||
+          !Array.isArray(s.texture.texturePaths) || !s.texture.texturePaths.length ||
+          new Set(s.texture.texturePaths).size !== s.texture.texturePaths.length ||
+          s.texture.texturePaths.some(p => !artifacts.some(a => a.path === p && a.kind === "image" && a.role === "texture")))
+        throw new Error("Smart UV·텍스처의 단계별 출처·비용·FBX 원본·텍스처 파일이 일치하지 않습니다.");
     } else {
       const url = new URL(receipt.conversationUrl ?? "");
       if (url.protocol !== "https:" || url.hostname !== "chatgpt.com" || url.port ||
@@ -902,6 +946,7 @@ export class WorkbenchEngine {
     this.applyResult(w, job, receipt.result);
     external.state = "received";
     if (job.request.externalModel) external.studioModels = structuredClone(receipt.studioModels);
+    else if (job.request.externalSurface) external.surface = structuredClone(receipt.surface);
     else external.conversationUrl = receipt.conversationUrl;
     job.updatedAt = now();
     w.message = "외부 결과 파일과 출처를 등록했습니다. 결과를 검토하고 직접 선택하세요.";

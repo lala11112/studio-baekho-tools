@@ -50,6 +50,13 @@ export type WorkbenchRequest = {
   executionMode?: "worker" | "codex-session";
   /** Observed Studio settings for a manually executed whole-model submission. */
   externalModel?: { model: "P2.0"; topology: "quad" | "triangle"; observedCreditCost: number };
+  /** Initial whole-model Smart UV followed by texture, executed in the current chat. */
+  externalSurface?: {
+    observedUvCost: number;
+    observedTextureCost: number;
+    textureResolution: "2K" | "4K" | "8K";
+    removeLighting: boolean;
+  };
   step: WorkbenchStep;
   prompt: string;
   provider?: "gpt" | "tripo";
@@ -117,6 +124,7 @@ export type WorkbenchJob = {
     reservedAt?: string;
     conversationUrl?: string;
     studioModels?: { candidateId: string; modelId: string; url: string }[];
+    surface?: WorkbenchSurfaceReceipt;
   };
   id: string;
   step: WorkbenchStep;
@@ -148,6 +156,12 @@ export type WorkbenchJob = {
     reason: string;
     nextAttemptAt?: string;
   };
+};
+export type WorkbenchSurfaceReceipt = {
+  sourceModelId: string;
+  uv: { sourceModelId: string; modelId: string; url: string; fbxPath: string; creditCost: number };
+  texture: { sourceModelId: string; modelId: string; url: string; fbxPath: string; creditCost: number;
+    texturePaths: string[]; resolution: "2K" | "4K" | "8K"; removeLighting: boolean };
 };
 export type WorkbenchSelection = { jobId: string; candidateId: string };
 export type Workbench = {
