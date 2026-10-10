@@ -62,6 +62,14 @@ for await (const line of readline.createInterface({input:process.stdin})) {
       await page.getByTestId("workbench-execute-concept").click();
       await page.getByTestId("workbench-external-receive").waitFor();
     }
+    else if(command.action==="repair-views") {
+      if(info.status!=="review" || info.candidates.length!==1) throw Error('A reviewed base view set is required');
+      const repairPrompt=fs.readFileSync('artifacts/runtime/rabbit-view-repair-prompt.txt','utf8');
+      await call({type:'workbench.action',id:project.id,action:{kind:'execute',
+        request:{step:'concept',conceptMode:'turnaround',provider:'gpt',imageBackend:'chatgpt-web',executionMode:'codex-session',
+          generationCount:1,baseJobId:info.jobId,baseCandidateId:info.candidates[0].id,prompt:repairPrompt},
+        approval:{accepted:true,studioCreditLimit:0,imageCreditLimit:0}}});
+    }
     else if(command.action==="screenshot") {
       const gallery=page.locator('.wb-whole-views');
       if(await gallery.count()) {
