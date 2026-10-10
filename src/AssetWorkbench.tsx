@@ -1368,10 +1368,12 @@ export function AssetWorkbench({
               </label>}
               <button data-testid="workbench-codex-run" disabled={locked || !["needs_input","submission_unknown"].includes(currentStatus.status) ||
                 (currentStatus.externalExecution.state === "reserved" && !currentStatus.externalExecution.worker) ||
-                (currentStatus.externalExecution.worker?.attempt ?? 0) >= 3}
-                onClick={()=>{void action({kind:"external-run",jobId:currentStatus.id,reply:externalReply || undefined});setExternalReply("");}}>
-                {currentStatus.externalExecution.worker ? "답변하고 기존 작업 이어서 확인" : "Codex로 실행"}
+                ((currentStatus.externalExecution.worker?.attempt ?? 0) >= 3 && !externalReply.trim())}
+                onClick={()=>{void action({kind:"external-run",jobId:currentStatus.id,reply:externalReply || undefined,
+                  continueOnce:(currentStatus.externalExecution!.worker?.attempt ?? 0) >= 3});setExternalReply("");}}>
+                {(currentStatus.externalExecution.worker?.attempt ?? 0) >= 3 ? "작성한 지시로 기존 작업 1회 이어서 확인" : currentStatus.externalExecution.worker ? "답변하고 기존 작업 이어서 확인" : "Codex로 실행"}
               </button>
+              {(currentStatus.externalExecution.worker?.attempt ?? 0) >= 3 && <p>기본 3회 실행이 끝났습니다. 해결한 문제와 이어서 할 내용을 작성하면 기존 제출·비용 기록을 보존해 한 번만 실행합니다. 완료된 생성은 반복하지 않습니다.</p>}
               <button onClick={() => void run({ type: "workbench.open", id: p.id })}>작업 폴더 열기</button>
               <button data-testid="workbench-external-receive"
                 disabled={currentStatus.externalExecution.state !== "reserved" || locked}

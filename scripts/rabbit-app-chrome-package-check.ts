@@ -18,7 +18,7 @@ store.put("project",projectId,project);store.put("workbench",workbenchId,workben
 fs.cpSync(liveProject,path.join(data,"projects",projectId),{recursive:true});
 const errors:string[]=[];
 const launch=async()=>{
- const app=await electron.launch({executablePath:path.resolve("release/0.6.9/win-unpacked/Partsmith.exe"),env:{...process.env,PARTSMITH_DATA:data}});
+ const app=await electron.launch({executablePath:path.resolve("release/0.6.10/win-unpacked/Partsmith.exe"),env:{...process.env,PARTSMITH_DATA:data}});
  const page=await app.firstWindow();page.setDefaultTimeout(10000);page.on("pageerror",e=>errors.push(e.message));
  await page.locator(`[data-testid="project-card"][data-project-id="${projectId}"]`).getByTestId("project-open").click();
  await page.getByTestId("workbench-step-surface").click();
@@ -26,6 +26,8 @@ const launch=async()=>{
 };
 let {app,page}=await launch();
 try {
+ assert(!(await page.getByTestId("workbench-codex-run").isEnabled()));
+ await page.getByTestId("workbench-codex-reply").fill("다운로드 감지 수정 후 기존 UV를 유지해 이어서 확인");
  assert(await page.getByTestId("workbench-codex-run").isEnabled());
  assert.equal(await page.getByTestId("workbench-chatgpt-connection-status").count(),0);
  assert.equal(await page.getByTestId("workbench-chatgpt-open").count(),0);
@@ -40,5 +42,5 @@ try {
  assert.deepEqual(j.externalExecution,savedExternal);
  assert.equal(w.selections["model:whole"].candidateId,"model-1");assert.equal(w.selections.surface,undefined);
  assert.deepEqual(errors,[]);
- console.log(JSON.stringify({package:"0.6.9",codexButtonEnabled:true,restartPreserved:true,jobId:job.id,workerStarted:false,paidRequests:0,errors}));
+ console.log(JSON.stringify({package:"0.6.10",codexButtonEnabled:true,restartPreserved:true,jobId:job.id,workerStarted:false,paidRequests:0,errors}));
 } finally {await app.close();}

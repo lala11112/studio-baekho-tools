@@ -182,10 +182,18 @@ test("external concept freezes scope, reserves once, validates receipt and waits
   surfaceReceipt.surface.texture.texturePaths=['color.png'];saveSurface();
   fs.appendFileSync(path.join(surfaceWorkspace,'color.png'),'tampered');assert.throws(receiveSurface,/해시/);
   fs.writeFileSync(path.join(surfaceWorkspace,'color.png'),png);
+  surfaceReceipt.result.checks=[{name:'file_integrity',passed:false,severity:'warning'}];
+  saveSurface();assert.throws(receiveSurface,/통과하지 못한/);
+  surfaceReceipt.result.checks=[{name:'visual_review',passed:false,severity:'warning',detail:'Surface appearance needs user review'},
+    {name:'native_texture_channels',passed:false,severity:'warning',detail:'Base color only; separate PBR maps not requested'}];
+  saveSurface();
   receiveSurface();
   assert.equal(restored.getForProject(p.id)!.selections.surface,undefined);
   const restartSurface=new WorkbenchEngine(store,executor).getForProject(p.id)!.jobs.find(j=>j.id===surfaceJob.id)!;
   assert.equal(restartSurface.status,'review');
+  assert.equal(restartSurface.checks[0].passed,false);
+  assert.equal(restartSurface.checks[0].severity,'warning');
+  assert.equal(restartSurface.checks[1].passed,false);
   assert.equal(restartSurface.externalExecution!.surface!.texture.modelId,textureId);
   assert.equal(calls,0);
   restored.action(p.id,{kind:"select",jobId:j.id,candidateId:"test-0"});

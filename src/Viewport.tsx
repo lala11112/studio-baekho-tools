@@ -125,7 +125,11 @@ export function Viewport({
         scale: obj.scale.toArray() as [number, number, number],
       });
     });
-    const loader = new GLTFLoader();
+    const manager = new THREE.LoadingManager();
+    manager.onError = () => {
+      if (!dead) setError("모델 또는 텍스처를 읽지 못했습니다. 원본 파일과 앱의 리소스 접근 설정을 확인하세요.");
+    };
+    const loader = new GLTFLoader(manager);
     setError("");
     setClips([]);
     const allClips: string[] = [];

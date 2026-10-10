@@ -207,7 +207,7 @@ export class WorkbenchEngine {
         this.save(w);pending.resolve(action.answer);return w;
       }
       case "external-run":
-        return this.runExternal(w, action.jobId, action.reply);
+        return this.runExternal(w, action.jobId, action.reply, action.continueOnce);
       case "external-reserve":
         return this.reserveExternal(w, action.jobId, action.requestHash);
       case "external-receive":
@@ -886,7 +886,7 @@ export class WorkbenchEngine {
   private workspace(w: Workbench, job: WorkbenchJob) {
     return this.store.file(w.projectId, `workbench/${w.id}/jobs/${job.id}`);
   }
-  private runExternal(w: Workbench, jobId: string, reply?: string) {
+  private runExternal(w: Workbench, jobId: string, reply?: string, continueOnce = false) {
     this.idle(w);
     const job = this.job(w, jobId), external = job.externalExecution;
     if (!this.externalRunner || !external || !this.current(w, job) ||
@@ -896,7 +896,7 @@ export class WorkbenchEngine {
       throw new Error("답변은 6,000자 이내로 작성하세요.");
     if (external.state === "reserved" && !external.worker)
       throw new Error("수동 제출 예약은 새 작업자로 재실행하지 않습니다. 기존 결과를 등록하세요.");
-    if ((external.worker?.attempt ?? 0) >= 3)
+    if ((external.worker?.attempt ?? 0) >= 3 && !(continueOnce === true && reply?.trim()))
       throw new Error("이 작업의 실행·복구 3회에 도달했습니다. 제출 기록을 먼저 확인하세요.");
     const workspace = this.workspace(w, job);
     if (hash(path.join(workspace, "external-request.json")) !== external.requestHash)
@@ -904,6 +904,9 @@ export class WorkbenchEngine {
     const packet = json<{inputs: WorkbenchArtifact[]}>(path.join(workspace, "external-request.json"));
     this.verifyArtifacts(w, packet.inputs);
     if (external.state === "prepared") this.reserveExternal(w, jobId, external.requestHash);
+    if (continueOnce === true && (external.worker?.attempt ?? 0) >= 3)
+      (external.continuations ??= []).push({afterAttempt:external.worker!.attempt,at:now(),reason:reply!.trim()});
+    if (external.worker) (external.workerHistory ??= []).push(structuredClone(external.worker));
     external.worker = { attempt: (external.worker?.attempt ?? 0) + 1, startedAt:now(), lastReply: reply };
     delete external.worker.question;
     delete external.worker.approval;

@@ -10,7 +10,7 @@ const prompt = `게임용 3D 캐릭터 제작을 위한 서로 다른 토끼 디
 후보 1: 작고 둥근 얼굴과 통통한 몸, 곧게 선 긴 귀로 귀여운 인상.
 후보 2: 조금 더 날렵한 얼굴과 탄력 있는 뒷다리, 귀 끝이 살짝 벌어진 생동감 있는 인상.
 각 결과 옆의 설명으로 후보 1과 후보 2를 구분하되 이미지 안에는 번호를 쓰지 마세요. 실제 이미지 두 장을 생성하고, 하나의 이미지를 복제하거나 자르지 마세요.`;
-const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.9/win-unpacked/Partsmith.exe") });
+const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.12/win-unpacked/Partsmith.exe") });
 const page = await app.firstWindow();
 await page.waitForSelector(".home");
 const call = c => page.evaluate(c => window.desktop.call(c), c);
@@ -56,6 +56,12 @@ for await (const line of readline.createInterface({input:process.stdin})) {
     if(command.action==="reserve") await call({type:"workbench.action",id:project.id,
       action:{kind:"external-reserve",jobId:info.jobId,requestHash:info.external.requestHash}});
     else if(command.action==="receive") await page.getByTestId("workbench-external-receive").click();
+    else if(command.action==="show-surface") {
+      await page.getByTestId("workbench-step-surface").click();
+      await page.locator(".wb-model").first().scrollIntoViewIfNeeded();
+      await page.waitForTimeout(1000);
+      await page.screenshot({path:"artifacts/runtime/rabbit-surface-live.png"});
+    }
     else if(command.action==='run-surface') {
       const current=workbench.jobs.find(j=>j.id===info.jobId);
       if(current.step!=='surface' || command.jobId!==info.jobId || command.costApproved!==true ||

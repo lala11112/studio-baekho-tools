@@ -364,3 +364,14 @@ node scripts/result-ui-smoke.mjs
 ```
 
 Unity 검증 스크립트는 명시된 테스트 프로젝트의 Partsmith 관리 폴더만 대상으로 합니다. `artifacts/runtime`는 로컬 검증 데이터이며 제품 사용자 데이터와 별개입니다. 원본 사용자 씬과 별도 게임용 Variant는 덮어쓰지 않습니다. 테스트용 Unity CLI는 작업 폴더 범위에 설치했고 테스트 프로젝트에 `com.unity.pipeline`만 추가했습니다. 기본 통합 및 사용자 추가 MCP 설정은 변경하지 않았습니다.
+
+### 2026-10-10 — 0.6.12 실제 토끼 UV·4K 텍스처 앱 회수
+
+- 실제 surface 작업 `18e8e770-ad5c-4f7e-9cfc-ad310bbdf3d1`, Tripo 모델 `19f0354a-a6db-41a7-a0d1-0110c79a6a2b`. 완료된 Smart UV20을 유지하고 4K 텍스처20만 한 번 제출했다. 실제 잔액4115→4095. 호스트 저널의 두 단계 completed, 승인 총40 사용.
+- 내보내기로 FBX는 저장됐지만 browser download event는 시간 초과했다. 이전 Facebook 다운로드 거절은 유지했고 그 URL을 고른 내부 원인은 미확정이다. `engine/native-download.ts`는 클릭 전후의 새 FBX/ZIP 한 개를 형식·해시 검사 후 보존한다. 과거 파일, 복수 파일, HTML 위장 파일을 거부한다. 비공개 URL·브라우저 데이터베이스는 사용하지 않는다.
+- 사용자가 명시적으로 한 번 이어서 실행하는 동작을 추가했고 시도 번호·이전 응답·과금 기록을 초기화하지 않는다. 진단 탭 충돌로 attempt4 무과금 종료, 정리 후 앱 전용 탭 attempt5 제작 완료. 취소/재시작 자동 실행·다음 단계 자동 진입 없음.
+- `shared/workbench-checks.ts`: surface의 알려진 외형 검토·별도 PBR 채널 부재 경고를 false 그대로 표시하며 검토 등록을 허용한다. 파일 무결성과 알 수 없는 실패는 계속 차단한다. 외부 결과 등록 회귀 검사 추가.
+- `index.html`, `src/Viewport.tsx`: 실제 하얀 미리보기 원인은 GLTFLoader의 내부 blob 이미지 읽기를 CSP가 차단한 것이었다. 로컬 blob만 connect-src에 추가했고 LoadingManager가 텍스처 실패도 표시한다. 외부 사이트 연결 범위는 넓히지 않았다.
+- 실파일: 두 FBX 각각5009 vertices / 5605 polygons / UV21064 loops. 네이티브 JPEG4096×4096, Base Color 연결, 내장 이미지 GLB 확인. Windows 긴 경로 대응을 위한 변환용 짧은 사본/이미지 경로 재연결을 사용했으며 네이티브 ZIP·FBX·JPEG는 보존했다. Blender는 검사/변환만 수행, Astra 보정은 아니다.
+- 최종 npm test237/237, TypeScript/Vite/esbuild 및 별도 release/0.6.12/win-unpacked/Partsmith.exe 빌드 성공. scripts/rabbit-surface-result-check.ts가 실제 결과 복사본의 등록 파일 SHA, GLB200, console/page 오류0, 재시작 결과·기록 보존, 자동 채택/추가 제출 없음 확인. 0.6.11의 CSP 오류를 실제 재현 후 수정했다. 화면에서 검은 눈·분홍 귀 확인. 로컬 증거: artifacts/runtime/rabbit-surface-result-check.json, rabbit-surface-result.png, rabbit-surface-live.png.
+- 현재 앱 검토 대기, surface-1 미채택. 수염 일부 거친 경계·볼 표면 굴곡, 후면/측면 상세 검수 미완료를 경고로 보존했다. basecolor 한 장만 있고 별도 normal/roughness/metallic 맵 없음. Astra 보정·리깅·애니메이션·Unity 실제 재생은 미완료다.

@@ -125,6 +125,9 @@ export type WorkbenchJob = {
     conversationUrl?: string;
     studioModels?: { candidateId: string; modelId: string; url: string }[];
     surface?: WorkbenchSurfaceReceipt;
+    /** Explicit user continuations after the bounded attempts; never reset history. */
+    continuations?: { afterAttempt:number; at:string; reason:string }[];
+    workerHistory?: NonNullable<WorkbenchJob["externalExecution"]>["worker"][];
     worker?: { attempt: number; startedAt?:string; threadId?: string; question?: string; lastReply?: string; usage?: unknown; approval?: WorkbenchRuntimeApproval };
   };
   id: string;
@@ -234,7 +237,7 @@ export type WorkbenchRuntimeApproval = {
 export type WorkbenchRuntimeAnswer = {accepted:boolean;values:Record<string,string>};
 export type WorkbenchAction =
   | {kind:"external-approval";jobId:string;approvalId:string;answer:WorkbenchRuntimeAnswer}
-  | { kind: "external-run"; jobId: string; reply?: string }
+  | { kind: "external-run"; jobId: string; reply?: string; continueOnce?: boolean }
   | { kind: "external-reserve"; jobId: string; requestHash: string }
   | { kind: "external-receive"; jobId: string }
   | { kind: "external-cancel"; jobId: string }

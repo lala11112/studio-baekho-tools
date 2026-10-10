@@ -1,7 +1,12 @@
 import type { WorkbenchCheck, WorkbenchStep } from "./workbench";
 
 // This is an explicit compatibility list, not a general worker-controlled severity override.
-// File integrity, missing parts, role validity, duplicate files and all other stages stay blocking.
+// File integrity, missing parts, role validity and duplicate files stay blocking.
+// Surface currently requests base color, not a separate PBR channel-generation operation.
+const surfaceReviewChecks: Record<string,string> = {
+  visual_review: "모델 표면의 외형을 확인해 주세요.",
+  native_texture_channels: "서비스에서 제공한 텍스처 채널을 확인해 주세요.",
+};
 const separationVisualChecks: Record<string, string> = {
   original_position_and_scale_preserved: "원본과 크기·위치가 다를 수 있습니다.",
   original_alignment_and_scale_preserved:
@@ -81,7 +86,9 @@ export function blocksWorkbenchCheck(
     return true;
   return (
     check.passed !== true &&
-    !(step === "separate" && isVisualObservation(check))
+    !(step === "separate" && isVisualObservation(check)) &&
+    !(step === "surface" && (Object.hasOwn(surfaceReviewChecks,check.name) ||
+      (check.name === "visual_quality" && check.visualCategory === "appearance")))
   );
 }
 
@@ -114,7 +121,7 @@ export function workbenchCheckLabel(check: WorkbenchCheck): string {
     check.visualCategory &&
     Object.hasOwn(visualCategories, check.visualCategory)
       ? visualCategories[check.visualCategory]
-      : (separationVisualChecks[key] ??
+      : (surfaceReviewChecks[key] ?? separationVisualChecks[key] ??
         (legacyView
           ? `${directionNames[legacyView[1]]} 사진의 형태·비율을 확인해 주세요.`
           : check.name));

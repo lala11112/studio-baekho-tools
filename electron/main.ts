@@ -639,6 +639,7 @@ app.whenReady().then(async () => {
       journalRoot:path.join(root,"workbench-chrome-journals"),
       bridgePath:path.join(__dirname,"production-mcp.cjs"),
       projectRoot:id=>store.directory(id),blenderPath:()=>store.settings.blenderPath,
+      downloadsPath:app.getPath("downloads"),
     }) },
   );
   protocol.handle("asset", async (request) => {

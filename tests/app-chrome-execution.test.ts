@@ -9,6 +9,29 @@ import { Engine } from "../engine/engine";
 import { WorkbenchEngine } from "../engine/workbench";
 import type { ExternalWorkbenchRunner } from "../shared/workbench";
 
+test("explicit continuation preserves attempt history and frozen reservation without granting automatic retries",async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),"partsmith-continuation-")),store=new Store(root);
+ await store.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));let calls=0;
+ const runner:ExternalWorkbenchRunner={async run(){calls++;return {status:"needs_input",summary:"Synthetic stopped",threadId:`test-${calls}`};},verifyReceipt(){throw Error("unused");}};
+ const engine=new WorkbenchEngine(store,{execute:async()=>{throw Error("unused");}},{externalRunner:runner});
+ t.after(()=>{engine.shutdown();store.db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new Engine(store,{} as any).create("Explicit continuation test");
+ const w=engine.action(p.id,{kind:"execute",request:{step:"concept",provider:"gpt",prompt:"one",generationCount:1,executionMode:"codex-app"},approval:{accepted:true,studioCreditLimit:0,imageCreditLimit:0}}),id=w.jobs[0].id;
+ await engine.wait(w.id);
+ for(let n=0;n<2;n++){engine.action(p.id,{kind:"external-run",jobId:id});await engine.wait(w.id);}
+ const previous=engine.get(w.id).jobs[0].externalExecution!;
+ assert.equal(previous.worker!.attempt,3);
+ assert.throws(()=>engine.action(p.id,{kind:"external-run",jobId:id,reply:"retry"}),/3회/);
+ assert.throws(()=>engine.action(p.id,{kind:"external-run",jobId:id,continueOnce:true,reply:" "}),/3회/);
+ engine.action(p.id,{kind:"external-run",jobId:id,continueOnce:true,reply:"Export collection fixed. Reuse completed UV."});await engine.wait(w.id);
+ const current=engine.get(w.id).jobs[0].externalExecution!;
+ assert.equal(calls,4);assert.equal(current.worker!.attempt,4);
+ assert.equal(current.reservedAt,previous.reservedAt);assert.equal(current.requestHash,previous.requestHash);
+ assert.equal(current.workerHistory!.length,3);assert.equal(current.workerHistory![2]!.threadId,"test-3");
+ assert.equal(current.continuations![0].afterAttempt,3);
+ assert.throws(()=>engine.action(p.id,{kind:"external-run",jobId:id}),/3회/);
+});
+
 test("app dispatch returns questions, collects validated files and never advances or resumes automatically", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "partsmith-app-chrome-"));
   const store = new Store(root);
