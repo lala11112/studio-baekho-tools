@@ -70,7 +70,9 @@ for await (const line of readline.createInterface({input:process.stdin})) {
       const count=command.generationCount ?? 1;
       if(!Number.isSafeInteger(count) || count<1 || count>16) throw Error('Invalid approved candidate count');
       await page.getByTestId('workbench-model-count').fill(String(count));
-      await page.getByTestId('workbench-polygon-count').fill('10000');
+      const polygonCount=command.polygonCount ?? 10000;
+      if(!Number.isSafeInteger(polygonCount) || polygonCount<500 || polygonCount>25000) throw Error('Invalid observed P2 polygon target');
+      await page.getByTestId('workbench-polygon-count').fill(String(polygonCount));
       await page.getByTestId('workbench-studio-topology').selectOption('quad');
       await page.getByTestId('workbench-observed-model-cost').fill('100');
       await page.getByTestId('workbench-credit-limit').fill('100');
