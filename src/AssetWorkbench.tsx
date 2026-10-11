@@ -1382,7 +1382,7 @@ export function AssetWorkbench({
                     </select> : <input aria-label={field.label} value={values[field.id] ?? ""} maxLength={12000} onChange={e=>change(field.id,e.target.value)} />}
                   </label>)}
                   <button data-testid="workbench-codex-approve" disabled={busy || approval.fields.some(f=>f.required && !values[f.id])}
-                    onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:true,values}})}>{approval.id.startsWith("runway-cost-") ? "표시된 예상 비용으로 영상 1개 생성" : "선택한 내용으로 계속"}</button>
+                    onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:true,values}})}>{approval.id.startsWith("tripo-model-cost-") ? "표시된 비용으로 모델 생성" : approval.id.startsWith("runway-cost-") ? "표시된 예상 비용으로 영상 1개 생성" : "선택한 내용으로 계속"}</button>
                   <button data-testid="workbench-codex-decline" disabled={busy}
                     onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:false,values:{}}})}>허용하지 않음</button>
                 </div>;
@@ -2735,10 +2735,9 @@ export function AssetWorkbench({
                 className="wb-note warning wb-visual-warnings"
                 data-testid="workbench-visual-warnings"
               >
-                <strong>사진을 보고 확인해 주세요</strong>
+                <strong>{step === "model" ? "모델을 보고 확인해 주세요" : "사진을 보고 확인해 주세요"}</strong>
                 <p>
-                  외형에 관한 참고 사항입니다. 사진을 검토한 뒤 수정하거나
-                  채택할 수 있습니다.
+                  {step === "model" ? "목표와 실제 모델의 차이입니다. 결과를 검토한 뒤 수정하거나 채택할 수 있습니다." : "외형에 관한 참고 사항입니다. 사진을 검토한 뒤 수정하거나 채택할 수 있습니다."}
                 </p>
                 <ul>
                   {visualWarnings.map((warning, i) => (

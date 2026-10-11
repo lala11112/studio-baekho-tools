@@ -137,11 +137,16 @@ test("external concept freezes scope, reserves once, validates receipt and waits
   fs.renameSync(path.join(modelWorkspace,'source.fbx'),path.join(modelWorkspace,'missing.fbx'));saveModel();
   assert.throws(()=>restored.action(p.id,{kind:'external-receive',jobId:modelJob.id}));
   fs.renameSync(path.join(modelWorkspace,'missing.fbx'),path.join(modelWorkspace,'source.fbx'));
+  modelReceipt.result.checks=[{name:'file_integrity',passed:false,severity:'warning',detail:'Synthetic failure'}];saveModel();
+  assert.throws(()=>restored.action(p.id,{kind:'external-receive',jobId:modelJob.id}),/통과하지 못한/);
+  modelReceipt.result.checks=[{name:'정확한 목표 면 수',passed:false,severity:'warning',detail:'Target 10000, actual 10297'},
+    {name:'전체 쿼드',passed:false,severity:'warning',detail:'9038 quads, 1259 triangles'}];saveModel();
   restored.action(p.id,{kind:'external-receive',jobId:modelJob.id});
   assert.equal(restored.getForProject(p.id)!.jobs.find(j=>j.id===modelJob.id)!.status,'review');
   assert.equal(restored.getForProject(p.id)!.selections['model:whole'],undefined);
   const restartModel=new WorkbenchEngine(store,executor).getForProject(p.id)!.jobs.find(j=>j.id===modelJob.id)!;
   assert.equal(restartModel.externalExecution!.studioModels![0].modelId,'11111111-1111-1111-1111-111111111111');
+  assert.equal(restartModel.checks.length,2);assert(restartModel.checks.every(c=>!c.passed && c.severity==='warning'));
   assert.equal(calls,0);
   // Surface handoff is a separate approved scope, never an automatic model follow-up.
   const surfaceRequest = {step:'surface' as const,modelInput:'whole' as const,executionMode:'codex-session' as const,

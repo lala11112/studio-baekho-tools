@@ -7,6 +7,18 @@ const surfaceReviewChecks: Record<string,string> = {
   visual_review: "모델 표면의 외형을 확인해 주세요.",
   native_texture_channels: "서비스에서 제공한 텍스처 채널을 확인해 주세요.",
 };
+// Provider targets describe desired density/topology, not file validity. Keep
+// these measured deviations false and visible; never accept arbitrary warnings.
+const modelTargetChecks: Record<string,string> = {
+  model_polygon_target: "목표와 실제 면 수를 확인해 주세요.",
+  model_quad_ratio: "쿼드와 삼각형의 실제 구성을 확인해 주세요.",
+  "정확한 목표 면 수": "목표와 실제 면 수를 확인해 주세요.",
+  "전체 쿼드": "쿼드와 삼각형의 실제 구성을 확인해 주세요.",
+};
+const isModelTargetReview = (check: WorkbenchCheck) =>
+  Object.hasOwn(modelTargetChecks, check.name) &&
+  check.severity === "warning" && check.visualCategory === undefined &&
+  !!check.detail?.trim();
 const separationVisualChecks: Record<string, string> = {
   original_position_and_scale_preserved: "원본과 크기·위치가 다를 수 있습니다.",
   original_alignment_and_scale_preserved:
@@ -100,6 +112,7 @@ export function blocksWorkbenchCheck(
     return true;
   return (
     check.passed !== true &&
+    !(step === "model" && isModelTargetReview(check)) &&
     !(step === "rig" && isRigLimitsReview(check)) &&
     !(step === "reference" && isReferenceVisualReview(check)) &&
     !(step === "assembly" && isAssemblyAppearanceReview(check)) &&
@@ -139,7 +152,7 @@ export function workbenchCheckLabel(check: WorkbenchCheck): string {
     check.visualCategory &&
     Object.hasOwn(visualCategories, check.visualCategory)
       ? visualCategories[check.visualCategory]
-      : ((key === "remaining_limitations" ? "리깅 제어 방식과 관절 변형 범위를 확인해 주세요." : undefined) ?? surfaceReviewChecks[key] ?? separationVisualChecks[key] ??
+      : ((key === "remaining_limitations" ? "리깅 제어 방식과 관절 변형 범위를 확인해 주세요." : undefined) ?? modelTargetChecks[key] ?? surfaceReviewChecks[key] ?? separationVisualChecks[key] ??
         (legacyView
           ? `${directionNames[legacyView[1]]} 사진의 형태·비율을 확인해 주세요.`
           : check.name));

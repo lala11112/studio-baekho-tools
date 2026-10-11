@@ -2,6 +2,20 @@ import {test} from "node:test";
 import assert from "node:assert/strict";
 import {blocksWorkbenchCheck,normalizeWorkbenchChecks,workbenchWarningMessages} from "../shared/workbench-checks";
 
+test("model density/topology target deviations remain visible without bypassing structural checks",()=>{
+  for(const name of ["model_polygon_target","model_quad_ratio","정확한 목표 면 수","전체 쿼드"]){
+    const observation={name,passed:false,severity:"warning" as const,detail:"Target 10000; actual 10297, 9038 quads and 1259 triangles."};
+    const normalized=normalizeWorkbenchChecks("model",[observation])[0];
+    assert.equal(normalized.passed,false);assert.equal(normalized.severity,"warning");
+    assert.match(workbenchWarningMessages("model",[normalized])[0],/10297/);
+    assert.equal(blocksWorkbenchCheck("surface",observation),true);
+    assert.equal(blocksWorkbenchCheck("model",{...observation,severity:"error"}),true);
+    assert.equal(blocksWorkbenchCheck("model",{...observation,detail:""}),true);
+    for(const failure of ["file_integrity","native_fbx","finite_vertices","wrong_model_settings","unknown_check"])
+      assert.equal(blocksWorkbenchCheck("model",{...observation,name:failure}),true);
+  }
+});
+
 test("animation appearance warning stays false; motion, integrity and unknown failures block",()=>{
   const warning={name:"visual_quality",passed:false,visualCategory:"appearance" as const,detail:"Original shoulder seam remains."};
   const checks=normalizeWorkbenchChecks("animation",[warning]);

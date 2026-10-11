@@ -1,6 +1,6 @@
 {
   "name": "partsmith",
-  "version": "0.6.29",
+  "version": "0.6.30",
   "private": true,
   "description": "Local character production workbench for Unity",
   "author": "Partsmith",
@@ -63,7 +63,12 @@
       {
         "from": "node_modules/ffmpeg-static",
         "to": "media",
-        "filter": ["ffmpeg.exe", "ffmpeg.exe.LICENSE", "ffmpeg.exe.README", "LICENSE"]
+        "filter": [
+          "ffmpeg.exe",
+          "ffmpeg.exe.LICENSE",
+          "ffmpeg.exe.README",
+          "LICENSE"
+        ]
       }
     ],
     "win": {

@@ -1,5 +1,16 @@
 # Partsmith 검증 결과
 
+## 2026-10-12 — 0.6.30 앱 모델 생성·수집·검토 완료
+
+- 실제 앱 작업 `a5d5e915-6c44-4953-85fd-119d6e570deb` attempt5: 채택한 원본 한 장 → P2.0/쿼드10,000면 목표/모델1개 → 앱 비용 확인100크레딧 → 한 번 생성 → 네이티브 FBX 다운로드 → Blender 검사/GLB 미리보기 → 앱 결과 확인. 서비스 모델 `c5109d40-f81f-4382-87b6-84afe561a57a`. 잔액4095→3995. 채팅에서 Tripo를 조작하거나 결과 파일을 수동 편집하지 않았다.
+- 0.6.28의 준비 URL 검증 수정 후 실제 비용창이 표시됐으나 내부 HTTP45초 제한으로 사라졌다.0.6.29는 모델/영상 비용 결정 대기만15분, 해당 MCP 도구960초로 변경했다. 일반 작업45초·작업자30분·취소 정책 유지. 실제 bridge subprocess의 합성47.1초 대기 검사 통과; 유료 생성 증거와 구분한다.
+- 반복 사이트 승인: attempt5 실제 `cua_repl` 요청에 앱이 `user-preauthorized-browser`로 자동 응답했다. 승인된 origin 및 호스트가 지정한 원본 전달 범위만 처리하며 유료 비용 결정은 별도다. 전역 승인/샌드박스/인증 설정 불변.
+- 원본 FBX SHA256 `492f01c528a581ce6187957cc17b06cd127396876f734efba1ca0b1663d2b74a`. 실제9844정점,10297면(쿼드9038/삼각형1259),UV0/텍스처0. 목표 면 수 편차와 혼합 토폴로지를 경고로 기록했으나 앱이 모든 model failed check를 차단해 결과 등록이 실패했다.
+- `shared/workbench-checks.ts`: 구체적인 목표 면 수·쿼드 비율 경고만 검토 가능하게 하고 false와 상세 관찰 유지. 미등록 이름·무결성·잘못된 설정·geometry 실패와 error는 계속 차단. `electron/chrome-workbench-runner.ts` 지시에 고정 검사명 추가. `src/AssetWorkbench.tsx` 비용 버튼을 ‘표시된 비용으로 모델 생성’으로 명확히 하고 모델 경고 문구 수정.
+- 관련19검사 통과(경고 정책,잘못된 원본/출처/해시,재시작,승인·거절·중복 제출,범위 제한). TypeScript/build 및 별도0.6.30 Windows 패키지 통과. 이전 전체274검사 통과 이후 관련 범위만 재검증했다.
+- 실제 패키지의 ‘저장된 결과 다시 확인’으로 기존 결과 등록. 이 복구에 신규worker0/유료제출0, 원본·external-result.json·작업자로그·journal 해시 불변. 재시작 뒤review/received·후보1개·미채택·attempt5 보존, 자동 재실행0, 렌더링 확인/pageerror0. 최초 검증 스크립트가 다중 후보용 선택자를 기다려 실패했으며 단일 모델용 선택자로 수정해 재확인했다.
+- 근거: `scripts/app-model-live-review.mjs`, `artifacts/runtime/app-model-live-verified.json`, `artifacts/runtime/app-model-live-canvas.png`. 현재 앱은 모델 검토 화면. 외형 품질 채택은 사용자 결정이며 UV·텍스처·후속 Blender 제작·Unity 재생은 이번 모델에서 아직 실행하지 않았다.
+
 ## 2026-10-11 — 0.6.21 MCP 상시 활성화 설정
 
 - 사용자가 작업마다 MCP를 켜고 끄는 정책을 철회했다. 전역 `.codex/config.toml`의 blender/fal_ai/notion을 enabled=true로 변경하고 전역/프로젝트 AGENTS 지침도 상시 활성화로 수정. TOML 파싱 전후 비교로 이 세 boolean 외 설정·인증 정보가 동일함을 확인. 자격 증명은 출력/커밋하지 않았다.
