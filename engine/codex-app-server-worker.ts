@@ -42,13 +42,15 @@ export function preauthorizedBrowserOrigin(message: Rpc, allowedOrigins: readonl
   if(message.method !== "mcpServer/elicitation/request" || p?.serverName !== "cua_repl" ||
       (p.mode !== undefined && p.mode !== "form") || schema?.type !== "object" ||
       !schema.properties || Object.keys(schema.properties).length || (schema.required?.length ?? 0)) return;
-  const rawMessage = p.reason ?? p.message;
+  const sourceMessage = p.reason ?? p.message;
+  // Browser prompts may end with sentence punctuation after the URL.
+  const rawMessage = typeof sourceMessage === "string" ? sourceMessage.replace(/\.$/, "") : sourceMessage;
   const transfer = typeof rawMessage === "string" && /^Allow (upload to|download from) (https:\/\/[^\s]+)$/.exec(rawMessage);
   if(transfer) {
     try {
       const u=new URL(transfer[2]), allowed=transfer[1] === "upload to" ? transfers.upload : transfers.download;
       if(u.protocol === "https:" && !u.port && !u.username && !u.password && !u.search && !u.hash &&
-          transfer[2] === u.href && allowed.includes(u.href) && allowedOrigins.includes(u.origin)) return u.href;
+          allowed.includes(u.href) && allowedOrigins.includes(u.origin)) return u.href;
     } catch { /* Other approvals keep their normal app UI. */ }
     return;
   }
@@ -57,7 +59,7 @@ export function preauthorizedBrowserOrigin(message: Rpc, allowedOrigins: readonl
   try {
     const u=new URL(match[1]);
     if(u.protocol !== "https:" || u.port || u.username || u.password || u.pathname !== "/" || u.search || u.hash ||
-       ![u.origin,`${u.origin}/`].includes(match[1]) || !allowedOrigins.includes(u.origin)) return;
+       !allowedOrigins.includes(u.origin)) return;
     return u.origin;
   } catch { return; }
 }
@@ -388,6 +390,15 @@ export class CodexAppServerWorker {
             method: m.method,
             mode: m.params?.mode,
             server: m.params?.serverName,
+            browserPolicy: m.params?.serverName === "cua_repl" ? {
+              configuredOrigins: this.options.allowedBrowserOrigins?.length ?? 0,
+              schemaType: m.params?.requestedSchema?.type,
+              fieldCount: Object.keys(m.params?.requestedSchema?.properties ?? {}).length,
+              requiredCount: m.params?.requestedSchema?.required?.length ?? 0,
+              hasReason: m.params?.reason !== undefined && m.params?.reason !== null,
+              messageType: typeof (m.params?.reason ?? m.params?.message),
+              finalPeriod: String(m.params?.reason ?? m.params?.message ?? "").endsWith("."),
+            } : undefined,
           });
           approvalQueue = approvalQueue.then(async () => {
             if (done) return;

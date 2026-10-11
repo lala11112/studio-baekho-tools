@@ -258,6 +258,8 @@ export class ChromeWorkbenchRunner implements ExternalWorkbenchRunner {
         'mcp_servers.partsmith_studio.env_vars=["PARTSMITH_STUDIO_PORT","PARTSMITH_STUDIO_TOKEN"]',
         "-c",
         'mcp_servers.partsmith_studio.env.ELECTRON_RUN_AS_NODE="1"',
+        "-c",
+        "mcp_servers.partsmith_studio.tool_timeout_sec=960",
         ...browserToolPolicy("partsmith_studio", tools),
       ],
       env: {

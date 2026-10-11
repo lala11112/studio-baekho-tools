@@ -117,6 +117,7 @@ test("only explicitly trusted empty browser-origin prompts auto-accept; other ap
  assert.deepEqual(await answerAppServerRequest(base,decline,allowed),{action:"accept",content:{},_meta:null});assert.equal(calls,0);
  assert.deepEqual(await answerAppServerRequest({...base,params:{...base.params,message:"Allow Browser use to access https://studio.tripo3d.ai"}},decline,allowed),{action:"accept",content:{},_meta:null});
  assert.deepEqual(await answerAppServerRequest({...base,params:{...base.params,message:undefined,reason:base.params.message}},decline,allowed),{action:"accept",content:{},_meta:null});
+ assert.deepEqual(await answerAppServerRequest({...base,params:{...base.params,message:base.params.message+"."}},decline,allowed),{action:"accept",content:{},_meta:null});
  for(const message of ["Allow Browser use to access https://studio.tripo3d.ai.evil.example/","Allow Browser use to access https://studio.tripo3d.ai/?cost=100","Allow Browser use to access https://studio.tripo3d.ai/download/","Allow Browser use to access https://evil.example/","Allow Browser use to access https://studio.tripo3d.ai@evil.example/","Allow Browser use to access https://studio.tripo3d.ai/ and pay 100","Allow download from https://studio.tripo3d.ai/"]){
   assert.deepEqual(await answerAppServerRequest({...base,params:{...base.params,message}},decline,allowed),{action:"decline",content:null,_meta:null});
  }
