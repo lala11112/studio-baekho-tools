@@ -2,6 +2,17 @@ import {test} from "node:test";
 import assert from "node:assert/strict";
 import {blocksWorkbenchCheck,normalizeWorkbenchChecks,workbenchWarningMessages} from "../shared/workbench-checks";
 
+test("animation appearance warning stays false; motion, integrity and unknown failures block",()=>{
+  const warning={name:"visual_quality",passed:false,visualCategory:"appearance" as const,detail:"Original shoulder seam remains."};
+  const checks=normalizeWorkbenchChecks("animation",[warning]);
+  assert.equal(checks[0].passed,false);assert.equal(checks[0].severity,"warning");
+  assert.match(workbenchWarningMessages("animation",checks)[0],/shoulder seam/);
+  assert.equal(blocksWorkbenchCheck("animation",{name:"loop_endpoints",passed:true,visualCategory:"view_consistency"}),false);
+  for(const name of ["loop_endpoints","foot_contact","file_integrity","unknown"])
+    assert.equal(blocksWorkbenchCheck("animation",{...warning,name}),true,name);
+  assert.equal(blocksWorkbenchCheck("animation",{...warning,visualCategory:"view_consistency"}),true);
+});
+
 test("reference visual mismatches stay false for human review; structural and unspecified failures block",()=>{
   const check={name:"visual_quality",passed:false,visualCategory:"view_consistency" as const,detail:"Foot position differs between views."};
   const normalized=normalizeWorkbenchChecks("reference",[check])[0];

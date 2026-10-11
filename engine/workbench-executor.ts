@@ -2206,7 +2206,8 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       }
       const forceRepair =
         checkpointMalformed ||
-        Boolean(context.recovery?.mode === "repair" && !phase);
+        Boolean(context.recovery?.mode === "repair" && !phase &&
+          !this.localTransportRecovery(context));
       if (checkpoint && !forceRepair) {
         onProgress(
           `${stageId} · 이미 완료한 파일을 재사용합니다. 다시 생성하지 않습니다.`,
@@ -2266,7 +2267,8 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       );
       const repair =
         forceRepair ||
-        Boolean(context.recovery && priorExecution) ||
+        Boolean(context.recovery && priorExecution &&
+          !(rawCompleted && this.localTransportRecovery(context))) ||
         Boolean(priorExecution && !rawCompleted);
       if (!rawCompleted && priorReceipt?.charges.length && !context.recovery)
         return {
@@ -2316,15 +2318,14 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
           response = await this.worker.run(task);
         } catch (error) {
           // The CLI stream can disconnect after Blender has durably saved its
-          // completed response. Only this local rig path may collect that file;
+          // completed response. Only local rig/animation paths may collect it;
           // cancellation/approval errors and paid/web stages retain their guards.
-          if (context.job.step !== "rig" || context.signal.aborted ||
-              !/stream disconnected|websocket closed/i.test(error instanceof Error ? error.message : "")) throw error;
+          if (!this.localTransportRecovery(context, error instanceof Error ? error.message : "")) throw error;
           let saved: WorkbenchResult | undefined;
           try { saved = resultSchema.parse(readJson(resultPath)); } catch { /* incomplete file: keep original failure */ }
           if (saved?.status !== "completed") throw error;
           response = {result:saved};
-          onProgress("rig · 연결 종료 전에 저장된 결과를 로컬 검증합니다. Astra를 다시 실행하지 않습니다.");
+          onProgress(`${stageId} · 연결 종료 전에 저장된 결과를 로컬 검증합니다. Astra를 다시 실행하지 않습니다.`);
         }
         this.saveJournal(context, stageId, true);
       }
@@ -3137,6 +3138,11 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       }
     }
     return result;
+  }
+  private localTransportRecovery(context: WorkbenchExecutionContext, error = context.recovery?.error ?? "") {
+    return ["rig", "animation"].includes(context.job.step) && !context.signal.aborted &&
+      /stream disconnected|websocket closed/i.test(error) &&
+      !/denied|denial|cancel|거절|차단|취소/i.test(error);
   }
   recover(
     context: WorkbenchExecutionContext,

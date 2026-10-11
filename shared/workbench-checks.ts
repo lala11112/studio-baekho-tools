@@ -93,7 +93,7 @@ export function blocksWorkbenchCheck(
     (check.detail !== undefined &&
       (typeof check.detail !== "string" || check.detail.length > 600)) ||
     (check.visualCategory !== undefined &&
-      !(["assembly", "reference"].includes(step)
+      !(["assembly", "animation", "reference"].includes(step)
         ? Object.hasOwn(visualCategories, check.visualCategory)
         : isVisualObservation(check)))
   )
@@ -103,6 +103,7 @@ export function blocksWorkbenchCheck(
     !(step === "rig" && isRigLimitsReview(check)) &&
     !(step === "reference" && isReferenceVisualReview(check)) &&
     !(step === "assembly" && isAssemblyAppearanceReview(check)) &&
+    !(step === "animation" && check.name === "visual_quality" && check.visualCategory === "appearance") &&
     !(step === "separate" && isVisualObservation(check)) &&
     !(step === "surface" && (Object.hasOwn(surfaceReviewChecks,check.name) ||
       (check.name === "visual_quality" && check.visualCategory === "appearance")))

@@ -262,9 +262,10 @@ test("ambiguous receipt prevents another worker submission even when the user re
   assert.equal(worker.calls.length, 0);
   fs.rmSync(f.root, { recursive: true, force: true });
 });
-test("rig collects a completed file after stream loss but still validates files and honors cancellation/denial", async () => {
-  for (const mode of ["complete", "missing-file", "incomplete", "cancelled", "denied"] as const) {
-    const f=fixture("rig"), worker=new Worker(), controller=new AbortController();
+test("local rig and animation collect saved completion after stream loss, preserving file/cancellation/denial guards", async () => {
+  for (const step of ["rig", "animation"] as const)
+  for (const mode of ["complete", "missing-file", "incomplete", "cancelled", "denied", "denied-stream"] as const) {
+    const f=fixture(step), worker=new Worker(), controller=new AbortController();
     f.context.signal=controller.signal;
     worker.run=async(task)=>{
       worker.calls.push(task);
@@ -273,7 +274,7 @@ test("rig collects a completed file after stream loss but still validates files 
       fs.writeFileSync(task.resultPath,JSON.stringify(result));
       if(mode==="missing-file") fs.unlinkSync(path.join(task.run.workspace,result.candidates[0].artifacts[0].path));
       if(mode==="cancelled") controller.abort();
-      throw Error(mode==="denied"?"approval denied":"stream disconnected before completion: websocket closed by server");
+      throw Error(mode==="denied"?"approval denied":`${mode==="denied-stream" ? "approval denied; " : ""}stream disconnected before completion: websocket closed by server`);
     };
     try {
       const executor=new CodexWorkbenchExecutor(worker,f.services);
@@ -282,6 +283,25 @@ test("rig collects a completed file after stream loss but still validates files 
       const result=await (executor as any).phase(f.context,[],()=>{});
       assert.equal(result.status,mode==="complete"?"completed":"needs_input",mode);
       assert.equal(worker.calls.length,1);
+    } finally { fs.rmSync(f.root,{recursive:true,force:true}); }
+  }
+});
+
+test("transport recovery validates saved animation without another worker; bad files still fail", async () => {
+  for (const mode of ["complete", "missing-file", "invalid-glb", "invalid-json"] as const) {
+    const f=fixture("animation"), worker=new Worker();
+    const folder=path.join(f.context.workspace,"outputs/animation");fs.mkdirSync(folder,{recursive:true});
+    const task={run:{workspace:f.context.workspace},stage:{id:"animation"},resultPath:path.join(folder,"result.json")} as WorkerTask;
+    const saved=output(task);
+    fs.writeFileSync(task.resultPath,JSON.stringify(saved));
+    if(mode==="missing-file") fs.unlinkSync(path.join(f.context.workspace,saved.candidates[0].artifacts[0].path));
+    if(mode==="invalid-glb") fs.writeFileSync(path.join(f.context.workspace,saved.candidates[0].artifacts[0].path),"invalid");
+    if(mode==="invalid-json") fs.writeFileSync(task.resultPath,JSON.stringify({...saved,candidates:"invalid"}));
+    f.context.recovery={attempt:1,mode:"repair",error:"stream disconnected before completion: websocket closed by server"};
+    try {
+      const result=await (new CodexWorkbenchExecutor(worker,f.services) as any).phase(f.context,[],()=>{});
+      assert.equal(result.status,mode==="complete"?"completed":"needs_input",mode);
+      assert.equal(worker.calls.length,0,mode);
     } finally { fs.rmSync(f.root,{recursive:true,force:true}); }
   }
 });
