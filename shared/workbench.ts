@@ -49,7 +49,11 @@ export type WorkbenchRequest = {
   conceptMode?: "design" | "turnaround";
   executionMode?: "worker" | "codex-session" | "codex-app";
   /** Observed Studio settings for a manually executed whole-model submission. */
-  externalModel?: { model: "P2.0"; topology: "quad" | "triangle"; observedCreditCost: number };
+  externalModel?: { model: "P2.0"; topology: "quad" | "triangle"; observedCreditCost: number;
+    /** Absent on legacy jobs means four accepted views. */
+    inputMode?: "single" | "multiview";
+    /** Observe cost in Chrome, then obtain a separate app approval before reservation. */
+    costApproval?: "in-app" };
   /** Initial whole-model Smart UV followed by texture, executed in the current chat. */
   externalSurface?: {
     observedUvCost: number;

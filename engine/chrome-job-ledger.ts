@@ -24,6 +24,12 @@ type Entry = {
   reservedAt: string;
   resultId?: string;
   resultUrl?: string;
+  approvedModelPlan?: ModelPlan;
+};
+export type ModelPlan = {
+  observedCost: number; url: string; model: "P2.0";
+  topology: "quad" | "triangle"; generationCount: number; polygonCount: number;
+  inputMode: "single" | "multiview";
 };
 type Journal = { jobId: string; requestHash: string; entries: Entry[] };
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -53,6 +59,7 @@ const validUrl = (
 /** Host-only durable journal, kept outside the worker's writable job directory. */
 export class ChromeJobLedger {
   private journal: Journal;
+  private modelApprovalPending = false;
   constructor(
     private file: string,
     private packet: ChromePacket,
@@ -82,12 +89,34 @@ export class ChromeJobLedger {
     }
     fs.renameSync(tmp, this.file);
   }
+  async approveModel(plan: ModelPlan, approve: (plan: ModelPlan) => Promise<boolean>, cancelled: () => boolean) {
+    const r = this.packet.request, settings = r.externalModel;
+    const frozen = structuredClone(plan);
+    if (this.modelApprovalPending || !this.packet.approval.accepted || r.step !== "model" ||
+        r.executionMode !== "codex-app" || settings?.costApproval !== "in-app" ||
+        this.journal.entries.length || cancelled() ||
+        frozen.model !== settings.model || frozen.topology !== settings.topology ||
+        frozen.inputMode !== (settings.inputMode ?? "multiview") ||
+        frozen.generationCount !== r.generationCount || frozen.polygonCount !== r.polygonCount ||
+        !Number.isSafeInteger(frozen.observedCost) || frozen.observedCost < 0 ||
+        !validUrl(frozen.url, "tripo"))
+      throw Error("모델 설정·개수·면 수·입력·비용 또는 제출 기록이 맞지 않습니다. 제출하지 마세요.");
+    this.modelApprovalPending = true;
+    try {
+      if (!await approve(structuredClone(frozen)) || cancelled())
+        throw Error("사용자가 모델 생성을 승인하지 않았거나 취소했습니다. 제출하지 마세요.");
+      return this.reserve({phase:"model", sourceModelId:"", observedCost:frozen.observedCost, url:frozen.url}, frozen);
+    } finally { this.modelApprovalPending = false; }
+  }
   begin(args: {
+    phase: string; observedCost: number; sourceModelId: string; url: string;
+  }) { return this.reserve(args); }
+  private reserve(args: {
     phase: string;
     observedCost: number;
     sourceModelId: string;
     url: string;
-  }) {
+  }, approvedModelPlan?: ModelPlan) {
     const { request: r, approval: a } = this.packet;
     if (!a.accepted || this.journal.entries.some((e) => e.phase === args.phase))
       throw Error(
@@ -96,8 +125,11 @@ export class ChromeJobLedger {
     let limit: number,
       source = "";
     if (r.step === "concept" && args.phase === "images") limit = 0;
-    else if (r.externalModel && args.phase === "model")
-      limit = r.externalModel.observedCreditCost;
+    else if (r.externalModel && args.phase === "model") {
+      if (r.externalModel.costApproval === "in-app" && !approvedModelPlan)
+        throw Error("앱에서 실제 모델 생성 비용을 먼저 승인해야 합니다. studio_model_begin을 사용하세요.");
+      limit = approvedModelPlan?.observedCost ?? r.externalModel.observedCreditCost;
+    }
     else if (r.externalSurface && args.phase === "uv") {
       limit = r.externalSurface.observedUvCost;
       source = this.packet.sourceStudioModel?.modelId ?? "";
@@ -121,7 +153,7 @@ export class ChromeJobLedger {
         source || undefined,
       ) ||
       this.journal.entries.reduce((n, e) => n + e.cost, 0) + args.observedCost >
-        a.studioCreditLimit
+        (approvedModelPlan?.observedCost ?? a.studioCreditLimit)
     )
       throw Error(
         "화면 비용/대상/주소가 승인한 범위를 벗어났습니다. 제출하지 마세요.",
@@ -133,6 +165,7 @@ export class ChromeJobLedger {
       url: args.url,
       state: "reserved",
       reservedAt: new Date().toISOString(),
+      ...(approvedModelPlan ? {approvedModelPlan} : {}),
     };
     this.journal.entries.push(entry);
     this.persist();

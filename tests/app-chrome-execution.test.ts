@@ -267,3 +267,19 @@ test("cancel and restart ignore late Chrome completion and never launch a new wo
     "reserved",
   );
 });
+
+
+test("app single-image P2 model freezes only the adopted original and defers cost approval",async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),"single-model-")),store=new Store(root);await store.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));
+ let modelPacket:any;let modelInputs:any[]=[];
+ const runner:ExternalWorkbenchRunner={async run(ctx){
+  if(ctx.job.step==="model"){modelPacket=JSON.parse(fs.readFileSync(path.join(ctx.workspace,"external-request.json"),"utf8"));modelInputs=ctx.inputs;return {status:"needs_input",summary:"Cost preview stub"};}
+  const bytes=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==","base64");fs.writeFileSync(path.join(ctx.workspace,"one.png"),bytes);
+  fs.writeFileSync(path.join(ctx.workspace,"external-result.json"),JSON.stringify({jobId:ctx.job.id,requestHash:ctx.job.externalExecution!.requestHash,conversationUrl:"https://chatgpt.com/c/fixture",files:[{path:"one.png",sha256:createHash("sha256").update(bytes).digest("hex")}],result:{status:"completed",summary:"fixture",checks:[],candidates:[{id:"one",label:"one",artifacts:[{path:"one.png",kind:"image"}]}]}}));return {status:"completed",summary:"fixture"};},verifyReceipt(){}};
+ const e=new WorkbenchEngine(store,{execute:async()=>{throw Error("unused");}},{externalRunner:runner});t.after(()=>{e.shutdown();store.db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new Engine(store,{} as any).create("Single image fixture"),approval={accepted:true,studioCreditLimit:0,imageCreditLimit:0};
+ const w=e.action(p.id,{kind:"execute",request:{step:"concept",prompt:"one",provider:"gpt",generationCount:1,executionMode:"codex-app"},approval});await e.wait(w.id);
+ const design=e.get(w.id).jobs[0];e.action(p.id,{kind:"select",jobId:design.id,candidateId:"one"});
+ e.action(p.id,{kind:"execute",request:{step:"model",prompt:"",modelInput:"whole",role:"whole",generationCount:1,polygonCount:10000,executionMode:"codex-app",externalModel:{model:"P2.0",topology:"quad",inputMode:"single",costApproval:"in-app",observedCreditCost:0}},approval});await e.wait(w.id);
+ assert.equal(modelInputs.length,1);assert.equal(modelInputs[0].sha256,design.candidates[0].artifacts[0].sha256);assert.deepEqual(Object.keys(modelPacket.dependencies),["concept"]);assert.equal(modelPacket.approval.studioCreditLimit,0);assert.equal(e.get(w.id).selections["model:whole"],undefined);
+});

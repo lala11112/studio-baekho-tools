@@ -378,7 +378,7 @@ export class WorkbenchEngine {
         return ["concept"];
       case "model":
         return workbenchModelInput(request) === "whole"
-          ? request.externalModel ? ["concept", "whole-reference"] : ["concept"]
+          ? request.externalModel && request.externalModel.inputMode !== "single" ? ["concept", "whole-reference"] : ["concept"]
           : ["concept", "separate"];
       case "surface":
         return workbenchModelInput(request) === "whole"
@@ -445,9 +445,11 @@ export class WorkbenchEngine {
       if (!externalMode(r.executionMode) || r.step !== "model" ||
           r.modelInput !== "whole" || r.baseJobId || settings.model !== "P2.0" ||
           !["quad", "triangle"].includes(settings.topology) ||
-          !Number.isSafeInteger(settings.observedCreditCost) || settings.observedCreditCost < 0)
-        throw new Error("외부 모델 실행에는 전체 4방향 입력과 확인한 P2.0 설정·비용이 필요합니다. 기존 모델 수정은 지원하지 않습니다.");
-      r.views = [...WORKBENCH_VIEWS];
+          !Number.isSafeInteger(settings.observedCreditCost) || settings.observedCreditCost < 0 ||
+          (settings.inputMode !== undefined && !["single", "multiview"].includes(settings.inputMode)) ||
+          (settings.costApproval !== undefined && (settings.costApproval !== "in-app" || r.executionMode !== "codex-app" || settings.observedCreditCost !== 0)))
+        throw new Error("외부 모델의 이미지 입력·P2.0 설정·비용 승인 방식을 확인하세요. 기존 모델 수정은 지원하지 않습니다.");
+      r.views = settings.inputMode === "single" ? ["front"] : [...WORKBENCH_VIEWS];
     }
     if (r.externalSurface !== undefined) {
       const s = r.externalSurface;
@@ -693,7 +695,7 @@ export class WorkbenchEngine {
         );
     }
     const r = this.normalize(input);
-    if (r.step === "model" && r.modelInput === "whole" && !r.baseJobId &&
+    if (r.step === "model" && r.modelInput === "whole" && !r.baseJobId && r.externalModel?.inputMode !== "single" &&
         w.jobs.some(j => j.slot === "whole-reference" && j.status !== "cancelled" && this.current(w, j))) {
       if (!w.selections["whole-reference"])
         throw new Error("전체 4방향 이미지를 먼저 검토하고 채택하세요.");
@@ -800,7 +802,10 @@ export class WorkbenchEngine {
       }
       dependencies[dep] = selected.selected;
       // The concept remains a lineage dependency, never an extra fifth upload.
-      if (!(r.externalModel && dep === "concept")) inputs.push(...selected.candidate.artifacts);
+      if (!(r.externalModel && r.externalModel.inputMode !== "single" && dep === "concept")) inputs.push(...selected.candidate.artifacts);
+      if (r.externalModel?.inputMode === "single" && dep === "concept" &&
+          selected.candidate.artifacts.filter(a => a.kind === "image").length !== 1)
+        throw new Error("단일 이미지 모델링에는 채택한 원본 이미지 한 장이 필요합니다.");
       if (r.externalModel && dep === "whole-reference") {
         const images = selected.candidate.artifacts.filter(a => a.kind === "image");
         if (images.length !== 4 || new Set(images.map(a => a.sha256)).size !== 4 ||

@@ -113,3 +113,24 @@ test("Chrome paid journal freezes phase, source and cost; recovery cannot resubm
     40,
   );
 });
+
+
+test("model cost approval binds exact settings, rejects denial/cancellation/bypass and persists one reservation", async t => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),"model-cost-"));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const packet:ChromePacket={jobId:"model",request:{step:"model",prompt:"rabbit",executionMode:"codex-app",generationCount:1,polygonCount:10000,
+ externalModel:{model:"P2.0",topology:"quad",observedCreditCost:0,inputMode:"single",costApproval:"in-app"}},approval:{accepted:true,studioCreditLimit:0,imageCreditLimit:0}};
+ const plan={observedCost:100,url:"https://studio.tripo3d.ai/workspace/generate/start",model:"P2.0" as const,topology:"quad" as const,generationCount:1,polygonCount:10000,inputMode:"single" as const};
+ const file=path.join(dir,"journal.json");let l=new ChromeJobLedger(file,packet,"frozen");let calls=0;
+ const yes=async()=>{calls++;return true;};
+ assert.throws(()=>l.begin({phase:"model",sourceModelId:"",observedCost:0,url:plan.url}),/비용을 먼저 승인/);
+ for(const bad of [{generationCount:2},{polygonCount:5000},{inputMode:"multiview"},{observedCost:-1},{url:plan.url+"?token=secret"},{model:"P1"}])
+   await assert.rejects(l.approveModel({...plan,...bad} as any,yes,()=>false),/맞지/);
+ assert.equal(calls,0);assert.equal(l.read().entries.length,0);
+ await assert.rejects(l.approveModel(plan,async()=>false,()=>false),/승인하지/);
+ let cancelled=false;await assert.rejects(l.approveModel(plan,async()=>{cancelled=true;return true;},()=>cancelled),/취소/);
+ assert.equal(l.read().entries.length,0);
+ let release!:(yes:boolean)=>void;const pending=l.approveModel(plan,()=>new Promise(r=>release=r),()=>false);
+ await assert.rejects(l.approveModel(plan,yes,()=>false),/맞지/);release(true);await pending;
+ l=new ChromeJobLedger(file,packet,"frozen");assert.equal(l.read().entries[0].cost,100);assert.deepEqual(l.read().entries[0].approvedModelPlan,plan);
+ await assert.rejects(l.approveModel(plan,yes,()=>false),/맞지/);assert.equal(calls,0);
+});

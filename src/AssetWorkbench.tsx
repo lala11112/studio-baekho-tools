@@ -306,7 +306,7 @@ export function AssetWorkbench({
   const [textureResolution, setTextureResolution] = useState<"2K" | "4K" | "8K">(savedSurface?.textureResolution ?? "8K");
   const [removeLighting, setRemoveLighting] = useState(savedSurface?.removeLighting ?? false);
   const [studioTopology, setStudioTopology] = useState<"quad" | "triangle">("quad");
-  const [observedModelCost, setObservedModelCost] = useState(0);
+  const [modelImageMode, setModelImageMode] = useState<"single" | "multiview">("single");
   const [turnaround, setTurnaround] = useState(w?.jobs[0]?.request.conceptMode === "turnaround");
   const [turnaroundPrompt, setTurnaroundPrompt] = useState("채택한 캐릭터를 그대로 유지한 정면·후면·캐릭터의 왼쪽 측면·오른쪽 측면 독립 원본 4장을 한 요청으로 생성하세요. 시트·콜라주·크롭·복제·좌우 반전은 금지합니다. 동일한 중립 자세, 체형·귀·꼬리·색상, 같은 캔버스·확대 비율·중심·발 높이, 전체 몸이 잘리지 않는 직교 시점, 단색 배경을 사용하세요. 각 이미지의 방향은 이미지 밖에서 명시하세요.");
   const [chatGptStatus, setChatGptStatus] = useState<ChatGptStatus>();
@@ -819,14 +819,15 @@ export function AssetWorkbench({
               executionMode: request.step === "concept" && externalConcept ? "codex-app" : "worker" }
           : request.step === "model" && externalModel && request.modelInput === "whole" && !request.baseJobId
             ? { ...request, executionMode: "codex-app", externalModel: {
-                model: "P2.0", topology: studioTopology, observedCreditCost: observedModelCost } }
+                model: "P2.0", topology: studioTopology, observedCreditCost: 0,
+                inputMode: modelImageMode, costApproval: "in-app" } }
             : request.step === "surface" && externalSurface && request.modelInput === "whole" && !request.baseJobId
               ? { ...request, executionMode: "codex-app", externalSurface: {
                   observedUvCost, observedTextureCost, textureResolution, removeLighting } }
             : request,
       approval: {
         accepted: paid ? approved : true,
-        studioCreditLimit: usesStudio ? studioLimit : 0,
+        studioCreditLimit: usesStudio && !(step === "model" && externalModel && !modelEditBase) ? studioLimit : 0,
         imageCreditLimit: 0,
       },
     });
@@ -1079,7 +1080,9 @@ export function AssetWorkbench({
   function approvalBox() {
     return (
       <div className="wb-budget">
-        {usesStudio ? (
+        {step === "model" && externalModel && !modelEditBase ? (
+          <small>먼저 Tripo 화면의 실제 설정·비용을 확인해 이 앱에 표시합니다. 별도 승인 전에는 생성하지 않습니다.</small>
+        ) : usesStudio ? (
           <>
             <label className="field">
               <span>이번 실행의 Studio 크레딧 한도</span>
@@ -1117,7 +1120,9 @@ export function AssetWorkbench({
             checked={approved}
             onChange={(e) => setApproved(e.target.checked)}
           />
-          {usesStudio
+          {step === "model" && externalModel && !modelEditBase
+            ? "채택한 이미지와 설정을 Tripo에 전달해 생성 비용을 확인합니다. 유료 생성은 다음 비용 승인 후 실행합니다."
+            : usesStudio
             ? "현재 설정과 이미지를 Tripo에 전달하고, 이 한도 안에서 이번 작업을 실행합니다."
             : step === "reference" ? "현재 캐릭터 참조와 동작 지시를 선택한 영상 서비스에 전달합니다. 유료 생성은 모델·길이·예상 비용 확인 후 실행합니다."
             : "현재 설정과 이미지를 GPT에 전달하고, 표시된 범위의 이미지 생성을 실행합니다."}
@@ -1678,7 +1683,7 @@ export function AssetWorkbench({
                     만들 수 있습니다. 경로를 바꿔도 기존 결과는 보존됩니다.
                   </small>
                 </label>
-                {modelInput === "whole" && externalModel && wholeReference ? (
+                {modelInput === "whole" && externalModel && modelImageMode === "multiview" && wholeReference ? (
                   <div className="wb-whole-views" data-testid="workbench-model-input-views">
                     {wholeReference.candidate.artifacts.filter(a => a.kind === "image").map(a =>
                       <figure key={a.path}><img src={url(a)} alt={`모델 입력 ${a.view}`} /><figcaption>{viewLabels[a.view!]}</figcaption></figure>)}
@@ -1963,17 +1968,18 @@ export function AssetWorkbench({
                         앱의 Codex로 Chrome에서 Tripo 실행
                       </label>
                       {externalModel && <>
-                        <small>채택한 전체 4방향 원본을 P2.0에 전달하고 앱이 Codex를 실행합니다.
-                          Codex가 Chrome의 방향·개수·면 수·비용을 확인하고 승인한 범위에서 한 번 제출합니다.</small>
+                        <small>앱의 Codex가 Chrome에서 입력·개수·면 수·비용을 확인하고, 이 앱에서 비용을 승인하면 한 번 생성합니다.</small>
+                        <label className="field"><span>모델링에 사용할 이미지</span>
+                          <select data-testid="workbench-model-image-mode" value={modelImageMode}
+                            onChange={e => {setModelImageMode(e.target.value as "single" | "multiview");setApproved(false);}}>
+                            <option value="single">채택한 이미지 한 장</option>
+                            <option value="multiview" disabled={!wholeReference}>채택한 4방향 이미지</option>
+                          </select></label>
                         <label className="field"><span>Tripo에서 확인한 토폴로지</span>
                           <select data-testid="workbench-studio-topology" value={studioTopology}
                             onChange={e => setStudioTopology(e.target.value as "quad" | "triangle")}>
                             <option value="quad">쿼드</option><option value="triangle">삼각형</option>
                           </select></label>
-                        <label className="field"><span>현재 화면의 생성 비용 (크레딧)</span>
-                          <input data-testid="workbench-observed-model-cost" type="number" min={0} step={1}
-                            value={observedModelCost} onChange={e => setObservedModelCost(Number(e.target.value))} />
-                        </label>
                       </>}
                     </>}
                     <label className="field">
@@ -2087,7 +2093,7 @@ export function AssetWorkbench({
                       <br />
                       {modelEditBase
                         ? "사용 가능 횟수는 Tripo 화면에서 확인합니다. 횟수를 소진하면 멈춥니다. 이전 버전은 보존됩니다."
-                        : `${modelInput === "whole" ? externalModel ? "채택한 전체 4방향 원본" : "선택한 전체 이미지" : "채택한 파츠 이미지"}로 Tripo의 생성 개수 기능을 사용합니다. 화면에서 지원하지 않는 개수는 실행 전에 알려드립니다.`}
+                        : `${modelInput === "whole" ? externalModel && modelImageMode === "multiview" ? "채택한 전체 4방향 원본" : "선택한 전체 이미지" : "채택한 파츠 이미지"}로 Tripo의 생성 개수 기능을 사용합니다. 화면에서 지원하지 않는 개수는 실행 전에 알려드립니다.`}
                     </div>
                     <small className="wb-muted">
                       {modelEditBase
@@ -2096,7 +2102,7 @@ export function AssetWorkbench({
                     </small>
                     {approvalBox()}
                     {launch(
-                      `${roleLabels[modelRole]} 모델 ${modelEditBase ? (modelEditScope === "all" ? "전체 리롤" : "부분 재생성") : `${modelCount}개 만들기`}`,
+                      `${roleLabels[modelRole]} 모델 ${modelEditBase ? (modelEditScope === "all" ? "전체 리롤" : "부분 재생성") : `${modelCount}개 ${externalModel ? "준비 · 비용 확인" : "만들기"}`}`,
                       {
                         step: "model",
                         role: modelRole,
