@@ -78,6 +78,9 @@ const isAssemblyAppearanceReview = (check: WorkbenchCheck) =>
 const isRigLimitsReview = (check: WorkbenchCheck) =>
   check.name === "remaining_limitations" && check.severity === "warning" &&
   check.visualCategory === undefined;
+const isReferenceVisualReview = (check: WorkbenchCheck) =>
+  check.name === "visual_quality" &&
+  ["appearance", "alignment", "view_consistency"].includes(check.visualCategory ?? "");
 
 export function blocksWorkbenchCheck(
   step: WorkbenchStep,
@@ -90,7 +93,7 @@ export function blocksWorkbenchCheck(
     (check.detail !== undefined &&
       (typeof check.detail !== "string" || check.detail.length > 600)) ||
     (check.visualCategory !== undefined &&
-      !(step === "assembly"
+      !(["assembly", "reference"].includes(step)
         ? Object.hasOwn(visualCategories, check.visualCategory)
         : isVisualObservation(check)))
   )
@@ -98,6 +101,7 @@ export function blocksWorkbenchCheck(
   return (
     check.passed !== true &&
     !(step === "rig" && isRigLimitsReview(check)) &&
+    !(step === "reference" && isReferenceVisualReview(check)) &&
     !(step === "assembly" && isAssemblyAppearanceReview(check)) &&
     !(step === "separate" && isVisualObservation(check)) &&
     !(step === "surface" && (Object.hasOwn(surfaceReviewChecks,check.name) ||

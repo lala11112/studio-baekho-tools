@@ -111,7 +111,7 @@ class MockExecutor implements WorkbenchExecutor {
         write("review.png", image(ctx.job.id), "image");
       }
       if (step === "reference") {
-        const times = Array.from(
+        const times = ctx.job.request.referenceTimes ?? Array.from(
           { length: ctx.job.request.referenceFrameCount ?? 3 },
           (_, i) =>
             (i * (ctx.job.request.duration ?? 2)) /
@@ -759,6 +759,18 @@ test("reference review precedes animation and BOM multiview manifests preserve s
   assert.equal(x.engine.get(x.w.id).selections.unity, undefined);
 });
 
+test("incorrect reference views remain non-selectable drafts with real files and no automatic retry", async (t) => {
+  const x=await setup(t);await x.assemble();await x.execute({step:"rig",prompt:"rig"},true);
+  x.executor.hook=(ctx,result)=>{
+    result.checks=[{name:"wrong_side_view",passed:false,severity:"error",visualCategory:"view_consistency",detail:"A front image was generated for the side."}];
+    ctx.onDraft?.(result);result.status="needs_input";result.recovery={kind:"blocked",reason:"Review incorrect direction"};return result;
+  };
+  const job=await x.execute({step:"reference",prompt:"idle",motion:"Idle",referenceTimes:[0,1,2]});
+  assert.equal(job.status,"needs_input");assert.equal(job.candidates.length,0);
+  assert.equal(job.draftCandidates?.[0].artifacts.filter(a=>a.kind==="image").length,9);
+  assert.equal(job.draftChecks?.[0].passed,false);
+  assert.throws(()=>x.engine.accept(x.w.id,job.id));
+});
 test("host rejects static repeated multiview images instead of calling them animation references", async (t) => {
   const x = await setup(t);
   await x.assemble();
@@ -963,9 +975,19 @@ test("reference phase count is explicit and must match generated frames includin
     prompt: "wave",
     motion: "wave",
     referenceFrameCount: 4,
+    referenceTimes: [0,0.4,1.4,2],
     duration: 2,
   });
   assert.equal(four.status, "review", four.summary);
+  assert.deepEqual(four.request.referenceTimes,[0,0.4,1.4,2]);
+  assert.throws(()=>x.engine.execute(x.w.id,{step:"reference",prompt:"wave",motion:"wave",referenceFrameCount:3,referenceTimes:[0,2,1]}),/참조 시점/);
+  x.executor.hook=(ctx,result)=>{
+    const manifest=result.candidates[0].artifacts.find(a=>a.kind==="frames")!;
+    const file=path.join(ctx.workspace,manifest.path),doc=JSON.parse(fs.readFileSync(file,"utf8").replace(/^\uFEFF/,""));
+    doc.frames[1].time=0.5;fs.writeFileSync(file,JSON.stringify(doc));return result;
+  };
+  const shifted=await x.execute({step:"reference",prompt:"wave",motion:"wave",referenceFrameCount:4,referenceTimes:[0,0.4,1.4,2],duration:2});
+  assert.equal(shifted.status,"failed");assert.match(shifted.summary,/저장된 요청/);
   assert.throws(
     () =>
       x.engine.execute(x.w.id, {

@@ -21,7 +21,7 @@ export type WorkbenchObject = {
 export type WorkbenchRigTarget = { objectId: string; extraBones: boolean };
 export type WorkbenchArtifact = {
   path: string;
-  kind: "image" | "model" | "blend" | "report" | "frames" | "export";
+  kind: "image" | "video" | "model" | "blend" | "report" | "frames" | "export";
   role?: string;
   view?: WorkbenchView;
   sha256: string;
@@ -94,6 +94,9 @@ export type WorkbenchRequest = {
   fps?: number;
   duration?: number;
   referenceFrameCount?: number;
+  referenceTimes?: number[];
+  /** Absent on historical jobs means independent static poses. New UI uses video AI. */
+  motionVideo?: { serviceUrl: string; model: string };
   loop?: boolean;
 };
 export type WorkbenchApproval = {

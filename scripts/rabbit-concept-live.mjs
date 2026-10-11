@@ -10,7 +10,7 @@ const prompt = `게임용 3D 캐릭터 제작을 위한 서로 다른 토끼 디
 후보 1: 작고 둥근 얼굴과 통통한 몸, 곧게 선 긴 귀로 귀여운 인상.
 후보 2: 조금 더 날렵한 얼굴과 탄력 있는 뒷다리, 귀 끝이 살짝 벌어진 생동감 있는 인상.
 각 결과 옆의 설명으로 후보 1과 후보 2를 구분하되 이미지 안에는 번호를 쓰지 마세요. 실제 이미지 두 장을 생성하고, 하나의 이미지를 복제하거나 자르지 마세요.`;
-const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.15/win-unpacked/Partsmith.exe") });
+const app = await electron.launch({ executablePath: path.resolve(process.env.PARTSMITH_EXECUTABLE ?? "release/0.6.16/win-unpacked/Partsmith.exe") });
 const page = await app.firstWindow();
 await page.waitForSelector(".home");
 const call = c => page.evaluate(c => window.desktop.call(c), c);
@@ -105,18 +105,62 @@ for await (const line of readline.createInterface({input:process.stdin})) {
       fs.writeFileSync('artifacts/runtime/rabbit-rig-dispatch.json',JSON.stringify({appVersion:'0.6.15',trigger:'workbench-execute-rig',assemblySelection:w.selections.assembly,job},null,2));
       console.log(JSON.stringify({rigJobId:job.id,status:job.status,request:job.request,dependencies:job.dependencies}));
     }
+    else if(command.action==='start-rabbit-reference') {
+      const motion=command.motion;
+      if(!['Rabbit_Idle','Rabbit_Jump'].includes(motion) || workbench.activeJobId ||
+        workbench.jobs.some(j=>j.step==='reference' && j.request.motion===motion)) throw Error('Exact new idle/jump reference scope required; do not duplicate generation');
+      const rig=workbench.jobs.find(j=>j.id==='a79d117c-027f-468f-b4c1-445e31c97117');
+      if(rig?.status!=='review' || !rig.candidates.some(c=>c.id==='rabbit-rig-v3')) throw Error('Reviewed rabbit rig required');
+      await page.getByTestId('workbench-step-rig').click();
+      if(!workbench.selections.rig) await page.getByTestId('workbench-accept-rig').click();
+      const idle=motion==='Rabbit_Idle';
+      await page.getByTestId('workbench-step-motion').click();
+      await page.getByTestId('workbench-tab-reference').click();
+      await page.getByTestId('workbench-motion-name').fill(motion);
+      await page.getByTestId('workbench-motion-duration').fill('2');
+      await page.getByTestId('workbench-motion-fps').fill('30');
+      await page.getByTestId('workbench-reference-count').fill(idle?'3':'5');
+      await page.getByTestId('workbench-reference-times').fill(idle?'0, 1, 2':'0, 0.4, 0.9, 1.4, 2');
+      await page.getByTestId('workbench-motion-loop').setChecked(idle);
+      await page.getByTestId('workbench-motion-prompt').fill(`채택한 둥근 흰색 네 발 토끼의 ${idle?'대기 반복':'제자리 점프'} 2D 동작 참조 원본을 생성하세요. ${idle?'0초 편안한 중립/1초 약한 들숨과 귀 미세 움직임/2초 0초 자세로 복귀. 네 발 접지는 고정하고 체형이 바뀌지 않게 합니다.':'0초 중립/0.4초 몸을 낮춰 도약 준비/0.9초 정점에서 네 발 모두 공중, 뒷다리와 앞다리는 자연스럽게 접힘/1.4초 같은 자리로 착지하여 충격 흡수/2초 처음 중립으로 복귀. X/Z 이동·전진 점프 없이 수직으로 뜁니다.'} 각 시점마다 정면·토끼의 왼쪽 측면·후면 독립 원본을 하나씩, 총 ${idle?9:15}장 생성합니다. 동일 시점의 세 방향은 몸통 높이, 네 발의 굽힘/접지, 좌우 귀 각도와 꼬리 위치가 같은 하나의 자세여야 합니다. 고정 카메라·동일 배율/캔버스/바닥선, 전신과 점프 높이가 잘리지 않는 여백, 깨끗한 단색 배경. 원래 얼굴·볼·수염·분홍 귀 안쪽/코·검은 눈·둥근 몸체를 보존합니다. 실제 imagegen 원본을 사용하고 시트/크롭/거울 복사/Blender 렌더로 대신하지 마세요. 정면 생성 뒤 그 원본과 캐릭터 참조를 측면·후면에 사용해 동일 포즈를 맞추세요. 0초와2초도 독립 원본으로 생성하되 반복/복귀 자세를 맞추세요. 각 원본 저장 직후 부분 결과를 보존하세요. 이미지별 방향과 시간, 실제 프롬프트를 보고서에 기록하고 불일치는 솔직히 남기세요. 사용자 검토 전 3D 애니메이션이나 다음 단계는 절대 실행하지 마세요.`);
+      const refPrompt=page.getByTestId('workbench-motion-prompt');
+      await refPrompt.fill((await refPrompt.inputValue())+' 카메라 방향을 엄격히 지키세요. 측면 생성에는 공급된 neutral_left 원본의 정확한 90도 프로필 카메라를 함께 사용하고, 같은 시점 정면은 포즈 정보만 참고합니다. 사선 정면이나3/4로 바꾸면 안 됩니다. 후면도 neutral_back의 정확한180도 카메라입니다. 점프 시 세 방향 모두 땅에서 같은 높이로 떠 있고, 동일한 발 접지/공중 상태여야 합니다. 큰 외형 불일치나 잘못된 방향은 오류로 남기고, 단순 배경 명암 차이는 그 영향만 구체적으로 기록하세요.');
+      await page.getByTestId('workbench-approve').check();
+      await page.getByTestId('workbench-execute-reference').click();
+      await page.waitForTimeout(700);
+      const after=await call({type:'state'}), w=after.workbenches.find(w=>w.projectId===project.id), job=w.jobs.find(j=>j.step==='reference'&&j.request.motion===motion);
+      if(!job || w.selections.rig?.candidateId!=='rabbit-rig-v3') throw Error('Reference button dispatch failed');
+      fs.writeFileSync(`artifacts/runtime/rabbit-${motion}-reference-dispatch.json`,JSON.stringify({appVersion:'0.6.16',trigger:'workbench-execute-reference',rigSelection:w.selections.rig,job},null,2));
+      console.log(JSON.stringify({referenceJobId:job.id,status:job.status,request:job.request}));
+    }
+    else if(command.action==='show-reference') {
+      await page.getByTestId('workbench-step-motion').click();
+      await page.getByTestId('workbench-tab-reference').click();
+      if(command.motion) await page.getByTestId('workbench-motion-name').fill(command.motion);
+      await page.screenshot({path:'artifacts/runtime/rabbit-reference-live.png'});
+      const after=await call({type:'state'}), w=after.workbenches.find(w=>w.projectId===project.id);
+      console.log(JSON.stringify(w.jobs.filter(j=>j.step==='reference').map(j=>({id:j.id,motion:j.request.motion,status:j.status,summary:j.summary,candidates:j.candidates.length}))));
+    }
     else if(command.action==='show-rig') {
       await page.getByTestId('workbench-step-rig').click();
       await page.screenshot({path:'artifacts/runtime/rabbit-rig-live.png'});
       const after=await call({type:'state'}), w=after.workbenches.find(w=>w.projectId===project.id), job=w.jobs.find(j=>j.step==='rig');
       console.log(JSON.stringify({selection:w.selections.rig,jobId:job?.id,status:job?.status,summary:job?.summary,checks:job?.checks}));
     }
-    else if(command.action==='recheck-existing-assembly' || command.action==='recheck-existing-rig') {
-      const step=command.action==='recheck-existing-rig'?'rig':'assembly';
+    else if(command.action==='inspect-reference') {
+      const job=workbench.jobs.find(j=>j.id===command.jobId&&j.step==='reference');
+      if(!job || workbench.activeJobId) throw Error('Idle existing reference required');
+      await page.getByTestId('workbench-step-motion').click();await page.getByTestId('workbench-tab-reference').click();
+      await page.getByTestId('workbench-motion-name').fill(job.request.motion);
+      await page.getByTestId('workbench-inspect-saved').click();
+    }
+    else if(command.action==='recheck-existing-assembly' || command.action==='recheck-existing-rig' || command.action==='recheck-existing-reference') {
+      const step=command.action==='recheck-existing-reference'?'reference':command.action==='recheck-existing-rig'?'rig':'assembly';
       const job=workbench.jobs.find(j=>j.step===step);
       if(workbench.activeJobId || job?.id!==command.jobId || !['needs_input','failed','cancelled'].includes(job.status))
         throw Error('Exact stopped existing assembly job required');
-      await page.getByTestId(`workbench-step-${step}`).click();
+      await page.getByTestId(`workbench-step-${step==='reference'?'motion':step}`).click();
+      if(step==='reference') { await page.getByTestId('workbench-tab-reference').click(); await page.getByTestId('workbench-motion-name').fill(job.request.motion); }
       await page.getByTestId('workbench-retry').click();
     }
     else if(command.action==='refine-reviewed-rabbit' || command.action==='correct-stopped-rabbit') {

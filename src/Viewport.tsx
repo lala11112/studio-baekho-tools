@@ -3,6 +3,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { skeletonOverlay } from "./skeleton-overlay";
 import {
   RotateCcw,
   Move,
@@ -36,9 +37,13 @@ export function Viewport({
     [clip, setClip] = useState(""),
     [playing, setPlaying] = useState(true),
     [explode, setExplode] = useState(false),
+    [showSkeleton, setShowSkeleton] = useState(true),
+    [boneCount, setBoneCount] = useState(0),
     [mode, setMode] = useState<"translate" | "rotate" | "scale">("translate");
   const callbacks = useRef({ onSelect, onTransform });
   callbacks.current = { onSelect, onTransform };
+  const skeletonVisible = useRef(showSkeleton);
+  skeletonVisible.current = showSkeleton;
   const sources = previewId
     ? [
         {
@@ -67,6 +72,8 @@ export function Viewport({
       frame = 0;
     const mixers: THREE.AnimationMixer[] = [];
     const actions: THREE.AnimationAction[] = [];
+    const skeletons: NonNullable<ReturnType<typeof skeletonOverlay>>[] = [];
+    setBoneCount(0);
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#151a1b");
     scene.fog = new THREE.Fog("#151a1b", 9, 22);
@@ -158,6 +165,12 @@ export function Viewport({
           if (explode && !previewId) group.position.x += (i - 1) * 0.65;
           group.traverse((o) => (o.userData.partId = s.id));
           objects.set(s.id, group);
+          const skeleton = skeletonOverlay(gltf.scene);
+          if (skeleton) {
+            skeleton.overlay.visible = skeletonVisible.current;
+            skeletons.push(skeleton); scene.add(skeleton.overlay);
+            setBoneCount(skeletons.reduce((sum, item) => sum + item.count, 0));
+          }
           if (s.id === selectedPart && !previewId) {
             scene.add(new THREE.BoxHelper(group, 0xaee6bf));
             if (!project.parts.find((p) => p.id === s.id)?.locked && !explode)
@@ -244,12 +257,13 @@ export function Viewport({
     });
     resize.observe(host.current);
     const clock = new THREE.Clock();
-    api.current = { camera, orbit, controls, actions, mixers, objects, scene };
+    api.current = { camera, orbit, controls, actions, mixers, objects, scene, skeletons };
     controls.setMode(mode);
     const tick = () => {
       frame = requestAnimationFrame(tick);
       const dt = clock.getDelta();
       if (api.current?.playing !== false) mixers.forEach((m) => m.update(dt));
+      skeletons.forEach(s => { if (s.overlay.visible) s.update(); });
       orbit.update();
       renderer.render(scene, camera);
     };
@@ -278,6 +292,9 @@ export function Viewport({
     if (api.current) api.current.playing = playing;
   }, [playing]);
   useEffect(() => {
+    api.current?.skeletons.forEach((s: NonNullable<ReturnType<typeof skeletonOverlay>>) => { s.overlay.visible = showSkeleton; });
+  }, [showSkeleton]);
+  useEffect(() => {
     api.current?.controls.setMode(mode);
   }, [mode]);
   useEffect(() => {
@@ -295,7 +312,7 @@ export function Viewport({
     api.current?.orbit.update();
   }
   return (
-    <div className="viewport">
+    <div className="viewport" data-bone-count={boneCount} data-skeleton-visible={boneCount > 0 && showSkeleton}>
       <div className="canvas" ref={host} />
       <div className="viewport-top">
         <span className="viewport-label">
@@ -304,6 +321,7 @@ export function Viewport({
           <small> PERSPECTIVE</small>
         </span>
         <div className="segmented">
+          {boneCount > 0 && <button data-testid="viewport-skeleton-toggle" aria-pressed={showSkeleton} onClick={() => setShowSkeleton(!showSkeleton)} title="실제 리그의 뼈와 관절 표시">뼈대 {showSkeleton ? "ON" : "OFF"} · {boneCount}</button>}
           <button onClick={() => view(0, 1, 4.6)}>정면</button>
           <button onClick={() => view(4.6, 1, 0)}>측면</button>
           <button onClick={() => view(0, 1, -4.6)}>후면</button>

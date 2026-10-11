@@ -287,6 +287,17 @@ test("rig collects a completed file after stream loss but still validates files 
     } finally { fs.rmSync(f.root,{recursive:true,force:true}); }
   }
 });
+test("saved reference failures are returned unchanged for host draft validation without invoking a worker",async()=>{
+  const f=fixture("reference"),worker=new Worker();
+  worker.probe=async()=>{throw Error("No probe for saved files");};
+  const folder=path.join(f.context.workspace,"outputs/reference");fs.mkdirSync(folder,{recursive:true});
+  const task={run:{workspace:f.context.workspace},stage:{id:"reference"},resultPath:path.join(folder,"result.json")} as WorkerTask;
+  const result=output(task);result.checks=[{name:"wrong_side",passed:false,severity:"error",visualCategory:"view_consistency",detail:"Front instead of side"}];
+  fs.writeFileSync(task.resultPath,JSON.stringify(result));const before=digest(task.resultPath);
+  try{const saved=await new CodexWorkbenchExecutor(worker,f.services).inspectSaved(f.context);
+    assert.equal(saved.status,"needs_input");assert.equal(saved.checks[0].passed,false);assert.equal(worker.calls.length,0);assert.equal(digest(task.resultPath),before);
+  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
 test("a saved UTF-8 BOM completed result is revalidated without regenerating candidates", async () => {
   const f = fixture("model"),
     worker = new Worker();

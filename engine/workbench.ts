@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { Store, uid } from "./store";
+import { MOTION_VIDEO_VIEWS, motionServiceUrl, validateVideoSources, type MotionVideoSources } from "../shared/motion-video";
 import { inspectWorkbenchGlb } from "./glb-inspect";
 import {
   blocksWorkbenchCheck,
@@ -392,7 +393,7 @@ export class WorkbenchEngine {
       case "rig":
         return ["assembly"];
       case "reference":
-        return ["concept", "rig"];
+        return ["concept", ...(request.motionVideo && w.selections["whole-reference"] ? ["whole-reference"] : []), "rig"];
       case "animation":
         return ["rig", `reference:${request.motion}`];
       case "unity": {
@@ -411,6 +412,13 @@ export class WorkbenchEngine {
     if (typeof request.prompt !== "string" || request.prompt.length > 12000)
       throw new Error("작업 지시는 12,000자 이내로 작성하세요.");
     const r = structuredClone(request);
+    if (r.motionVideo) {
+      if (r.step !== "reference" || r.executionMode !== "codex-app" ||
+          typeof r.motionVideo.model !== "string" || !r.motionVideo.model.trim() || r.motionVideo.model.length > 100)
+        throw Error("동작 영상은 앱 Codex 실행과 실제 사용할 서비스·모델 이름이 필요합니다.");
+      motionServiceUrl(r.motionVideo.serviceUrl);
+      r.motionVideo.model = r.motionVideo.model.trim();
+    }
     if (r.rigProfile !== undefined && (r.step !== "rig" || !["automatic", "quadruped"].includes(r.rigProfile)))
       throw new Error("잘못된 리깅 체형 설정입니다.");
     if (r.rigControls !== undefined && (r.step !== "rig" || !r.rigControls ||
@@ -602,6 +610,11 @@ export class WorkbenchEngine {
       r.duration ??= 2;
       r.loop ??= true;
       r.referenceFrameCount ??= 3;
+      if (r.referenceTimes !== undefined && (!Array.isArray(r.referenceTimes) ||
+          r.referenceTimes.length !== r.referenceFrameCount || r.referenceTimes[0] !== 0 ||
+          r.referenceTimes.at(-1) !== r.duration || r.referenceTimes.some((time, index) =>
+            !Number.isFinite(time) || time < 0 || time > r.duration! || (index > 0 && time <= r.referenceTimes![index - 1]))))
+        throw new Error("참조 시점은 프레임 수와 일치하며 0초부터 종료까지 증가해야 합니다.");
       if (
         !Number.isInteger(r.referenceFrameCount) ||
         r.referenceFrameCount < 3 ||
@@ -676,7 +689,7 @@ export class WorkbenchEngine {
     }
     if (externalMode(r.executionMode) &&
         !((r.step === "concept" && r.provider === "gpt") || (r.step === "model" && r.externalModel) ||
-          (r.step === "surface" && r.externalSurface)))
+          (r.step === "surface" && r.externalSurface) || (r.step === "reference" && r.motionVideo)))
       throw new Error("현재 대화 실행 연결은 GPT 이미지, 전체 P2 모델과 최초 UV·텍스처를 지원합니다.");
     if (r.step === "assembly") {
       const route = workbenchModelInput(this.chosen(w, "surface").job.request);
@@ -694,7 +707,8 @@ export class WorkbenchEngine {
           (j.externalExecution.state === "prepared" && j.status !== "cancelled"))))
       throw new Error("이 단계의 외부 실행이 대기 중입니다. 기존 작업의 결과를 먼저 회수하세요.");
     if (
-      w.jobs.some((j) => j.slot === slot && j.status === "submission_unknown")
+      w.jobs.some((j) => j.slot === slot && j.status === "submission_unknown" &&
+        !(r.motionVideo && j.step === "reference" && !j.request.motionVideo && !j.externalExecution))
     )
       throw new Error(
         "이 단계의 이전 제출 여부를 먼저 확인하세요. 중복 생성하지 않습니다.",
@@ -703,6 +717,7 @@ export class WorkbenchEngine {
       w.jobs.some(
         (j) =>
           j.slot === slot &&
+          !(r.motionVideo && j.step === "reference" && !j.request.motionVideo && !j.externalExecution) &&
           j.status !== "review" &&
           this.executor.hasSubmission?.(j),
       )
@@ -1051,6 +1066,8 @@ export class WorkbenchEngine {
           new Set(s.texture.texturePaths).size !== s.texture.texturePaths.length ||
           s.texture.texturePaths.some(p => !artifacts.some(a => a.path === p && a.kind === "image" && a.role === "texture")))
         throw new Error("Smart UV·텍스처의 단계별 출처·비용·FBX 원본·텍스처 파일이 일치하지 않습니다.");
+    } else if (job.request.motionVideo) {
+      if (!external.worker) throw Error("동작 영상은 앱 실행 및 호스트 원본 다운로드 기록이 필요합니다.");
     } else {
       const url = new URL(receipt.conversationUrl ?? "");
       if (url.protocol !== "https:" || url.hostname !== "chatgpt.com" || url.port ||
@@ -1063,7 +1080,12 @@ export class WorkbenchEngine {
         artifacts.some(a => !receipt.files.some(f => f.path === a.path &&
           f.sha256 === hash(safeRelative(workspace, a.path)))))
       throw new Error("다운로드 원본 목록 또는 해시가 일치하지 않습니다.");
-    this.applyResult(w, job, receipt.result);
+    if (job.request.motionVideo && receipt.result.checks.some(check => blocksWorkbenchCheck(job.step, check))) {
+      this.applyReferenceDraft(w, job, receipt.result);
+      job.status = "needs_input";
+      job.summary = receipt.result.summary;
+      job.recovery = { attempt: 0, maxAttempts: 3, state: "blocked", reason: "영상 동작·방향 검사에 실패했습니다. 원본 초안을 검토하세요. 자동 재생성하지 않습니다." };
+    } else this.applyResult(w, job, receipt.result);
     external.state = "received";
     if (job.request.externalModel) external.studioModels = structuredClone(receipt.studioModels);
     else if (job.request.externalSurface) external.surface = structuredClone(receipt.surface);
@@ -1109,10 +1131,11 @@ export class WorkbenchEngine {
               if (controller.signal.aborted || token !== invocation) return;
               const latest = this.get(id),
                 current = this.job(latest, jobId);
-              if (current.status !== "running" || current.step !== "separate")
+              if (current.status !== "running" || !["separate", "reference"].includes(current.step))
                 return;
               this.verifyArtifacts(latest, inputs);
-              this.applyDraft(latest, current, draft);
+              if (current.step === "reference") this.applyReferenceDraft(latest, current, draft);
+              else this.applyDraft(latest, current, draft);
               current.updatedAt = now();
               this.save(latest);
             },
@@ -1464,7 +1487,7 @@ export class WorkbenchEngine {
           bytes = fs.statSync(file).size;
         if (
           !bytes ||
-          !["image", "model", "blend", "report", "frames", "export"].includes(
+          !["image", "video", "model", "blend", "report", "frames", "export"].includes(
             a.kind,
           )
         )
@@ -1539,6 +1562,17 @@ export class WorkbenchEngine {
       roles.add(match[1]);
     }
   }
+  private applyReferenceDraft(w: Workbench, job: WorkbenchJob, result: WorkbenchResult) {
+    if (job.step !== "reference" || !this.current(w, job) || result.candidates.length !== 1)
+      throw new Error("현재 동작 참조 한 세트만 초안으로 표시할 수 있습니다.");
+    const candidates = this.registerCandidates(w, job, result.candidates);
+    this.validateFrames(job, result.candidates[0], this.workspace(w, job));
+    const images = candidates[0].artifacts.filter(a => a.kind === "image");
+    if (images.length !== 3 * job.request.referenceFrameCount! || (!job.request.motionVideo && new Set(images.map(a => a.sha256)).size !== images.length))
+      throw new Error("동작 참조 초안의 독립 원본 수가 요청과 다릅니다.");
+    job.draftCandidates = candidates;
+    job.draftChecks = normalizeWorkbenchChecks("reference", result.checks);
+  }
   private applyDraft(w: Workbench, job: WorkbenchJob, result: WorkbenchResult) {
     if (job.step !== "separate" || !this.current(w, job))
       throw new Error(
@@ -1603,6 +1637,8 @@ export class WorkbenchEngine {
     if (kind === "model" && ext === ".glb") {
       inspectWorkbenchGlb(data);
     }
+    if (kind === "video" && (ext !== ".mp4" || data.length < 32 || data.toString("ascii", 4, 8) !== "ftyp"))
+      throw Error("동작 영상은 실제 MP4 원본이어야 합니다.");
     if (kind === "model" && ![".glb", ".fbx", ".obj", ".gltf"].includes(ext))
       throw new Error("지원하지 않는 모델 파일입니다.");
     if (kind === "blend" && data.toString("ascii", 0, 7) !== "BLENDER")
@@ -1769,6 +1805,8 @@ export class WorkbenchEngine {
       fps: number;
       duration: number;
       camera: string;
+      source?: string;
+      videos?: MotionVideoSources;
       frames: { time: number; front: string; side: string; back: string }[];
     }>(safeRelative(workspace, manifest.path));
     if (
@@ -1781,6 +1819,16 @@ export class WorkbenchEngine {
       doc.frames.length !== job.request.referenceFrameCount
     )
       throw new Error("멀티뷰 동작 설정과 프레임 명세가 일치하지 않습니다.");
+    if (job.request.motionVideo) {
+      if (doc.source !== "video-ai") throw Error("정지 이미지 대신 동작 AI의 원본 영상이 필요합니다.");
+      validateVideoSources(doc.videos);
+      const originals = MOTION_VIDEO_VIEWS.map(view => {
+        const a = candidate.artifacts.find(a => a.kind === "video" && a.path === doc.videos![view].path && a.role === view);
+        if (!a || doc.videos![view].startTime !== 0) throw Error("등록한 원본 영상·방향·검토 구간이 일치하지 않습니다.");
+        return hash(safeRelative(workspace, a.path));
+      });
+      if (new Set(originals).size !== 3) throw Error("같은 영상을 다른 방향으로 복제할 수 없습니다.");
+    }
     if (
       Math.abs(doc.frames[0].time) > 0.000001 ||
       Math.abs(doc.frames.at(-1)!.time - doc.duration) > 0.000001
@@ -1788,6 +1836,9 @@ export class WorkbenchEngine {
       throw new Error(
         "멀티뷰 기준 이미지는 시작 0초와 종료 시점을 포함해야 합니다.",
       );
+    if (job.request.referenceTimes && doc.frames.some((frame, index) =>
+      Math.abs(frame.time - job.request.referenceTimes![index]) > 0.000001))
+      throw new Error("생성된 참조 시점이 저장된 요청과 다릅니다.");
     let previous = -1;
     const phases = {
       front: new Set<string>(),
@@ -1816,9 +1867,11 @@ export class WorkbenchEngine {
         phases[view].add(hash(safeRelative(workspace, artifact.path)));
       }
     }
-    if (Object.values(phases).some((p) => p.size < 3))
+    if (Object.values(phases).some((p) => p.size < (job.request.motionVideo ? 2 : 3)))
       throw new Error(
-        "정지 이미지 복제 대신 각 방향에서 세 개 이상의 서로 다른 동작 프레임이 필요합니다.",
+        job.request.motionVideo
+          ? "각 방향의 실제 영상에서 두 개 이상의 서로 다른 동작 프레임이 필요합니다."
+          : "정지 이미지 복제 대신 각 방향에서 세 개 이상의 서로 다른 동작 프레임이 필요합니다.",
       );
   }
   select(id: string, jobId: string, candidateId: string) {
@@ -2011,11 +2064,11 @@ export class WorkbenchEngine {
     this.workerIdle();
     const job = this.job(w, jobId);
     if (
-      job.step !== "separate" ||
-      !["failed", "needs_input", "cancelled"].includes(job.status)
+      !["separate", "reference"].includes(job.step) ||
+      !["failed", "needs_input", "cancelled", ...(job.step === "reference" ? ["submission_unknown"] : [])].includes(job.status)
     )
       throw new Error(
-        "중지된 파츠 분리 작업에서만 저장된 이미지를 확인할 수 있습니다.",
+        "중지된 분리·동작 참조 작업에서만 저장된 이미지를 확인할 수 있습니다.",
       );
     if (!this.executor.inspectSaved)
       throw new Error("저장된 이미지 확인 기능을 사용할 수 없습니다.");
@@ -2033,7 +2086,7 @@ export class WorkbenchEngine {
     const originalStatus = job.status;
     job.status = "running";
     job.summary =
-      "저장된 파츠 이미지를 확인합니다. 새 이미지는 생성하지 않습니다.";
+      "저장된 이미지를 확인합니다. 새 이미지는 생성하지 않습니다.";
     delete job.recovery;
     job.updatedAt = now();
     w.activeJobId = job.id;
@@ -2057,8 +2110,10 @@ export class WorkbenchEngine {
         if (result.status === "completed") {
           this.applyResult(latest, current, result);
         } else {
-          if (result.candidates.length)
-            this.applyDraft(latest, current, result);
+          if (result.candidates.length) {
+            if (current.step === "reference") this.applyReferenceDraft(latest, current, result);
+            else this.applyDraft(latest, current, result);
+          }
           current.status =
             originalStatus === "cancelled" ? "cancelled" : "needs_input";
           current.summary =

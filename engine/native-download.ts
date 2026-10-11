@@ -14,11 +14,12 @@ export class NativeDownloadCollector {
   constructor(
     private downloads: string,
     private workspace: string,
+    private media: "model" | "video" = "model",
   ) {}
   private snapshot() {
     const found = new Map<string, string>();
     for (const name of fs.readdirSync(this.downloads)) {
-      if (!/\.(fbx|zip)$/i.test(name)) continue;
+      if (!(this.media === "video" ? /\.mp4$/i : /\.(fbx|zip)$/i).test(name)) continue;
       const file = path.join(this.downloads, name),
         stat = fs.lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink()) continue;
@@ -62,13 +63,13 @@ export class NativeDownloadCollector {
     const bytes = fs.readFileSync(source);
     if (this.snapshot().get(name) !== stamp || bytes.length !== stat.size)
       return { status: "pending" };
-    const valid = /\.fbx$/i.test(name)
+    const valid = this.media === "video" ? bytes.toString("ascii", 4, 8) === "ftyp" : /\.fbx$/i.test(name)
       ? bytes
           .subarray(0, 23)
           .equals(Buffer.from("Kaydara FBX Binary  \x00\x1a\x00")) ||
         /^; FBX/.test(bytes.subarray(0, 100).toString())
       : bytes.readUInt32LE(0) === 0x04034b50;
-    if (!valid) throw Error("파일 내용이 FBX/ZIP 원본 형식과 다릅니다.");
+    if (!valid) throw Error("파일 내용이 요청한 원본 형식과 다릅니다.");
     const relative = `outputs/native-downloads/${id}/${name}`;
     const destination = path.join(this.workspace, relative);
     fs.mkdirSync(path.dirname(destination), { recursive: true });

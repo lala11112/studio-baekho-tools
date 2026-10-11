@@ -146,6 +146,7 @@ const imageRequest = (request: WorkbenchJob["request"]) => {
     fps,
     duration,
     referenceFrameCount,
+    referenceTimes,
     loop,
   } = request;
   return {
@@ -158,6 +159,7 @@ const imageRequest = (request: WorkbenchJob["request"]) => {
     fps,
     duration,
     referenceFrameCount,
+    referenceTimes,
     loop,
   };
 };
@@ -238,6 +240,7 @@ const resultSchema = z
                     path: z.string().min(1),
                     kind: z.enum([
                       "image",
+                      "video",
                       "model",
                       "blend",
                       "report",
@@ -333,6 +336,7 @@ export const workbenchResultJsonSchema = {
                   type: "string",
                   enum: [
                     "image",
+                    "video",
                     "model",
                     "blend",
                     "report",
@@ -1555,6 +1559,13 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
   async inspectSaved(
     context: WorkbenchExecutionContext,
   ): Promise<WorkbenchResult> {
+    if (context.job.step === "reference") {
+      const result: WorkbenchResult = resultSchema.parse(readJson(this.file(context.workspace, "outputs/reference/result.json")));
+      result.checks = normalizeWorkbenchChecks("reference", result.checks);
+      if (result.checks.some(c => blocksWorkbenchCheck("reference", c)))
+        return {...result, status:"needs_input", recovery:{kind:"blocked", reason:"참조 방향·자세를 검토해 주세요. 원본만 표시하며 재생성하지 않습니다."}};
+      return result;
+    }
     if (
       context.job.step === "separate" &&
       !context.separationVariant &&
@@ -1879,6 +1890,15 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         .match(/^(.*\/jobs\/[^/]+\/)/)?.[1];
       if (!prefix || !Array.isArray(manifest.frames))
         throw Error("선택한 동작 이미지 명세의 기준 폴더가 없습니다.");
+      if (manifest.source === "video-ai") {
+        for (const view of ["front", "side", "back"]) {
+          const clip = manifest.videos?.[view];
+          const original: string = typeof clip?.path === "string" ? path.posix.normalize(prefix + clip.path.replaceAll("\\", "/")) : "";
+          const video = copied.find(item => item.kind === "video" && item.path.replaceAll("\\", "/") === original);
+          if (!original.startsWith(prefix) || !video) throw Error("채택한 동작 영상 원본이 없습니다.");
+          clip.path = video.localPath;
+        }
+      }
       for (const frame of manifest.frames)
         for (const view of ["front", "side", "back"]) {
           const reference = frame[view];
@@ -1953,8 +1973,8 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       assembly: `You are the requested Codex gpt-6-astra author. ${commonBlender} ${request.baseJobId ? "Open the prior accepted .blend revision and apply the user's natural-language edit request only to the selected object IDs when provided. Keep unspecified proportions, materials and objects stable." : workbenchModelInput(request) === "whole" || inputs.some((input) => input.role === "whole") ? "Refine the selected WHOLE textured character as one editable character scene; do not invent three separate input parts. Use the original full character image to match identity, silhouette, proportions and game-ready scale." : "Assemble the THREE selected textured parts into one character scene. Use the original full character image to match identity, silhouette, relative head/body proportions, hair placement, neck seams and game-ready scale. Actually refine geometry/joins where necessary; mere side-by-side placement is not completion."} Use every supplied accepted view as identity guidance. ${request.baseJobId ? "Keep the prior .blend revision as the edit source; do not reimport an upstream FBX over its corrections." : "Import the textured FBX with its matching supplied texture, not an earlier UV-only checkpoint; copied input filenames may differ, so explicitly resolve image nodes using the input manifest."} Preserve native texture resolution. Also export an FBX with its texture files for continued editing and Unity. For a local correction, render before/after closeups with identical cameras and lighting as well as full front/side/back views. Record changes, review renders and unresolved quality concerns. For remaining subjective appearance limits use the canonical check visual_quality, passed=false, severity=warning, visualCategory=appearance and a concrete detail. Keep file, UV, texture, geometry, preservation and requested-defect checks separate and truthful; technical failures remain blocking. Return ONE candidate version for the user to accept, refine or restore. Never start rigging automatically.`,
       rig: `You are the requested Codex gpt-6-astra author. ${commonBlender} Open the selected packed .blend as the source; preserve the accepted geometry, UVs, native texture resolution and persistent object IDs. Rig the actual accepted character with real deform weights and editable controls; do not add unweighted mesh helper objects. Body profile: ${request.rigProfile ?? "automatic (legacy)"}. ${request.rigProfile === "quadruped" ? "Use a quadruped skeleton for Unity Generic, never a human Humanoid mapping. Set the armature custom property partsmith_rig_type='generic'. Each of the four connected leg chains must have at least three parent-connected weighted deform bones. Tag each bone in its chain with partsmith_limb='front_left' / 'front_right' / 'hind_left' / 'hind_right'. Test each front elbow/paw and each hind knee/hock/paw independently with actual poses." : "Match the actual source anatomy and test its limb bends."} Anatomical controls: ${JSON.stringify(request.rigControls ?? "legacy / follow original request")}. When ears=true create independently weighted left and right ear deform chains, tagging their bones partsmith_control='ear_left' or 'ear_right'; when tail=true create weighted tail control bone(s), tagging partsmith_control='tail'. These are anatomical body controls even when ears/tail share the body mesh, not additional clothing/hair object bones. Do not use partsmith_target_id on these anatomical controls unless that object's extraBones toggle is also enabled. Disabled anatomical controls follow the body without dedicated tagged control bones. Requested object toggles: ${JSON.stringify(request.rigTargets ?? [])}. For extraBones=true add suitable dedicated deform bones/weights and set EACH dedicated bone's partsmith_target_id to that stable object ID. For extraBones=false bind to the body/head using ordinary bones with no object-dedicated tags. Normalize all mesh deform weights, include every vertex, and preserve the accepted whisker object following the head. No physics simulation. Inspect genuine bent-leg, independently posed ear and tail renders for tearing, collapse and unwanted influence; return quantitative pose checks and images as evidence. Restore neutral rest pose before final export. Export packed .blend, skinned GLB, FBX with the accompanying actual full-resolution texture. Rig test poses are not production animation clips: do not create Idle/Jump or advance to animation. Keep structural/weight/pose check visualCategory=null; record unchanged source appearance limits in the report rather than claiming they were repaired by rigging.`,
 
-      reference: `Generate ONE coherent synchronized multiview 2D KEY-POSE image sequence for '${request.motion}', duration ${request.duration}s. The user approved EXACTLY ${request.referenceFrameCount ?? 3} shared key-pose timestamps and ${3 * (request.referenceFrameCount ?? 3)} actual generated images in total (one front/side/back image at each time). The ${request.fps} fps setting is for later 3D animation playback, NOT a promise of full-rate 2D video frames. ${imageRules} Use front/side/back reference views of the SAME accepted character. Define exactly the approved number of meaningful shared timestamps including 0 and duration, then make actual images for each time and view with the SAME pose and fixed camera. Reference the completed front image at a time when generating side/back for that time. Preserve face, body proportions, outfit, hair and scale. Do not assume independently generated views synchronize. Inspect correspondence and identity and report uncertainty. Return ONE candidate, every actual key-pose frame as image artifact, and ONE frames artifact JSON: {schemaVersion:1,motion:<string>,fps:<number>,duration:<number>,camera:'fixed',frames:[{time:<seconds>,front:<job-relative PNG>,side:<job-relative PNG>,back:<job-relative PNG>}]} with increasing time. Video or motion capture services are not required. Do not create 3D animation yet.`,
-      animation: `You are the requested Codex gpt-6-astra author. ${commonBlender} Inspect the user-accepted synchronized front/side/back 2D frame sequence and timestamps, and the accepted rig. Infer and AUTHOR actual bone poses, keyframes, interpolation and timing in Blender from those specific images for '${request.motion}'. Use actual visual reasoning and bpy execution, not preset Idle/Walk, text-only pose plans or generic animation templates. Compare rendered key phases against corresponding multiview frames; correct foot contact, sliding, penetration and timing. Bake/export actual action clips in GLB and editable .blend. Respect user corrections. If views disagree materially return needs_input, never invent synchronization. Return ONE version for review.`,
+      reference: `Generate ONE coherent synchronized multiview 2D KEY-POSE image sequence for '${request.motion}', duration ${request.duration}s. The user approved EXACTLY ${request.referenceFrameCount ?? 3} shared key-pose timestamps and ${3 * (request.referenceFrameCount ?? 3)} actual generated images in total (one front/side/back image at each time). The ${request.fps} fps setting is for later 3D animation playback, NOT a promise of full-rate 2D video frames. ${imageRules} Use front/side/back reference views of the SAME accepted character. Use these exact frozen timestamps when specified: ${JSON.stringify(request.referenceTimes ?? "choose meaningful timestamps including 0 and duration")}. Make actual images for each time and view with the SAME pose and fixed camera. Reference the completed front image at a time when generating side/back for that time. Preserve face, body proportions, outfit, hair and scale. Do not assume independently generated views synchronize. Inspect correspondence and identity and report uncertainty. Return ONE candidate, every actual key-pose frame as image artifact, and ONE frames artifact JSON: {schemaVersion:1,motion:<string>,fps:<number>,duration:<number>,camera:'fixed',frames:[{time:<seconds>,front:<job-relative PNG>,side:<job-relative PNG>,back:<job-relative PNG>}]} with increasing time. Video or motion capture services are not required. Save each genuine original immediately and update a partial result.json after each image so files survive a disconnect. Never substitute posed Blender renders, contact sheets, crops, mirrored copies or duplicates for generated independent images. Rig test renders in the inputs are appearance/anatomy references, not the requested action timing. Do not create 3D animation yet.`,
+      animation: `You are the requested Codex gpt-6-astra author. ${commonBlender} Inspect the user-accepted front/side/back motion references, timestamps and accepted rig. When frames.json has source=video-ai, the accompanying native videos are the source of truth: inspect the continuous movement and decode additional original-resolution frames if needed to assess anticipation, contact, apex and landing between supplied key times. Do not treat the extracted key frames as the only available motion or regenerate them. Preserve the originals and their timing. For legacy static references inspect the complete accepted frame sequence. Infer and AUTHOR actual bone poses, keyframes, interpolation and timing in Blender from those specific images for '${request.motion}'. Use actual visual reasoning and bpy execution, not preset Idle/Walk, text-only pose plans or generic animation templates. Compare rendered key phases against corresponding multiview frames; correct foot contact, sliding, penetration and timing. Bake/export actual action clips in GLB and editable .blend. Respect user corrections. If views disagree materially return needs_input, never invent synchronization. Return ONE version for review.`,
       unity:
         "Merge ALL user-accepted animation clip versions supplied in the immutable inputs into the accepted character rig, preserving every distinct motion and name; do not export only the newest .blend or drop other clips. Export the complete clip set and materials for Unity. Read the installed Partsmith Unity Editor bridge contract in the configured Unity project; use its actual request/result mechanism to import into the managed Assets folder and verify Avatar, the complete expected clip list, materials and playback. Preserve unrelated assets. Export files and a real Unity-generated validation report. If no Unity editor/project/bridge is configured, return needs_input. Do not claim Unity validation based only on a Blender export or worker report.",
     };
@@ -2145,7 +2165,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         : {}),
       imagePaths: inputs
         .filter((input) => input.kind === "image")
-        .slice(0, 12)
+        .slice(0, ["reference", "animation"].includes(context.job.step) ? undefined : 12)
         .map((input) => this.file(context.workspace, input.localPath)),
       schemaPath,
       resultPath,
@@ -2312,6 +2332,16 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         result.summary,
       );
       result.checks = normalizeWorkbenchChecks(context.job.step, result.checks);
+      // A full image set with truthful visual warnings is reviewable. This
+      // does not mark cross-view synchronization as passed or select the set.
+      // File/count/timestamp validation still runs in the host below.
+      if (context.job.step === "reference" && result.status === "needs_input" &&
+          result.candidates.length === 1 && result.checks.some(c => !c.passed) &&
+          !result.checks.some(c => blocksWorkbenchCheck("reference", c))) {
+        result.status = "completed";
+        result.summary = `참조 원본 검토 필요 — ${result.summary}`;
+        delete result.recovery;
+      }
       if (usesChatGptWeb(context)) {
         const hashes = new Set<string>();
         for (const candidate of result.candidates) {
@@ -2474,6 +2504,10 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
             );
           matched.add(matching.sha256);
         }
+      }
+      if (context.job.step === "reference" && result.checks.some(check => blocksWorkbenchCheck("reference", check))) {
+        context.onDraft?.(result);
+        return {...result, status:"needs_input", recovery:{kind:"blocked", reason:"동작 참조의 방향·자세 검토가 필요합니다. 저장된 원본을 표시하며 자동 재생성하지 않습니다."}};
       }
       this.saveCheckpoint(context, stageId, result);
       return result;

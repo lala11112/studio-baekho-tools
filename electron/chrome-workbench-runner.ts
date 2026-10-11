@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { CodexAppServerWorker } from "../engine/codex-app-server-worker";
 import { NativeDownloadCollector } from "../engine/native-download";
+import { MotionVideoLedger, type VideoPlan } from "../engine/motion-video-ledger";
+import { prepareMotionVideoFrames } from "../engine/motion-video-media";
 import {
   ChromeJobLedger,
   type ChromePacket,
@@ -18,8 +20,10 @@ import type { ProductionRun, ProductionStage } from "../shared/production";
 import { browserToolPolicy } from "./worker-tool-policy";
 
 const tools = [
-  { name:"studio_download_prepare", description:"Before the native Tripo FBX export click, snapshot the app-owned Downloads folder. Requires an already completed phase. Does not request network access or submit anything.", inputSchema:{type:"object",properties:{phase:{type:"string"},url:{type:"string"}},required:["phase","url"],additionalProperties:false} },
-  { name:"studio_download_collect", description:"After the observed native export click, collect exactly one new valid FBX/ZIP original into this job. Old or ambiguous files are rejected. Pending means wait briefly, never generate again.", inputSchema:{type:"object",properties:{id:{type:"string"}},required:["id"],additionalProperties:false} },
+  { name: "studio_motion_begin", description: "Video AI only: show the actual model, resolution, length and cost in Partsmith for user approval; then durably reserve exactly ONE view submission. Must succeed immediately before Generate. Never reuse a reserved view.", inputSchema: { type: "object", properties: { phase: { type: "string", enum: ["front", "side", "back"] }, observedCost: { type: "number" }, model: { type: "string" }, duration: { type: "number" }, resolution: { type: "string" }, url: { type: "string" }, sourceModelId: { type: "string" } }, required: ["phase", "observedCost", "model", "duration", "resolution", "url", "sourceModelId"], additionalProperties: false } },
+  { name: "studio_motion_frames", description: "Video AI only: after collecting all three native MP4 originals, decode the frozen review timestamps at original resolution using local code. No AI generation or resizing. Returns real frames for visual review; does not select or start 3D work.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  { name:"studio_download_prepare", description:"Before the native download/export click, snapshot the app-owned Downloads folder. Requires an already completed phase. Does not request network access or submit anything.", inputSchema:{type:"object",properties:{phase:{type:"string"},url:{type:"string"}},required:["phase","url"],additionalProperties:false} },
+  { name:"studio_download_collect", description:"After the observed native download/export click, collect exactly one new original into this job: MP4 for video jobs, FBX/ZIP for Tripo model jobs. Old or ambiguous files are rejected. Pending means wait briefly, never generate again.", inputSchema:{type:"object",properties:{id:{type:"string"}},required:["id"],additionalProperties:false} },
   {
     name: "studio_job_status",
     description:
@@ -72,6 +76,7 @@ export class ChromeWorkbenchRunner implements ExternalWorkbenchRunner {
       projectRoot: (id: string) => string;
       blenderPath: () => string;
       downloadsPath: string;
+      ffmpegPath?: string;
     },
   ) {}
   private ledger(ctx: WorkbenchExecutionContext) {
@@ -83,7 +88,7 @@ export class ChromeWorkbenchRunner implements ExternalWorkbenchRunner {
     ) as ChromePacket;
     return {
       packet,
-      ledger: new ChromeJobLedger(
+      ledger: new (packet.request.motionVideo ? MotionVideoLedger : ChromeJobLedger)(
         path.join(
           this.options.journalRoot,
           ctx.workbench.id,
@@ -117,7 +122,7 @@ export class ChromeWorkbenchRunner implements ExternalWorkbenchRunner {
     progress: (message: string) => void,
   ) {
     const { packet, ledger } = this.ledger(ctx);
-    const downloads = new NativeDownloadCollector(this.options.downloadsPath,ctx.workspace);
+    const downloads = new NativeDownloadCollector(this.options.downloadsPath,ctx.workspace, packet.request.motionVideo ? "video" : "model");
     const token = randomBytes(32).toString("hex");
     const server = http.createServer(async (req, res) => {
       if (
@@ -142,7 +147,22 @@ export class ChromeWorkbenchRunner implements ExternalWorkbenchRunner {
         if (body.method === "tools/list") result = { tools };
         else if (body.method === "tools/call") {
           const a = body.arguments ?? {};
-          const value =
+          let value: unknown;
+          if (body.name === "studio_motion_begin") {
+            if (!(ledger instanceof MotionVideoLedger) || !ctx.requestApproval) throw Error("동작 영상의 앱 승인 연결이 없습니다.");
+            const plan = a as VideoPlan;
+            ledger.validatePlan(plan);
+            const approved = await ctx.requestApproval({ id: `video-${ctx.job.id}-${plan.phase}`, title: `${packet.request.motion} · ${plan.phase} 영상 생성 확인`,
+              detail: `${plan.model} / ${plan.resolution} / 원본 ${plan.duration}초, 처음 ${packet.request.duration}초 검토 / ${plan.observedCost}크레딧 / 1개 생성. 서비스: ${packet.request.motionVideo!.serviceUrl}. 정면·측면·후면은 별도 결과이며 동작 일치는 생성 후 검토합니다.`, fields: [] });
+            if (!approved.accepted || ctx.signal.aborted) throw Error("사용자가 영상 생성을 승인하지 않았거나 취소했습니다. 제출하지 마세요.");
+            value = ledger.reserveApproved(plan);
+          } else if (body.name === "studio_motion_frames") {
+            if (!(ledger instanceof MotionVideoLedger)) throw Error("동작 영상 작업이 아닙니다.");
+            const decoded = await prepareMotionVideoFrames(this.options.ffmpegPath ?? "", ctx.workspace, packet.request, ledger.read().entries, ctx.signal);
+            ledger.recordDecoded(decoded.artifacts.filter(a => a.kind !== "video").map(a => ({ path: a.path,
+              sha256: createHash("sha256").update(fs.readFileSync(path.join(ctx.workspace, a.path))).digest("hex") })));
+            value = decoded;
+          } else value =
             body.name === "studio_job_status"
               ? ledger.read()
               : body.name === "studio_download_prepare"
@@ -152,7 +172,12 @@ export class ChromeWorkbenchRunner implements ExternalWorkbenchRunner {
                     return downloads.prepare(a.phase,a.url);
                   })()
                 : body.name === "studio_download_collect"
-                  ? downloads.collect(a.id)
+                  ? (() => {
+                      const collected = downloads.collect(a.id);
+                      if (ledger instanceof MotionVideoLedger && collected.status === "collected" && "path" in collected)
+                        ledger.recordDownload(collected.phase, collected);
+                      return collected;
+                    })()
               : body.name === "studio_phase_begin"
                 ? ledger.begin(a)
                 : body.name === "studio_phase_complete"
@@ -312,6 +337,7 @@ export class ChromeWorkbenchRunner implements ExternalWorkbenchRunner {
     packet: ChromePacket,
     journal: unknown,
   ) {
+    if (packet.request.motionVideo) return this.videoPrompt(ctx, packet, journal);
     return `You are the production worker launched by a Partsmith app button. Execute ONLY this frozen current stage, then return its results to the app. Communicate progress and all questions in Korean. Do not ask the user to return to a separate Codex chat. If blocked, return needs_input with a concrete question; the app shows it and supplies the user's reply on explicit continuation. Never start the next workbench stage or select results for the user.
 Use the installed cua_repl browser tools and the user's connected ordinary Chrome. First discover its actual availability. Respect all browser tool documentation/website permissions. Do not use embedded Electron browsers, Playwright/CDP from shell, private endpoints, cookie migration, API substitutes or copied desktop identities. Login/CAPTCHA are user-operated. No account/model changes. If unavailable/denied, stop immediately, do not scan logs/repositories. Do not call imagegen: use the actual ChatGPT website for image jobs.
 Read external-request.json in this job directory. It is the frozen host specification, including source model ID, selected inputs, exact counts/views, settings and budget. Input paths are relative to the project root ${JSON.stringify(this.options.projectRoot(ctx.workbench.projectId))}. Do not rewrite request files or other projects/history. Only create this job's outputs. No repository scan. Approved source images are attached at their existing resolution; preserve quality, asymmetry, aspect ratio, originals and candidate count. Use independent image originals, never sheets/crops/screenshots as images.
@@ -324,5 +350,15 @@ All receipt artifact/file paths relative to this job directory; each artifact oc
 Never retry a reserved phase. On continuation, collect/inspect existing outputs, and at most 3 bounded retries of transient reads/downloads. Cancel or app shutdown ends this worker and never automatically restarts. The following reply is user guidance inside the original scope, not permission to change budgets, counts, models or replay a phase:
 ${ctx.reply ?? "No additional reply."}
 Current phase settings: ${JSON.stringify(packet.request)}`;
+  }
+  private videoPrompt(ctx: WorkbenchExecutionContext & { reply?: string }, packet: ChromePacket, journal: unknown) {
+    return `You are the continuous-motion video worker launched by a Partsmith button. Korean progress/questions. ONLY create the requested motion's front, character-left side and back native video references, return them for USER review. Never create 3D animation, select results, start another motion or advance stages.
+Read external-request.json here. Inputs are relative to ${JSON.stringify(this.options.projectRoot(ctx.workbench.projectId))}. Frozen request: ${JSON.stringify(packet.request)}. Journal: ${JSON.stringify(journal)}.
+Use installed cua_repl and the explicitly connected ordinary Chrome, observing current browser documentation and actual controls. Check availability first. Open only the requested video service, using exactly the requested model. User handles login/CAPTCHA. No account changes, private endpoints, Playwright/CDP/shell web access, API fallbacks, identity/cookie copying, imagegen, independent static pose generation, collage/crops, mirrored views or Blender-rendered motion substitutes. No repository exploration.
+FIRST inspect actual model, image-to-video capability, motion/video-reference capability, supported duration/resolution and visible credit cost. Front is a fixed frontal continuous performance of the accepted character. Side/back MUST reference the completed FRONT MOTION VIDEO plus the corresponding accepted original appearance view to re-create the SAME performance with only the camera changed. A multiple-shot video or a turntable is NOT synchronized multiview motion. If exact model or motion-reference camera-change support is absent, stop with the precise limitation BEFORE generation. Do not make independent text-only side/back actions. Do not pretend requested timing is guaranteed. The service may require a longer native duration: only proceed after the app approval explicitly shows it, with the complete requested ${packet.request.duration}s action at the start and a neutral hold afterwards. Keep fixed camera/framing/scale, whole body, ears and tail, and a static floor. No reference downsampling or quality/model/effort reduction.
+For EACH direction, call studio_job_status. Only a never-reserved direction may submit: call studio_motion_begin with observed model (exact requested name), actual native duration/resolution/cost, view phase front/side/back, actual service page URL without authentication query or fragment, sourceModelId empty for front and the completed front resultId for side/back. It shows the actual cost in Partsmith, waits for the user's approval and durably reserves the one submission. Only after success click the real Generate control ONCE. Never retry/replay a reserved phase, even after timeout/cancellation/restart. If approval denied STOP. Read-only collection of an already-reserved result is allowed on explicit continuation; never reset journals or move to another provider. Transient reads/downloads at most three attempts.
+Record actual completed result ID and result page URL using studio_phase_complete. Save real native MP4: studio_download_prepare(phase,url) BEFORE the observed native download button; click only the video's download control through cua_repl; studio_download_collect(ticket). The host collects one new MP4 from Downloads. Never downloadMedia on whole pages, tracking images or export button containers, never fetch asset URLs or browser databases. Actual denial stops the job. Pending collector means a short bounded wait, not regeneration. Preserve every completed original immediately.
+After ALL three native videos are collected, call studio_motion_frames. The host decodes original-resolution frames at the frozen requested times with local ffmpeg, no GPT image generation. Inspect these actual frames and the original playback for camera direction, same character, continuous temporal progression, contact, scale, synchronized anticipation/apex/landing or breathing and loop/return. Clearly record any failed observations as checks (stable visual_quality with finite category view_consistency/alignment/appearance). Major wrong direction or different action/phase timing MUST be a failed technical check such as motion_correspondence; never mark synchronization passed just because durations match. Minor appearance warnings stay false. Do not regenerate failures automatically. Return all files for review, retaining failed checks; the host blocks adoption when required checks fail.
+Write external-result.json: {jobId:${JSON.stringify(ctx.job.id)},requestHash:${JSON.stringify(ctx.job.externalExecution!.requestHash)},videos:[{view,resultId,url,path,sha256}],files:[{path,sha256}],result:{status:"completed",summary,candidates:[{id,label,artifacts:[{path,kind,role?}]}],checks:[{name,passed,severity?,visualCategory?,detail?}]}}. The three videos must match the host journal/downloads. Include exactly the video/frame/manifest/decode-report artifacts returned by studio_motion_frames plus a factual visual report. All paths job-relative and files list has each artifact once with real SHA256. Do not change the host-decoded images, manifest or report. Completed means collected for review, never user accepted or synchronized by assumption. If missing files or capability, preserve progress and return needs_input/submission_unknown. No fake completion. User reply within existing scope: ${ctx.reply ?? "none"}.`;
   }
 }

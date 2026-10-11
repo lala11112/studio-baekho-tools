@@ -2,6 +2,15 @@ import {test} from "node:test";
 import assert from "node:assert/strict";
 import {blocksWorkbenchCheck,normalizeWorkbenchChecks,workbenchWarningMessages} from "../shared/workbench-checks";
 
+test("reference visual mismatches stay false for human review; structural and unspecified failures block",()=>{
+  const check={name:"visual_quality",passed:false,visualCategory:"view_consistency" as const,detail:"Foot position differs between views."};
+  const normalized=normalizeWorkbenchChecks("reference",[check])[0];
+  assert.equal(normalized.passed,false);assert.equal(normalized.severity,"warning");
+  assert.match(workbenchWarningMessages("reference",[normalized])[0],/Foot position/);
+  for(const name of ["file_integrity","timestamps","missing_frames","unknown_sync_check"])
+    assert.equal(blocksWorkbenchCheck("reference",{...check,name}),true);
+});
+
 test("rig motion-range warning remains false; weights, failed poses and unknown checks still block",()=>{
   const warning={name:"remaining_limitations",passed:false,severity:"warning" as const,detail:"FK has no automatic foot lock; local joint compression remains."};
   const checks=normalizeWorkbenchChecks("rig",[warning]);

@@ -38,6 +38,7 @@ import {
 import type { ProductionRun } from "../shared/production";
 import { workbenchWarningMessages } from "../shared/workbench-checks";
 import { Viewport } from "./Viewport";
+import { MotionVideoReview } from "./MotionVideoReview";
 import "./workbench.css";
 
 const pages = [
@@ -396,6 +397,9 @@ export function AssetWorkbench({
       ?.request.motion ?? "오른손을 들어 인사하기",
   );
   const [motionPrompt, setMotionPrompt] = useState("");
+  const latestVideo = w?.jobs.find(j => j.request.motionVideo)?.request.motionVideo;
+  const [videoServiceUrl, setVideoServiceUrl] = useState(latestVideo?.serviceUrl ?? "");
+  const [videoModel, setVideoModel] = useState(latestVideo?.model ?? "");
   const [duration, setDuration] = useState(
     w?.jobs.find((j) => j.step === "reference")?.request.duration ?? 2,
   );
@@ -408,6 +412,9 @@ export function AssetWorkbench({
   );
   const [loop, setLoop] = useState(
     w?.jobs.find((j) => j.step === "reference")?.request.loop ?? false,
+  );
+  const [referenceTimes, setReferenceTimes] = useState(
+    w?.jobs.find(j => j.step === "reference")?.request.referenceTimes?.join(", ") ?? "",
   );
   const [polygonCount, setPolygonCount] = useState(10000);
   const [studioLimit, setStudioLimit] = useState(0);
@@ -985,6 +992,7 @@ export function AssetWorkbench({
           separationGallery(images, false, c?.id)
         ) : step === "reference" &&
           c?.artifacts.some((a) => a.kind === "frames") ? (
+          c.artifacts.some(a => a.kind === "video") ? <MotionVideoReview projectId={p.id} candidate={c} /> :
           <FrameSequence projectId={p.id} candidate={c} />
         ) : (
           <>
@@ -1085,6 +1093,8 @@ export function AssetWorkbench({
               생성은 진행하지 않습니다.
             </small>
           </>
+        ) : step === "reference" ? (
+          <small>동작 AI로 정면·측면·후면 영상 각 1개를 제작합니다. 실제 서비스 모델·해상도·길이·비용은 제출 직전에 이 앱에서 확인받습니다. 원본 프레임 추출에는 GPT를 사용하지 않습니다.</small>
         ) : (
           <small>
             기존 ChatGPT 계정의 사용량을 사용합니다.
@@ -1105,6 +1115,7 @@ export function AssetWorkbench({
           />
           {usesStudio
             ? "현재 설정과 이미지를 Tripo에 전달하고, 이 한도 안에서 이번 작업을 실행합니다."
+            : step === "reference" ? "현재 캐릭터 참조와 동작 지시를 선택한 영상 서비스에 전달합니다. 유료 생성은 실제 비용 확인 후 실행합니다."
             : "현재 설정과 이미지를 GPT에 전달하고, 표시된 범위의 이미지 생성을 실행합니다."}
         </label>
       </div>
@@ -1128,7 +1139,8 @@ export function AssetWorkbench({
               request.generationCount < 1 ||
               request.generationCount > WORKBENCH_MAX_GENERATION_COUNT)) ||
           (paid && !approved) ||
-          stageJobs.some((j) => j.status === "submission_unknown")
+          stageJobs.some((j) => j.status === "submission_unknown" &&
+            !(request.motionVideo && j.step === "reference" && !j.request.motionVideo && !j.externalExecution))
         }
         onClick={() => execute(request)}
       >
@@ -2383,9 +2395,17 @@ export function AssetWorkbench({
             {page === "motion" && (
               <>
                 <p>
-                  동작별로 정면·측면·후면 이미지 한 세트를 확인한 뒤 3D
-                  애니메이션을 만듭니다.
+                  동작 AI로 연속 동작을 생성합니다. 정면·측면·후면 영상을 재생해 확인·채택한 뒤 Blender + Astra로 3D 애니메이션을 만듭니다.
                 </p>
+                {motionMode === "reference" && <>
+                  <div className="wb-pair">
+                    <button onClick={() => { setMotion("Rabbit_Idle"); setDuration(2); setFps(30); setLoop(true); setReferenceFrameCount(3); setReferenceTimes("0, 1, 2"); setViewJobId(""); setMotionPrompt("채택한 둥근 흰색 네 발 토끼. 네 발은 제자리에 접지하고 몸통이 미세하게 숨 쉬며 귀가 자연스럽게 움직이는 2초 반복 대기. 시작과 끝 자세 일치. 고정 카메라, 같은 동작의 정면·왼쪽 측면·후면 영상. 옷·소품 없음."); }}>대기 설정</button>
+                    <button onClick={() => { setMotion("Rabbit_Jump"); setDuration(2); setFps(30); setLoop(false); setReferenceFrameCount(5); setReferenceTimes("0, 0.4, 0.9, 1.4, 2"); setViewJobId(""); setMotionPrompt("채택한 둥근 흰색 네 발 토끼의 제자리 점프. 0초 중립 → 0.4초 웅크림 → 0.9초 네 발 모두 공중인 정점 → 1.4초 같은 자리에 착지·충격 흡수 → 2초 중립 복귀. 전진·옆 이동 없음. 같은 동작을 고정된 정면·왼쪽 측면·후면 카메라로 보여주세요. 귀와 꼬리의 자연스러운 후속 움직임."); }}>제자리 점프 설정</button>
+                  </div>
+                  <label className="field"><span>동작 생성 서비스 주소</span><input data-testid="workbench-video-service" value={videoServiceUrl} onChange={e => setVideoServiceUrl(e.target.value)} placeholder="로그인해서 사용할 영상 AI의 HTTPS 주소" /></label>
+                  <label className="field"><span>사용할 영상 모델</span><input data-testid="workbench-video-model" value={videoModel} onChange={e => setVideoModel(e.target.value)} placeholder="서비스 화면의 정확한 모델 이름" /></label>
+                  <p className="wb-muted">Chrome 로그인과 동작 참조 기능을 먼저 확인합니다. 측면·후면은 정면 동작 영상을 참조하며, 지원하지 않으면 생성 전에 이유를 표시합니다.</p>
+                </>}
                 <label className="field">
                   <span>동작 이름</span>
                   <input
@@ -2404,6 +2424,7 @@ export function AssetWorkbench({
                     <input
                       type="number"
                       min={0.5}
+                      data-testid="workbench-motion-duration"
                       max={30}
                       step={0.5}
                       disabled={motionMode === "animation"}
@@ -2418,6 +2439,7 @@ export function AssetWorkbench({
                   <label className="field">
                     <span>3D 출력 프레임 속도</span>
                     <input
+                      data-testid="workbench-motion-fps"
                       type="number"
                       min={1}
                       max={30}
@@ -2432,7 +2454,7 @@ export function AssetWorkbench({
                   </label>
                 </div>
                 <label className="field">
-                  <span>방향별 동작 참조 프레임 수</span>
+                  <span>영상에서 추출할 주요 시점 수</span>
                   <input
                     data-testid="workbench-reference-count"
                     type="number"
@@ -2451,13 +2473,12 @@ export function AssetWorkbench({
                     }
                   />
                   <small>
-                    동작의 시작·중간·끝을 같은 시점에서 비교하는 주요 포즈
-                    이미지입니다. 전체 FPS만큼의 2D 영상을 생성하는 설정은
-                    아닙니다.
+                    실제 연속 영상에서 원본 해상도로 추출해 Astra에 전달합니다. 이미지를 새로 생성하는 개수가 아닙니다.
                   </small>
                 </label>
                 <label className="wb-checkbox">
                   <input
+                    data-testid="workbench-motion-loop"
                     type="checkbox"
                     disabled={motionMode === "animation"}
                     checked={
@@ -2468,6 +2489,13 @@ export function AssetWorkbench({
                     onChange={(e) => setLoop(e.target.checked)}
                   />
                   반복 재생 가능한 동작
+                </label>
+                <label className="field">
+                  <span>참조 시점 (초, 쉼표로 구분)</span>
+                  <input data-testid="workbench-reference-times" disabled={motionMode === "animation"}
+                    value={motionMode === "animation" ? (reference?.job.request.referenceTimes?.join(", ") ?? "") : referenceTimes}
+                    onChange={e => setReferenceTimes(e.target.value)} placeholder="예: 0, 0.4, 0.9, 1.4, 2" />
+                  <small>원본 영상에서 추출할 시점입니다. 비워 두면 균등하게 추출합니다. 생성 AI가 이 시점의 자세를 정확히 지켰는지는 결과 검토가 필요합니다.</small>
                 </label>
                 <label className="field">
                   <span>동작·수정 지시</span>
@@ -2484,20 +2512,23 @@ export function AssetWorkbench({
                     {approvalBox()}
                     {launch(
                       editBase
-                        ? "멀티뷰 동작 이미지 수정 · 리롤"
-                        : "멀티뷰 동작 이미지 한 세트 생성",
+                        ? "동작 AI로 수정 영상 제작"
+                        : "동작 AI 연결 확인 · 멀티뷰 영상 제작",
                       {
                         step: "reference",
+                        executionMode: "codex-app",
+                        motionVideo: { serviceUrl: videoServiceUrl.trim(), model: videoModel.trim() },
                         prompt: motionPrompt.trim() || motion,
                         provider: "gpt",
                         motion,
                         duration,
                         fps,
                         referenceFrameCount,
+                        referenceTimes: referenceTimes.trim() ? referenceTimes.split(",").map(t => Number(t.trim())) : undefined,
                         loop,
-                        baseJobId: editBase?.id,
+                        baseJobId: editBase?.request.motionVideo ? editBase.id : undefined,
                       },
-                      !motion.trim(),
+                      !motion.trim() || !videoServiceUrl.trim() || !videoModel.trim(),
                     )}
                   </>
                 ) : (
@@ -2505,7 +2536,7 @@ export function AssetWorkbench({
                     {launch(
                       editBase
                         ? "Astra로 3D 동작 수정 · 리롤"
-                        : "이미지를 보고 Astra로 3D 동작 제작",
+                        : "채택한 동작을 보고 Astra로 3D 제작",
                       {
                         step: "animation",
                         prompt: motionPrompt.trim() || motion,
@@ -2520,7 +2551,7 @@ export function AssetWorkbench({
                       !reference || !motion.trim(),
                     )}
                     <div className="wb-note">
-                      채택한 멀티뷰 이미지와 타이밍을 기준으로 Astra가
+                      채택한 원본 동작의 추출 프레임과 타이밍을 기준으로 Astra가
                       Blender에서 포즈와 키프레임을 만듭니다.
                     </div>
                   </>
@@ -2615,7 +2646,7 @@ export function AssetWorkbench({
                     setViewJobId("");
                   }}
                 >
-                  ① 멀티뷰 이미지 확인
+                  ① 멀티뷰 동작 확인
                 </button>
                 <button
                   disabled={!reference}
@@ -2642,7 +2673,14 @@ export function AssetWorkbench({
                   : "앞 단계의 선택이 바뀌기 전 결과입니다. 기록은 보존되어 있지만 현재 결과로 채택하거나 수정 기준으로 사용할 수 없습니다."}
               </p>
             )}
-            {step === "separate" &&
+            {step === "reference" && !viewing?.candidates.length && viewing?.draftCandidates?.map(c => (
+              <section key={c.id} data-testid="workbench-reference-draft">
+                <p className="wb-note warning">수정이 필요한 참조 초안입니다. 원본은 보존됐으며 아직 채택하거나 3D 애니메이션에 사용할 수 없습니다.</p>
+                {viewing.draftChecks?.filter(check => !check.passed).map((check,index) => <p className="wb-note warning" key={index}>{check.name}: {check.detail}</p>)}
+                {c.artifacts.some(a => a.kind === "video") ? <MotionVideoReview projectId={p.id} candidate={c} /> : <FrameSequence projectId={p.id} candidate={c} />}
+              </section>
+            ))}
+            {["separate", "reference"].includes(step) &&
               viewing &&
               viewing.status !== "running" &&
               viewing.status !== "review" && (

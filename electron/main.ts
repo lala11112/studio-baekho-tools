@@ -8,6 +8,7 @@ import {
   shell,
 } from "electron";
 import fs from "node:fs";
+import { byteRange } from "../engine/byte-range";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { Readable } from "node:stream";
@@ -640,6 +641,7 @@ app.whenReady().then(async () => {
       bridgePath:path.join(__dirname,"production-mcp.cjs"),
       projectRoot:id=>store.directory(id),blenderPath:()=>store.settings.blenderPath,
       downloadsPath:app.getPath("downloads"),
+      ffmpegPath:app.isPackaged ? path.join(process.resourcesPath,"media","ffmpeg.exe") : path.join(app.getAppPath(),"node_modules","ffmpeg-static","ffmpeg.exe"),
     }) },
   );
   protocol.handle("asset", async (request) => {
@@ -707,7 +709,18 @@ app.whenReady().then(async () => {
         ".webm": "video/webm",
       };
       const bytes = fs.statSync(file).size;
-      const stream = fs.createReadStream(file);
+      let range: ReturnType<typeof byteRange>;
+      try { range = byteRange(request.headers.get("range"), bytes); }
+      catch { return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${bytes}` } }); }
+      const headers = {
+        "Content-Type": mime[path.extname(file).toLowerCase()] ?? "application/octet-stream",
+        "Content-Length": String(range ? range.end - range.start + 1 : bytes),
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Origin": "*",
+        ...(range ? { "Content-Range": `bytes ${range.start}-${range.end}/${bytes}` } : {}),
+      };
+      if (request.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
+      const stream = fs.createReadStream(file, range);
       await new Promise<void>((resolve, reject) => {
         stream.once("open", () => resolve());
         stream.once("error", reject);
@@ -715,13 +728,8 @@ app.whenReady().then(async () => {
       return new Response(
         Readable.toWeb(stream) as ReadableStream<Uint8Array>,
         {
-          headers: {
-            "Content-Type":
-              mime[path.extname(file).toLowerCase()] ??
-              "application/octet-stream",
-            "Content-Length": String(bytes),
-            "Access-Control-Allow-Origin": "*",
-          },
+          status: range ? 206 : 200,
+          headers,
         },
       );
     } catch {

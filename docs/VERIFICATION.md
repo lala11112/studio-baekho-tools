@@ -401,3 +401,22 @@ Unity 검증 스크립트는 명시된 테스트 프로젝트의 Partsmith 관�
 - 실행기는 rig 단계의 stream/websocket 종료에 한해 완성된 저장 응답을 읽고 기존 파일·GLB·호스트 뼈대 검사를 계속한다. 미완성 파일/파일 누락/취소/권한 거절은 성공으로 취급하지 않는다. 웹/유료 제출 경로는 변경하지 않았다. `shared/workbench-checks.ts`는 rig의 명시적인 remaining_limitations 경고만 false/검토 상태로 보존하고 웨이트·포즈·무결성·알 수 없는 실패는 계속 차단한다.
 - 최종 npm test **243/243**, npm run build와 별도 `release/0.6.15/win-unpacked/Partsmith.exe` 패키징 통과. `scripts/rabbit-rig-result-check.ts`로 실제 결과의 상위/출력 SHA, 스킨 GLB200, 실제 뼈대/웨이트, 오류0, 재시작 후 설정/결과/채택 상태 유지, 자동 채택/실행 없음 확인. 증거: `artifacts/runtime/rabbit-rig-dispatch.json`, `rabbit-rig-result-check.json`, `rabbit-rig-result.png`, `rabbit-rig-live.png`.
 - 현재 리깅은 review/미채택이며 앱에서 수정 지시 또는 채택이 가능하다. 기존 수염 밝기·뿌리 색 차이·어깨 텍스처 경계는 리깅으로 수정하지 않았다. IK/물리/제작 애니메이션은 생성하지 않았고 Unity 실제 재생도 아직 미검증이다.
+
+### 2026-10-11 — 0.6.16 뼈대 표시와 동작 참조 단계 연결 (아래 0.6.17에서 정지 이미지 계획 취소)
+
+- 사용자의 리깅 채택을 앱에 저장했다. `src/skeleton-overlay.ts`, `src/Viewport.tsx`는 실제 SkinnedMesh의 뼈만 추출해 관절 점과 연결선을 표시한다. 리그가 있으면 기본 ON이며 모델 검수 상단에서 OFF/ON 전환한다. 동작 재생 시 관절 위치를 따라가고 원래 메시/재질/웨이트를 수정하지 않는다. 뼈가 없는 모델에는 가짜 뼈대나 토글을 만들지 않는다.
+- 실제 토끼의25뼈로 release/0.6.16에서 ON/OFF 이미지 차이, 토글 상태, GLB 재다운로드 없음, 오류0, 원본/결과SHA 유지 및 재시작 보존을 확인했다. `scripts/rabbit-rig-result-check.ts`의 선택적 뼈대 검사가 실제 파일을 사용했다. 증거: `artifacts/runtime/rabbit-skeleton-on.png`, `rabbit-skeleton-off.png`, `rabbit-rig-result-check.json`.
+- `shared/workbench.ts`, `engine/workbench.ts`, `src/AssetWorkbench.tsx`에 참조 시점 배열과 입력을 추가했다. 프레임 수/시작0/종료/증가 순서를 검사하고 실제 매니페스트 시간이 고정 요청과 다르면 등록을 막는다. `engine/workbench-executor.ts`는 시점을 프롬프트에 전달하고 참조 이미지 입력을12개에서 조용히 자르지 않는다. 독립 생성 원본·즉시 저장·부분 결과 보존을 명시했다. 모델/추론 강도/기존 참조 해상도를 변경하지 않았다.
+- npm test244/244 및 시간표 불일치 회귀를 보강한 workbench59/59 통과. 별도0.6.16 빌드 성공. 리깅과 뼈대의 실제 검사와 이미지 생성 결과 검사는 별개다.
+- 현재 앱 버튼으로 Rabbit_Idle 참조 작업 `ab0cf771-4a51-42cf-80c7-bc8d1b24e776`을 실행 중이다. 사용자가 승인한 범위는 Idle0/1/2초9장 + Jump0/0.4/0.9/1.4/2초15장, 모두 정면/토끼 왼쪽/후면. 실제 생성 원본은 작업 폴더에 보존 중이며 일부 바닥선·배율·발 위치 차이가 관찰돼 동기화 성공으로 취급하지 않는다. 두 세트의 최종 검증·앱 등록은 아직 진행 중이고 이미지 채택/3D 애니메이션/Unity는 실행하지 않았다.
+
+### 2026-10-11 — 0.6.17 연속 영상 참조 기반과 Dreamina 사전 확인
+
+- 사용자 지시대로 정지 이미지 생성 작업을 중지했다. Idle의 실제9장과 잘못된 측면/접지/배율 경고는 비채택 초안으로 보존하고, Jump의 불명확한 부분 제출은 재실행하지 않는다. 리깅 rabbit-rig-v3는 채택됐지만 동작 참조와3D애니메이션은 아직 채택/제작되지 않았다.
+- 앱의 새 참조 버튼은 영상 서비스·정확한 모델·동작·시점을 고정해 Codex 앱 작업자에 전달한다. 정면 영상을 기준으로 측면/후면을 요청하며, 지원하지 않으면 중지한다. 실제 모델/해상도/원본 길이/크레딧을 방향별로 앱에서 승인한 뒤 제출을 예약한다. 예약된 작업은 재제출하지 않는다. 취소·앱 재시작 후 자동 실행하지 않고 사용자 채택 전 Astra 애니메이션을 막는다.
+- engine/motion-video-ledger.ts, engine/native-download.ts, electron/chrome-workbench-runner.ts: 원본MP4의 실제 다운로드·서비스결과ID·해시와 호스트 프레임 추출 기록을 묶어 검증한다. ffmpeg-static5.3.0과 라이선스를 별도 패키지에 포함했다. engine/motion-video-media.ts는 AI 없이 실제 영상의 고정 시점을 원본 해상도로 추출하며 원본을 수정하지 않는다. Astra에는 모든 필요한 참조 이미지와 원본 영상을 전달한다. 생성 모델/추론 강도는 낮추지 않았다.
+- src/MotionVideoReview.tsx: 정면/측면/후면의 공동 재생·정지·시점 이동. 공동 재생이 실제 동작 일치의 증거라고 표시하지 않는다. 방향/동작 불일치 검사는 채택을 막고 원본 초안은 보존한다.
+- 실제 패키지 검사에서 CSP의 media-src 누락 때문에 영상이 열리지 않는 문제가 발견됐다. index.html에 등록된 로컬 asset 영상만 허용하고 electron/main.ts와 engine/byte-range.ts에206/416 범위 응답을 추가했다. 파일 접근 제한은 유지한다.
+- npm test252/252, TypeScript/빌드/별도 release/0.6.17 패키징 통과. scripts/motion-video-package-check.ts가 격리된 사용자 데이터 사본과 합성320x240 MP4 세 개로 패키지 ffmpeg 해독, 원본 크기, 실제 재생/정지/1초 seek,206범위32바이트/잘못된범위416, 재시작 보존, 자동 채택/애니메이션 없음과 오류0을 확인했다. 실제 사용자 workbench.json 해시 불변. 증거 artifacts/runtime/tests-0.6.17.log, motion-video-package-check.json, motion-video-package-player.png. 합성 영상 검사는 실제 AI 생성 품질 검증이 아니다.
+- 실제 Chrome Dreamina 로그인과 Seedance2.5 정규 모델, Omni reference/Smart edit 및4초 최소 길이를 확인했다. 참조 업로드 전4초 화면가격은2.5 720p148/1080p364크레딧,2.0 720p68/1080p164크레딧, 잔액120. 사용자는 두 모델을 간단한 동작으로 하나씩 비교 후 선택하기로 했다. 같은 채택 토끼 측면/720p4초/작은 제자리 점프를 준비하되 최종 업로드 후 견적과 비용 승인 전 생성하지 않는다.
+- 미완료: Reference+ 자동 클릭은 chooser를 열지 못했고 이미지 붙여넣기는 Chrome 연결을 두 번 종료시켰다. 기존 탭 재연결/새로고침은 해결하지 못했으며 새 탭에서는 읽기만 복구됐다. 반복 시도를 중단하고 사용자에게 Reference+의 hover 업로드 메뉴 확인을 요청했다. 실제 업로드·영상 생성·과금0, 두 모델 품질 비교·정확한 멀티뷰 일치·앱 버튼의 실제 영상 서비스 실행·3D애니메이션·Unity재생은 미검증이다. 이번에는 새 앱으로 실제 제작 프로세스를 재시작하지 않았다.
