@@ -115,6 +115,8 @@ test("only explicitly trusted empty browser-origin prompts auto-accept; other ap
  const base={method:"mcpServer/elicitation/request",params:{serverName:"cua_repl",mode:"form",message:"Allow Browser use to access https://studio.tripo3d.ai/",requestedSchema:{type:"object",properties:{}}}};
  let calls=0;const decline=async()=>{calls++;return {accepted:false,values:{}};};const allowed=["https://studio.tripo3d.ai","https://chatgpt.com"];
  assert.deepEqual(await answerAppServerRequest(base,decline,allowed),{action:"accept",content:{},_meta:null});assert.equal(calls,0);
+ assert.deepEqual(await answerAppServerRequest({...base,params:{...base.params,message:"Allow Browser use to access https://studio.tripo3d.ai"}},decline,allowed),{action:"accept",content:{},_meta:null});
+ assert.deepEqual(await answerAppServerRequest({...base,params:{...base.params,message:undefined,reason:base.params.message}},decline,allowed),{action:"accept",content:{},_meta:null});
  for(const message of ["Allow Browser use to access https://studio.tripo3d.ai.evil.example/","Allow Browser use to access https://studio.tripo3d.ai/?cost=100","Allow Browser use to access https://studio.tripo3d.ai/download/","Allow Browser use to access https://evil.example/","Allow Browser use to access https://studio.tripo3d.ai@evil.example/","Allow Browser use to access https://studio.tripo3d.ai/ and pay 100","Allow download from https://studio.tripo3d.ai/"]){
   assert.deepEqual(await answerAppServerRequest({...base,params:{...base.params,message}},decline,allowed),{action:"decline",content:null,_meta:null});
  }
@@ -125,4 +127,17 @@ test("only explicitly trusted empty browser-origin prompts auto-accept; other ap
  await answerAppServerRequest({method:"item/commandExecution/requestApproval",params:{command:"dangerous"}},decline,allowed);
  await answerAppServerRequest({method:"item/permissions/requestApproval",params:{permissions:{network:{enabled:true}}}},decline,allowed);
  assert.equal(calls,12);
+});
+
+
+test("routine transfers require exact host-provided URLs, never a broad site or tracking grant",async()=>{
+ const origin="https://studio.tripo3d.ai",url=origin+"/ko/workspace/generate";let calls=0;const ask=async()=>{calls++;return {accepted:false,values:{}};};
+ const msg=(message:string)=>({method:"mcpServer/elicitation/request",params:{mode:"form",serverName:"cua_repl",message,requestedSchema:{type:"object",properties:{}}}});
+ const policy={upload:[url],download:[origin+"/ko/workspace/generate/result"]};
+ for(const text of ["Allow upload to "+url,"Allow download from "+policy.download[0]])assert.deepEqual(await answerAppServerRequest(msg(text),ask,[origin],policy),{action:"accept",content:{},_meta:null});
+ assert.equal(calls,0);
+ for(const text of ["Allow upload to "+url+"?token=secret","Allow download from "+url,"Allow upload to https://facebook.com/tr/","Allow download from https://cdn.example/asset.fbx"])
+  assert.deepEqual(await answerAppServerRequest(msg(text),ask,[origin],policy),{action:"decline",content:null,_meta:null});
+ assert.equal(calls,4);
+ await answerAppServerRequest(msg("Allow upload to "+url),ask,[origin],{upload:[],download:[]});assert.equal(calls,5);
 });

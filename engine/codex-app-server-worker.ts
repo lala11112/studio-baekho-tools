@@ -36,17 +36,28 @@ export function approvalText(value: unknown): string {
 
 /** Only the user's explicitly preauthorized, empty browser-origin prompt may skip UI.
  * Never use sanitized text for a permission decision or infer authority from a model reply. */
-export function preauthorizedBrowserOrigin(message: Rpc, allowedOrigins: readonly string[]): string | undefined {
+type BrowserTransfers = {upload: readonly string[]; download: readonly string[]};
+export function preauthorizedBrowserOrigin(message: Rpc, allowedOrigins: readonly string[], transfers: BrowserTransfers = {upload:[],download:[]}): string | undefined {
   const p=message.params, schema=p?.requestedSchema;
   if(message.method !== "mcpServer/elicitation/request" || p?.serverName !== "cua_repl" ||
       (p.mode !== undefined && p.mode !== "form") || schema?.type !== "object" ||
       !schema.properties || Object.keys(schema.properties).length || (schema.required?.length ?? 0)) return;
-  const match=typeof p.message === "string" && /^Allow Browser use to access (https:\/\/[^\s]+\/)$/.exec(p.message);
+  const rawMessage = p.reason ?? p.message;
+  const transfer = typeof rawMessage === "string" && /^Allow (upload to|download from) (https:\/\/[^\s]+)$/.exec(rawMessage);
+  if(transfer) {
+    try {
+      const u=new URL(transfer[2]), allowed=transfer[1] === "upload to" ? transfers.upload : transfers.download;
+      if(u.protocol === "https:" && !u.port && !u.username && !u.password && !u.search && !u.hash &&
+          transfer[2] === u.href && allowed.includes(u.href) && allowedOrigins.includes(u.origin)) return u.href;
+    } catch { /* Other approvals keep their normal app UI. */ }
+    return;
+  }
+  const match=typeof rawMessage === "string" && /^Allow Browser use to access (https:\/\/[^\s]+)$/.exec(rawMessage);
   if(!match) return;
   try {
     const u=new URL(match[1]);
     if(u.protocol !== "https:" || u.port || u.username || u.password || u.pathname !== "/" || u.search || u.hash ||
-       match[1] !== `${u.origin}/` || !allowedOrigins.includes(u.origin)) return;
+       ![u.origin,`${u.origin}/`].includes(match[1]) || !allowedOrigins.includes(u.origin)) return;
     return u.origin;
   } catch { return; }
 }
@@ -56,8 +67,9 @@ export async function answerAppServerRequest(
   message: Rpc,
   ask: Ask,
   allowedBrowserOrigins: readonly string[] = [],
+  browserTransfers: BrowserTransfers = {upload:[],download:[]},
 ): Promise<unknown> {
-  if(preauthorizedBrowserOrigin(message,allowedBrowserOrigins))
+  if(preauthorizedBrowserOrigin(message,allowedBrowserOrigins,browserTransfers))
     return {action:"accept",content:{},_meta:null};
   const p = message.params ?? {},
     method = message.method;
@@ -217,6 +229,7 @@ export class CodexAppServerWorker {
       cliPath?: string;
       timeoutMs?: number;
       allowedBrowserOrigins?: readonly string[];
+      browserTransfers?: () => BrowserTransfers;
     },
   ) {}
   shutdown() {
@@ -379,15 +392,17 @@ export class CodexAppServerWorker {
           approvalQueue = approvalQueue.then(async () => {
             if (done) return;
             try {
+              const transfers=this.options.browserTransfers?.() ?? {upload:[],download:[]};
               const result = await answerAppServerRequest(
                 m,
                 task.requestApproval,
                 this.options.allowedBrowserOrigins,
+                transfers,
               );
               if (!done) write({ id: m.id, result });
               log({ event: "approval.response", method: m.method,
-                ...(preauthorizedBrowserOrigin(m,this.options.allowedBrowserOrigins ?? []) ?
-                  {source:"user-preauthorized-site",origin:preauthorizedBrowserOrigin(m,this.options.allowedBrowserOrigins ?? [])} : {}) });
+                ...(preauthorizedBrowserOrigin(m,this.options.allowedBrowserOrigins ?? [],transfers) ?
+                  {source:"user-preauthorized-browser",url:preauthorizedBrowserOrigin(m,this.options.allowedBrowserOrigins ?? [],transfers)} : {}) });
             } catch (error) {
               write({
                 id: m.id,

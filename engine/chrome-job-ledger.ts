@@ -37,6 +37,7 @@ const validUrl = (
   value: string,
   provider: "chatgpt" | "tripo",
   id?: string,
+  allowModelDraft = false,
 ) => {
   const u = new URL(value);
   return (
@@ -49,9 +50,9 @@ const validUrl = (
     (provider === "chatgpt"
       ? u.hostname === "chatgpt.com" && (!id || u.pathname === `/c/${id}`)
       : u.hostname === "studio.tripo3d.ai" &&
-        /^\/(?:[a-z]{2}\/)?workspace\/(generate|texture|smart-uv)\/[^/]+$/.test(
+        (/^\/(?:[a-z]{2}\/)?workspace\/(generate|texture|smart-uv)\/[^/]+$/.test(
           u.pathname,
-        ) &&
+        ) || (allowModelDraft && !id && /^\/(?:[a-z]{2}\/)?workspace\/generate\/?$/.test(u.pathname))) &&
         (!id || u.pathname.endsWith(id)))
   );
 };
@@ -99,7 +100,7 @@ export class ChromeJobLedger {
         frozen.inputMode !== (settings.inputMode ?? "multiview") ||
         frozen.generationCount !== r.generationCount || frozen.polygonCount !== r.polygonCount ||
         !Number.isSafeInteger(frozen.observedCost) || frozen.observedCost < 0 ||
-        !validUrl(frozen.url, "tripo"))
+        !validUrl(frozen.url, "tripo", undefined, true))
       throw Error("모델 설정·개수·면 수·입력·비용 또는 제출 기록이 맞지 않습니다. 제출하지 마세요.");
     this.modelApprovalPending = true;
     try {
@@ -151,6 +152,7 @@ export class ChromeJobLedger {
         args.url,
         r.step === "concept" ? "chatgpt" : "tripo",
         source || undefined,
+        args.phase === "model",
       ) ||
       this.journal.entries.reduce((n, e) => n + e.cost, 0) + args.observedCost >
         (approvedModelPlan?.observedCost ?? a.studioCreditLimit)

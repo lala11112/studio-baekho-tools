@@ -244,6 +244,11 @@ export class ChromeWorkbenchRunner implements ExternalWorkbenchRunner {
       // Paid model/video approval uses the host requestApproval path and is unaffected.
       allowedBrowserOrigins: packet.request.step === "concept" ? ["https://chatgpt.com"] :
         ["model", "surface"].includes(packet.request.step) ? ["https://studio.tripo3d.ai"] : [],
+      browserTransfers: () => ({
+        upload: packet.request.step === "model" && ctx.inputs.some(a=>a.kind === "image") && !ledger.read().entries.length
+          ? ["https://studio.tripo3d.ai/ko/workspace/generate", "https://studio.tripo3d.ai/workspace/generate"] : [],
+        download: ledger.read().entries.filter(e=>e.state === "completed" && e.resultUrl).map(e=>e.resultUrl!),
+      }),
       args: [
         "-c",
         `mcp_servers.partsmith_studio.command=${JSON.stringify(process.execPath)}`,
@@ -372,6 +377,7 @@ export class ChromeWorkbenchRunner implements ExternalWorkbenchRunner {
     if (packet.request.motionVideo) return this.videoPrompt(ctx, packet, journal);
     return `You are the production worker launched by a Partsmith app button. Execute ONLY this frozen current stage, then return its results to the app. Communicate progress and all questions in Korean. Do not ask the user to return to a separate Codex chat. If blocked, return needs_input with a concrete question; the app shows it and supplies the user's reply on explicit continuation. Never start the next workbench stage or select results for the user.
 Use the installed cua_repl browser tools and the user's connected ordinary Chrome. First discover its actual availability. Respect all browser tool documentation/website permissions. Do not use embedded Electron browsers, Playwright/CDP from shell, private endpoints, cookie migration, API substitutes or copied desktop identities. Login/CAPTCHA are user-operated. No account/model changes. If unavailable/denied, stop immediately, do not scan logs/repositories. Do not call imagegen: use the actual ChatGPT website for image jobs.
+APP-OWNED TABS: A connected Chrome with no service tab is NOT a missing-browser error. Use the documented createBrowserTab API to open a new app-owned Chrome tab (session name Partsmith): https://chatgpt.com/ for concept or https://studio.tripo3d.ai/ for model/surface. Reuse an accessible app-owned service tab when present. Never ask the user to create/reopen a tab for routine navigation. If the journal has a reserved/completed phase, open only its recorded service result/submission location and collect; do not submit again. If no phase was reserved, a lost tab or failed pre-submit upload may be prepared again with the SAME frozen input; no Generate until host cost approval. Browser connection or real login failure is different: report the exact failing documented API and sanitized error code/message in the app, not a vague tab request. One connection rediscovery is enough; no repeated failed calls.
 Read external-request.json in this job directory. It is the frozen host specification, including source model ID, selected inputs, exact counts/views, settings and budget. Input paths are relative to the project root ${JSON.stringify(this.options.projectRoot(ctx.workbench.projectId))}. Do not rewrite request files or other projects/history. Only create this job's outputs. No repository scan. Approved source images are attached at their existing resolution; preserve quality, asymmetry, aspect ratio, originals and candidate count. Use independent image originals, never sheets/crops/screenshots as images.
 Host journal at start: ${JSON.stringify(journal)}
 ${ctx.recovery ? "RECOVERY ONLY: no new Send/Generate or untouched phase submissions. Read studio_job_status, reuse its saved pending download ticket/collected originals and recover existing outputs. The host rejects new submissions in recovery." : ""}
