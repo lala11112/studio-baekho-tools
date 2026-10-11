@@ -34,11 +34,31 @@ export function approvalText(value: unknown): string {
     .slice(0, 12000);
 }
 
-/** Protocol approvals are answered only by the app user, never by the model. */
+/** Only the user's explicitly preauthorized, empty browser-origin prompt may skip UI.
+ * Never use sanitized text for a permission decision or infer authority from a model reply. */
+export function preauthorizedBrowserOrigin(message: Rpc, allowedOrigins: readonly string[]): string | undefined {
+  const p=message.params, schema=p?.requestedSchema;
+  if(message.method !== "mcpServer/elicitation/request" || p?.serverName !== "cua_repl" ||
+      (p.mode !== undefined && p.mode !== "form") || schema?.type !== "object" ||
+      !schema.properties || Object.keys(schema.properties).length || (schema.required?.length ?? 0)) return;
+  const match=typeof p.message === "string" && /^Allow Browser use to access (https:\/\/[^\s]+\/)$/.exec(p.message);
+  if(!match) return;
+  try {
+    const u=new URL(match[1]);
+    if(u.protocol !== "https:" || u.port || u.username || u.password || u.pathname !== "/" || u.search || u.hash ||
+       match[1] !== `${u.origin}/` || !allowedOrigins.includes(u.origin)) return;
+    return u.origin;
+  } catch { return; }
+}
+
+/** Other protocol approvals are answered by the app user, never by the model. */
 export async function answerAppServerRequest(
   message: Rpc,
   ask: Ask,
+  allowedBrowserOrigins: readonly string[] = [],
 ): Promise<unknown> {
+  if(preauthorizedBrowserOrigin(message,allowedBrowserOrigins))
+    return {action:"accept",content:{},_meta:null};
   const p = message.params ?? {},
     method = message.method;
   const request: WorkbenchRuntimeApproval = {
@@ -196,6 +216,7 @@ export class CodexAppServerWorker {
       env: Record<string, string>;
       cliPath?: string;
       timeoutMs?: number;
+      allowedBrowserOrigins?: readonly string[];
     },
   ) {}
   shutdown() {
@@ -361,9 +382,12 @@ export class CodexAppServerWorker {
               const result = await answerAppServerRequest(
                 m,
                 task.requestApproval,
+                this.options.allowedBrowserOrigins,
               );
               if (!done) write({ id: m.id, result });
-              log({ event: "approval.response", method: m.method });
+              log({ event: "approval.response", method: m.method,
+                ...(preauthorizedBrowserOrigin(m,this.options.allowedBrowserOrigins ?? []) ?
+                  {source:"user-preauthorized-site",origin:preauthorizedBrowserOrigin(m,this.options.allowedBrowserOrigins ?? [])} : {}) });
             } catch (error) {
               write({
                 id: m.id,

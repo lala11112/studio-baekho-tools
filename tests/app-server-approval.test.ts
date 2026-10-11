@@ -109,3 +109,20 @@ test("invalid form choices fail instead of widening requested permission", async
     /허용되지/,
   );
 });
+
+
+test("only explicitly trusted empty browser-origin prompts auto-accept; other approval classes still ask",async()=>{
+ const base={method:"mcpServer/elicitation/request",params:{serverName:"cua_repl",mode:"form",message:"Allow Browser use to access https://studio.tripo3d.ai/",requestedSchema:{type:"object",properties:{}}}};
+ let calls=0;const decline=async()=>{calls++;return {accepted:false,values:{}};};const allowed=["https://studio.tripo3d.ai","https://chatgpt.com"];
+ assert.deepEqual(await answerAppServerRequest(base,decline,allowed),{action:"accept",content:{},_meta:null});assert.equal(calls,0);
+ for(const message of ["Allow Browser use to access https://studio.tripo3d.ai.evil.example/","Allow Browser use to access https://studio.tripo3d.ai/?cost=100","Allow Browser use to access https://studio.tripo3d.ai/download/","Allow Browser use to access https://evil.example/","Allow Browser use to access https://studio.tripo3d.ai@evil.example/","Allow Browser use to access https://studio.tripo3d.ai/ and pay 100","Allow download from https://studio.tripo3d.ai/"]){
+  assert.deepEqual(await answerAppServerRequest({...base,params:{...base.params,message}},decline,allowed),{action:"decline",content:null,_meta:null});
+ }
+ assert.equal(calls,7);
+ await answerAppServerRequest(base,decline,[]);
+ await answerAppServerRequest({...base,params:{...base.params,serverName:"other"}},decline,allowed);
+ await answerAppServerRequest({...base,params:{...base.params,requestedSchema:{type:"object",properties:{pay:{type:"boolean"}}}}},decline,allowed);
+ await answerAppServerRequest({method:"item/commandExecution/requestApproval",params:{command:"dangerous"}},decline,allowed);
+ await answerAppServerRequest({method:"item/permissions/requestApproval",params:{permissions:{network:{enabled:true}}}},decline,allowed);
+ assert.equal(calls,12);
+});

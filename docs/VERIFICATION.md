@@ -494,3 +494,10 @@ Unity 검증 스크립트는 명시된 테스트 프로젝트의 Partsmith 관�
 - Files: shared/workbench.ts, engine/workbench.ts, engine/chrome-job-ledger.ts, electron/chrome-workbench-runner.ts, src/AssetWorkbench.tsx. Existing original downloads and receipt validation retained.
 - All272 tests passed, including exact-plan approval/replay/denial/cancellation and single-source frozen packet regressions; TypeScript and separate0.6.25 Windows build passed.
 - Actual packaged app: image-1 adopted through UI, persisted on version switch; no active jobs were interrupted. Model job a5d5e915-6c44-4953-85fd-119d6e570deb launched with actual app button using single selected original,P2.0,1model,quad10000target. Pending browser site permission in Partsmith. No paid submission; actual cost and returned model remain unverified.
+
+
+# 2026-10-11 — 0.6.26 user-preauthorized browser site access
+
+- User requested removal of repeated routine site approval prompts. App worker auto-accepts only the exact empty cua_repl origin-access request for the authorized site matching its frozen stage. Raw URL is checked (HTTPS/exact host/root/no credentials,port,query,fragment). All unrelated/unknown/form-value/download/command/permission requests retain the previous app flow; actual model credit approval is separate and still mandatory. No global policy or credentials changed.
+- engine/codex-app-server-worker.ts validates protocol/method/server/schema/origin and logs the preauthorized origin without secrets. electron/chrome-workbench-runner.ts supplies only the stage-specific ChatGPT or Tripo origin. tests/app-server-approval.test.ts covers exact success and lookalike host/URL/scope/form/command rejection.273 tests and separate0.6.26 package passed.
+- Live model attempt1 stopped on Chrome disconnect while uploading, before cost/reservation/Generate. After confirming idle,0.6.25 was closed and0.6.26 opened with same selection/job preserved and no auto-resume. The app Continue button explicitly started attempt2; live result pending.

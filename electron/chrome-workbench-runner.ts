@@ -240,6 +240,10 @@ export class ChromeWorkbenchRunner implements ExternalWorkbenchRunner {
     if (!address || typeof address === "string")
       throw Error("실행 기록 연결 실패");
     const worker = new CodexAppServerWorker({
+      // User explicitly requested automatic routine access to these production sites.
+      // Paid model/video approval uses the host requestApproval path and is unaffected.
+      allowedBrowserOrigins: packet.request.step === "concept" ? ["https://chatgpt.com"] :
+        ["model", "surface"].includes(packet.request.step) ? ["https://studio.tripo3d.ai"] : [],
       args: [
         "-c",
         `mcp_servers.partsmith_studio.command=${JSON.stringify(process.execPath)}`,
