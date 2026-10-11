@@ -209,6 +209,8 @@ export class WorkbenchEngine {
       }
       case "external-run":
         return this.runExternal(w, action.jobId, action.reply, action.continueOnce);
+      case "external-recover":
+        return this.runExternal(w,action.jobId,"기존 생성 결과와 원본 다운로드를 수집하고 등록 정보를 복구하세요. 새 제출·생성은 금지합니다.",true,true);
       case "external-reserve":
         return this.reserveExternal(w, action.jobId, action.requestHash);
       case "external-receive":
@@ -919,7 +921,7 @@ export class WorkbenchEngine {
   private workspace(w: Workbench, job: WorkbenchJob) {
     return this.store.file(w.projectId, `workbench/${w.id}/jobs/${job.id}`);
   }
-  private runExternal(w: Workbench, jobId: string, reply?: string, continueOnce = false) {
+  private runExternal(w: Workbench, jobId: string, reply?: string, continueOnce = false, collectOnly = false) {
     this.idle(w);
     const job = this.job(w, jobId), external = job.externalExecution;
     if (!this.externalRunner || !external || !this.current(w, job) ||
@@ -927,6 +929,14 @@ export class WorkbenchEngine {
       throw new Error("앱에서 이어서 실행할 외부 작업이 아닙니다.");
     if (reply !== undefined && (typeof reply !== "string" || reply.length > 6000))
       throw new Error("답변은 6,000자 이내로 작성하세요.");
+    // Explicit continuation first collects a saved receipt, even after the worker
+    // attempt budget is exhausted. It never grants another remote submission.
+    if(external.state === "reserved" && fs.existsSync(path.join(this.workspace(w,job),"external-result.json"))) {
+      const previousStatus=job.status;
+      job.status="needs_input";
+      try { return this.receiveExternal(w,jobId); }
+      catch(error) { job.status=previousStatus; if(!collectOnly) throw error; }
+    }
     if (external.state === "reserved" && !external.worker)
       throw new Error("수동 제출 예약은 새 작업자로 재실행하지 않습니다. 기존 결과를 등록하세요.");
     if ((external.worker?.attempt ?? 0) >= 3 && !(continueOnce === true && reply?.trim()))
@@ -948,8 +958,9 @@ export class WorkbenchEngine {
     w.activeJobId = jobId;
     this.save(w);
     const controller = new AbortController();
-    const context = {workbench:structuredClone(w),job:structuredClone(job),workspace,
+    const context: Parameters<ExternalWorkbenchRunner["run"]>[0] = {workbench:structuredClone(w),job:structuredClone(job),workspace,
       inputs:packet.inputs,signal:controller.signal,reply,
+      ...(collectOnly ? {recovery:{attempt:1,mode:"retry" as const,error:"사용자가 요청한 기존 결과 수집·등록 복구"}} : {}),
       requestApproval:(approval:WorkbenchRuntimeApproval)=>new Promise<WorkbenchRuntimeAnswer>((resolve,reject)=>{
         if(controller.signal.aborted || this.pendingApprovals.has(w.id)) {reject(Error("권한 요청이 취소되었거나 중복됐습니다."));return;}
         const latest=this.get(w.id),current=this.job(latest,jobId);
@@ -966,6 +977,8 @@ export class WorkbenchEngine {
         this.save(latest);
       })};
     const promise = Promise.resolve().then(async () => {
+      let automaticAttempts=0;
+      while(!controller.signal.aborted) {
       try {
         const result = await this.externalRunner!.run(context, message => {
           if (controller.signal.aborted) return;
@@ -985,19 +998,47 @@ export class WorkbenchEngine {
         current.updatedAt = now(); delete latest.activeJobId;
         this.active.delete(w.id); this.save(latest);
         if (result.status === "completed") this.receiveExternal(latest, jobId);
+        break;
       } catch (error) {
         if (!controller.signal.aborted) {
           const latest = this.get(w.id), current = this.job(latest, jobId);
+          const failure=messageOf(error);
+          const transient=/stream disconnected|websocket closed|ECONNRESET|ETIMEDOUT/i.test(failure) &&
+            !/denied|denial|cancel|login|captcha|거절|차단|취소|로그인/i.test(failure);
+          if(transient && fs.existsSync(path.join(workspace,"external-result.json"))) {
+            current.status="needs_input";delete latest.activeJobId;
+            this.active.delete(w.id);
+            try { this.receiveExternal(latest,jobId);break; }
+            catch(collectionError) { error=collectionError; }
+          } else if(transient && !current.externalExecution!.worker!.approval &&
+            current.externalExecution!.worker!.attempt<3 && automaticAttempts<MAX_RECOVERY_ATTEMPTS) {
+            automaticAttempts++;
+            const delay=this.recoveryDelaysMs[automaticAttempts-1];
+            current.recovery={attempt:automaticAttempts,maxAttempts:MAX_RECOVERY_ATTEMPTS,state:"waiting",reason:failure,nextAttemptAt:new Date(Date.now()+delay).toISOString()};
+            current.summary="연결이 끊겼습니다. 기존 결과만 자동으로 다시 확인합니다.";this.save(latest);
+            if(!await waitForRecovery(delay,controller.signal)) break;
+            const next=this.get(w.id),j=this.job(next,jobId),ex=j.externalExecution!;
+            if(j.status!=="running") break;
+            (ex.workerHistory??=[]).push(structuredClone(ex.worker!));
+            ex.worker={attempt:ex.worker!.attempt+1,startedAt:now(),lastReply:reply};
+            j.recovery!.state="running";delete j.recovery!.nextAttemptAt;this.save(next);
+            context.job=structuredClone(j);context.workbench=structuredClone(next);
+            context.recovery={attempt:automaticAttempts,mode:"retry",error:failure};
+            continue;
+          }
           current.status = "needs_input";
           delete current.externalExecution!.worker!.approval;
           current.summary = `Codex 실행 확인 필요: ${messageOf(error)} 기존 제출을 재전송하지 않습니다.`;
+          if(automaticAttempts) current.recovery={attempt:automaticAttempts,maxAttempts:MAX_RECOVERY_ATTEMPTS,state:"exhausted",reason:messageOf(error)};
           delete latest.activeJobId; this.save(latest);
         }
-      } finally {
+        break;
+      }
+      }
+    }).finally(() => {
         const pending=this.pendingApprovals.get(w.id);
         if(pending) {this.pendingApprovals.delete(w.id);pending.resolve({accepted:false,values:{}});}
         this.active.delete(w.id);
-      }
     });
     this.active.set(w.id,{controller,promise});
     return w;
@@ -1013,14 +1054,14 @@ export class WorkbenchEngine {
     this.verifyArtifacts(w, packet.inputs);
     external.state = "reserved";
     external.reservedAt = now();
-    job.summary = "외부 제출 예약됨 · 현재 대화에서 한 번만 전송하고 기존 결과를 회수하세요. 재전송 금지.";
+    job.summary = "앱 작업이 예약됐습니다. Codex가 한 번 제출하고 결과를 가져옵니다.";
     job.updatedAt = now();
     return this.save(w);
   }
   private receiveExternal(w: Workbench, jobId: string) {
     this.idle(w);
     const job = this.job(w, jobId), external = job.externalExecution;
-    if (job.status !== "needs_input" || external?.state !== "reserved")
+    if (!["needs_input","submission_unknown"].includes(job.status) || external?.state !== "reserved")
       throw new Error("결과 회수를 기다리는 외부 실행 작업이 아닙니다.");
     const workspace = this.workspace(w, job);
     if (external.worker) {
@@ -1029,6 +1070,8 @@ export class WorkbenchEngine {
     }
     if (hash(path.join(workspace, "external-request.json")) !== external.requestHash)
       throw new Error("고정 실행 명세가 변경되었습니다.");
+    const savedPacket=json<{inputs:WorkbenchArtifact[]}>(path.join(workspace,"external-request.json"));
+    this.verifyArtifacts(w,savedPacket.inputs);
     const receipt = json<{jobId: string; requestHash: string; conversationUrl?: string;
       studioModels?: {candidateId: string; modelId: string; url: string}[];
       surface?: WorkbenchSurfaceReceipt;
@@ -1101,6 +1144,7 @@ export class WorkbenchEngine {
     if (job.request.externalModel) external.studioModels = structuredClone(receipt.studioModels);
     else if (job.request.externalSurface) external.surface = structuredClone(receipt.surface);
     else external.conversationUrl = receipt.conversationUrl;
+    delete job.recovery;
     job.updatedAt = now();
     w.message = "외부 결과 파일과 출처를 등록했습니다. 결과를 검토하고 직접 선택하세요.";
     return this.save(w);
@@ -2077,11 +2121,11 @@ export class WorkbenchEngine {
     this.workerIdle();
     const job = this.job(w, jobId);
     if (
-      !["separate", "reference"].includes(job.step) ||
+      !["separate", "reference", "assembly", "rig", "animation"].includes(job.step) ||
       !["failed", "needs_input", "cancelled", ...(job.step === "reference" ? ["submission_unknown"] : [])].includes(job.status)
     )
       throw new Error(
-        "중지된 분리·동작 참조 작업에서만 저장된 이미지를 확인할 수 있습니다.",
+        "중지된 분리·참조·Blender 작업에서 저장된 결과를 확인할 수 있습니다.",
       );
     if (!this.executor.inspectSaved)
       throw new Error("저장된 이미지 확인 기능을 사용할 수 없습니다.");
@@ -2099,7 +2143,7 @@ export class WorkbenchEngine {
     const originalStatus = job.status;
     job.status = "running";
     job.summary =
-      "저장된 이미지를 확인합니다. 새 이미지는 생성하지 않습니다.";
+      "저장된 결과 파일을 검사합니다. Codex나 새 생성을 실행하지 않습니다.";
     delete job.recovery;
     job.updatedAt = now();
     w.activeJobId = job.id;

@@ -244,6 +244,7 @@ export type WorkbenchRuntimeApproval = {
 };
 export type WorkbenchRuntimeAnswer = {accepted:boolean;values:Record<string,string>};
 export type WorkbenchAction =
+  | {kind:"external-recover";jobId:string}
   | {kind:"external-approval";jobId:string;approvalId:string;answer:WorkbenchRuntimeAnswer}
   | { kind: "external-run"; jobId: string; reply?: string; continueOnce?: boolean }
   | { kind: "external-reserve"; jobId: string; requestHash: string }

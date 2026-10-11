@@ -9,6 +9,35 @@ import { Engine } from "../engine/engine";
 import { WorkbenchEngine } from "../engine/workbench";
 import type { ExternalWorkbenchRunner } from "../shared/workbench";
 
+test("transport loss collects completed receipts locally; otherwise bounded retries are collection-only",async t=>{
+ for(const mode of ["saved","transient","denied","cancelled"] as const){
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"app-recovery-")),store=new Store(root);await store.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));
+  let calls=0;const recoveries:any[]=[];
+  const runner:ExternalWorkbenchRunner={async run(ctx){
+    calls++;recoveries.push(ctx.recovery);
+    if(mode==="saved"){
+      const bytes=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==","base64");
+      fs.writeFileSync(path.join(ctx.workspace,"image.png"),bytes);
+      fs.writeFileSync(path.join(ctx.workspace,"external-result.json"),JSON.stringify({jobId:ctx.job.id,requestHash:ctx.job.externalExecution!.requestHash,
+        conversationUrl:"https://chatgpt.com/c/test",files:[{path:"image.png",sha256:createHash("sha256").update(bytes).digest("hex")}],
+        result:{status:"completed",summary:"Saved",checks:[],candidates:[{id:"one",label:"one",artifacts:[{path:"image.png",kind:"image"}]}]}}));
+    }
+    if(mode==="cancelled")await new Promise(r=>setTimeout(r,20));
+    throw Error(mode==="denied"?"approval denied; websocket closed":"stream disconnected before completion: websocket closed");
+  },verifyReceipt(){}};
+  const engine=new WorkbenchEngine(store,{execute:async()=>{throw Error("unused");}},{externalRunner:runner,recoveryDelaysMs:[1,1,1]});
+  t.after(()=>{engine.shutdown();store.db.close();fs.rmSync(root,{recursive:true,force:true});});
+  const p=new Engine(store,{} as any).create("Recovery fixture");
+  const w=engine.action(p.id,{kind:"execute",request:{step:"concept",provider:"gpt",prompt:"one",generationCount:1,executionMode:"codex-app"},approval:{accepted:true,studioCreditLimit:0,imageCreditLimit:0}});
+  if(mode==="cancelled"){await new Promise(r=>setImmediate(r));engine.action(p.id,{kind:"cancel"});}
+  await engine.wait(w.id);const got=engine.get(w.id);
+  assert.equal(calls,mode==="transient"?3:1,mode);assert(!got.activeJobId);
+  assert.equal(got.jobs[0].status,mode==="saved"?"review":mode==="cancelled"?"submission_unknown":"needs_input",got.jobs[0].summary);
+  if(mode==="transient"){assert(recoveries.slice(1).every(r=>r.mode==="retry"));assert.equal(got.jobs[0].externalExecution!.workerHistory!.length,2);}
+  assert.deepEqual(got.selections,{});
+ }
+});
+
 test("explicit continuation preserves attempt history and frozen reservation without granting automatic retries",async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),"partsmith-continuation-")),store=new Store(root);
  await store.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));let calls=0;
@@ -30,6 +59,9 @@ test("explicit continuation preserves attempt history and frozen reservation wit
  assert.equal(current.workerHistory!.length,3);assert.equal(current.workerHistory![2]!.threadId,"test-3");
  assert.equal(current.continuations![0].afterAttempt,3);
  assert.throws(()=>engine.action(p.id,{kind:"external-run",jobId:id}),/3회/);
+  runner.run=async ctx=>{calls++;assert.equal(ctx.recovery?.mode,"retry");return {status:"needs_input",summary:"Explicit collection only"};};
+  engine.action(p.id,{kind:"external-recover",jobId:id});await engine.wait(w.id);
+  assert.equal(calls,5);assert.equal(engine.get(w.id).jobs[0].externalExecution!.worker!.attempt,5);
 });
 
 test("app dispatch returns questions, collects validated files and never advances or resumes automatically", async (t) => {

@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 /** Collect only a new native file after an observed export click; never fetch URLs. */
 export class NativeDownloadCollector {
+  private collected: any[] = [];
   private pending?: {
     id: string;
     phase: string;
@@ -14,12 +15,34 @@ export class NativeDownloadCollector {
   constructor(
     private downloads: string,
     private workspace: string,
-    private media: "model" | "video" = "model",
-  ) {}
+    private media: "model" | "video" | "image" = "model",
+    private stateFile?: string,
+  ) {
+    if (stateFile && fs.existsSync(stateFile)) {
+      const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+      if (saved.workspace !== path.resolve(workspace) || saved.downloads !== path.resolve(downloads) || saved.media !== media)
+        throw Error("다운로드 기록의 작업 위치가 다릅니다.");
+      this.collected = saved.collected;
+      if (saved.pending) this.pending = {...saved.pending, before:new Map(saved.pending.before)};
+    }
+  }
+  status() {
+    return {pending:this.pending ? {id:this.pending.id,phase:this.pending.phase,url:this.pending.url} : undefined,
+      collected:structuredClone(this.collected)};
+  }
+  private persist() {
+    if (!this.stateFile) return;
+    fs.mkdirSync(path.dirname(this.stateFile),{recursive:true});
+    const fd=fs.openSync(this.stateFile+".tmp","w");
+    try { fs.writeFileSync(fd,JSON.stringify({workspace:path.resolve(this.workspace),downloads:path.resolve(this.downloads),media:this.media,
+      pending:this.pending ? {...this.pending,before:[...this.pending.before]} : undefined,collected:this.collected}));fs.fsyncSync(fd); }
+    finally {fs.closeSync(fd);}
+    fs.renameSync(this.stateFile+".tmp",this.stateFile);
+  }
   private snapshot() {
     const found = new Map<string, string>();
     for (const name of fs.readdirSync(this.downloads)) {
-      if (!(this.media === "video" ? /\.mp4$/i : /\.(fbx|zip)$/i).test(name)) continue;
+      if (!(this.media === "image" ? /\.(png|jpe?g|webp)$/i : this.media === "video" ? /\.mp4$/i : /\.(fbx|zip)$/i).test(name)) continue;
       const file = path.join(this.downloads, name),
         stat = fs.lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink()) continue;
@@ -36,6 +59,7 @@ export class NativeDownloadCollector {
       before: this.snapshot(),
       startedAt: new Date().toISOString(),
     };
+    this.persist();
     return {
       id: this.pending.id,
       status: "ready",
@@ -44,6 +68,15 @@ export class NativeDownloadCollector {
     };
   }
   collect(id: string) {
+    const saved = this.stateFile && this.collected.find(r=>r.id===id);
+    if(saved) {
+      const file=path.resolve(this.workspace,saved.path);
+      if(!file.startsWith(path.resolve(this.workspace)+path.sep) ||
+        !fs.realpathSync(file).startsWith(fs.realpathSync(this.workspace)+path.sep) ||
+        createHash("sha256").update(fs.readFileSync(file)).digest("hex")!==saved.sha256)
+        throw Error("저장된 다운로드 원본이 변경됐습니다.");
+      return structuredClone(saved);
+    }
     const ticket = this.pending;
     if (!ticket || ticket.id !== id)
       throw Error("현재 다운로드 예약과 일치하지 않습니다.");
@@ -63,7 +96,11 @@ export class NativeDownloadCollector {
     const bytes = fs.readFileSync(source);
     if (this.snapshot().get(name) !== stamp || bytes.length !== stat.size)
       return { status: "pending" };
-    const valid = this.media === "video" ? bytes.toString("ascii", 4, 8) === "ftyp" : /\.fbx$/i.test(name)
+    const valid = this.media === "image" ?
+      (bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])) ||
+       (bytes[0]===255 && bytes[1]===216 && bytes[2]===255) ||
+       (bytes.toString("ascii",0,4)==="RIFF" && bytes.toString("ascii",8,12)==="WEBP")) :
+      this.media === "video" ? bytes.toString("ascii", 4, 8) === "ftyp" : /\.fbx$/i.test(name)
       ? bytes
           .subarray(0, 23)
           .equals(Buffer.from("Kaydara FBX Binary  \x00\x1a\x00")) ||
@@ -73,9 +110,14 @@ export class NativeDownloadCollector {
     const relative = `outputs/native-downloads/${id}/${name}`;
     const destination = path.join(this.workspace, relative);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, bytes, { flag: "wx" });
+    if(!fs.realpathSync(path.dirname(destination)).startsWith(fs.realpathSync(this.workspace)+path.sep))
+      throw Error("작업 폴더 밖 연결 파일을 거부했습니다.");
+    if(fs.existsSync(destination)) {
+      if(!fs.readFileSync(destination).equals(bytes)) throw Error("기존 수집 원본과 다른 파일입니다.");
+    } else fs.writeFileSync(destination, bytes, { flag: "wx" });
     const receipt = {
       status: "collected",
+      id,
       path: relative,
       sha256: createHash("sha256").update(bytes).digest("hex"),
       bytes: bytes.length,
@@ -89,9 +131,11 @@ export class NativeDownloadCollector {
     fs.writeFileSync(
       path.join(path.dirname(destination), "download-receipt.json"),
       JSON.stringify(receipt, null, 2),
-      { flag: "wx" },
+      { flag: "w" },
     );
     this.pending = undefined;
+    this.collected.push(receipt);
+    this.persist();
     return receipt;
   }
 }

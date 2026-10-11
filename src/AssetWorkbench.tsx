@@ -1399,6 +1399,9 @@ export function AssetWorkbench({
               <button data-testid="workbench-external-receive"
                 disabled={currentStatus.externalExecution.state !== "reserved" || locked}
                 onClick={() => void action({kind: "external-receive", jobId: currentStatus.id})}>저장된 결과 다시 확인</button>
+              <button data-testid="workbench-external-recover"
+                disabled={locked || currentStatus.externalExecution.state !== "reserved" || !currentStatus.externalExecution.worker}
+                onClick={()=>void action({kind:"external-recover",jobId:currentStatus.id})}>원본 수집·등록 복구 · 새 생성 없음</button>
               <button disabled={currentStatus.status !== "needs_input" || locked}
                 onClick={() => void action({kind: "external-cancel", jobId: currentStatus.id})}>외부 작업 추적 중지</button>
             </div>}
@@ -1467,6 +1470,12 @@ export function AssetWorkbench({
               중단
             </button>
           )}
+          {!active && !currentStatus.externalExecution && ["assembly","rig","animation"].includes(currentStatus.step) &&
+            ["failed","needs_input","cancelled"].includes(currentStatus.status) && <button
+              data-testid="workbench-collect-local" disabled={locked || !currentInputs(currentStatus)}
+              onClick={()=>action({kind:"inspect-saved",jobId:currentStatus.id})}>
+              저장된 결과 가져오기 · 생성 없음
+            </button>}
           {currentStatus.validationPending && (
             <button
               data-testid="workbench-revalidate"
@@ -1951,10 +1960,10 @@ export function AssetWorkbench({
                       <label className="wb-check">
                         <input type="checkbox" data-testid="workbench-external-model" checked={externalModel}
                           onChange={e => setExternalModel(e.target.checked)} />
-                        현재 Codex 대화에서 Chrome의 Tripo 실행
+                        앱의 Codex로 Chrome에서 Tripo 실행
                       </label>
                       {externalModel && <>
-                        <small>채택한 전체 4방향 원본을 P2.0에 전달합니다. 이 버튼은 작업 명세만 저장합니다.
+                        <small>채택한 전체 4방향 원본을 P2.0에 전달하고 앱이 Codex를 실행합니다.
                           Codex가 Chrome의 방향·개수·면 수·비용을 확인하고 승인한 범위에서 한 번 제출합니다.</small>
                         <label className="field"><span>Tripo에서 확인한 토폴로지</span>
                           <select data-testid="workbench-studio-topology" value={studioTopology}

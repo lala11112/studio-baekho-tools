@@ -1560,6 +1560,15 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
   async inspectSaved(
     context: WorkbenchExecutionContext,
   ): Promise<WorkbenchResult> {
+    if (["assembly","rig","animation"].includes(context.job.step)) {
+      if(context.signal.aborted) throw Error("저장 결과 확인을 취소했습니다.");
+      const saved=resultSchema.parse(readJson(this.file(context.workspace,`outputs/${context.job.step}/result.json`)));
+      if(saved.status!=="completed") throw Error("완료된 결과 파일이 없습니다. 기존 작업 이어서 확인을 사용하세요.");
+      // No probe or worker: completed metadata is mandatory before phase validation.
+      const result=await this.phase({...context,recovery:undefined},this.inputs(context),()=>{});
+      if(result.status==="completed") await this.inspectBlend(context,result.candidates[0]);
+      return result;
+    }
     if (context.job.step === "reference") {
       const result: WorkbenchResult = resultSchema.parse(readJson(this.file(context.workspace, "outputs/reference/result.json")));
       result.checks = normalizeWorkbenchChecks("reference", result.checks);
