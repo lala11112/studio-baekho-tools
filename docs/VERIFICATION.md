@@ -1,5 +1,12 @@
 # Partsmith 검증 결과
 
+## 2026-10-11 — 0.6.21 MCP 상시 활성화 설정
+
+- 사용자가 작업마다 MCP를 켜고 끄는 정책을 철회했다. 전역 `.codex/config.toml`의 blender/fal_ai/notion을 enabled=true로 변경하고 전역/프로젝트 AGENTS 지침도 상시 활성화로 수정. TOML 파싱 전후 비교로 이 세 boolean 외 설정·인증 정보가 동일함을 확인. 자격 증명은 출력/커밋하지 않았다.
+- `engine/codex-worker.ts`, `engine/codex-app-server-worker.ts`, `engine/runway-client.ts`에서 위 세 MCP의 enabled=false 강제 인자를 제거해 사용자 설정을 상속한다. 기존 sandbox·도구 승인·유료 요청 확인은 유지.
+- 초기 전체 검사에서 과거 비활성화 정책을 기대하던 회귀 검사1개가 실패했고 새 상속 정책으로 수정했다. 최종 전체266/266 통과, TypeScript/Vite/esbuild 및 별도0.6.21 패키지 성공. 실제 app.asar의 main.cjs에서도 세 강제 비활성화 문자열이 없음을 검사했다.
+- 현재0.6.20에서 animation34cc1dac-45c6-48ec-a651-532557c5d6ae 실행 중이므로 앱·worker 종료/재시작·사용자 데이터 변경 없음. 새0.6.21 빌드는 준비만 했으며 실행하지 않았다. 실행 중 세션의 도구 목록/실제 서버 연결 건강 상태가 변경됐다고 주장하지 않는다. 새 세션/작업 종료 후 새 앱 실행 시 반영 필요할 수 있다. 이번 작업은 설정 변경이며 애니메이션 완료 검증이 아니다.
+
 ## 2026-10-11 — 0.6.20 채택한 측면 영상의 Astra 전달 오류 수정
 
 - 실제 사용자 채택: 새 전신 Idle `b7f3d611-c744-40e2-9915-c54d8c94f9a3`, Runway `ce4c4e4c-d79d-4443-94dc-f423a268f275`. 이후 animation `34cc1dac-45c6-48ec-a651-532557c5d6ae`가 “채택한 동작 영상 원본이 없습니다”로 실패. 채택과 원본 MP4는 정상이며, 실패는 작업 실행 전 입력 준비에서 발생했다.

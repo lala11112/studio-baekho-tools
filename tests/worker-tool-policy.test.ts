@@ -35,7 +35,7 @@ test("noninteractive child approves only app-owned browser tools while keeping s
     assert(args.includes('approval_policy="never"'));
     assert(args.includes("workspace-write"));
     for (const name of ["blender", "fal_ai", "notion"])
-      assert(args.includes(`mcp_servers.${name}.enabled=false`));
+      assert(!args.some(arg => arg.startsWith(`mcp_servers.${name}.enabled=`)));
     assert(
       !grants.some((value) =>
         /sandbox|approval_policy|default_tools|apps\./.test(value),

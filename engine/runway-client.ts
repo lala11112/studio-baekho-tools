@@ -29,7 +29,7 @@ export class CodexRunwayConnection implements RunwayConnection {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
       !(key.startsWith("CODEX_") && key !== "CODEX_HOME") && !/^(BROWSER_USE_|CUA_|OPENAI_API_KEY$|CODEX_API_KEY$)/.test(key)));
     const child = spawn(path.join(process.env.LOCALAPPDATA!, "Programs/OpenAI/Codex/bin/codex.exe"),
-      ["app-server", "--stdio", "-c", "mcp_servers.blender.enabled=false", "-c", "mcp_servers.fal_ai.enabled=false", "-c", "mcp_servers.notion.enabled=false",
+      ["app-server", "--stdio",
         ...(this.uploadOnly ? ["-c", "features.image_generation=false"] : [])],
       { cwd, env, windowsHide: true, shell: false, stdio: "pipe" });
     this.child = child;

@@ -191,9 +191,7 @@ test("assembly, rig and animation explicitly use Astra; image steps retain confi
     if (["assembly", "rig", "animation"].includes(step))
       assert.equal(args[args.indexOf("--model") + 1], "gpt-6-astra");
     else assert(!args.includes("--model"));
-    assert(args.includes("mcp_servers.blender.enabled=false"));
-    assert(args.includes("mcp_servers.fal_ai.enabled=false"));
-    assert(args.includes("mcp_servers.notion.enabled=false"));
+    assert(!args.some(arg => /^mcp_servers\.(blender|fal_ai|notion)\.enabled=/.test(arg)));
     fs.rmSync(f.root, { recursive: true, force: true });
   }
 });

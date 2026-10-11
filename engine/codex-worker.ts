@@ -111,14 +111,7 @@ export function codexArguments(task: WorkerTask, extraArgs: string[] = []) {
     "workspace-write",
     "--config",
     'approval_policy="never"',
-    // Child jobs use built-in image tools and local Blender scripts. Keep the
-    // user's disabled integrations disabled without rewriting their config.
-    "--config",
-    "mcp_servers.blender.enabled=false",
-    "--config",
-    "mcp_servers.fal_ai.enabled=false",
-    "--config",
-    "mcp_servers.notion.enabled=false",
+    // Inherit the user's persistent MCP settings; never toggle servers per job.
     "--skip-git-repo-check",
     "--cd",
     task.run.workspace,
