@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { z } from "zod";
 import { PNG } from "pngjs";
 import { readJsonFile } from "./json";
+import { motionVideoViews, validateVideoSources } from "../shared/motion-video";
 import { inspectWorkbenchGlb } from "./glb-inspect";
 import { validateAnatomicalRig } from "./rig-inspect";
 import { splitMultiviewSheet } from "./multiview-sheet";
@@ -1890,17 +1891,19 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         .match(/^(.*\/jobs\/[^/]+\/)/)?.[1];
       if (!prefix || !Array.isArray(manifest.frames))
         throw Error("선택한 동작 이미지 명세의 기준 폴더가 없습니다.");
+      const views = manifest.source === "video-ai" ? motionVideoViews(manifest.mode) : ["front", "side", "back"];
       if (manifest.source === "video-ai") {
-        for (const view of ["front", "side", "back"]) {
+        validateVideoSources(manifest.videos, manifest.mode);
+        for (const view of views) {
           const clip = manifest.videos?.[view];
           const original: string = typeof clip?.path === "string" ? path.posix.normalize(prefix + clip.path.replaceAll("\\", "/")) : "";
           const video = copied.find(item => item.kind === "video" && item.path.replaceAll("\\", "/") === original);
-          if (!original.startsWith(prefix) || !video) throw Error("채택한 동작 영상 원본이 없습니다.");
+          if (!original.startsWith(prefix) || !video) throw Error(`채택한 ${view} 동작 영상이 등록된 입력에 없습니다.`);
           clip.path = video.localPath;
         }
       }
       for (const frame of manifest.frames)
-        for (const view of ["front", "side", "back"]) {
+        for (const view of views) {
           const reference = frame[view];
           if (typeof reference !== "string" || path.isAbsolute(reference))
             throw Error(

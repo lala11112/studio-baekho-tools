@@ -473,6 +473,36 @@ test("animation input manifests are rebased to copied registered frames without 
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
+for (const mode of ["side", "multiview"] as const) {
+  test(`${mode} accepted video and frame paths reach the animation worker without changing originals`, async t => {
+    const f = fixture("animation"), worker = new Worker();
+    t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+    const prefix = "workbench/bench/jobs/accepted/", root = f.services.projectRoot("project");
+    const views = mode === "side" ? ["side"] : ["front", "side", "back"];
+    const add = (relative: string, kind: "video" | "image" | "frames", bytes: string) => {
+      const file = path.join(root, prefix, relative); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes);
+      f.context.inputs.push({ path: prefix + relative, kind, sha256: digest(file), bytes: fs.statSync(file).size });
+    };
+    for (const view of views) { add(`outputs/${view}.mp4`, "video", `fixture-video-${view}`); add(`outputs/${view}.png`, "image", `fixture-frame-${view}`); }
+    const manifest = { source: "video-ai", mode, videos: Object.fromEntries(views.map(view => [view, { path: `outputs/${view}.mp4`, startTime: 0 }])), frames: [{ time: 0, ...Object.fromEntries(views.map(view => [view, `outputs/${view}.png`])) }] };
+    add("outputs/frames.json", "frames", JSON.stringify(manifest));
+    const original = f.context.inputs.at(-1)!;
+    await new CodexWorkbenchExecutor(worker, f.services).execute(f.context, () => {});
+    assert.equal(worker.calls.length, 1);
+    const copied = JSON.parse(fs.readFileSync(path.join(f.context.workspace, `inputs/${f.context.inputs.length - 1}-frames.json`), "utf8"));
+    assert.deepEqual(Object.keys(copied.videos), views);
+    for (const view of views) {
+      assert.equal(fs.readFileSync(path.join(f.context.workspace, copied.videos[view].path), "utf8"), `fixture-video-${view}`);
+      assert.equal(fs.readFileSync(path.join(f.context.workspace, copied.frames[0][view]), "utf8"), `fixture-frame-${view}`);
+    }
+    assert.equal(digest(path.join(root, original.path)), original.sha256);
+    // Missing registered originals must still fail before running an expensive worker.
+    f.context.inputs = f.context.inputs.filter(a => a.kind !== "video"); worker.calls.length = 0;
+    await assert.rejects(new CodexWorkbenchExecutor(worker, f.services).execute(f.context, () => {}), /등록된 입력/);
+    assert.equal(worker.calls.length, 0);
+  });
+}
+
 test("GLB inspection rejects broken UV accessors, inflated weights and static animation", () => {
   const valid = buildWorkbenchGlb();
   assert(

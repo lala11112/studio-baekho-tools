@@ -2658,7 +2658,7 @@ export function AssetWorkbench({
                     setViewJobId("");
                   }}
                 >
-                  ① 멀티뷰 동작 확인
+                  ① 동작 참조 확인
                 </button>
                 <button
                   disabled={!reference}
@@ -2933,8 +2933,7 @@ export function AssetWorkbench({
             {page === "motion" && motionMode === "reference" && (
               <div className="wb-next">
                 <p>
-                  같은 시점의 정면·측면·후면 동작이 일치하는지 확인하고
-                  채택하세요.
+                  {viewing?.request.motionVideo?.mode === "side" ? "측면 영상의 전신 구도·발 접지·반복 연결을 확인하고 채택하세요." : "같은 시점의 정면·측면·후면 동작이 일치하는지 확인하고 채택하세요."}
                 </p>
                 <button
                   className="primary"
