@@ -9,16 +9,19 @@ import { RunwayWorkbenchRunner } from "../engine/runway-workbench-runner";
 import type { RunwayConnection, RunwayTool } from "../engine/runway-client";
 import type { Workbench, WorkbenchJob, WorkbenchExecutionContext } from "../shared/workbench";
 import { validateVideoSources } from "../shared/motion-video";
+import { PNG } from "pngjs";
 
 const digest = (v: Buffer | string) => createHash("sha256").update(v).digest("hex");
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==", "base64");
-function setup(t: any) {
+function setup(t: any, framed = false) {
+  const fixture = new PNG({ width: 32, height: 32 }); fixture.data.fill(255);
+  const sourcePng = framed ? PNG.sync.write(fixture) : png;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "runway-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const workspace = path.join(root, "jobs", "motion"); fs.mkdirSync(workspace, { recursive: true }); fs.writeFileSync(path.join(root, "side.png"), png);
-  const image = { path: "side.png", kind: "image" as const, role: "whole", view: "left" as const, bytes: png.length, sha256: digest(png) };
+  const workspace = path.join(root, "jobs", "motion"); fs.mkdirSync(workspace, { recursive: true }); fs.writeFileSync(path.join(root, "side.png"), sourcePng);
+  const image = { path: "side.png", kind: "image" as const, role: "whole", view: "left" as const, bytes: sourcePng.length, sha256: digest(sourcePng) };
   const request = { step: "reference" as const, prompt: "fixed side rabbit idle", motion: "Rabbit_Idle", duration: 2, fps: 30, referenceFrameCount: 3, referenceTimes: [0, 1, 2], loop: true,
-    motionVideo: { serviceUrl: "https://app.runwayml.com", backend: "runway-mcp" as const, mode: "side" as const, model: "gen-4.5", sourceView: "left" as const, resolution: "1080p" as const, nativeDuration: 2 } };
+    motionVideo: { serviceUrl: "https://app.runwayml.com", backend: "runway-mcp" as const, mode: "side" as const, model: "gen-4.5", sourceView: "left" as const, resolution: framed ? "720p" as const : "1080p" as const, nativeDuration: 2, ...(framed ? { framing: "full-body-v1" as const } : {}) } };
   const approval = { accepted: true, studioCreditLimit: 0, imageCreditLimit: 0 };
   const packet = JSON.stringify({ jobId: "motion", request, approval }); fs.writeFileSync(path.join(workspace, "external-request.json"), packet);
   const job: WorkbenchJob = { id: "motion", step: "reference", slot: "reference:Rabbit_Idle", status: "running", createdAt: "test", updatedAt: "test", summary: "", candidates: [], checks: [], request, approval, externalExecution: { state: "reserved", requestHash: digest(packet) }, dependencies: { "whole-reference": { jobId: "views", candidateId: "accepted" } } };
@@ -30,8 +33,8 @@ function setup(t: any) {
   const connection: RunwayConnection = { open: async () => {}, close: () => {}, call: async (tool, args) => {
     calls.push(tool);
     if (tool === "whoami") return { authenticated: true, team: { id: 1 }, credits: { total: 625 }, availableVideoModels: ["gen-4.5"] };
-    if (tool === "init_upload") { uploads++; assert.deepEqual(fs.readFileSync(args.file as string), png); return { kind: "upload_complete", assetUrl: "https://asset.example/original?secret=hidden" }; }
-    if (tool === "generate_video") { submits++; assert.equal(args.duration, 2); assert.equal(args.model, "gen-4.5"); assert.equal(args.resolution, "1080p"); assert.equal((args.startFrame as any).url, "https://asset.example/original?secret=hidden"); if (simulateTimeout) throw Error("timeout after submit"); return { taskId: "task-1" }; }
+    if (tool === "init_upload") { uploads++; const uploaded = fs.readFileSync(args.file as string); if (!framed) assert.deepEqual(uploaded, png); else { const actual = PNG.sync.read(uploaded); assert.equal(actual.width / actual.height, 16 / 9); assert(actual.height > 32); } return { kind: "upload_complete", assetUrl: "https://asset.example/original?secret=hidden" }; }
+    if (tool === "generate_video") { submits++; assert.equal(args.duration, 2); assert.equal(args.model, "gen-4.5"); assert.equal(args.resolution, framed ? "720p" : "1080p"); assert.equal(args.ratio, framed ? "16:9" : undefined); if (framed) assert.match(String(args.promptText), /Both ear tips.*all four feet/); assert.equal((args.startFrame as any).url, "https://asset.example/original?secret=hidden"); if (simulateTimeout) throw Error("timeout after submit"); return { taskId: "task-1" }; }
     return { kind: taskKind, taskId: "task-1", url: "https://asset.example/video?secret=hidden" };
   } };
   const options = { journalRoot: path.join(root, "journals"), projectRoot: () => root, ffmpegPath: path.resolve("node_modules/ffmpeg-static/ffmpeg.exe"),
@@ -45,6 +48,17 @@ test("side video manifest requires one side original; legacy three-view requirem
   const side = { side: { path: "side.mp4", startTime: 0 } };
   validateVideoSources(side, "side"); assert.throws(() => validateVideoSources(side));
   assert.throws(() => validateVideoSources({ ...side, front: side.side }, "side"));
+});
+
+test("full-body upload waits for a fresh 24-credit approval, preserves source and sends explicit 16:9/720p only once", async t => {
+  const f = setup(t, true), original = fs.readFileSync(path.join(f.root, "side.png"));
+  await f.runner.run({ ...f.ctx, requestApproval: async a => { assert.match(a.detail, /추가 예상 24크레딧/); assert.match(a.detail, /16:9 전신/); return { accepted: false, values: {} }; } }, () => {});
+  assert.equal(f.state().submits, 0);
+  assert.deepEqual(fs.readFileSync(path.join(f.root, "side.png")), original);
+  const metadata = JSON.parse(fs.readFileSync(path.join(f.ctx.workspace, "inputs/runway-framing.json"), "utf8"));
+  assert.equal(metadata.sourceSha256, digest(original)); assert.notEqual(metadata.uploadSha256, metadata.sourceSha256);
+  await f.runner.run({ ...f.ctx, requestApproval: async () => ({ accepted: true, values: {} }) }, () => {});
+  assert.equal(f.state().submits, 1); assert.equal(f.state().uploads, 1);
 });
 test("upload preserves exact accepted bytes, waits for app cost approval and reuses upload on explicit continuation", async t => {
   const f = setup(t);
@@ -75,6 +89,21 @@ test("failed known task is only collected on continuation, never regenerated", a
   assert.equal((await f.runner.run(ctx, () => {})).status, "needs_input");
   await new RunwayWorkbenchRunner(f.options).run(ctx, () => {});
   assert.equal(f.state().submits, 1); assert.equal(f.calls.filter(x => x === "get_task").length, 2);
+});
+
+test("new Jump headroom cannot reuse Idle upload even with the same original", async t => {
+  const f = setup(t, true), requestApproval = async () => ({ accepted: false, values: {} });
+  await f.runner.run({ ...f.ctx, requestApproval }, () => {});
+  const workspace = path.join(f.root, "jobs", "jump"); fs.mkdirSync(workspace, { recursive: true });
+  const job = structuredClone(f.ctx.job); job.id = "jump"; job.request.motion = "Rabbit_Jump"; job.request.loop = false;
+  const packet = JSON.stringify({ jobId: job.id, request: job.request, approval: job.approval });
+  fs.writeFileSync(path.join(workspace, "external-request.json"), packet); job.externalExecution!.requestHash = digest(packet);
+  await new RunwayWorkbenchRunner(f.options).run({ ...f.ctx, workspace, job, requestApproval }, () => {});
+  assert.equal(f.state().uploads, 2); assert.equal(f.state().submits, 0);
+  const idle = JSON.parse(fs.readFileSync(path.join(f.ctx.workspace, "inputs/runway-framing.json"), "utf8"));
+  const jump = JSON.parse(fs.readFileSync(path.join(workspace, "inputs/runway-framing.json"), "utf8"));
+  assert.notEqual(idle.uploadSha256, jump.uploadSha256); assert.equal(idle.sourceSha256, jump.sourceSha256);
+  assert(jump.y > idle.y);
 });
 test("cancel at approval performs zero paid submissions", async t => {
   const f = setup(t);

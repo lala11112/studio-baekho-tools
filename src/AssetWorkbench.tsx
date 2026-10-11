@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { RUNWAY_RATE } from "../shared/runway";
+import { RunwayFramePreview } from "./RunwayFramePreview";
 import {
   ArrowRight,
   Check,
@@ -402,6 +403,7 @@ export function AssetWorkbench({
   const videoServiceUrl = "https://app.runwayml.com";
   const [videoSourceView, setVideoSourceView] = useState<"left" | "right">(latestVideo?.sourceView ?? "left");
   const videoModel = RUNWAY_RATE.model;
+  const [videoFrameReady, setVideoFrameReady] = useState(false);
   const [duration, setDuration] = useState(
     w?.jobs.find((j) => j.step === "reference")?.request.duration ?? 2,
   );
@@ -2404,7 +2406,7 @@ export function AssetWorkbench({
                     <button onClick={() => { setMotion("Rabbit_Idle"); setDuration(2); setFps(30); setLoop(true); setReferenceFrameCount(3); setReferenceTimes("0, 1, 2"); setViewJobId(""); setMotionPrompt("채택한 둥근 흰색 네 발 토끼. 네 발은 제자리에 접지하고 몸통이 미세하게 숨 쉬며 귀가 자연스럽게 움직이는 2초 반복 대기. 시작과 끝 자세 일치. 입력 이미지와 같은 측면 고정 카메라. 토끼 전체와 발이 화면에 유지되고 회전·줌·장면 전환 없음. 옷·소품 없음."); }}>대기 설정</button>
                     <button onClick={() => { setMotion("Rabbit_Jump"); setDuration(2); setFps(30); setLoop(false); setReferenceFrameCount(5); setReferenceTimes("0, 0.4, 0.9, 1.4, 2"); setViewJobId(""); setMotionPrompt("채택한 둥근 흰색 네 발 토끼의 제자리 점프. 0초 중립 → 0.4초 웅크림 → 0.9초 네 발 모두 공중인 정점 → 1.4초 같은 자리에 착지·충격 흡수 → 2초 중립 복귀. 전진·옆 이동 없음. 입력 이미지와 같은 측면 고정 카메라. 토끼 전체와 발이 화면에 유지되고 회전·줌·장면 전환 없음. 귀와 꼬리의 자연스러운 후속 움직임."); }}>제자리 점프 설정</button>
                   </div>
-                  <p className="wb-note">Runway 계정 연결 · {videoModel} · 1080p · {duration}초 · 1개당 예상 {duration * RUNWAY_RATE.creditsPerSecond}크레딧. 브라우저 탭을 열어 둘 필요가 없습니다.</p>
+                  <p className="wb-note">Runway 계정 연결 · {videoModel} · 720p (1280×720) · 16:9 · {duration}초 · 새 영상 1개당 추가 예상 {duration * RUNWAY_RATE.creditsPerSecond}크레딧. 브라우저 탭을 열어 둘 필요가 없습니다.</p>
                   <p className="wb-muted">공개 요율 기준({RUNWAY_RATE.checkedAt})이며 실시간 견적은 아닙니다. 원본 업로드 후 앱에서 생성 비용을 확인받습니다.</p>
                   <div className="wb-pair">{(["left", "right"] as const).map(view => {
                     const source = wholeReference?.candidate.artifacts.find(a => a.kind === "image" && a.role === "whole" && a.view === view);
@@ -2414,6 +2416,7 @@ export function AssetWorkbench({
                     </label>;
                   })}</div>
                   <p className="wb-muted">위에서 선택한 이미지 한 장만 영상 입력으로 사용합니다. 기존 4방향 원본은 이후 Astra의 외형 참고로 함께 전달합니다.</p>
+                  <RunwayFramePreview src={(() => { const source = wholeReference?.candidate.artifacts.find(a => a.kind === "image" && a.role === "whole" && a.view === videoSourceView); return source ? window.desktop.assetUrl(p.id, source.path) : undefined; })()} loop={loop} onReady={setVideoFrameReady} />
                 </>}
                 <label className="field">
                   <span>동작 이름</span>
@@ -2522,11 +2525,11 @@ export function AssetWorkbench({
                     {launch(
                       editBase
                         ? "측면 동작 수정본 만들기"
-                        : "Runway에 측면 원본 업로드 · 동작 만들기",
+                        : "전신 구도로 동작 만들기 · 비용 확인",
                       {
                         step: "reference",
                         executionMode: "codex-app",
-                        motionVideo: { serviceUrl: videoServiceUrl, model: videoModel, mode: "side", backend: "runway-mcp", sourceView: videoSourceView, resolution: "1080p", nativeDuration: duration },
+                        motionVideo: { serviceUrl: videoServiceUrl, model: videoModel, mode: "side", backend: "runway-mcp", sourceView: videoSourceView, resolution: "720p", nativeDuration: duration, framing: "full-body-v1" },
                         prompt: motionPrompt.trim() || motion,
                         provider: "gpt",
                         motion,
@@ -2537,7 +2540,7 @@ export function AssetWorkbench({
                         loop,
                         baseJobId: editBase?.request.motionVideo ? editBase.id : undefined,
                       },
-                      !motion.trim() || !wholeReference,
+                      !motion.trim() || !wholeReference || !videoFrameReady,
                     )}
                   </>
                 ) : (

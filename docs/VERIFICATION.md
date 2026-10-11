@@ -1,5 +1,16 @@
 # Partsmith 검증 결과
 
+## 2026-10-11 — 0.6.19 전신 구도·720p·재생성 비용 확인
+
+- 사용자 요청: 귀·발이 잘리지 않게 전신 구도를 준비하고 앱에서 재생성. 애니메이션 참조720p 허용, 비용은 생성 전에 표시.
+- 원인 근거: 원본1254×1254는 전신이나 이전 수신 영상1280×720은 귀·발이 잘림. 이전 호출의 ratio가 미지정된 점 확인. 공급자의 정확한 내부 크롭 원인은 미확정. [공식 사양](https://help.runwayml.com/hc/en-us/articles/46974685288467-Creating-with-Gen-4-5)은 네이티브720p/12크레딧·초이며 기존1080p 안내를 수정했다.
+- 구현: `shared/runway-framing.ts`가 원본 모든 픽셀을1:1 보존하면서 배경 가장자리를 연장한16:9 파생 입력을 준비한다. 대기는 상하 여백, 점프(비반복)는 더 큰 상단 여백. `src/RunwayFramePreview.tsx`에서 같은 알고리즘으로 실제 업로드 구도를 미리 보여준다. 브라우저 canvas의 로컬 asset 접근에는 anonymous CORS를 명시해 초기 미리보기 실패를 수정했다.
+- `engine/runway-workbench-runner.ts`는 새 요청의 구도·원본/업로드 해시·최종 프롬프트를 보존하고 explicit ratio16:9/resolution720p를 제출한다. 구도가 다른 이미지에 이전 업로드 캐시를 재사용하지 않는다. 비용 승인 없이 생성하지 않으며 구형 체크포인트·불명확 제출 재시도 방지 유지. 실제 결과 크기를 검토 경고에 표시하고 요청과 다른 출력도 보존/안내한다.
+- `src/AssetWorkbench.tsx`, `shared/{runway,workbench}.ts`, `engine/workbench.ts`: 새 작업720p 기본값, 전신 구도 준비 실패 시 생성 버튼 비활성, 2초 새 영상1개 추가24크레딧 예상 및 별도 승인. 원본은 수정하지 않으며 AI로 여백 이미지를 재생성하지 않는다. 모델/추론강도 변경 없음.
+- 검증: 전체263/263 통과 후 추가 캐시 분리 검사를 포함한 관련12/12 통과. TypeScript/Vite/esbuild 및 별도0.6.19 Electron 패키지 성공. `scripts/runway-framing-package-check.ts`로 실제 토끼 프로젝트 격리 복사본에서 대기/점프 입력 픽셀과 앱 preview RGBA SHA256 일치, 생성 버튼 준비 및 비용 표시, 원본/기존 결과/선택 보존, 재시작 자동 실행 없음, pageerror0 확인. 실제 미리보기 PNG도 시각 확인: 귀·발 전체가 프레임 안에 있고 점프 상단 공간 확보.
+- 증거: `artifacts/runtime/runway-framing-package-check.json`, `runway-{idle,jump}-frame-preview.png`, `runway-framing-live-ready.json`. 실제 입력 Idle2976×1674,Jump3728×2097, 출력 요청1280×720. 기존 앱에 실행 작업이 없는 것을 확인 후 정상 종료하고 새0.6.19를 실제 프로젝트의 Idle 미리보기로 열었다. 모든 기존 jobs/selections 동일.
+- 이번 변경의 실제 업로드0/유료 제출0. 준비한 구도로 AI가 생성한 영상의 품질은 아직 미검증이며 성공을 보장하지 않는다. 앱에서 추가 비용 승인 후 새로 생성하고 검토해야 한다. 기존 잘린 영상은 review/미채택으로 그대로 보존. 점프·Astra 3D 애니메이션·Unity 검증 미완료.
+
 ## 2026-10-11 — 실제 Idle 생성·수집 완료, 품질 검토 실패 관찰
 
 - 앱 비용 승인 후 작업 `a34c2036-36d5-42bb-beca-f7f36aab8cc6`가 review로 완료. 실제 Runway task `0ecfdb32-0d78-4bf9-87da-9dcb4c7fa917`, 영속 제출 기록 completed24크레딧. 이번 확인에서 재생성 없음. 계정 조회 plan601/purchased300/total901.

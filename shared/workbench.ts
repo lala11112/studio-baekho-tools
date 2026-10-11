@@ -98,7 +98,7 @@ export type WorkbenchRequest = {
   /** Absent on historical jobs means independent static poses. New UI uses video AI. */
   motionVideo?: { serviceUrl: string; model: string; mode?: "side" | "multiview";
     backend?: "runway-mcp"; sourceView?: "left" | "right";
-    resolution?: "720p" | "1080p"; nativeDuration?: number };
+    resolution?: "720p" | "1080p"; nativeDuration?: number; framing?: "full-body-v1" };
   loop?: boolean;
 };
 export type WorkbenchApproval = {

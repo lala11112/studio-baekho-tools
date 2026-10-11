@@ -423,9 +423,11 @@ export class WorkbenchEngine {
       if (r.motionVideo.backend === "runway-mcp") {
         if (r.motionVideo.mode !== "side" || r.motionVideo.serviceUrl !== "https://app.runwayml.com" ||
             !["left", "right"].includes(r.motionVideo.sourceView ?? "") ||
-            r.motionVideo.model !== "gen-4.5" || r.motionVideo.resolution !== "1080p" ||
+            r.motionVideo.model !== "gen-4.5" || !["720p", "1080p"].includes(r.motionVideo.resolution ?? "") ||
+            (r.motionVideo.framing !== undefined && r.motionVideo.framing !== "full-body-v1") ||
+            (r.motionVideo.framing === "full-body-v1" && r.motionVideo.resolution !== "720p") ||
             !Number.isInteger(r.motionVideo.nativeDuration) || r.motionVideo.nativeDuration! < 2 || r.motionVideo.nativeDuration! > 10 ||
-            r.motionVideo.nativeDuration! < (r.duration ?? 0)) throw Error("Runway 측면 입력·Gen-4.5·1080p·2~10초 설정을 확인하세요.");
+            r.motionVideo.nativeDuration! < (r.duration ?? 0)) throw Error("Runway 측면 입력·Gen-4.5·720p 전신 구도·2~10초 설정을 확인하세요.");
       }
     }
     if (r.rigProfile !== undefined && (r.step !== "rig" || !["automatic", "quadruped"].includes(r.rigProfile)))

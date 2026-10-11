@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { PNG } from "pngjs";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ExternalWorkbenchRunner, WorkbenchExecutionContext, WorkbenchArtifact, WorkbenchResult } from "../shared/workbench";
 import { RUNWAY_RATE, runwayEstimate } from "../shared/runway";
+import { renderRunwayFrame, runwayFrameLayout, RUNWAY_FULL_BODY_PROMPT } from "../shared/runway-framing";
 import { CodexRunwayConnection, type RunwayConnection } from "./runway-client";
 import { MotionVideoLedger } from "./motion-video-ledger";
 import { prepareMotionVideoFrames } from "./motion-video-media";
@@ -11,8 +13,8 @@ import { approvalText } from "./codex-app-server-worker";
 
 type Context = Parameters<ExternalWorkbenchRunner["run"]>[0];
 type Saved = { requestHash: string; sourceHash: string; teamId?: number; assetEncrypted?: string;
-  uploadModelTurns?: number; uploadUsage?: unknown;
-  taskId?: string; status?: string; approved?: { at: string; estimatedCredits: number; basis: typeof RUNWAY_RATE } };
+  uploadModelTurns?: number; uploadUsage?: unknown; uploadHash?: string;
+  taskId?: string; status?: string; approved?: { at: string; estimatedCredits: number; basis: Omit<typeof RUNWAY_RATE, "resolution"> & { resolution: string } } };
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 const fileHash = (file: string) => hash(fs.readFileSync(file));
 function save(file: string, value: unknown) {
@@ -27,7 +29,7 @@ function mediaUrl(value: string) {
     /^[\d.:[\]]+$/.test(u.hostname) || /(^|\.)(localhost|local|internal)$/.test(u.hostname)) throw Error("Runway 파일 주소 형식이 올바르지 않습니다.");
   return u;
 }
-/** Host-only official connector orchestration. Never starts an inference turn. */
+/** Paid submission, polling and collection are host-only; a new upload uses one scoped Codex turn. */
 export class RunwayWorkbenchRunner implements ExternalWorkbenchRunner {
   private connections = new Set<RunwayConnection>();
   constructor(private options: { journalRoot: string; projectRoot: (id: string) => string; ffmpegPath: string;
@@ -64,12 +66,27 @@ export class RunwayWorkbenchRunner implements ExternalWorkbenchRunner {
   async run(ctx: Context, progress: (message: string) => void) {
     const { packet, ledger, stateFile } = this.records(ctx), r = packet.request, settings = r.motionVideo;
     if (r.step !== "reference" || settings?.backend !== "runway-mcp" || settings.mode !== "side" || settings.model !== RUNWAY_RATE.model ||
-      settings.resolution !== RUNWAY_RATE.resolution || settings.serviceUrl !== "https://app.runwayml.com") throw Error("지원하는 Runway 측면 동작 설정이 아닙니다.");
+      !["720p", "1080p"].includes(settings.resolution) || settings.serviceUrl !== "https://app.runwayml.com" ||
+      (settings.framing !== undefined && settings.framing !== "full-body-v1") ||
+      (settings.framing === "full-body-v1" && settings.resolution !== "720p")) throw Error("지원하는 Runway 측면 동작 설정이 아닙니다.");
     const cost = runwayEstimate(settings.nativeDuration);
     if (settings.nativeDuration < r.duration) throw Error("원본 영상 길이가 검토 길이보다 짧습니다.");
     const { artifact, bytes } = this.source(ctx);
+    let uploadBytes = bytes;
+    let layout: ReturnType<typeof runwayFrameLayout> | undefined;
+    if (settings.framing === "full-body-v1") {
+      // Validate allocation bounds before PNG decompression. Retain every source pixel.
+      layout = runwayFrameLayout(bytes.readUInt32BE(16), bytes.readUInt32BE(20), r.loop === true);
+      const png = PNG.sync.read(bytes);
+      const framed = new PNG({ width: layout.width, height: layout.height });
+      framed.data = Buffer.from(renderRunwayFrame(png.data, layout));
+      uploadBytes = PNG.sync.write(framed);
+    }
+    const uploadHash = hash(uploadBytes), providerPrompt = layout ? `${r.prompt}\n\n${RUNWAY_FULL_BODY_PROMPT}` : r.prompt;
     const state: Saved = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, "utf8")) : { requestHash: ctx.job.externalExecution!.requestHash, sourceHash: artifact.sha256 };
     if (state.requestHash !== ctx.job.externalExecution!.requestHash || state.sourceHash !== artifact.sha256) throw Error("Runway 체크포인트가 현재 입력과 다릅니다.");
+    if (state.uploadHash && state.uploadHash !== uploadHash) throw Error("Runway 전신 입력 구도가 저장된 작업과 다릅니다.");
+    state.uploadHash = uploadHash;
     const connection = this.options.connection?.() ?? new CodexRunwayConnection(); this.connections.add(connection);
     const ask = ctx.requestApproval ?? (async () => { throw Error("앱 비용 확인 창을 사용할 수 없습니다."); });
     try {
@@ -95,42 +112,43 @@ export class RunwayWorkbenchRunner implements ExternalWorkbenchRunner {
       if (!state.taskId) {
         if (!account.availableVideoModels?.includes(settings.model)) throw Error("연결한 계정에서 선택한 영상 모델을 사용할 수 없습니다.");
         if (!Number.isFinite(account.credits?.total) || account.credits.total < cost) throw Error(`예상 ${cost}크레딧에 필요한 잔액이 없습니다.`);
-        const uploadCache = path.join(this.options.journalRoot, "uploads", String(state.teamId), `${artifact.sha256}.json`);
+        const snapshot = path.join(ctx.workspace, "inputs", "runway-source.png");
+        fs.mkdirSync(path.dirname(snapshot), { recursive: true });
+        if (fs.existsSync(snapshot)) {
+          if (fileHash(snapshot) !== uploadHash) throw Error("업로드용 입력 사본이 변경되었습니다.");
+        } else fs.writeFileSync(snapshot, uploadBytes, { flag: "wx" });
+        if (layout) save(path.join(ctx.workspace, "inputs", "runway-framing.json"), { ...layout, sourceSha256: artifact.sha256, uploadSha256: uploadHash, prompt: providerPrompt });
+        const uploadCache = path.join(this.options.journalRoot, "uploads", String(state.teamId), `${uploadHash}.json`);
         if (!state.assetEncrypted && fs.existsSync(uploadCache)) {
           const cached: Saved = JSON.parse(fs.readFileSync(uploadCache, "utf8"));
-          if (cached.teamId !== state.teamId || cached.sourceHash !== artifact.sha256 || !cached.assetEncrypted) throw Error("Runway 원본 업로드 캐시가 일치하지 않습니다.");
+          if (cached.teamId !== state.teamId || cached.sourceHash !== artifact.sha256 || (cached.uploadHash ?? cached.sourceHash) !== uploadHash || !cached.assetEncrypted) throw Error("Runway 원본 업로드 캐시가 일치하지 않습니다.");
           mediaUrl(this.options.decrypt(cached.assetEncrypted));
           state.assetEncrypted = cached.assetEncrypted; state.uploadModelTurns = 0; save(stateFile, state);
-          progress("같은 계정에 이미 올린 동일한 측면 원본을 재사용합니다. 새 업로드나 GPT 호출은 없습니다.");
+          progress("같은 계정에 이미 올린 동일한 입력 구도를 재사용합니다. 새 업로드나 GPT 호출은 없습니다.");
         }
         if (!state.assetEncrypted) {
-          progress("채택한 측면 PNG 원본을 Runway에 업로드합니다. 크기와 화질을 유지합니다.");
+          progress(layout ? "원본 픽셀을 보존하고 배경 여백을 더한 16:9 전신 입력을 Runway에 업로드합니다." : "채택한 측면 PNG 원본을 Runway에 업로드합니다. 크기와 화질을 유지합니다.");
           // This Codex connector exposes a local-file parameter. The connector uploads
           // the bytes; a metadata-only request is explicitly unsupported in this runtime.
-          const snapshot = path.join(ctx.workspace, "inputs", "runway-source.png");
-          fs.mkdirSync(path.dirname(snapshot), { recursive: true });
-          if (fs.existsSync(snapshot)) {
-            if (fileHash(snapshot) !== artifact.sha256) throw Error("업로드용 원본 사본이 변경되었습니다.");
-          } else fs.writeFileSync(snapshot, bytes, { flag: "wx" });
           const uploaded = await connection.call("init_upload", { file: snapshot,
-            rationale: "Partsmith에서 채택한 토끼 측면 PNG 원본을 동작 영상 입력으로 업로드. 유료 생성은 아직 승인 전입니다." });
+            rationale: "Partsmith의 미리보기와 같은 토끼 측면 PNG 입력을 업로드. 유료 생성은 아직 승인 전입니다." });
           if (uploaded.kind !== "upload_complete" || !uploaded.assetUrl) throw Error("Runway 원본 업로드가 완료되지 않았습니다.");
           mediaUrl(uploaded.assetUrl); state.assetEncrypted = this.options.encrypt(uploaded.assetUrl);
           state.uploadModelTurns = uploaded.uploadModelTurns ?? 0; state.uploadUsage = uploaded.uploadUsage; save(stateFile, state);
-          save(uploadCache, { sourceHash: state.sourceHash, teamId: state.teamId, assetEncrypted: state.assetEncrypted });
+          save(uploadCache, { sourceHash: state.sourceHash, uploadHash, teamId: state.teamId, assetEncrypted: state.assetEncrypted });
         }
         progress(`측면 원본 업로드 완료. ${r.motion} 1개 · ${settings.nativeDuration}초 · 예상 ${cost}크레딧의 앱 확인을 기다립니다.`);
         const answer = await ask({ id: `runway-cost-${ctx.job.id}`, title: `${r.motion} · 측면 영상 1개 생성`,
-          detail: `${settings.model} · ${settings.resolution} · ${settings.nativeDuration}초 · 원본 PNG 그대로 사용\n예상 ${cost}크레딧 (공식 공개 요율 ${RUNWAY_RATE.creditsPerSecond}/초, ${RUNWAY_RATE.checkedAt} 확인). 실시간 견적 API는 없으며 최종 차감은 Runway 기준입니다. 현재 잔액 ${account.credits.total}.\n이 동작 1개만 제출합니다. 결과는 앱에서 검토·채택하며 3D 작업은 시작하지 않습니다.\n${r.prompt}`, fields: [] });
+          detail: `${settings.model} · ${settings.resolution} · ${settings.nativeDuration}초 · ${layout ? "16:9 전신 구도 / 원본 픽셀 보존 + 배경 여백" : "원본 PNG 그대로 사용"}\n새 영상 1개 추가 예상 ${cost}크레딧 (공식 공개 요율 ${RUNWAY_RATE.creditsPerSecond}/초, ${RUNWAY_RATE.checkedAt} 확인). 실시간 견적 API는 없으며 최종 차감은 Runway 기준입니다. 현재 잔액 ${account.credits.total}.\n기존 결과는 보존합니다. 이 동작 1개만 제출하며 자동 재생성하지 않습니다. 결과는 앱에서 검토·채택하며 3D 작업은 시작하지 않습니다.\n${providerPrompt}`, fields: [] });
         if (!answer.accepted || ctx.signal.aborted) return { status: "needs_input" as const, summary: "생성 승인을 받지 않아 제출하지 않았습니다. 업로드한 원본은 보존했습니다." };
-        state.approved = { at: new Date().toISOString(), estimatedCredits: cost, basis: RUNWAY_RATE }; save(stateFile, state);
+        state.approved = { at: new Date().toISOString(), estimatedCredits: cost, basis: { ...RUNWAY_RATE, resolution: settings.resolution } }; save(stateFile, state);
         this.source(ctx); // Revalidate accepted source immediately before the paid boundary.
         const assetUrl = this.options.decrypt(state.assetEncrypted!); mediaUrl(assetUrl);
         ledger.reserveApproved({ phase: "side", observedCost: cost, costBasis: "published-rate", model: settings.model, duration: settings.nativeDuration,
           resolution: settings.resolution, url: settings.serviceUrl, sourceModelId: "" });
         progress("승인한 측면 영상 1개를 Runway에 제출합니다.");
-        const created = await connection.call("generate_video", { model: settings.model, promptText: r.prompt, duration: settings.nativeDuration,
-          resolution: settings.resolution, startFrame: { url: assetUrl }, rationale: `Partsmith에서 승인한 ${r.motion} 측면 동작 1개` });
+        const created = await connection.call("generate_video", { model: settings.model, promptText: providerPrompt, duration: settings.nativeDuration,
+          resolution: settings.resolution, ...(layout ? { ratio: layout.ratio } : {}), startFrame: { url: assetUrl }, rationale: `Partsmith에서 승인한 ${r.motion} 측면 동작 1개` });
         if (!created.taskId || !/^[\w-]{1,200}$/.test(created.taskId)) return { status: "submission_unknown" as const, summary: "Runway 작업 ID를 확인하지 못했습니다. 재제출하지 않습니다." };
         state.taskId = created.taskId; state.status = created.status ?? "submitted"; save(stateFile, state);
       }
@@ -166,12 +184,16 @@ export class RunwayWorkbenchRunner implements ExternalWorkbenchRunner {
       const provenance = "outputs/video-reference/runway-provenance.json";
       save(path.join(ctx.workspace, provenance), { backend: "runway-mcp", taskId: state.taskId, teamId: state.teamId, model: settings.model,
         source: { path: artifact.path, sha256: artifact.sha256, bytes: artifact.bytes, view: settings.sourceView }, approval: state.approved,
-        duration: settings.nativeDuration, resolution: settings.resolution, serviceUrl: settings.serviceUrl, uploadModelTurns: state.uploadModelTurns, orchestrationModelTurns: 0, visualReview: "pending" });
+        duration: settings.nativeDuration, resolution: settings.resolution, framing: layout, uploadSha256: uploadHash, prompt: providerPrompt,
+        serviceUrl: settings.serviceUrl, uploadModelTurns: state.uploadModelTurns, orchestrationModelTurns: 0, visualReview: "pending" });
+      const actual = JSON.parse(fs.readFileSync(path.join(ctx.workspace, "outputs/video-reference/decode-report.json"), "utf8")).metadata.side;
       const artifacts = [...decoded.artifacts, { path: provenance, kind: "report" as const }];
       const result: WorkbenchResult = { status: "completed", summary: `${r.motion} 측면 원본 영상이 준비됐습니다. 외형·발 접지·동작을 확인한 뒤 채택하세요.`,
         candidates: [{ id: `runway-${state.taskId}`, label: `${r.motion} · 측면`, artifacts }], checks: [
           { name: "native_video_decode", passed: true }, { name: "visual_quality", passed: false, severity: "warning", visualCategory: "appearance",
-            detail: "AI 영상의 외형 유지, 발 미끄러짐, 점프 착지 및 반복 연결은 사용자 검토 전입니다. 자동 검증됐다고 간주하지 않습니다." }] };
+            detail: `실제 원본 ${actual.width}×${actual.height}. 귀 끝·네 발이 전 구간에 보이는지, 외형 유지·발 접지·착지·반복 연결을 검토하세요. 자동 검증됐다고 간주하지 않습니다.` },
+          ...(layout && (actual.width !== 1280 || actual.height !== 720) ? [{ name: "visual_quality", passed: false, severity: "warning" as const, visualCategory: "appearance" as const,
+            detail: `요청한 16:9 720p(1280×720)와 실제 ${actual.width}×${actual.height}가 다릅니다. 원본 보존, 자동 재생성 없음.` }] : [])] };
       const entry = ledger.read().entries[0];
       const receipt = { schemaVersion: 1, jobId: ctx.job.id, requestHash: ctx.job.externalExecution!.requestHash, result,
         files: artifacts.map(a => ({ path: a.path, sha256: fileHash(path.join(ctx.workspace, a.path)) })),
