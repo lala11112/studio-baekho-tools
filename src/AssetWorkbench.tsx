@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { RUNWAY_RATE } from "../shared/runway";
 import {
   ArrowRight,
   Check,
@@ -398,8 +399,9 @@ export function AssetWorkbench({
   );
   const [motionPrompt, setMotionPrompt] = useState("");
   const latestVideo = w?.jobs.find(j => j.request.motionVideo)?.request.motionVideo;
-  const [videoServiceUrl, setVideoServiceUrl] = useState(latestVideo?.serviceUrl ?? "");
-  const [videoModel, setVideoModel] = useState(latestVideo?.model ?? "");
+  const videoServiceUrl = "https://app.runwayml.com";
+  const [videoSourceView, setVideoSourceView] = useState<"left" | "right">(latestVideo?.sourceView ?? "left");
+  const videoModel = RUNWAY_RATE.model;
   const [duration, setDuration] = useState(
     w?.jobs.find((j) => j.step === "reference")?.request.duration ?? 2,
   );
@@ -1094,7 +1096,7 @@ export function AssetWorkbench({
             </small>
           </>
         ) : step === "reference" ? (
-          <small>동작 AI로 정면·측면·후면 영상 각 1개를 제작합니다. 실제 서비스 모델·해상도·길이·비용은 제출 직전에 이 앱에서 확인받습니다. 원본 프레임 추출에는 GPT를 사용하지 않습니다.</small>
+          <small>선택한 측면 이미지로 현재 동작 영상 1개를 만듭니다. 공개 요율 기준 예상 {duration * RUNWAY_RATE.creditsPerSecond}크레딧이며, 제출 직전에 이 앱에서 확인받습니다. 원본 프레임 추출에는 GPT를 사용하지 않습니다.</small>
         ) : (
           <small>
             기존 ChatGPT 계정의 사용량을 사용합니다.
@@ -1115,7 +1117,7 @@ export function AssetWorkbench({
           />
           {usesStudio
             ? "현재 설정과 이미지를 Tripo에 전달하고, 이 한도 안에서 이번 작업을 실행합니다."
-            : step === "reference" ? "현재 캐릭터 참조와 동작 지시를 선택한 영상 서비스에 전달합니다. 유료 생성은 실제 비용 확인 후 실행합니다."
+            : step === "reference" ? "현재 캐릭터 참조와 동작 지시를 선택한 영상 서비스에 전달합니다. 유료 생성은 모델·길이·예상 비용 확인 후 실행합니다."
             : "현재 설정과 이미지를 GPT에 전달하고, 표시된 범위의 이미지 생성을 실행합니다."}
         </label>
       </div>
@@ -1346,7 +1348,7 @@ export function AssetWorkbench({
           )}
           <div>
             <strong>
-              {currentStatus.externalExecution ? currentStatus.status === "running" ? "Codex · Chrome 작업 중" : "Codex 실행 · 확인 필요" : statuses[currentStatus.status]}
+              {currentStatus.request.motionVideo?.backend === "runway-mcp" ? (currentStatus.status === "running" ? "Runway 작업 중" : "Runway 확인 필요") : currentStatus.externalExecution ? currentStatus.status === "running" ? "Codex · Chrome 작업 중" : "Codex 실행 · 확인 필요" : statuses[currentStatus.status]}
               {active
                 ? ` · ${Math.floor(elapsed / 60)}분 ${elapsed % 60}초`
                 : ""}
@@ -1357,7 +1359,7 @@ export function AssetWorkbench({
             </p>
             {currentStatus.externalExecution && <div>
               <p>작업 ID: {currentStatus.id}</p>
-              <p>현재 단계의 승인한 설정으로 Codex가 Chrome 작업을 실행하고 결과를 이 앱으로 가져옵니다.</p>
+              <p>{currentStatus.request.motionVideo?.backend === "runway-mcp" ? "앱이 Runway 공식 연결로 원본 업로드·영상 생성·결과 수집을 처리합니다. 생성 비용 확인과 결과 채택은 이 앱에서 합니다." : "현재 단계의 승인한 설정으로 Codex가 Chrome 작업을 실행하고 결과를 이 앱으로 가져옵니다."}</p>
               {currentStatus.externalExecution.worker?.question && <p data-testid="workbench-codex-question">{currentStatus.externalExecution.worker.question}</p>}
               {currentStatus.externalExecution.worker?.approval && (()=>{
                 const approval=currentStatus.externalExecution!.worker!.approval!;
@@ -1373,7 +1375,7 @@ export function AssetWorkbench({
                     </select> : <input aria-label={field.label} value={values[field.id] ?? ""} maxLength={12000} onChange={e=>change(field.id,e.target.value)} />}
                   </label>)}
                   <button data-testid="workbench-codex-approve" disabled={busy || approval.fields.some(f=>f.required && !values[f.id])}
-                    onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:true,values}})}>선택한 내용으로 계속</button>
+                    onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:true,values}})}>{approval.id.startsWith("runway-cost-") ? "표시된 예상 비용으로 영상 1개 생성" : "선택한 내용으로 계속"}</button>
                   <button data-testid="workbench-codex-decline" disabled={busy}
                     onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:false,values:{}}})}>허용하지 않음</button>
                 </div>;
@@ -2395,16 +2397,23 @@ export function AssetWorkbench({
             {page === "motion" && (
               <>
                 <p>
-                  동작 AI로 연속 동작을 생성합니다. 정면·측면·후면 영상을 재생해 확인·채택한 뒤 Blender + Astra로 3D 애니메이션을 만듭니다.
+                  4방향 이미지는 외형 참고로 보존하고, 선택한 측면 한 장으로 대기와 점프 영상을 각각 만듭니다. 영상을 확인·채택한 뒤 Blender + Astra로 3D 애니메이션을 만듭니다.
                 </p>
                 {motionMode === "reference" && <>
                   <div className="wb-pair">
-                    <button onClick={() => { setMotion("Rabbit_Idle"); setDuration(2); setFps(30); setLoop(true); setReferenceFrameCount(3); setReferenceTimes("0, 1, 2"); setViewJobId(""); setMotionPrompt("채택한 둥근 흰색 네 발 토끼. 네 발은 제자리에 접지하고 몸통이 미세하게 숨 쉬며 귀가 자연스럽게 움직이는 2초 반복 대기. 시작과 끝 자세 일치. 고정 카메라, 같은 동작의 정면·왼쪽 측면·후면 영상. 옷·소품 없음."); }}>대기 설정</button>
-                    <button onClick={() => { setMotion("Rabbit_Jump"); setDuration(2); setFps(30); setLoop(false); setReferenceFrameCount(5); setReferenceTimes("0, 0.4, 0.9, 1.4, 2"); setViewJobId(""); setMotionPrompt("채택한 둥근 흰색 네 발 토끼의 제자리 점프. 0초 중립 → 0.4초 웅크림 → 0.9초 네 발 모두 공중인 정점 → 1.4초 같은 자리에 착지·충격 흡수 → 2초 중립 복귀. 전진·옆 이동 없음. 같은 동작을 고정된 정면·왼쪽 측면·후면 카메라로 보여주세요. 귀와 꼬리의 자연스러운 후속 움직임."); }}>제자리 점프 설정</button>
+                    <button onClick={() => { setMotion("Rabbit_Idle"); setDuration(2); setFps(30); setLoop(true); setReferenceFrameCount(3); setReferenceTimes("0, 1, 2"); setViewJobId(""); setMotionPrompt("채택한 둥근 흰색 네 발 토끼. 네 발은 제자리에 접지하고 몸통이 미세하게 숨 쉬며 귀가 자연스럽게 움직이는 2초 반복 대기. 시작과 끝 자세 일치. 입력 이미지와 같은 측면 고정 카메라. 토끼 전체와 발이 화면에 유지되고 회전·줌·장면 전환 없음. 옷·소품 없음."); }}>대기 설정</button>
+                    <button onClick={() => { setMotion("Rabbit_Jump"); setDuration(2); setFps(30); setLoop(false); setReferenceFrameCount(5); setReferenceTimes("0, 0.4, 0.9, 1.4, 2"); setViewJobId(""); setMotionPrompt("채택한 둥근 흰색 네 발 토끼의 제자리 점프. 0초 중립 → 0.4초 웅크림 → 0.9초 네 발 모두 공중인 정점 → 1.4초 같은 자리에 착지·충격 흡수 → 2초 중립 복귀. 전진·옆 이동 없음. 입력 이미지와 같은 측면 고정 카메라. 토끼 전체와 발이 화면에 유지되고 회전·줌·장면 전환 없음. 귀와 꼬리의 자연스러운 후속 움직임."); }}>제자리 점프 설정</button>
                   </div>
-                  <label className="field"><span>동작 생성 서비스 주소</span><input data-testid="workbench-video-service" value={videoServiceUrl} onChange={e => setVideoServiceUrl(e.target.value)} placeholder="로그인해서 사용할 영상 AI의 HTTPS 주소" /></label>
-                  <label className="field"><span>사용할 영상 모델</span><input data-testid="workbench-video-model" value={videoModel} onChange={e => setVideoModel(e.target.value)} placeholder="서비스 화면의 정확한 모델 이름" /></label>
-                  <p className="wb-muted">Chrome 로그인과 동작 참조 기능을 먼저 확인합니다. 측면·후면은 정면 동작 영상을 참조하며, 지원하지 않으면 생성 전에 이유를 표시합니다.</p>
+                  <p className="wb-note">Runway 계정 연결 · {videoModel} · 1080p · {duration}초 · 1개당 예상 {duration * RUNWAY_RATE.creditsPerSecond}크레딧. 브라우저 탭을 열어 둘 필요가 없습니다.</p>
+                  <p className="wb-muted">공개 요율 기준({RUNWAY_RATE.checkedAt})이며 실시간 견적은 아닙니다. 원본 업로드 후 앱에서 생성 비용을 확인받습니다.</p>
+                  <div className="wb-pair">{(["left", "right"] as const).map(view => {
+                    const source = wholeReference?.candidate.artifacts.find(a => a.kind === "image" && a.role === "whole" && a.view === view);
+                    return <label className="field" key={view}>
+                      <span><input type="radio" name="motion-source-side" data-testid={`motion-source-${view}`} checked={videoSourceView === view} onChange={() => setVideoSourceView(view)} /> {view === "left" ? "측면 원본 1" : "측면 원본 2"}</span>
+                      {source && <img alt={`${view} 측면 원본`} src={window.desktop.assetUrl(p.id, source.path)} style={{ width: "100%", maxHeight: 180, objectFit: "contain" }} />}
+                    </label>;
+                  })}</div>
+                  <p className="wb-muted">위에서 선택한 이미지 한 장만 영상 입력으로 사용합니다. 기존 4방향 원본은 이후 Astra의 외형 참고로 함께 전달합니다.</p>
                 </>}
                 <label className="field">
                   <span>동작 이름</span>
@@ -2423,10 +2432,10 @@ export function AssetWorkbench({
                     <span>길이 (초)</span>
                     <input
                       type="number"
-                      min={0.5}
+                      min={2}
                       data-testid="workbench-motion-duration"
-                      max={30}
-                      step={0.5}
+                      max={10}
+                      step={1}
                       disabled={motionMode === "animation"}
                       value={
                         motionMode === "animation"
@@ -2512,12 +2521,12 @@ export function AssetWorkbench({
                     {approvalBox()}
                     {launch(
                       editBase
-                        ? "동작 AI로 수정 영상 제작"
-                        : "동작 AI 연결 확인 · 멀티뷰 영상 제작",
+                        ? "측면 동작 수정본 만들기"
+                        : "Runway에 측면 원본 업로드 · 동작 만들기",
                       {
                         step: "reference",
                         executionMode: "codex-app",
-                        motionVideo: { serviceUrl: videoServiceUrl.trim(), model: videoModel.trim() },
+                        motionVideo: { serviceUrl: videoServiceUrl, model: videoModel, mode: "side", backend: "runway-mcp", sourceView: videoSourceView, resolution: "1080p", nativeDuration: duration },
                         prompt: motionPrompt.trim() || motion,
                         provider: "gpt",
                         motion,
@@ -2528,7 +2537,7 @@ export function AssetWorkbench({
                         loop,
                         baseJobId: editBase?.request.motionVideo ? editBase.id : undefined,
                       },
-                      !motion.trim() || !videoServiceUrl.trim() || !videoModel.trim(),
+                      !motion.trim() || !wholeReference,
                     )}
                   </>
                 ) : (

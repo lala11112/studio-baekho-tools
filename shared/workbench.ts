@@ -96,7 +96,9 @@ export type WorkbenchRequest = {
   referenceFrameCount?: number;
   referenceTimes?: number[];
   /** Absent on historical jobs means independent static poses. New UI uses video AI. */
-  motionVideo?: { serviceUrl: string; model: string };
+  motionVideo?: { serviceUrl: string; model: string; mode?: "side" | "multiview";
+    backend?: "runway-mcp"; sourceView?: "left" | "right";
+    resolution?: "720p" | "1080p"; nativeDuration?: number };
   loop?: boolean;
 };
 export type WorkbenchApproval = {
@@ -265,7 +267,7 @@ export const WORKBENCH_STEPS: { id: WorkbenchStep; title: string }[] = [
   { id: "surface", title: "Smart UV · 텍스처" },
   { id: "assembly", title: "조립 · 반복 수정" },
   { id: "rig", title: "오브젝트 리깅" },
-  { id: "reference", title: "멀티뷰 동작 이미지" },
+  { id: "reference", title: "동작 참조 확인" },
   { id: "animation", title: "3D 애니메이션" },
   { id: "unity", title: "Unity 내보내기" },
 ];

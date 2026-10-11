@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { MOTION_VIDEO_VIEWS, motionServiceUrl } from "../shared/motion-video";
+import { motionVideoViews, motionServiceUrl } from "../shared/motion-video";
 import type { ChromePacket } from "./chrome-job-ledger";
 
-export type VideoPlan = { phase: string; observedCost: number; model: string; duration: number; resolution: string; url: string; sourceModelId: string };
+export type VideoPlan = { phase: string; observedCost: number; costBasis?: "published-rate"; model: string; duration: number; resolution: string; url: string; sourceModelId: string };
 type VideoEntry = { phase: string; cost: number; sourceModelId: string; url: string; state: "reserved" | "completed"; resultId?: string; resultUrl?: string; plan: VideoPlan; download?: { path: string; sha256: string } };
 type Journal = { jobId: string; requestHash: string; entries: VideoEntry[]; decoded?: { path: string; sha256: string }[] };
 
@@ -27,7 +27,7 @@ export class MotionVideoLedger {
     return text;
   }
   validatePlan(plan: VideoPlan) {
-    if (!this.packet.approval.accepted || !MOTION_VIDEO_VIEWS.includes(plan.phase as any) ||
+    if (!this.packet.approval.accepted || !motionVideoViews(this.packet.request.motionVideo?.mode).includes(plan.phase as any) ||
         this.journal.entries.some(e => e.phase === plan.phase)) throw Error("승인되지 않았거나 이미 제출 예약된 방향입니다. 재생성하지 마세요.");
     const r = this.packet.request;
     if (!Number.isFinite(plan.observedCost) || plan.observedCost < 0 || plan.model !== r.motionVideo?.model ||
@@ -35,7 +35,7 @@ export class MotionVideoLedger {
         !plan.resolution?.trim() || plan.resolution.length > 100) throw Error("실제 영상 모델·길이·해상도·비용 설정을 확인하세요.");
     this.url(plan.url);
     const front = this.journal.entries.find(e => e.phase === "front" && e.state === "completed");
-    if (plan.phase === "front" ? plan.sourceModelId !== "" : !front?.download || plan.sourceModelId !== front.resultId)
+    if (this.packet.request.motionVideo?.mode === "side" ? plan.sourceModelId !== "" : (plan.phase === "front" ? plan.sourceModelId !== "" : !front?.download || plan.sourceModelId !== front.resultId))
       throw Error("측면·후면은 완료된 정면 동작 원본을 참조해야 합니다. 독립된 다른 동작으로 대체하지 마세요.");
   }
   /** Call ONLY after the host has received the matching app approval. */
@@ -67,9 +67,10 @@ export class MotionVideoLedger {
   verify(receipt: { files?: { path: string; sha256: string }[]; videos?: { view: string; resultId: string; url: string; path: string; sha256: string }[]; result?: { candidates: { artifacts: { kind: string; role?: string; path: string }[] }[] } }) {
     if (!this.journal.decoded?.length || this.journal.decoded.some(file => !receipt.files?.some(f => f.path === file.path && f.sha256 === file.sha256)))
       throw Error("원본 영상에서 추출한 프레임·명세가 호스트 기록과 다릅니다.");
-    if (receipt.videos?.length !== 3 || new Set(receipt.videos.map(v => v.view)).size !== 3 || this.journal.entries.length !== 3)
-      throw Error("세 방향 영상의 제출·다운로드 기록이 필요합니다.");
-    for (const view of MOTION_VIDEO_VIEWS) {
+    const views = motionVideoViews(this.packet.request.motionVideo?.mode);
+    if (receipt.videos?.length !== views.length || new Set(receipt.videos.map(v => v.view)).size !== views.length || this.journal.entries.length !== views.length)
+      throw Error("요청한 방향별 영상의 제출·다운로드 기록이 필요합니다.");
+    for (const view of views) {
       const e = this.journal.entries.find(e => e.phase === view), v = receipt.videos.find(v => v.view === view);
       if (!e || e.state !== "completed" || !e.download || !v || e.resultId !== v.resultId || e.resultUrl !== v.url ||
           e.download.path !== v.path || e.download.sha256 !== v.sha256 ||

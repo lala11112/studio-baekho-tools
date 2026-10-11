@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { MOTION_VIDEO_VIEWS, type MotionVideoManifest } from "../shared/motion-video";
+import { motionVideoViews, type MotionVideoManifest } from "../shared/motion-video";
 import type { WorkbenchRequest, WorkbenchResult } from "../shared/workbench";
 import type { MotionVideoLedger } from "./motion-video-ledger";
 
@@ -27,12 +27,13 @@ export async function prepareMotionVideoFrames(binary: string, workspace: string
   fs.mkdirSync(path.join(workspace, folder), { recursive: true });
   const count = request.referenceFrameCount!, duration = request.duration!;
   const times = request.referenceTimes ?? Array.from({ length: count }, (_, index) => duration * index / (count - 1));
-  const manifest: MotionVideoManifest = { schemaVersion: 1, source: "video-ai", motion: request.motion!, duration, fps: request.fps!, camera: "fixed", videos: {} as MotionVideoManifest["videos"], frames: times.map(time => ({ time, front: "", side: "", back: "" })) };
+  const views = motionVideoViews(request.motionVideo?.mode);
+  const manifest: MotionVideoManifest = { schemaVersion: 1, source: "video-ai", motion: request.motion!, duration, fps: request.fps!, camera: "fixed", mode: request.motionVideo?.mode, loop: request.loop, videos: {} as MotionVideoManifest["videos"], frames: times.map(time => ({ time })) };
   const artifacts: WorkbenchResult["candidates"][number]["artifacts"] = [];
   const metadata: Record<string, unknown> = {};
-  for (const view of MOTION_VIDEO_VIEWS) {
+  for (const view of views) {
     const entry = entries.find(e => e.phase === view && e.state === "completed");
-    if (!entry?.download || !entry.resultId) throw Error("세 방향의 완료된 원본이 필요합니다.");
+    if (!entry?.download || !entry.resultId) throw Error("요청한 방향의 완료된 원본이 필요합니다.");
     const source = path.resolve(workspace, entry.download.path);
     if (!source.startsWith(path.resolve(workspace) + path.sep) || !fs.realpathSync(source).startsWith(fs.realpathSync(workspace) + path.sep) ||
         hash(source) !== entry.download.sha256) throw Error("영상 원본 경로·해시가 일치하지 않습니다.");
@@ -60,7 +61,7 @@ export async function prepareMotionVideoFrames(binary: string, workspace: string
     }
     metadata[view] = { resultId: entry.resultId, url: entry.resultUrl, nativeDuration, width, height, reviewedStart: 0, reviewedDuration: duration };
   }
-  if (new Set(entries.map(e => e.download?.sha256)).size !== 3) throw Error("세 방향의 서로 다른 원본 영상이 필요합니다.");
+  if (new Set(entries.map(e => e.download?.sha256)).size !== views.length) throw Error("요청한 방향의 서로 다른 원본 영상이 필요합니다.");
   const manifestPath = `${folder}/frames.json`, reportPath = `${folder}/decode-report.json`;
   fs.writeFileSync(path.join(workspace, manifestPath), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(workspace, reportPath), JSON.stringify({ source: "native-video-decode", metadata }, null, 2));

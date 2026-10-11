@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { Store, uid } from "./store";
-import { MOTION_VIDEO_VIEWS, motionServiceUrl, validateVideoSources, type MotionVideoSources } from "../shared/motion-video";
+import { motionVideoViews, motionServiceUrl, validateVideoSources, type MotionVideoSources } from "../shared/motion-video";
 import { inspectWorkbenchGlb } from "./glb-inspect";
 import {
   blocksWorkbenchCheck,
@@ -395,7 +395,7 @@ export class WorkbenchEngine {
       case "reference":
         return ["concept", ...(request.motionVideo && w.selections["whole-reference"] ? ["whole-reference"] : []), "rig"];
       case "animation":
-        return ["rig", `reference:${request.motion}`];
+        return ["rig", ...(w.selections["whole-reference"] ? ["whole-reference"] : []), `reference:${request.motion}`];
       case "unity": {
         const clips = Object.keys(w.selections).filter((k) =>
           k.startsWith("animation:"),
@@ -418,6 +418,15 @@ export class WorkbenchEngine {
         throw Error("동작 영상은 앱 Codex 실행과 실제 사용할 서비스·모델 이름이 필요합니다.");
       motionServiceUrl(r.motionVideo.serviceUrl);
       r.motionVideo.model = r.motionVideo.model.trim();
+      if (r.motionVideo.mode !== undefined && !["side", "multiview"].includes(r.motionVideo.mode)) throw Error("알 수 없는 동작 참조 방식입니다.");
+      if (r.motionVideo.backend !== undefined && r.motionVideo.backend !== "runway-mcp") throw Error("알 수 없는 영상 연결입니다.");
+      if (r.motionVideo.backend === "runway-mcp") {
+        if (r.motionVideo.mode !== "side" || r.motionVideo.serviceUrl !== "https://app.runwayml.com" ||
+            !["left", "right"].includes(r.motionVideo.sourceView ?? "") ||
+            r.motionVideo.model !== "gen-4.5" || r.motionVideo.resolution !== "1080p" ||
+            !Number.isInteger(r.motionVideo.nativeDuration) || r.motionVideo.nativeDuration! < 2 || r.motionVideo.nativeDuration! > 10 ||
+            r.motionVideo.nativeDuration! < (r.duration ?? 0)) throw Error("Runway 측면 입력·Gen-4.5·1080p·2~10초 설정을 확인하세요.");
+      }
     }
     if (r.rigProfile !== undefined && (r.step !== "rig" || !["automatic", "quadruped"].includes(r.rigProfile)))
       throw new Error("잘못된 리깅 체형 설정입니다.");
@@ -933,7 +942,7 @@ export class WorkbenchEngine {
     delete external.worker.question;
     delete external.worker.approval;
     job.status = "running";
-    job.summary = "앱에서 Codex 실행 중 · 연결된 Chrome에서 현재 단계만 처리합니다.";
+    job.summary = job.request.motionVideo?.backend === "runway-mcp" ? "앱에서 Runway 공식 연결을 확인합니다." : "앱에서 Codex 실행 중 · 연결된 Chrome에서 현재 단계만 처리합니다.";
     w.activeJobId = jobId;
     this.save(w);
     const controller = new AbortController();
@@ -943,7 +952,7 @@ export class WorkbenchEngine {
         if(controller.signal.aborted || this.pendingApprovals.has(w.id)) {reject(Error("권한 요청이 취소되었거나 중복됐습니다."));return;}
         const latest=this.get(w.id),current=this.job(latest,jobId);
         current.externalExecution!.worker!.approval=approval;
-        current.summary="Codex가 실행 권한을 확인하고 있습니다. 아래 내용을 확인해 이 앱에서 답변하세요.";
+        current.summary=current.request.motionVideo?.backend === "runway-mcp" ? (approval.id.startsWith("runway-cost-") ? "Runway 원본 업로드 완료 · 아래 설정과 예상 비용을 확인하세요." : "Runway 도구 접근 확인 · 아래 요청 범위를 확인하세요.") : "Codex가 실행 권한을 확인하고 있습니다. 아래 내용을 확인해 이 앱에서 답변하세요.";
         const abort=()=>{
           this.pendingApprovals.delete(w.id);
           resolve({accepted:false,values:{}});
@@ -1568,7 +1577,7 @@ export class WorkbenchEngine {
     const candidates = this.registerCandidates(w, job, result.candidates);
     this.validateFrames(job, result.candidates[0], this.workspace(w, job));
     const images = candidates[0].artifacts.filter(a => a.kind === "image");
-    if (images.length !== 3 * job.request.referenceFrameCount! || (!job.request.motionVideo && new Set(images.map(a => a.sha256)).size !== images.length))
+    if (images.length !== (job.request.motionVideo ? motionVideoViews(job.request.motionVideo.mode).length : 3) * job.request.referenceFrameCount! || (!job.request.motionVideo && new Set(images.map(a => a.sha256)).size !== images.length))
       throw new Error("동작 참조 초안의 독립 원본 수가 요청과 다릅니다.");
     job.draftCandidates = candidates;
     job.draftChecks = normalizeWorkbenchChecks("reference", result.checks);
@@ -1806,8 +1815,9 @@ export class WorkbenchEngine {
       duration: number;
       camera: string;
       source?: string;
+      mode?: "side" | "multiview";
       videos?: MotionVideoSources;
-      frames: { time: number; front: string; side: string; back: string }[];
+      frames: { time: number; front?: string; side?: string; back?: string }[];
     }>(safeRelative(workspace, manifest.path));
     if (
       doc.schemaVersion !== 1 ||
@@ -1821,13 +1831,14 @@ export class WorkbenchEngine {
       throw new Error("멀티뷰 동작 설정과 프레임 명세가 일치하지 않습니다.");
     if (job.request.motionVideo) {
       if (doc.source !== "video-ai") throw Error("정지 이미지 대신 동작 AI의 원본 영상이 필요합니다.");
-      validateVideoSources(doc.videos);
-      const originals = MOTION_VIDEO_VIEWS.map(view => {
-        const a = candidate.artifacts.find(a => a.kind === "video" && a.path === doc.videos![view].path && a.role === view);
-        if (!a || doc.videos![view].startTime !== 0) throw Error("등록한 원본 영상·방향·검토 구간이 일치하지 않습니다.");
+      if ((doc.mode ?? "multiview") !== (job.request.motionVideo.mode ?? "multiview")) throw Error("요청한 동작 방향과 명세가 다릅니다.");
+      validateVideoSources(doc.videos, doc.mode);
+      const originals = motionVideoViews(doc.mode).map(view => {
+        const a = candidate.artifacts.find(a => a.kind === "video" && a.path === doc.videos![view]!.path && a.role === view);
+        if (!a || doc.videos![view]!.startTime !== 0) throw Error("등록한 원본 영상·방향·검토 구간이 일치하지 않습니다.");
         return hash(safeRelative(workspace, a.path));
       });
-      if (new Set(originals).size !== 3) throw Error("같은 영상을 다른 방향으로 복제할 수 없습니다.");
+      if (new Set(originals).size !== motionVideoViews(doc.mode).length) throw Error("같은 영상을 다른 방향으로 복제할 수 없습니다.");
     }
     if (
       Math.abs(doc.frames[0].time) > 0.000001 ||
@@ -1856,7 +1867,7 @@ export class WorkbenchEngine {
           "프레임 시간은 길이 범위에서 순서대로 증가해야 합니다.",
         );
       previous = frame.time;
-      for (const view of ["front", "side", "back"] as const) {
+      for (const view of (job.request.motionVideo ? motionVideoViews(job.request.motionVideo.mode) : ["front", "side", "back"] as const)) {
         const artifact = candidate.artifacts.find(
           (a) => a.kind === "image" && a.path === frame[view],
         );
@@ -1867,7 +1878,7 @@ export class WorkbenchEngine {
         phases[view].add(hash(safeRelative(workspace, artifact.path)));
       }
     }
-    if (Object.values(phases).some((p) => p.size < (job.request.motionVideo ? 2 : 3)))
+    if ((job.request.motionVideo ? motionVideoViews(job.request.motionVideo.mode) : ["front", "side", "back"] as const).some(view => phases[view].size < (job.request.motionVideo ? 2 : 3)))
       throw new Error(
         job.request.motionVideo
           ? "각 방향의 실제 영상에서 두 개 이상의 서로 다른 동작 프레임이 필요합니다."

@@ -1,5 +1,17 @@
 # Partsmith 검증 결과
 
+## 2026-10-11 — 0.6.18 측면 Runway 동작 참조와 실제 앱 업로드
+
+- 사용자 확정 방식: 채택한 4방향 정지 이미지는 외형 참고로 보존하고 측면 원본 한 장으로 Idle/Jump 연속 영상 각1개를 제작한다. 영상 검토·채택 뒤에만 Blender + gpt-6-astra를 실행한다. 취소한 정지 이미지 작업은 다시 시작하지 않는다.
+- 실제 계정: 연결된 유료 Runway 계정에서 gen-4.5 사용 가능·625크레딧 확인. 브라우저 클릭/파일 선택기/별도 API key 없이 공식 Runway 플러그인을 사용한다. 유료 영상 생성은0회다.
+- 실제 앱 업로드: `scripts/runway-upload-package-check.ts`가 실제 토끼 프로젝트의 격리 복사본에서 대기 설정→측면1→업로드 버튼→Runway init_upload의 앱 접근 확인→업로드 완료→비용 확인 창까지 검증했다. 원본1,674,171bytes, SHA256 b96d1a200ac6c30c773a53fe9b244edc065174045bb40df4f486c1717ccc6ef6. 테스트 작업04f1db8c-7e99-4b1f-b6ae-b6002dbd432d. 1080p/2초/1개/예상24크레딧 창에서 생성은 거절했다. 재시작 시 자동 실행 없음, 기존 채택과 실제 사용자 데이터 해시 유지. 증거: `artifacts/runtime/runway-upload-package-check.json`, `runway-upload-cost.png`.
+- 원인과 수정: 직접 MCP RPC는 local file parameter 업로드 변환을 거치지 않았다. metadata-only는 ChatGPT용 file 필수 오류, string은 object 형식 오류로 끝났다. 정상 Codex 도구 턴에서 공식 fileParams 변환을 사용하고, 실제 MCP 완료 응답만 회수한다. 실행 설정/카탈로그는 다른 정보를 제공하므로 카탈로그의 isEnabled를 자식 실행 정책 검증으로 오인하지 않는다. 사진 업로드 권한은 앱의 정확한 요청으로 답한다. 전역 권한·인증·브라우저 세션을 변경하지 않았다.
+- 토큰 사용: 원본 업로드에는 기본 모델·추론 설정을 유지한 Codex 턴1회가 필요했다. 해당 실제 턴의 native total117788(입력117479, 캐시 입력92032, 출력309) 기록을 보존한다. 하나의 턴은 여러 모델 호출을 포함할 수 있다. 동일 계정/원본 해시의 DPAPI 업로드 캐시는 Idle와 Jump 간 재사용한다. 진행 조회·유료 제출·다운로드·프레임 추출에는 GPT를 사용하지 않는다. 전체 사용량0 또는 측정하지 않은 절감률은 주장하지 않는다.
+- 주요 파일: `engine/runway-client.ts`, `engine/runway-workbench-runner.ts`, `shared/runway.ts`, `electron/main.ts`; 단일 측면을 지원하는 `shared/motion-video.ts`, `engine/motion-video-{ledger,media}.ts`, `engine/workbench.ts`, `src/MotionVideoReview.tsx`, `src/AssetWorkbench.tsx`. Astra에는 채택된 실제 측면 동작과 기존4방향 외형 입력을 구분해 전달한다. 가려진 다리의 동작은 직접 관측했다고 주장하지 않는다.
+- 비용: [Runway 공개 가격](https://runway.com/pricing)의12크레딧/초 기준24/2초, 두 동작48 예상. 실시간 견적 도구는 없어 추정값으로 명시한다. 각 작업별 앱 승인과 제출 전 영속 기록이 필요하다. 불명확한 제출은 재전송하지 않고 실제 taskId의 결과만 수집한다. 유료 재시도·자동 채택·단계 자동 진입 없음.
+- 실사용 준비: 새 별도 앱에서 실제 토끼 Idle 작업 `a34c2036-36d5-42bb-beca-f7f36aab8cc6`를 만들고 비용 승인 직전까지 진행했다. 위 실제 업로드 원본만 재사용했으며 이 작업의 추가 업로드/GPT턴/유료 제출0, taskId 없음. 이전 선택/취소 기록은 보존했다. 격리 프로필의 암호문을 직접 복사하면 복호화되지 않아, 양 프로필의 실제 앱 safeStorage로 해당 파일 URL만 메모리에서 재암호화했다. 계정 쿠키/키를 복사하지 않았다. `runway-live-prepared.json`, `runway-live-cost.png`에 준비 근거를 기록했다. 비용 창을 열어 두었으며 사용자가 승인해야 제출한다.
+- 모의/로컬 검증: 259개 전체 테스트와 이후 업로드 재사용·취소·미확인 제출·원본 변조·단일 측면 native decode 관련8개 검사가 통과했다. 공개 모델 품질의 증거가 아니다. 별도0.6.18 패키지에서 합성 MP4의 원본320×240 재생/정지/1초탐색/206·416/재시작 유지/3D실행 차단을 검사했다. 실제 AI 영상의 수집·외형·접지·반복 연결과 Astra 3D 애니메이션/Unity 재생은 아직 미검증이다.
+
 ## 2026-10-10 — 0.6.9 실제 Smart UV 완료, 다운로드 차단 보존
 
 - 앱에서 시작한 작업자가 채택 모델의 Smart UV를 한 번 실행·저장했습니다. 전후 실제 스크린샷에서 잔액 **4,135→4,115**, UV 공간 점유율 **65.1%**, 실제 펼친 UV와 기존 모델 ID를 확인했습니다. 호스트 기록은 `uv: completed`, 20크레딧입니다. 이 채택 결과를 다른 모델로 교체하거나 UV를 다시 생성하지 않습니다.

@@ -6,6 +6,7 @@ import {
   nativeImage,
   protocol,
   shell,
+  safeStorage,
 } from "electron";
 import fs from "node:fs";
 import { byteRange } from "../engine/byte-range";
@@ -23,6 +24,7 @@ import { CodexWorkbenchExecutor } from "../engine/workbench-executor";
 import { parseJsonText, readJsonFile } from "../engine/json";
 import { CodexWorker } from "../engine/codex-worker";
 import { ChromeWorkbenchRunner } from "./chrome-workbench-runner";
+import { RunwayWorkbenchRunner, routeExternalRunners } from "../engine/runway-workbench-runner";
 import { StudioBrowser } from "./studio-browser";
 import { ChatGptBrowser } from "./chatgpt-browser";
 import { Tripo } from "../engine/tripo";
@@ -636,13 +638,19 @@ app.whenReady().then(async () => {
         ? path.join(process.resourcesPath, "integrations")
         : path.join(app.getAppPath(), "integrations"),
     }),
-    { prepareSeparationImages, externalRunner: new ChromeWorkbenchRunner({
+    { prepareSeparationImages, externalRunner: routeExternalRunners(new ChromeWorkbenchRunner({
       journalRoot:path.join(root,"workbench-chrome-journals"),
       bridgePath:path.join(__dirname,"production-mcp.cjs"),
       projectRoot:id=>store.directory(id),blenderPath:()=>store.settings.blenderPath,
       downloadsPath:app.getPath("downloads"),
       ffmpegPath:app.isPackaged ? path.join(process.resourcesPath,"media","ffmpeg.exe") : path.join(app.getAppPath(),"node_modules","ffmpeg-static","ffmpeg.exe"),
-    }) },
+    }), new RunwayWorkbenchRunner({
+      journalRoot: path.join(root, "workbench-runway-journals"),
+      projectRoot: id => store.directory(id),
+      ffmpegPath: app.isPackaged ? path.join(process.resourcesPath, "media", "ffmpeg.exe") : path.join(app.getAppPath(), "node_modules", "ffmpeg-static", "ffmpeg.exe"),
+      encrypt: value => { if (!safeStorage.isEncryptionAvailable()) throw Error("Windows 보안 저장을 사용할 수 없습니다."); return safeStorage.encryptString(value).toString("base64"); },
+      decrypt: value => safeStorage.decryptString(Buffer.from(value, "base64")),
+    })) },
   );
   protocol.handle("asset", async (request) => {
     try {
