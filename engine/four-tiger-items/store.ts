@@ -10,6 +10,12 @@ export class FourTigerItemStore {
   private operations=new Map<string,Promise<unknown>>();
   constructor(root:string){this.root=path.resolve(root);}
   directory(projectId:string):string {if(!uuid.test(projectId))throw new FourTigerError('PATH_REJECTED','잘못된 묶음 식별자입니다.');return path.join(this.root,projectId);}
+  async ensureDirectory(projectId:string,relative:string):Promise<string>{
+    if(path.isAbsolute(relative)||relative.includes('\\')||relative.includes(':')||relative.split('/').some(x=>!x||x==='.'||x==='..'))throw new FourTigerError('PATH_REJECTED','허용되지 않은 저장 경로입니다.');
+    let current=this.directory(projectId);
+    for(const segment of ['',...relative.split('/')]){if(segment)current=path.join(current,segment);try{const info=await fs.lstat(current);if(info.isSymbolicLink()||!info.isDirectory())throw new FourTigerError('PATH_REJECTED','외부 연결 경로에는 저장할 수 없습니다.');}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;await fs.mkdir(current);}}
+    return current;
+  }
   async resolveFile(projectId:string,relative:string):Promise<string> {
     if(!relative||path.isAbsolute(relative)||relative.includes('\\')||relative.split('/').some(p=>p==='..'||p==='.'||!p)||relative.includes(':'))throw new FourTigerError('PATH_REJECTED','허용되지 않은 파일 경로입니다.');
     const dir=this.directory(projectId),file=path.resolve(dir,relative);
