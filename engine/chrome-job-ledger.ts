@@ -25,13 +25,18 @@ type Entry = {
   resultId?: string;
   resultUrl?: string;
   approvedModelPlan?: ModelPlan;
+  approvedSurfacePlan?: SurfacePlan;
 };
 export type ModelPlan = {
   observedCost: number; url: string; model: "P2.0";
   topology: "quad" | "triangle"; generationCount: number; polygonCount: number;
   inputMode: "single" | "multiview";
 };
-type Journal = { jobId: string; requestHash: string; entries: Entry[]; modelResults?: {modelId:string;url:string;observations?:string[]}[] };
+export type SurfacePlan = {
+  phase: "uv" | "texture"; observedCost:number; sourceModelId:string; url:string;
+  textureResolution:"2K"|"4K"|"8K"; removeLighting:boolean;
+};
+type Journal = { jobId: string; requestHash: string; entries: Entry[]; surfaceObservations?:string[]; modelResults?: {modelId:string;url:string;observations?:string[]}[] };
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const validUrl = (
   value: string,
@@ -61,6 +66,7 @@ const validUrl = (
 export class ChromeJobLedger {
   private journal: Journal;
   private modelApprovalPending = false;
+  private surfaceApprovalPending = false;
   constructor(
     private file: string,
     private packet: ChromePacket,
@@ -112,12 +118,27 @@ export class ChromeJobLedger {
   begin(args: {
     phase: string; observedCost: number; sourceModelId: string; url: string;
   }) { return this.reserve(args); }
+  async approveSurface(plan:SurfacePlan, approve:(plan:SurfacePlan)=>Promise<boolean>,cancelled:()=>boolean) {
+    const frozen=structuredClone(plan),r=this.packet.request,s=r.externalSurface;
+    const uv=this.journal.entries.find(e=>e.phase==='uv'&&e.state==='completed');
+    const source=frozen.phase==='uv'?this.packet.sourceStudioModel?.modelId:uv?.resultId;
+    if(this.surfaceApprovalPending || !this.packet.approval.accepted || r.step!=='surface' || r.executionMode!=='codex-app' || s?.costApproval!=='in-app' || cancelled() ||
+       !['uv','texture'].includes(frozen.phase) || !source || frozen.sourceModelId!==source ||
+       this.journal.entries.some(e=>e.phase===frozen.phase) || frozen.textureResolution!==s.textureResolution || frozen.removeLighting!==s.removeLighting ||
+       !Number.isSafeInteger(frozen.observedCost) || frozen.observedCost<0 || !validUrl(frozen.url,'tripo',source))
+      throw Error('UV·텍스처의 대상·설정·비용·이전 완료 기록을 확인하세요. 제출하지 마세요.');
+    this.surfaceApprovalPending=true;
+    try {
+      if(!await approve(structuredClone(frozen))||cancelled())throw Error('사용자가 UV·텍스처 비용을 승인하지 않았거나 취소했습니다.');
+      return this.reserve(frozen,undefined,frozen);
+    } finally {this.surfaceApprovalPending=false;}
+  }
   private reserve(args: {
     phase: string;
     observedCost: number;
     sourceModelId: string;
     url: string;
-  }, approvedModelPlan?: ModelPlan) {
+  }, approvedModelPlan?: ModelPlan, approvedSurfacePlan?:SurfacePlan) {
     const { request: r, approval: a } = this.packet;
     if (!a.accepted || this.journal.entries.some((e) => e.phase === args.phase))
       throw Error(
@@ -125,6 +146,8 @@ export class ChromeJobLedger {
       );
     let limit: number,
       source = "";
+    if(r.externalSurface?.costApproval==='in-app' && !approvedSurfacePlan)
+      throw Error('앱에서 해당 UV·텍스처 단계의 실제 비용을 먼저 승인해야 합니다.');
     if (r.step === "concept" && args.phase === "images") limit = 0;
     else if (r.externalModel && args.phase === "model") {
       if (r.externalModel.costApproval === "in-app" && !approvedModelPlan)
@@ -132,7 +155,7 @@ export class ChromeJobLedger {
       limit = approvedModelPlan?.observedCost ?? r.externalModel.observedCreditCost;
     }
     else if (r.externalSurface && args.phase === "uv") {
-      limit = r.externalSurface.observedUvCost;
+      limit = approvedSurfacePlan?.observedCost ?? r.externalSurface.observedUvCost;
       source = this.packet.sourceStudioModel?.modelId ?? "";
       if (!uuid.test(source)) throw Error("채택한 모델 ID가 없습니다.");
     } else if (r.externalSurface && args.phase === "texture") {
@@ -140,7 +163,7 @@ export class ChromeJobLedger {
         (e) => e.phase === "uv" && e.state === "completed",
       );
       if (!uv?.resultId) throw Error("완료한 Smart UV 결과가 필요합니다.");
-      limit = r.externalSurface.observedTextureCost;
+      limit = approvedSurfacePlan?.observedCost ?? r.externalSurface.observedTextureCost;
       source = uv.resultId;
     } else throw Error("이 작업 명세에 없는 생성 단계입니다.");
     if (
@@ -155,7 +178,7 @@ export class ChromeJobLedger {
         args.phase === "model",
       ) ||
       this.journal.entries.reduce((n, e) => n + e.cost, 0) + args.observedCost >
-        (approvedModelPlan?.observedCost ?? a.studioCreditLimit)
+        (approvedSurfacePlan ? this.journal.entries.reduce((n,e)=>n+e.cost,0)+approvedSurfacePlan.observedCost : approvedModelPlan?.observedCost ?? a.studioCreditLimit)
     )
       throw Error(
         "화면 비용/대상/주소가 승인한 범위를 벗어났습니다. 제출하지 마세요.",
@@ -168,6 +191,7 @@ export class ChromeJobLedger {
       state: "reserved",
       reservedAt: new Date().toISOString(),
       ...(approvedModelPlan ? {approvedModelPlan} : {}),
+      ...(approvedSurfacePlan ? {approvedSurfacePlan} : {}),
     };
     this.journal.entries.push(entry);
     this.persist();
@@ -196,6 +220,12 @@ export class ChromeJobLedger {
     });
     this.persist();
     return structuredClone(entry);
+  }
+  recordSurfaceObservations(observations?:string[]) {
+    if(!this.packet.request.externalSurface)throw Error('표면 작업이 아닙니다.');
+    if(observations===undefined)return;
+    if(!Array.isArray(observations)||observations.length>8||observations.some(o=>typeof o!=='string'||!o.trim()||o.length>500))throw Error('외형 관찰은 500자 이내 최대 8개입니다.');
+    this.journal.surfaceObservations=[...new Set([...(this.journal.surfaceObservations??[]),...observations])];this.persist();
   }
   recordModelResult(modelId:string,url:string,observations?:string[]) {
     if(observations!==undefined && (!Array.isArray(observations)||observations.length>8||observations.some(o=>typeof o!=="string"||!o.trim()||o.length>500)))throw Error("외형 관찰은 500자 이내 최대 8개로 기록하세요.");

@@ -210,6 +210,7 @@ export class LocalPipeline {
         report: `builds/${buildId}/character.report.json`,
         warnings: report.warnings,
         hasRig: report.hasRig,
+        rigType: mode === "demo-rig" ? "humanoid" : report.rigType === "humanoid" ? "humanoid" : "generic",
         clips: report.clips,
       };
       const current = this.store.project(id);
@@ -291,7 +292,7 @@ export class LocalPipeline {
     fs.mkdirSync(inbox, { recursive: true });
     fs.mkdirSync(path.dirname(resultPath), { recursive: true });
     const manifest = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       projectId: p.id,
       requestId,
       source: this.store.file(id, b.fbx),
@@ -302,7 +303,8 @@ export class LocalPipeline {
       destination: `Assets/${p.unityFolder}/${p.id}`,
       revision: p.revision,
       resultPath,
-      humanoid: b.hasRig,
+      rigType: b.rigType ?? "generic",
+      humanoid: b.rigType === "humanoid",
     };
     const file = path.join(inbox, requestId + ".json");
     fs.writeFileSync(file + ".tmp", JSON.stringify(manifest));

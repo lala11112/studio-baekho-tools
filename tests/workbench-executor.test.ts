@@ -195,6 +195,12 @@ test("assembly, rig and animation explicitly use Astra; image steps retain confi
     fs.rmSync(f.root, { recursive: true, force: true });
   }
 });
+test("local Unity dispatch never probes or invokes a GPT worker, including configuration failures",async()=>{
+ const f=fixture('unity'),worker=new Worker();f.context.job.request.unityExecution='local';
+ worker.probe=async()=>{throw Error('Unexpected GPT probe');};f.services.unityPath=()=>'';
+ try{const result=await new CodexWorkbenchExecutor(worker,f.services).execute(f.context,()=>{});assert.equal(result.status,'needs_input');assert.match(result.summary,/Unity 프로젝트/);assert.equal(worker.calls.length,0);}finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
 test("surface retry reuses completed paid phases instead of charging them twice", async () => {
   const f = fixture("surface"),
     worker = new Worker();
@@ -263,7 +269,7 @@ test("ambiguous receipt prevents another worker submission even when the user re
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 test("local rig and animation collect saved completion after stream loss, preserving file/cancellation/denial guards", async () => {
-  for (const step of ["rig", "animation"] as const)
+  for (const step of ["assembly", "rig", "animation"] as const)
   for (const mode of ["complete", "missing-file", "incomplete", "cancelled", "denied", "denied-stream"] as const) {
     const f=fixture(step), worker=new Worker(), controller=new AbortController();
     f.context.signal=controller.signal;

@@ -54,8 +54,9 @@ export type WorkbenchRequest = {
     inputMode?: "single" | "multiview";
     /** Observe cost in Chrome, then obtain a separate app approval before reservation. */
     costApproval?: "in-app" };
-  /** Initial whole-model Smart UV followed by texture, executed in the current chat. */
+  /** Initial whole-model Smart UV followed by texture, executed by the app worker. */
   externalSurface?: {
+    costApproval?: "in-app";
     observedUvCost: number;
     observedTextureCost: number;
     textureResolution: "2K" | "4K" | "8K";
@@ -83,6 +84,8 @@ export type WorkbenchRequest = {
   /** Preserve every existing image and generate only missing role/view pairs. */
   reuseExisting?: boolean;
   polygonCount?: number;
+  unityRigType?: "generic" | "humanoid";
+  unityExecution?: "local" | "astra";
   baseJobId?: string;
   /** Host-frozen candidate ID, including selected legacy multi-candidate history. */
   baseCandidateId?: string;

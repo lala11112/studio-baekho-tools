@@ -11,8 +11,10 @@ using UnityEngine.SceneManagement;
 using UnityEngine.Rendering;
 
 namespace Partsmith {
- [Serializable] public class ImportRequest { public int schemaVersion; public string projectId,requestId,source,textureDirectory,destination,resultPath; public int revision; public bool humanoid; }
- [Serializable] public class ImportResult { public string requestId,status,prefabPath,userPrefabPath,scenePath,unityVersion,pipeline,guid; public bool avatarValid,avatarHuman,playbackVerified,runtimePlayModeVerified; public int revision; public string[] clips,runtimeClips,runtimeMovingClips,warnings,errors; }
+ [Serializable] public class ExpectedClip { public string name; public bool loop; }
+ [Serializable] public class TextureSize { public string name; public int width,height; }
+ [Serializable] public class ImportRequest { public int schemaVersion; public string projectId,requestId,source,textureDirectory,destination,resultPath; public int revision; public bool humanoid; public string rigType; public ExpectedClip[] expectedClips; }
+ [Serializable] public class ImportResult { public string rigType; public string requestId,status,prefabPath,userPrefabPath,scenePath,unityVersion,pipeline,guid; public bool avatarValid,avatarHuman,playbackVerified,runtimePlayModeVerified; public int revision; public TextureSize[] textures; public string[] loopClips,clips,runtimeClips,runtimeMovingClips,warnings,errors; }
  [InitializeOnLoad] public static class PartsmithBridge {
   static double next; static bool busy;
   static string Root => Path.GetDirectoryName(Application.dataPath);
@@ -31,7 +33,9 @@ namespace Partsmith {
    ImportRequest q=null;var warnings=new List<string>();var errors=new List<string>();var r=new ImportResult{status="failed",unityVersion=Application.unityVersion,clips=Array.Empty<string>()};
    try{
     q=JsonUtility.FromJson<ImportRequest>(File.ReadAllText(file));r.requestId=q.requestId;r.revision=q.revision;
-    if(q.schemaVersion!=1||!Guid.TryParse(q.projectId,out _)||!Guid.TryParse(q.requestId,out _))throw new Exception("Unsupported request or invalid ID");
+    if((q.schemaVersion!=1&&q.schemaVersion!=2)||!Guid.TryParse(q.projectId,out _)||!Guid.TryParse(q.requestId,out _))throw new Exception("Unsupported request or invalid ID");
+    bool human=q.schemaVersion>=2?q.rigType=="humanoid":q.humanoid;
+    if(q.schemaVersion>=2 && q.rigType!="generic" && q.rigType!="humanoid")throw new Exception("Invalid rig type");r.rigType=human?"humanoid":"generic";
     var dest=Path.GetFullPath(Path.Combine(Root,q.destination));if(!q.destination.StartsWith("Assets/")||!dest.StartsWith(Path.GetFullPath(Application.dataPath)+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase)||!q.destination.EndsWith("/"+q.projectId))throw new Exception("Unsafe destination");
     var resultRoot=Path.GetFullPath(Path.Combine(Root,"Library/PartsmithResults"))+Path.DirectorySeparatorChar;
     if(!Path.GetFullPath(q.resultPath).StartsWith(resultRoot))throw new Exception("Unsafe result path");
@@ -39,18 +43,25 @@ namespace Partsmith {
     string generated=q.destination+"/Generated";Folder(generated);Folder(q.destination+"/User");
     string modelPath=generated+"/Character.fbx";File.Copy(q.source,Path.Combine(Root,modelPath),true);
     string texturePath=generated+"/Textures";Folder(texturePath);
-    if(Directory.Exists(q.textureDirectory))foreach(string texture in Directory.GetFiles(q.textureDirectory,"*.png"))File.Copy(texture,Path.Combine(Root,texturePath,Path.GetFileName(texture)),true);
+    if(Directory.Exists(q.textureDirectory))foreach(string texture in Directory.GetFiles(q.textureDirectory).Where(f=>new[]{".png",".jpg",".jpeg"}.Contains(Path.GetExtension(f).ToLowerInvariant())))File.Copy(texture,Path.Combine(Root,texturePath,Path.GetFileName(texture)),true);
     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
     var importer=(ModelImporter)AssetImporter.GetAtPath(modelPath);importer.globalScale=1;importer.useFileScale=true;importer.bakeAxisConversion=true;importer.importAnimation=true;importer.materialImportMode=ModelImporterMaterialImportMode.ImportStandard;
-    importer.animationType=q.humanoid?ModelImporterAnimationType.Human:ModelImporterAnimationType.Generic;
+    importer.animationType=human?ModelImporterAnimationType.Human:ModelImporterAnimationType.Generic;
     importer.avatarSetup=ModelImporterAvatarSetup.CreateFromThisModel;
+    importer.animationCompression=ModelImporterAnimationCompression.Off;
     // A replaced mesh can retain the previous FBX's serialized rest skeleton in .meta.
     // Rebuild the managed avatar while retaining the asset GUID and external references.
-    if(q.humanoid)importer.humanDescription=new HumanDescription{human=Array.Empty<HumanBone>(),skeleton=Array.Empty<SkeletonBone>(),upperArmTwist=.5f,lowerArmTwist=.5f,upperLegTwist=.5f,lowerLegTwist=.5f,armStretch=.05f,legStretch=.05f};
+    if(human)importer.humanDescription=new HumanDescription{human=Array.Empty<HumanBone>(),skeleton=Array.Empty<SkeletonBone>(),upperArmTwist=.5f,lowerArmTwist=.5f,upperLegTwist=.5f,lowerLegTwist=.5f,armStretch=.05f,legStretch=.05f};
     importer.SaveAndReimport();
-    var defaults=importer.defaultClipAnimations;foreach(var clip in defaults){clip.loopTime=true;clip.lockRootRotation=true;clip.lockRootHeightY=true;clip.lockRootPositionXZ=true;}if(defaults.Length>0){importer.clipAnimations=defaults;importer.SaveAndReimport();}
+    var defaults=importer.defaultClipAnimations;foreach(var clip in defaults){var expected=q.expectedClips?.FirstOrDefault(e=>clip.name==e.name||clip.name.EndsWith("|"+e.name)||clip.takeName==e.name||clip.takeName.EndsWith("|"+e.name));if(expected!=null)clip.name=expected.name;clip.loopTime=expected?.loop??true;clip.lockRootRotation=true;clip.lockRootHeightY=true;clip.lockRootPositionXZ=true;}if(defaults.Length>0){importer.clipAnimations=defaults;importer.SaveAndReimport();}
+    r.loopClips=importer.clipAnimations.Where(c=>c.loopTime).Select(c=>c.name).ToArray();
     // Export embedded materials/textures once, then update persistent URP materials in place.
     importer.ExtractTextures(texturePath);AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+    // Managed originals keep full 2K/4K/8K resolution and avoid implicit lossy compression.
+    foreach(var asset in Directory.GetFiles(texturePath).Where(f=>new[]{".png",".jpg",".jpeg"}.Contains(Path.GetExtension(f).ToLowerInvariant())).Select(f=>f.Replace('\\','/'))){
+     var ti=AssetImporter.GetAtPath(asset) as TextureImporter;if(!ti)continue;ti.maxTextureSize=8192;ti.textureCompression=TextureImporterCompression.Uncompressed;ti.SaveAndReimport();
+    }
+    r.textures=Directory.GetFiles(texturePath).Where(f=>new[]{".png",".jpg",".jpeg"}.Contains(Path.GetExtension(f).ToLowerInvariant())).Select(f=>f.Replace('\\','/')).Select(AssetDatabase.LoadAssetAtPath<Texture2D>).Where(t=>t).Select(t=>new TextureSize{name=t.name,width=t.width,height=t.height}).ToArray();
     var model=AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);
     var shader=Shader.Find("Universal Render Pipeline/Lit");r.pipeline=GraphicsSettings.currentRenderPipeline?GraphicsSettings.currentRenderPipeline.GetType().Name:"Built-in";
     if(!shader){shader=Shader.Find("Standard");warnings.Add("URP Lit not found; Standard fallback material.");}
@@ -61,6 +72,7 @@ namespace Partsmith {
      Color color=original.HasProperty("_BaseColor")?original.GetColor("_BaseColor"):original.HasProperty("_Color")?original.color:Color.white;
      var tex=original.HasProperty("_BaseMap")?original.GetTexture("_BaseMap"):original.mainTexture;
      if(mat.HasProperty("_BaseColor"))mat.SetColor("_BaseColor",color);if(mat.HasProperty("_BaseMap")&&tex)mat.SetTexture("_BaseMap",tex);
+     if(mat.HasProperty("_Color"))mat.SetColor("_Color",color);if(mat.HasProperty("_MainTex")&&tex)mat.SetTexture("_MainTex",tex);
      if(original.HasProperty("_BumpMap")&&original.GetTexture("_BumpMap")){mat.SetTexture("_BumpMap",original.GetTexture("_BumpMap"));mat.EnableKeyword("_NORMALMAP");}
      if(original.HasProperty("_MetallicGlossMap")&&original.GetTexture("_MetallicGlossMap")){mat.SetTexture("_MetallicGlossMap",original.GetTexture("_MetallicGlossMap"));mat.EnableKeyword("_METALLICSPECGLOSSMAP");}
      EditorUtility.SetDirty(mat);importer.AddRemap(new AssetImporter.SourceAssetIdentifier(original),mat);
@@ -68,7 +80,8 @@ namespace Partsmith {
     importer.SaveAndReimport();model=AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);
     var clips=AssetDatabase.LoadAllAssetsAtPath(modelPath).OfType<AnimationClip>().Where(x=>!x.name.StartsWith("__preview__")).ToArray();r.clips=clips.Select(x=>x.name).ToArray();
     var avatar=AssetDatabase.LoadAllAssetsAtPath(modelPath).OfType<Avatar>().FirstOrDefault();r.avatarValid=avatar&&avatar.isValid;r.avatarHuman=avatar&&avatar.isHuman;
-    if(!r.avatarValid||!r.avatarHuman)warnings.Add("Human Avatar invalid or absent. Configure bones / T-pose in the model importer.");
+    if(!r.avatarValid||(human&&!r.avatarHuman))warnings.Add(human?"Human Avatar invalid or absent. Configure bones / T-pose in the model importer.":"Generic Avatar invalid or absent.");
+    if(q.expectedClips!=null && q.expectedClips.Any(e=>!r.clips.Contains(e.name)))throw new Exception("An accepted animation clip is missing from the FBX import.");
     if(clips.Length==0)warnings.Add("No animation clips found.");
     string controllerPath=generated+"/Character.controller";var controller=AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath)??AnimatorController.CreateAnimatorControllerAtPath(controllerPath);
     var sm=controller.layers[0].stateMachine;
@@ -99,7 +112,7 @@ namespace Partsmith {
     if(!r.playbackVerified)warnings.Add("Animator evaluation did not confirm playback; inspect the test scene.");
     EditorPrefs.SetString("Partsmith.LatestScene."+Root,r.scenePath);AssetDatabase.SaveAssets();
     warnings.Add("Visual review still required: joint deformation, surface seams, hair attachment, texture maps and orientation.");
-    r.status=r.avatarValid&&r.avatarHuman&&r.playbackVerified?"complete_review_required":"correction_required";
+    r.status=r.avatarValid&&(!human||r.avatarHuman)&&r.playbackVerified?"complete_review_required":"correction_required";
    }catch(Exception e){errors.Add(e.Message);Debug.LogError("Partsmith import: "+e.Message);}
    r.warnings=warnings.ToArray();r.errors=errors.ToArray();
    // Never honor an unchecked result path, including on validation failure.

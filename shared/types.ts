@@ -122,6 +122,7 @@ export type BuildResult = {
   report: string;
   warnings: string[];
   hasRig: boolean;
+  rigType?: "generic" | "humanoid";
   clips: string[];
 };
 export type UnityResult = {

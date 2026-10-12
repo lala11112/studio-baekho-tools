@@ -16,9 +16,9 @@ const output = (value: unknown) =>
   process.stdout.write(JSON.stringify(value) + "\n");
 const bridge = async (body: unknown) => {
   const call=body as {method?:string;name?:string};
-  // These two calls wait for a human cost decision in Partsmith. No inference
+  // These calls wait for a human cost decision in Partsmith. No inference
   // or repeat request is needed while waiting. Ordinary operations stay bounded.
-  const humanDecision=call.method === "tools/call" && ["studio_model_begin","studio_motion_begin"].includes(call.name ?? "");
+  const humanDecision=call.method === "tools/call" && ["studio_model_begin","studio_motion_begin","studio_surface_begin"].includes(call.name ?? "");
   const response = await fetch(`http://127.0.0.1:${port}/tools`, {
     method: "POST",
     headers: {
@@ -26,7 +26,7 @@ const bridge = async (body: unknown) => {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(humanDecision || call.name === 'studio_models_finish' ? 15 * 60 * 1000 : 45000),
+    signal: AbortSignal.timeout(humanDecision || ["studio_models_finish","studio_surface_finish"].includes(call.name ?? "") ? 15 * 60 * 1000 : 45000),
   });
   if (!response.ok)
     throw Error("Production browser bridge rejected the request");

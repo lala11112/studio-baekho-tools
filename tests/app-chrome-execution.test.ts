@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { Store } from "../engine/store";
 import { Engine } from "../engine/engine";
 import { WorkbenchEngine } from "../engine/workbench";
+import {buildWorkbenchGlb} from "./fixtures/workbench-glb";
 import type { ExternalWorkbenchRunner } from "../shared/workbench";
 
 test("transport loss collects completed receipts locally; otherwise bounded retries are collection-only",async t=>{
@@ -274,8 +275,9 @@ test("cancel and restart ignore late Chrome completion and never launch a new wo
 
 test("app single-image P2 model freezes only the adopted original and defers cost approval",async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),"single-model-")),store=new Store(root);await store.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));
- let modelPacket:any;let modelInputs:any[]=[];
+ let modelPacket:any,surfacePacket:any;let modelInputs:any[]=[];
  const runner:ExternalWorkbenchRunner={async run(ctx){
+  if(ctx.job.step==="surface"){surfacePacket=JSON.parse(fs.readFileSync(path.join(ctx.workspace,"external-request.json"),"utf8"));return {status:"needs_input",summary:"Unpaid cost inspection stub"};}
   if(ctx.job.step==="model"){modelPacket=JSON.parse(fs.readFileSync(path.join(ctx.workspace,"external-request.json"),"utf8"));modelInputs=ctx.inputs;return {status:"needs_input",summary:"Cost preview stub"};}
   const bytes=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==","base64");fs.writeFileSync(path.join(ctx.workspace,"one.png"),bytes);
   fs.writeFileSync(path.join(ctx.workspace,"external-result.json"),JSON.stringify({jobId:ctx.job.id,requestHash:ctx.job.externalExecution!.requestHash,conversationUrl:"https://chatgpt.com/c/fixture",files:[{path:"one.png",sha256:createHash("sha256").update(bytes).digest("hex")}],result:{status:"completed",summary:"fixture",checks:[],candidates:[{id:"one",label:"one",artifacts:[{path:"one.png",kind:"image"}]}]}}));return {status:"completed",summary:"fixture"};},verifyReceipt(){}};
@@ -285,4 +287,11 @@ test("app single-image P2 model freezes only the adopted original and defers cos
  const design=e.get(w.id).jobs[0];e.action(p.id,{kind:"select",jobId:design.id,candidateId:"one"});
  e.action(p.id,{kind:"execute",request:{step:"model",prompt:"",modelInput:"whole",role:"whole",generationCount:1,polygonCount:10000,executionMode:"codex-app",externalModel:{model:"P2.0",topology:"quad",inputMode:"single",costApproval:"in-app",observedCreditCost:0}},approval});await e.wait(w.id);
  assert.equal(modelInputs.length,1);assert.equal(modelInputs[0].sha256,design.candidates[0].artifacts[0].sha256);assert.deepEqual(Object.keys(modelPacket.dependencies),["concept"]);assert.equal(modelPacket.approval.studioCreditLimit,0);assert.equal(e.get(w.id).selections["model:whole"],undefined);
+ const model=e.get(w.id).jobs.find(j=>j.step==='model')!,work=path.join(store.directory(p.id),'workbench',w.id,'jobs',model.id);
+ const files=[{path:'native.fbx',bytes:Buffer.concat([Buffer.from('Kaydara FBX Binary  '+String.fromCharCode(0,26,0)),Buffer.alloc(64)])},{path:'preview.glb',bytes:buildWorkbenchGlb(7)}];for(const f of files)fs.writeFileSync(path.join(work,f.path),f.bytes);
+ fs.writeFileSync(path.join(work,'external-result.json'),JSON.stringify({jobId:model.id,requestHash:model.externalExecution!.requestHash,studioModels:[{candidateId:'model-1',modelId:'11111111-1111-1111-1111-111111111111',url:'https://studio.tripo3d.ai/ko/workspace/generate/rabbit-11111111-1111-1111-1111-111111111111'}],files:files.map(f=>({path:f.path,sha256:createHash('sha256').update(f.bytes).digest('hex')})),result:{status:'completed',summary:'synthetic',checks:[],candidates:[{id:'model-1',label:'synthetic',artifacts:files.map(f=>({path:f.path,kind:'model',role:'whole'}))}]}}));
+ e.action(p.id,{kind:'external-receive',jobId:model.id});e.action(p.id,{kind:'select',jobId:model.id,candidateId:'model-1'});
+ e.action(p.id,{kind:'execute',request:{step:'surface',prompt:'',modelInput:'whole',executionMode:'codex-app',externalSurface:{observedUvCost:0,observedTextureCost:0,textureResolution:'4K',removeLighting:false,costApproval:'in-app'}},approval});await e.wait(w.id);
+ assert.deepEqual(Object.keys(surfacePacket.dependencies),['concept','model:whole']);assert.equal(surfacePacket.approval.studioCreditLimit,0);assert.equal(surfacePacket.sourceStudioModel.modelId,'11111111-1111-1111-1111-111111111111');
+
 });

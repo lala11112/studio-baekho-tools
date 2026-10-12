@@ -382,7 +382,7 @@ export class WorkbenchEngine {
           : ["concept", "separate"];
       case "surface":
         return workbenchModelInput(request) === "whole"
-          ? request.externalSurface ? ["concept", "whole-reference", "model:whole"] : ["concept", "model:whole"]
+          ? request.externalSurface && this.chosen(w, "model:whole").job.dependencies["whole-reference"] ? ["concept", "whole-reference", "model:whole"] : ["concept", "model:whole"]
           : [
               "concept",
               "separate",
@@ -440,6 +440,8 @@ export class WorkbenchEngine {
     if (r.executionMode !== undefined && !["worker", "codex-session", "codex-app"].includes(r.executionMode))
       throw new Error("알 수 없는 실행 연결입니다.");
     r.prompt = r.prompt.trim();
+    if(r.unityExecution!==undefined && (r.step!=="unity"||!["local","astra"].includes(r.unityExecution)))throw Error("Unity 실행 방식을 확인하세요.");
+    if(r.unityRigType!==undefined && (r.step!=="unity"||!["generic","humanoid"].includes(r.unityRigType)))throw Error("Unity 리그 유형을 확인하세요.");
     if (r.externalModel !== undefined) {
       const settings = r.externalModel;
       if (!externalMode(r.executionMode) || r.step !== "model" ||
@@ -455,7 +457,8 @@ export class WorkbenchEngine {
       const s = r.externalSurface;
       if (!externalMode(r.executionMode) || r.step !== "surface" || r.modelInput !== "whole" ||
           r.baseJobId || !s || ![s.observedUvCost, s.observedTextureCost].every(n => Number.isSafeInteger(n) && n >= 0) ||
-          !["2K", "4K", "8K"].includes(s.textureResolution) || typeof s.removeLighting !== "boolean")
+          !["2K", "4K", "8K"].includes(s.textureResolution) || typeof s.removeLighting !== "boolean" ||
+          (s.costApproval !== undefined && (s.costApproval !== "in-app" || r.executionMode !== "codex-app" || s.observedUvCost !== 0 || s.observedTextureCost !== 0)))
         throw new Error("외부 UV·텍스처는 채택한 전체 모델의 최초 작업과 확인한 설정·비용만 지원합니다.");
     }
     if (r.conceptMode !== undefined && (r.step !== "concept" || !["design", "turnaround"].includes(r.conceptMode)))
@@ -1125,7 +1128,7 @@ export class WorkbenchEngine {
           !validUrl(s.uv.url, s.uv.modelId, "smart-uv") || !validUrl(s.texture.url, s.texture.modelId, "texture") ||
           !fbx(s.uv.fbxPath) || !fbx(s.texture.fbxPath) || s.uv.fbxPath === s.texture.fbxPath ||
           ![s.uv.creditCost, s.texture.creditCost].every(n => Number.isSafeInteger(n) && n >= 0) ||
-          s.uv.creditCost > settings.observedUvCost || s.texture.creditCost > settings.observedTextureCost ||
+          (settings.costApproval !== "in-app" && (s.uv.creditCost > settings.observedUvCost || s.texture.creditCost > settings.observedTextureCost)) ||
           s.texture.resolution !== settings.textureResolution || s.texture.removeLighting !== settings.removeLighting ||
           !Array.isArray(s.texture.texturePaths) || !s.texture.texturePaths.length ||
           new Set(s.texture.texturePaths).size !== s.texture.texturePaths.length ||

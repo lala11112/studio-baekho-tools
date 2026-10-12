@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import {executeWorkbenchUnity} from "./workbench-unity";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -1988,7 +1989,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       reference: `Generate ONE coherent synchronized multiview 2D KEY-POSE image sequence for '${request.motion}', duration ${request.duration}s. The user approved EXACTLY ${request.referenceFrameCount ?? 3} shared key-pose timestamps and ${3 * (request.referenceFrameCount ?? 3)} actual generated images in total (one front/side/back image at each time). The ${request.fps} fps setting is for later 3D animation playback, NOT a promise of full-rate 2D video frames. ${imageRules} Use front/side/back reference views of the SAME accepted character. Use these exact frozen timestamps when specified: ${JSON.stringify(request.referenceTimes ?? "choose meaningful timestamps including 0 and duration")}. Make actual images for each time and view with the SAME pose and fixed camera. Reference the completed front image at a time when generating side/back for that time. Preserve face, body proportions, outfit, hair and scale. Do not assume independently generated views synchronize. Inspect correspondence and identity and report uncertainty. Return ONE candidate, every actual key-pose frame as image artifact, and ONE frames artifact JSON: {schemaVersion:1,motion:<string>,fps:<number>,duration:<number>,camera:'fixed',frames:[{time:<seconds>,front:<job-relative PNG>,side:<job-relative PNG>,back:<job-relative PNG>}]} with increasing time. Video or motion capture services are not required. Save each genuine original immediately and update a partial result.json after each image so files survive a disconnect. Never substitute posed Blender renders, contact sheets, crops, mirrored copies or duplicates for generated independent images. Rig test renders in the inputs are appearance/anatomy references, not the requested action timing. Do not create 3D animation yet.`,
       animation: `If the accepted frames.json has mode=side and source=video-ai, use ONLY its side video and decoded frames as observed motion evidence. The accepted four whole-character images are appearance references, NOT synchronized motion. Author occluded limb motion from anatomy and inspect it in actual Blender renders; do not claim unseen motion was observed. Never generate new reference images/videos in this step. You are the requested Codex gpt-6-astra author. ${commonBlender} Inspect the user-accepted motion references, timestamps and accepted rig. When frames.json has source=video-ai, the accompanying native videos are the source of truth: inspect the continuous movement and decode additional original-resolution frames if needed to assess anticipation, contact, apex and landing between supplied key times. Do not treat the extracted key frames as the only available motion or regenerate them. Preserve the originals and their timing. For legacy static references inspect the complete accepted frame sequence. Infer and AUTHOR actual bone poses, keyframes, interpolation and timing in Blender from those specific images for '${request.motion}'. Use actual visual reasoning and bpy execution, not preset Idle/Walk, text-only pose plans or generic animation templates. Compare rendered key phases against the actual accepted reference view(s); correct foot contact, sliding, penetration and timing. Bake/export actual action clips in GLB and editable .blend. Respect user corrections. If views disagree materially return needs_input, never invent synchronization. Return ONE version for review.`,
       unity:
-        "Merge ALL user-accepted animation clip versions supplied in the immutable inputs into the accepted character rig, preserving every distinct motion and name; do not export only the newest .blend or drop other clips. Export the complete clip set and materials for Unity. Read the installed Partsmith Unity Editor bridge contract in the configured Unity project; use its actual request/result mechanism to import into the managed Assets folder and verify Avatar, the complete expected clip list, materials and playback. Preserve unrelated assets. Export files and a real Unity-generated validation report. If no Unity editor/project/bridge is configured, return needs_input. Do not claim Unity validation based only on a Blender export or worker report.",
+        `Unity rig type: ${request.unityRigType ?? "generic"}; use schemaVersion 2 and explicit rigType plus expectedClips. Generic does not require avatarHuman. Merge ALL user-accepted animation clip versions supplied in the immutable inputs into the accepted character rig, preserving every distinct motion and name; do not export only the newest .blend or drop other clips. Export the complete clip set and materials for Unity. Read the installed Partsmith Unity Editor bridge contract in the configured Unity project; use its actual request/result mechanism to import into the managed Assets folder and verify Avatar, the complete expected clip list, materials and playback. Preserve unrelated assets. Export files and a real Unity-generated validation report. If no Unity editor/project/bridge is configured, return needs_input. Do not claim Unity validation based only on a Blender export or worker report.`,
     };
     return [
       "You are Partsmith's real asset authoring worker. Execute ONLY this user-requested action. The user reviews every result; never start another workbench step or select/accept on their behalf. Perform actual tools work, not a plan.",
@@ -2157,7 +2158,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       stages: [stage],
       message: "User requested one step",
     };
-    const requestedModel = ["assembly", "rig", "animation"].includes(
+    const requestedModel = ["assembly", "rig", "animation", "unity"].includes(
       context.job.step,
     )
       ? ("gpt-6-astra" as const)
@@ -2327,7 +2328,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
           response = await this.worker.run(task);
         } catch (error) {
           // The CLI stream can disconnect after Blender has durably saved its
-          // completed response. Only local rig/animation paths may collect it;
+          // completed response. Only local authoring/Unity paths may collect it;
           // cancellation/approval errors and paid/web stages retain their guards.
           if (!this.localTransportRecovery(context, error instanceof Error ? error.message : "")) throw error;
           let saved: WorkbenchResult | undefined;
@@ -2608,6 +2609,22 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     context: WorkbenchExecutionContext,
     onProgress: (message: string) => void,
   ): Promise<WorkbenchResult> {
+    if(context.job.step==='unity' && context.job.request.unityExecution==='local') {
+      try {
+        return await executeWorkbenchUnity(context,{
+          projectRoot:this.services.projectRoot(context.workbench.projectId),
+          unityPath:this.services.unityPath(context.workbench.projectId)??'',
+          editor:this.services.unityEditorPath(),blender:this.services.blenderPath(),
+          resources:this.services.resourcesPath,
+          checkpoint:path.join(this.services.checkpointRoot??path.join(this.services.projectRoot(context.workbench.projectId),'.host-checkpoints'),context.job.id+'.unity.json'),
+          runBlender,
+        },onProgress);
+      } catch(error) {
+        if(context.signal.aborted)throw error;
+        const summary=error instanceof Error?error.message:String(error);
+        return {status:'needs_input',summary,candidates:[],checks:[],recovery:{kind:'blocked',reason:summary}};
+      }
+    }
     if (
       context.job.step === "separate" &&
       !context.separationVariant &&
@@ -3149,7 +3166,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     return result;
   }
   private localTransportRecovery(context: WorkbenchExecutionContext, error = context.recovery?.error ?? "") {
-    return ["rig", "animation"].includes(context.job.step) && !context.signal.aborted &&
+    return ["assembly", "rig", "animation", "unity"].includes(context.job.step) && !context.signal.aborted &&
       /stream disconnected|websocket closed/i.test(error) &&
       !/denied|denial|cancel|거절|차단|취소/i.test(error);
   }

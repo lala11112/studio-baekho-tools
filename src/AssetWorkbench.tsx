@@ -302,8 +302,6 @@ export function AssetWorkbench({
   const [externalModel, setExternalModel] = useState(!!w?.jobs.find(j => j.step === "model")?.request.externalModel);
   const savedSurface = w?.jobs.find(j => j.request.externalSurface)?.request.externalSurface;
   const [externalSurface, setExternalSurface] = useState(!!savedSurface || externalModel);
-  const [observedUvCost, setObservedUvCost] = useState(savedSurface?.observedUvCost ?? 0);
-  const [observedTextureCost, setObservedTextureCost] = useState(savedSurface?.observedTextureCost ?? 0);
   const [textureResolution, setTextureResolution] = useState<"2K" | "4K" | "8K">(savedSurface?.textureResolution ?? "8K");
   const [removeLighting, setRemoveLighting] = useState(savedSurface?.removeLighting ?? false);
   const [studioTopology, setStudioTopology] = useState<"quad" | "triangle">("quad");
@@ -423,6 +421,7 @@ export function AssetWorkbench({
   );
   const [polygonCount, setPolygonCount] = useState(10000);
   const [studioLimit, setStudioLimit] = useState(0);
+  const [unityRigType,setUnityRigType]=useState<"generic"|"humanoid">("generic");
   const [approved, setApproved] = useState(false);
   const [viewJobId, setViewJobId] = useState("");
   const [compareId, setCompareId] = useState("");
@@ -824,11 +823,11 @@ export function AssetWorkbench({
                 inputMode: modelImageMode, costApproval: "in-app" } }
             : request.step === "surface" && externalSurface && request.modelInput === "whole" && !request.baseJobId
               ? { ...request, executionMode: "codex-app", externalSurface: {
-                  observedUvCost, observedTextureCost, textureResolution, removeLighting } }
+                  observedUvCost:0, observedTextureCost:0, textureResolution, removeLighting, costApproval:"in-app" } }
             : request,
       approval: {
         accepted: paid ? approved : true,
-        studioCreditLimit: usesStudio && !(step === "model" && externalModel && !modelEditBase) ? studioLimit : 0,
+        studioCreditLimit: usesStudio && !((step === "model" && externalModel && !modelEditBase) || (step === "surface" && externalSurface && !surfaceEditBase)) ? studioLimit : 0,
         imageCreditLimit: 0,
       },
     });
@@ -987,7 +986,8 @@ export function AssetWorkbench({
     );
   }
   function resultGallery(c?: WorkbenchCandidate) {
-    const images = c?.artifacts.filter((a) => a.kind === "image") ?? [];
+    const images = c?.artifacts.filter((a) => a.kind === "image" &&
+      (step !== "unity" || (a.role !== "texture" && !/\/textures\//i.test(a.path)))) ?? [];
     const models =
       c?.artifacts.filter(
         (a) => a.kind === "model" && /\.glb$/i.test(a.path),
@@ -1081,7 +1081,7 @@ export function AssetWorkbench({
   function approvalBox() {
     return (
       <div className="wb-budget">
-        {step === "model" && externalModel && !modelEditBase ? (
+        {((step === "model" && externalModel && !modelEditBase) || (step === "surface" && externalSurface && !surfaceEditBase)) ? (
           <small>먼저 Tripo 화면의 실제 설정·비용을 확인해 이 앱에 표시합니다. 별도 승인 전에는 생성하지 않습니다.</small>
         ) : usesStudio ? (
           <>
@@ -1383,7 +1383,7 @@ export function AssetWorkbench({
                     </select> : <input aria-label={field.label} value={values[field.id] ?? ""} maxLength={12000} onChange={e=>change(field.id,e.target.value)} />}
                   </label>)}
                   <button data-testid="workbench-codex-approve" disabled={busy || approval.fields.some(f=>f.required && !values[f.id])}
-                    onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:true,values}})}>{approval.id.startsWith("tripo-model-cost-") ? "표시된 비용으로 모델 생성" : approval.id.startsWith("runway-cost-") ? "표시된 예상 비용으로 영상 1개 생성" : "선택한 내용으로 계속"}</button>
+                    onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:true,values}})}>{approval.id.startsWith("tripo-model-cost-") ? "표시된 비용으로 모델 생성" : approval.id.startsWith("tripo-surface-cost-") ? "표시된 비용으로 이 단계 실행" : approval.id.startsWith("runway-cost-") ? "표시된 예상 비용으로 영상 1개 생성" : "선택한 내용으로 계속"}</button>
                   <button data-testid="workbench-codex-decline" disabled={busy}
                     onClick={()=>void action({kind:"external-approval",jobId:currentStatus.id,approvalId:approval.id,answer:{accepted:false,values:{}}})}>허용하지 않음</button>
                 </div>;
@@ -2156,12 +2156,7 @@ export function AssetWorkbench({
                   {externalSurface && <>
                     <small>채택한 Tripo 모델에 Smart UV, 텍스처를 순서대로 적용할 작업 명세를 저장합니다.
                       앱이 Codex를 실행하고 각 원본과 비용을 보존합니다. 결과가 돌아오면 직접 채택하세요.</small>
-                    <label className="field"><span>화면에서 확인한 Smart UV 비용</span>
-                      <input data-testid="workbench-observed-uv-cost" type="number" min={0} step={1}
-                        value={observedUvCost} onChange={e => setObservedUvCost(Number(e.target.value))} /></label>
-                    <label className="field"><span>화면에서 확인한 텍스처 비용</span>
-                      <input data-testid="workbench-observed-texture-cost" type="number" min={0} step={1}
-                        value={observedTextureCost} onChange={e => setObservedTextureCost(Number(e.target.value))} /></label>
+                    <small>각 작업 직전에 실제 화면의 비용과 설정을 이 앱에서 확인받습니다. 승인 전에는 제출하지 않습니다.</small>
                     <label className="field"><span>텍스처 해상도</span>
                       <select data-testid="workbench-texture-resolution" value={textureResolution}
                         onChange={e => setTextureResolution(e.target.value as "2K" | "4K" | "8K")}>
@@ -2169,7 +2164,7 @@ export function AssetWorkbench({
                       </select></label>
                     <label className="wb-check"><input data-testid="workbench-remove-lighting" type="checkbox"
                       checked={removeLighting} onChange={e => setRemoveLighting(e.target.checked)} />조명 제거</label>
-                    <small>현재 확인한 합계: {observedUvCost + observedTextureCost}크레딧</small>
+
                   </>}
                 </>}
                 {selectedSource && (
@@ -2601,10 +2596,17 @@ export function AssetWorkbench({
                   />
                 </label>
                 <div className="wb-note">
-                  내보내기 결과와 실제 Unity 검사 결과를 구분해 표시합니다.
+                  기본 내보내기·재생 검사는 앱 코드로 처리합니다. 아래에 추가 수정 지시를 쓰면 Blender + Astra가 처리하며 GPT 사용량이 발생합니다.
                 </div>
                 <label className="field">
-                  <span>내보내기·수정 지시</span>
+                  <span>Unity 리그 유형</span>
+                  <select data-testid="workbench-unity-rig-type" value={unityRigType} onChange={e=>setUnityRigType(e.target.value as "generic"|"humanoid")}>
+                    <option value="generic">Generic · 동물·일반 캐릭터</option>
+                    <option value="humanoid">Humanoid · 사람형 캐릭터</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>추가 수정 지시 · 선택 사항</span>
                   <textarea
                     data-testid="workbench-unity-prompt"
                     rows={4}
@@ -2618,7 +2620,7 @@ export function AssetWorkbench({
                     ? "내보내기 수정 · 다시 검사"
                     : "Unity로 내보내고 검사",
                   {
-                    step: "unity",
+                    step: "unity", unityRigType, unityExecution:unityPrompt.trim()?"astra":"local",
                     prompt:
                       unityPrompt.trim() ||
                       "채택한 리깅 모델과 모든 애니메이션을 설정된 Unity 프로젝트로 내보내고 Avatar, 클립 및 재생을 검사해 주세요.",

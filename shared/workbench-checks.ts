@@ -114,6 +114,7 @@ export function blocksWorkbenchCheck(
   return (
     check.passed !== true &&
     !(step === "model" && isModelTargetReview(check)) &&
+    !(step === "unity" && check.name === "unity_visual_review" && check.severity === "warning" && !!check.detail?.trim()) &&
     !(step === "rig" && isRigLimitsReview(check)) &&
     !(step === "reference" && isReferenceVisualReview(check)) &&
     !(step === "assembly" && isAssemblyAppearanceReview(check)) &&
@@ -153,7 +154,7 @@ export function workbenchCheckLabel(check: WorkbenchCheck): string {
     check.visualCategory &&
     Object.hasOwn(visualCategories, check.visualCategory)
       ? visualCategories[check.visualCategory]
-      : ((key === "remaining_limitations" ? "리깅 제어 방식과 관절 변형 범위를 확인해 주세요." : undefined) ?? modelTargetChecks[key] ?? surfaceReviewChecks[key] ?? separationVisualChecks[key] ??
+      : ((key === "unity_visual_review" ? "Unity 재생 화면 확인" : key === "remaining_limitations" ? "리깅 제어 방식과 관절 변형 범위를 확인해 주세요." : undefined) ?? modelTargetChecks[key] ?? surfaceReviewChecks[key] ?? separationVisualChecks[key] ??
         (legacyView
           ? `${directionNames[legacyView[1]]} 사진의 형태·비율을 확인해 주세요.`
           : check.name));

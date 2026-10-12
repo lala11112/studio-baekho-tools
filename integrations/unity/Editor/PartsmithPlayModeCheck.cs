@@ -14,7 +14,7 @@ namespace Partsmith {
   static double started; static int index=-1; static bool finishing;
   static readonly List<string> verified=new List<string>();
   static readonly List<string> moving=new List<string>();
-  static Transform[] bones; static Quaternion[] pose;
+  static Transform[] bones; static Quaternion[] pose; static Vector3[] positions; static bool currentMoved;
   static PartsmithPlayModeCheck(){EditorApplication.update+=Tick;EditorApplication.playModeStateChanged+=Changed;}
   static void Changed(PlayModeStateChange state){
    if(state==PlayModeStateChange.EnteredPlayMode){started=EditorApplication.timeSinceStartup;index=-1;finishing=false;verified.Clear();moving.Clear();}
@@ -32,11 +32,15 @@ namespace Partsmith {
     try{
      var report=JsonUtility.FromJson<ImportResult>(File.ReadAllText(file));
      var animator=UnityEngine.Object.FindObjectsByType<Animator>(FindObjectsSortMode.None).FirstOrDefault(a=>a.runtimeAnimatorController);
-     if(animator && index>=0 && animator.isActiveAndEnabled){var state=animator.GetCurrentAnimatorStateInfo(0);if(state.IsName(report.clips[index])&&state.normalizedTime>0)verified.Add(report.clips[index]);if(bones!=null&&bones.Where((b,i)=>Quaternion.Angle(b.localRotation,pose[i])>.01f).Any())moving.Add(report.clips[index]);}
+     if(animator && index>=0 && animator.isActiveAndEnabled){
+      if(bones!=null&&bones.Where((b,i)=>Quaternion.Angle(b.localRotation,pose[i])>.01f||Vector3.Distance(b.localPosition,positions[i])>.0001f).Any())currentMoved=true;
+      var activeClip=animator.runtimeAnimatorController.animationClips.FirstOrDefault(c=>c.name==report.clips[index]);
+      if(EditorApplication.timeSinceStartup-started<Math.Max(.35,activeClip?activeClip.length*2:.35))return;
+      var state=animator.GetCurrentAnimatorStateInfo(0);if(state.IsName(report.clips[index])&&state.normalizedTime>0)verified.Add(report.clips[index]);if(currentMoved)moving.Add(report.clips[index]);}
      index++;
-     if(animator&&index<report.clips.Length){animator.Play(report.clips[index],0,0);animator.Update(0);bones=animator.GetComponentsInChildren<SkinnedMeshRenderer>().SelectMany(r=>r.bones).Where(b=>b).Distinct().ToArray();pose=bones.Select(b=>b.localRotation).ToArray();started=EditorApplication.timeSinceStartup;return;}
+     if(animator&&index<report.clips.Length){animator.Play(report.clips[index],0,0);animator.Update(0);bones=animator.GetComponentsInChildren<SkinnedMeshRenderer>().SelectMany(r=>r.bones).Where(b=>b).Distinct().ToArray();pose=bones.Select(b=>b.localRotation).ToArray();positions=bones.Select(b=>b.localPosition).ToArray();currentMoved=false;started=EditorApplication.timeSinceStartup;return;}
      report.runtimeClips=verified.ToArray();report.runtimeMovingClips=moving.ToArray();report.runtimePlayModeVerified=report.clips.Length>0&&verified.Count==report.clips.Length;
-     if(report.runtimePlayModeVerified){report.warnings=report.warnings.Where(w=>!w.StartsWith("Animator evaluation did not")).ToArray();if(report.avatarValid&&report.avatarHuman&&report.errors.Length==0)report.status="complete_review_required";}
+     if(report.runtimePlayModeVerified){report.warnings=report.warnings.Where(w=>!w.StartsWith("Animator evaluation did not")).ToArray();if(report.avatarValid&&(report.rigType=="generic"||report.avatarHuman)&&report.errors.Length==0&&moving.Count==report.clips.Length)report.status="complete_review_required";}
      else report.warnings=report.warnings.Concat(new[]{"Actual Play Mode did not advance every animation state."}).ToArray();
      File.WriteAllText(file,JsonUtility.ToJson(report,true));Capture(Path.ChangeExtension(file,".png"));
     }catch(Exception e){Debug.LogError("Partsmith Play check: "+e.Message);}

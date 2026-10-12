@@ -54,6 +54,16 @@ textures = []
 for image in bpy.data.images:
     if image.source != 'FILE':
         continue
+    if image.packed_file:
+        raw = bytes(image.packed_file.data)
+        extension = '.png' if raw.startswith(b'\x89PNG\r\n\x1a\n') else '.jpg' if raw.startswith(b'\xff\xd8\xff') else None
+        if extension is None:
+            raise RuntimeError('Unsupported embedded texture format: ' + image.name)
+        packed_dir = pathlib.Path(output, 'embedded')
+        packed_dir.mkdir(exist_ok=True)
+        packed_path = packed_dir / (str(len(textures)) + extension)
+        packed_path.write_bytes(raw)
+        preserved.append(str(packed_path))
     if not image.packed_file:
         basename = os.path.basename(image.filepath.replace('\\', '/'))
         matches = [p for p in preserved if os.path.basename(p).casefold() == basename.casefold()]
