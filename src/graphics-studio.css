@@ -74,9 +74,7 @@
   flex: 0 0 auto;
 }
 .gs-creation-execute {
-  position: sticky;
-  top: 0;
-  z-index: 4;
+  position: static;
   display: flex;
   gap: 8px;
   align-items: center;
@@ -203,6 +201,10 @@
   border-radius: 7px;
   padding: 4px 7px;
   min-height: 30px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
   cursor: pointer;
   line-height: 1.4;
 }
@@ -238,6 +240,15 @@
   width: 16px;
   height: 16px;
   flex: 0 0 16px;
+}
+.graphics-studio label:has(> input[type="checkbox"]) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.graphics-studio label > input[type="checkbox"] {
+  margin: 0;
 }
 .graphics-studio textarea {
   resize: vertical;
@@ -368,6 +379,7 @@
   padding: 6px;
   background: transparent;
   width: 100%;
+  flex-shrink: 0;
 }
 .gs-object span {
   display: flex;
@@ -378,9 +390,12 @@
 .gs-object strong {
   overflow: hidden;
   text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 .gs-object small {
   margin-top: 2px;
+  word-break: keep-all;
+  overflow-wrap: normal;
 }
 .graphics-studio .gs-object.is-active {
   background: #2d3b30;
@@ -499,6 +514,34 @@
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+.gs-motion-source-preview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+}
+.gs-motion-source-preview figure {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 5px;
+  margin: 0;
+  min-width: 0;
+  min-height: 0;
+}
+.gs-motion-source-preview img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+}
+.gs-motion-source-preview figcaption {
+  font-size: 12px;
+  color: var(--gs-muted);
+  text-align: center;
+  overflow-wrap: anywhere;
 }
 .gs-version-detail {
   padding-top: 14px;
@@ -731,15 +774,24 @@
   overflow: auto;
 }
 .graphics-studio .gs-version-list button {
+  /* A bounded scrolling flex list must not shrink its multiline rows. */
+  flex: 0 0 auto;
+  height: auto;
   justify-content: space-between;
   text-align: left;
   background: #202c26;
-  padding: 9px;
+  padding: 7px 8px;
 }
-.gs-version-list button span {
+.gs-version-list button > span {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.gs-version-list :is(strong, small) {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .graphics-studio .gs-version-list .is-active {
   border-color: #9bb582;
@@ -1241,8 +1293,7 @@
 }
 .graphics-studio .gs-result {
   order: 1;
-  position: sticky;
-  top: 52px;
+  position: static;
 }
 .graphics-studio .gs-preview {
   height: min(50vh, 520px);
@@ -1315,7 +1366,9 @@
     padding-bottom: 4px;
   }
   .graphics-studio .gs-creation-stages button {
-    flex: 1 0 88px;
+    flex: 1 0 auto;
+    min-width: 88px;
+    white-space: nowrap;
   }
 }
 @media (max-width: 740px) {

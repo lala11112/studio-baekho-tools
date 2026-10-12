@@ -2478,13 +2478,23 @@ svg {
 .app:has(.graphics-studio) .brand {
   gap: 6px;
   padding: 0 2px 12px;
+  white-space: normal;
+  flex: 0 0 auto;
 }
 .app:has(.graphics-studio) .brand > span {
   font-size: 18px;
+  min-width: 0;
+  flex: 1;
+}
+.app:has(.graphics-studio) .brand small {
+  letter-spacing: 0.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 .app:has(.graphics-studio) .brand-mark {
   width: 22px;
   height: 26px;
+  flex: 0 0 22px;
 }
 .app:has(.graphics-studio) .workspace-label {
   padding: 0 4px 8px;
@@ -2494,12 +2504,23 @@ svg {
   padding: 6px 5px;
   gap: 5px;
   font-size: 12px;
+  white-space: normal;
+  flex: 0 0 auto;
+}
+.app:has(.graphics-studio) .nav > span:not(.connection-dot) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.app:has(.graphics-studio) .nav > :is(svg, small, .connection-dot) {
+  flex-shrink: 0;
 }
 .app:has(.graphics-studio) .nav-label {
   margin: 12px 5px 6px;
 }
 .app:has(.graphics-studio) .manual-tools summary {
   padding: 8px 4px;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 .app:has(.graphics-studio) .local-note {
   padding: 8px 4px;
@@ -2507,6 +2528,13 @@ svg {
 }
 .app:has(.graphics-studio) .version {
   padding: 7px 4px 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  letter-spacing: 0.6px;
+}
+.app:has(.graphics-studio) .version span {
+  white-space: nowrap;
 }
 .app-body:has(> .graphics-studio) > .topbar {
   height: 34px;

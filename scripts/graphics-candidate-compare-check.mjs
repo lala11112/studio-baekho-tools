@@ -22,8 +22,11 @@ for (const [name, width, height, color] of [
   for (let p = 0; p < png.data.length; p += 4) png.data.set([...color, 255], p);
   fs.writeFileSync(path.join(root, name + ".png"), PNG.sync.write(png));
 }
+fs.copyFileSync(path.join(root, "new-a.png"), path.join(root, "left.png"));
+fs.copyFileSync(path.join(root, "new-b.png"), path.join(root, "right.png"));
 const entry = `
 import React,{useState} from 'react';import {createRoot} from 'react-dom/client';
+import {Box,Boxes,Folder,ImagePlus,Scissors,Settings,ShieldCheck,Sparkles,Workflow} from 'lucide-react';
 import ${JSON.stringify(path.resolve("src/style.css"))};
 import {GraphicsStudio} from ${JSON.stringify(path.resolve("src/GraphicsStudio.tsx"))};
 import {defaultCreation} from ${JSON.stringify(path.resolve("shared/graphics-creation.ts"))};
@@ -35,14 +38,28 @@ const version=(id,label,date,role='design',objectId='object')=>({id,objectId,rol
 const versions=[version('old-a','디자인 1','2026-10-12'),version('old-b','디자인 2','2026-10-12'),version('new-a','디자인 1','2026-10-13'),version('new-b','디자인 2','2026-10-13'),version('model','모델 원본','2026-10-13','model')];
 const measured=id=>({...version(id,id,'2026-10-13','model'),files:[{path:id+'.fbx',kind:'model',bytes:20,sha256:'native-'+id},{path:id+'.report.json',kind:'report',bytes:100,sha256:'report-'+id}]});
 versions.push(measured('measured'),{...measured('postprocess'),sourceVersionIds:['measured']},measured('invalid'),measured('slow'));
+versions.push(version('long-label','귀와 꼬리 웨이트를 보정하고 발 접지를 유지한 매우 긴 결과 버전 이름 · 원본과 수정본 비교를 위한 추가 설명이 있는 모델','2026-10-13','model'));
 const task=(id,ids,date,taskId='I01',objectId='object')=>({id,objectId,taskId,createdAt:date,updatedAt:date,status:'review',inputVersionIds:[],settings:{count:2},instruction:'',requestHash:id,outputVersionIds:ids,backendJobIds:[],message:'Fixture only',localOnly:false});
 const initial={schemaVersion:1,id:'ws',projectId:'p',revision:1,objects:[{...object,settings:{faceLimit:77777}}],versions,tasks:[task('old-batch',['old-a','old-b'],'2026-10-12'),task('new-batch',['new-a','new-b'],'2026-10-13'),{...task('model-batch',['measured'],'2026-10-13','M01'),settings:{faceLimit:5000}},task('postprocess-batch',['postprocess'],'2026-10-13','T01')],deliveries:[]};
 const project={id:'p',name:'격리 후보 비교',assets:[],parts:[]};
+const legacySteps=[['단계별 에셋 제작',Workflow],['Tripo 작업실',Sparkles],['이미지 스튜디오',ImagePlus],['파츠 준비',Scissors],['조립 작업실',Boxes],['리깅 · 애니메이션',Workflow],['Unity로 보내기',Box]];
+function SidebarFixture(){return <aside className="sidebar">
+  <button className="brand"><div className="brand-mark"><Boxes size={24}/></div><span>partsmith<small>CHARACTER WORKBENCH</small></span></button>
+  <div className="workspace-label">개인 작업 공간 <span className="badge neutral">LOCAL</span></div>
+  <button className="nav"><Folder size={18}/> 모든 프로젝트</button>
+  <div className="nav-label">에셋 제작</div>
+  <button className="nav selected"><Workflow size={18}/><span>Unity 그래픽 제작</span></button>
+  <details className="manual-tools"><summary>기존 작업 · 수동 도구</summary>{legacySteps.map(([label,Icon],i)=><button key={label} className="nav"><Icon size={18}/><span>{label}</span><small>0{i+1}</small></button>)}</details>
+  <div className="sidebar-bottom"><div className="local-note"><ShieldCheck size={18}/><div>내 컴퓨터에 저장<small>키는 프로젝트와 별도 보관</small></div></div>
+  <button className="nav"><Settings size={18}/> 연결 설정<span className="connection-dot online"/></button>
+  <div className="version">PROTOTYPE <span>v${JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")).version}</span></div></div>
+</aside>}
 function Harness(){const[workspace,setWorkspace]=useState(initial),[forcedBusy,setForcedBusy]=useState(false);window.setBusyFixture=setForcedBusy;window.workspace=workspace;window.refreshFixture=()=>setWorkspace(w=>({...w,versions:[...w.versions]}));window.resetFixture=()=>setWorkspace(initial);window.exportClicks=0;
 window.compactFixture=()=>{const creation=defaultCreation('character');creation.subject='animal';creation.attributes={style:'stylized',shape:'round',legs:'four',ears:'long',tail:'short',composition:'whole'};setWorkspace({...initial,objects:[{...object,id:'compact-model',name:'흰 네발 토끼',kind:'character',creation,accepted:{'design:main':'new-a','model:main':'model'}}],versions:versions.filter(v=>['new-a','model'].includes(v.id)).map(v=>({...v,objectId:'compact-model',...(v.id==='model'?{preview:'new-a.png'}:{})})),tasks:[]});};
 window.textureFixture=kind=>{const id='texture-'+kind,creation=defaultCreation('prop'),accepted=kind==='missing'?{}:{'design:main':'old-a'};if(kind.includes('part')){creation.attributes.composition='parts';creation.parts=[{id:'head',label:'머리',enabled:true,instruction:'',faceLimit:5000,count:1}];creation.activePartId='head';if(kind==='part')accepted['design:part-head']='new-a';}setWorkspace({...initial,objects:[{...object,id,creation,accepted}],versions:versions.map(v=>({...v,objectId:id,...(kind==='part'&&v.id==='new-a'?{slot:'part-head'}:{})})),tasks:[]});};
 window.videoFixture=()=>setWorkspace({...initial,objects:[{...object,id:'video-object',accepted:{}}],versions:[version('video-a','동작 후보 1','2026-10-13','motion-reference','video-object'),version('video-b','동작 후보 2','2026-10-13','motion-reference','video-object')],tasks:[task('video-batch',['video-a','video-b'],'2026-10-13','N02','video-object')]});
-return <div className="app"><aside className="sidebar"><div className="brand"><span>Partsmith</span></div><button className="nav selected">Unity 그래픽 제작</button></aside><div className="app-body"><header className="topbar">작업 공간 · 격리 UI 확인</header><GraphicsStudio project={project} workspace={workspace} busy={forcedBusy} onExportProject={()=>window.exportClicks++} onOpenSettings={()=>{}} onAction={async action=>{window.actions.push(action);if(action.kind!=='accept')throw Error('Service/production actions forbidden');setWorkspace(w=>({...w,objects:w.objects.map(o=>o.id===action.objectId?{...o,accepted:{...o.accepted,'design:main':action.versionId}}:o)}));}}/></div></div>}
+window.motionSourceFixture=()=>setWorkspace({...initial,objects:[{...object,id:'motion-source-object',accepted:{}}],versions:[{...version('motion-source','측면 원본 묶음','2026-10-13','design','motion-source-object'),slot:'motion-source',files:['left.png','right.png'].map(path=>({path,kind:'image',bytes:20,sha256:path}))}],tasks:[]});
+return <div className="app"><SidebarFixture/><div className="app-body"><header className="topbar">작업 공간 · 격리 UI 확인</header><GraphicsStudio project={project} workspace={workspace} busy={forcedBusy} onExportProject={()=>window.exportClicks++} onOpenSettings={()=>{}} onAction={async action=>{window.actions.push(action);if(action.kind!=='accept')throw Error('Service/production actions forbidden');setWorkspace(w=>({...w,objects:w.objects.map(o=>o.id===action.objectId?{...o,accepted:{...o.accepted,'design:main':action.versionId}}:o)}));}}/></div></div>}
 createRoot(document.getElementById('root')).render(<Harness/>);
 `;
 await build({
@@ -69,6 +86,40 @@ try {
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(pathToFileURL(path.join(root, "index.html")).href);
     await page.getByTestId("graphics-object-object").waitFor();
+    const inspectShell = () => page.locator(".sidebar").evaluate((sidebar) => {
+      const bounds = sidebar.getBoundingClientRect(), failures = [];
+      const visible = (element) => {
+        const details = element.closest("details:not([open])");
+        if (details && !element.closest("summary")) return false;
+        const r = element.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const elements = [...sidebar.querySelectorAll(".brand, .brand > span, .brand small, .workspace-label, .nav, .nav > span:not(.connection-dot), .nav small, .manual-tools summary, .local-note, .local-note > div, .version, .version span")].filter(visible);
+      for (const element of elements) {
+        const r = element.getBoundingClientRect();
+        if (element.scrollWidth > element.clientWidth + 1 || r.left < bounds.left - 1 || r.right > bounds.right + 1)
+          failures.push({kind:"element-overflow",text:element.textContent,client:element.clientWidth,scroll:element.scrollWidth});
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          if (!walker.currentNode.textContent.trim()) continue;
+          const range = document.createRange();range.selectNodeContents(walker.currentNode);
+          for (const t of range.getClientRects()) if(t.left < r.left - 1 || t.right > r.right + 1 || t.top < r.top - 1 || t.bottom > r.bottom + 1)
+            failures.push({kind:"text-overflow",text:walker.currentNode.textContent,container:element.className || element.tagName});
+        }
+      }
+      return {manualOpen:sidebar.querySelector("details").open,checkedElements:elements.length,navCount:elements.filter(e=>e.matches(".nav")).length,failures};
+    });
+    const shellClosed = await inspectShell();
+    assert.deepEqual(shellClosed.failures, []);
+    assert.equal(shellClosed.manualOpen, false);
+    await page.locator(".manual-tools summary").click();
+    const shellOpen = await inspectShell();
+    assert.deepEqual(shellOpen.failures, []);
+    assert.equal(shellOpen.manualOpen, true);
+    assert.equal(shellOpen.navCount, 10);
+    await page.screenshot({path:path.join(root,"shell-expanded-"+width+".png")});
+    await page.locator(".manual-tools summary").click();
+    const shell = {closed:shellClosed,expanded:shellOpen};
     await page.evaluate(() => window.compactFixture());
     await page.getByTestId("graphics-object-compact-model").waitFor();
     await page
@@ -118,7 +169,10 @@ try {
     assert.equal(compact.optionsOpen, false);
     assert.equal(compact.font, "13px");
     assert.equal(compact.secondary, "12px");
-    assert(compact.stage.height <= 32 && compact.button.height <= 32);
+    assert(
+      compact.stage.height <= 32 && compact.button.height <= 32,
+      JSON.stringify(compact),
+    );
     assert(compact.preview.y <= 265, JSON.stringify(compact));
     assert(
       compact.button.y >= 0 &&
@@ -156,7 +210,130 @@ try {
     );
     await page.evaluate(() => window.setBusyFixture(false));
     assert.equal(await page.evaluate(() => window.actions.length), 0);
+    await page
+      .getByRole("navigation", { name: "제작 단계" })
+      .getByRole("button", { name: "5 리깅", exact: true })
+      .click();
+    const ear = page.getByRole("checkbox", { name: "귀", exact: true });
+    await ear.scrollIntoViewIfNeeded();
+    const checkboxFlow = await ear.evaluate((input) => {
+      const parent = input.parentElement,
+        box = input.getBoundingClientRect(),
+        label = parent.getBoundingClientRect();
+      return {
+        display: getComputedStyle(parent).display,
+        inside: box.top >= label.top && box.bottom <= label.bottom,
+        hittable:
+          document.elementFromPoint(
+            box.x + box.width / 2,
+            box.y + box.height / 2,
+          ) === input,
+      };
+    });
+    assert.deepEqual(checkboxFlow, {
+      display: "flex",
+      inside: true,
+      hittable: true,
+    });
+    await ear.check();
+    assert.equal(await page.evaluate(() => window.actions.length), 0);
+    assert.equal(
+      await page
+        .locator(".gs-creation-execute")
+        .evaluate((element) => getComputedStyle(element).position),
+      "static",
+    );
+    assert.equal(
+      await page
+        .locator(".gs-result")
+        .evaluate((element) => getComputedStyle(element).position),
+      "static",
+    );
+    await page
+      .getByRole("navigation", { name: "제작 단계" })
+      .getByRole("button", { name: "7 Unity 전달", exact: true })
+      .click();
+    const pivot = page.getByLabel("피벗", { exact: true });
+    await pivot.scrollIntoViewIfNeeded();
+    assert(
+      await pivot.evaluate((select) => {
+        const r = select.getBoundingClientRect(),
+          p = select.parentElement.getBoundingClientRect();
+        return (
+          r.left >= p.left &&
+          r.right <= p.right + 1 &&
+          r.height >= 30 &&
+          select.scrollWidth <= select.clientWidth
+        );
+      }),
+    );
     await page.evaluate(() => window.resetFixture());
+    const versionList = page.locator(".gs-version-list");
+    await versionList.scrollIntoViewIfNeeded();
+    const rowFlow = await versionList
+      .locator(":scope > button")
+      .evaluateAll((buttons) =>
+        buttons.map((button) => {
+          const r = button.getBoundingClientRect(),
+            text = button
+              .querySelector(":scope > span")
+              .getBoundingClientRect();
+          return {
+            id: button.dataset.testid,
+            y: r.y,
+            bottom: r.bottom,
+            height: r.height,
+            textTop: text.top,
+            textBottom: text.bottom,
+            contained:
+              text.top >= r.top &&
+              text.bottom <= r.bottom &&
+              text.left >= r.left &&
+              text.right <= r.right,
+            shrink: getComputedStyle(button).flexShrink,
+          };
+        }),
+      );
+    assert(
+      rowFlow.every(
+        (row) => row.contained && row.shrink === "0" && row.height > 40,
+      ),
+      JSON.stringify(rowFlow),
+    );
+    assert(
+      rowFlow.every(
+        (row, index) => index === 0 || row.y >= rowFlow[index - 1].bottom,
+      ),
+    );
+    const lastRow = versionList.locator(":scope > button").last();
+    await lastRow.scrollIntoViewIfNeeded();
+    assert(
+      await lastRow.evaluate((button) => {
+        const r = button.getBoundingClientRect(),
+          list = button.parentElement.getBoundingClientRect(),
+          hit = document.elementFromPoint(
+            r.x + r.width / 2,
+            r.y + r.height / 2,
+          );
+        return (
+          r.y >= list.y - 1 &&
+          r.bottom <= list.bottom + 1 &&
+          button.contains(hit)
+        );
+      }),
+    );
+    const flow = {
+      rowHeights: rowFlow.map((row) => row.height),
+      allTextContained: true,
+      rowsDoNotOverlap: true,
+      lastRowReachable: true,
+      checkboxFlow,
+      selectContained: true,
+      executeOverlaysContent: false,
+    };
+    await page.screenshot({
+      path: path.join(root, "content-flow-" + width + ".png"),
+    });
     const comparison = page.getByTestId("graphics-candidate-comparison");
     await comparison.waitFor();
     assert.equal(
@@ -408,6 +585,64 @@ try {
       0,
     );
     assert.equal(await page.evaluate(() => window.actions.length), 1);
+    await page.evaluate(() => window.motionSourceFixture());
+    const sideComparison = page.getByTestId(
+      "graphics-motion-source-comparison",
+    );
+    await sideComparison.waitFor();
+    await sideComparison.scrollIntoViewIfNeeded();
+    await sideComparison
+      .locator("img")
+      .evaluateAll((images) =>
+        Promise.all(images.map((image) => image.decode())),
+      );
+    assert.equal(
+      await page.getByTestId("graphics-candidate-comparison").count(),
+      0,
+    );
+    assert.deepEqual(
+      await sideComparison.locator("figcaption").allTextContents(),
+      ["왼쪽 측면", "오른쪽 측면"],
+    );
+    const sideFrames = await sideComparison
+      .locator("img")
+      .evaluateAll((images) =>
+        images.map((image) => {
+          const r = image.getBoundingClientRect(),
+            p = image.parentElement.getBoundingClientRect();
+          return {
+            x: r.x,
+            y: r.y,
+            fit: getComputedStyle(image).objectFit,
+            contained:
+              r.left >= p.left &&
+              r.right <= p.right &&
+              r.top >= p.top &&
+              r.bottom <= p.bottom,
+            natural: [image.naturalWidth, image.naturalHeight],
+          };
+        }),
+      );
+    assert(
+      sideFrames.every((image) => image.contained && image.fit === "contain"),
+    );
+    assert.equal(sideFrames[0].y, sideFrames[1].y);
+    assert(sideFrames[0].x < sideFrames[1].x);
+    assert.deepEqual(
+      sideFrames.map((image) => image.natural),
+      [
+        [80, 120],
+        [120, 80],
+      ],
+    );
+    assert.deepEqual(
+      await page.evaluate(() => window.workspace.objects[0].accepted),
+      {},
+    );
+    assert.equal(await page.evaluate(() => window.actions.length), 1);
+    await page.screenshot({
+      path: path.join(root, "motion-source-comparison-" + width + ".png"),
+    });
     if (width === 1280) {
       await page.evaluate(() => window.videoFixture());
       await page
@@ -436,7 +671,14 @@ try {
     reports.push({
       width,
       scale: 1.5,
+      shell,
       compact,
+      flow,
+      motionSourceComparison: {
+        directions: ["left", "right"],
+        fullImages: true,
+        noAutoAcceptance: true,
+      },
       grid,
       distinctBatches: true,
       previewOnlyBeforeAcceptance: true,

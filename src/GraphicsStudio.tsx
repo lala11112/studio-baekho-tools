@@ -294,6 +294,36 @@ function VersionPreview({
       </div>
     );
   const glb = version.files.find((file) => /\.glb$/i.test(file.path));
+  const motionSources =
+    version.role === "design" && version.slot === "motion-source"
+      ? version.files.filter((file) => isImagePath(file.path))
+      : [];
+  if (motionSources.length > 1)
+    return (
+      <div
+        className="gs-motion-source-preview"
+        data-testid="graphics-motion-source-comparison"
+        aria-label="측면 원본 비교"
+      >
+        {motionSources.map((file) => {
+          const name = fileName(file.path);
+          const label = /^left\./i.test(name)
+            ? "왼쪽 측면"
+            : /^right\./i.test(name)
+              ? "오른쪽 측면"
+              : name;
+          return (
+            <figure key={file.path}>
+              <img
+                src={window.desktop.assetUrl(project.id, file.path)}
+                alt={label}
+              />
+              <figcaption>{label}</figcaption>
+            </figure>
+          );
+        })}
+      </div>
+    );
   const media =
     version.preview ??
     version.files.find((file) =>
@@ -368,6 +398,14 @@ type CandidateGroup = {
   candidates: { version: AssetVersion; media: CandidateMedia }[];
 };
 function candidateMedia(version: AssetVersion): CandidateMedia | undefined {
+  // A motion-source version is one accepted bundle with separate left/right inputs.
+  // Show its files together in the detail preview, not as a one-image candidate.
+  if (
+    version.role === "design" &&
+    version.slot === "motion-source" &&
+    version.files.filter((file) => isImagePath(file.path)).length > 1
+  )
+    return undefined;
   const kind =
     version.role === "design"
       ? "image"
