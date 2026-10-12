@@ -26,6 +26,7 @@ import type {
   GraphicsTask,
   GraphicsWorkspace,
 } from "../shared/graphics";
+import { graphicsLegacyUnlinkProblem } from "../shared/graphics";
 import {
   filterGraphicsTasks,
   findGraphicsTask,
@@ -43,6 +44,7 @@ import {
   creationStages,
   creationTaskId,
   creationSettings,
+  creationSelectionProblem,
   defaultCreation,
   effectiveCreation,
   summarizeCreation,
@@ -587,6 +589,27 @@ export function GraphicsStudio({
   const imageDialog = useRef<HTMLDialogElement>(null);
   const [auxiliary, setAuxiliary] = useState<"history" | "support">();
   const auxiliaryDialog = useRef<HTMLDialogElement>(null);
+  const [legacyPreview, setLegacyPreview] =
+    useState<GraphicsWorkspace["legacyPreview"]>();
+  const [legacySelection, setLegacySelection] = useState<string[]>([]);
+  const [unlinkObjectId, setUnlinkObjectId] = useState<string>();
+  const legacyDialog = useRef<HTMLDialogElement>(null);
+  const unlinkObject = workspace?.objects.find(
+    (item) => item.id === unlinkObjectId,
+  );
+  const unlinkProblem =
+    workspace && unlinkObjectId
+      ? graphicsLegacyUnlinkProblem(workspace, unlinkObjectId)
+      : undefined;
+  useEffect(() => {
+    if ((legacyPreview || unlinkObject) && !legacyDialog.current?.open)
+      legacyDialog.current?.showModal();
+  }, [legacyPreview, unlinkObject]);
+  useEffect(() => {
+    setLegacyPreview(undefined);
+    setLegacySelection([]);
+    setUnlinkObjectId(undefined);
+  }, [project.id]);
   useEffect(() => {
     if (auxiliary && !auxiliaryDialog.current?.open)
       auxiliaryDialog.current?.showModal();
@@ -611,6 +634,7 @@ export function GraphicsStudio({
     ? creationSettings({ ...object, creation }, stage)
     : (creation.stageSettings[stage]?.values ?? {});
   const instruction = creation.stageSettings[stage]?.instruction ?? "";
+  const selectionProblem = creationSelectionProblem(creation, stage);
   const versions =
     workspace?.versions.filter((version) => version.objectId === objectId) ??
     [];
@@ -640,7 +664,7 @@ export function GraphicsStudio({
     comparisonGroup?.kind === "video" ? "동작 영상" : "이미지";
   const activeTask = findGraphicsTask(taskId) ?? {
     id: taskId,
-    name: "제작 연결 확인 필요",
+    name: selectionProblem ? "제작 옵션 선택" : "제작 연결 확인 필요",
     inputs: "설정 확인",
     output: "실행 연결 준비 중",
     executor: "none" as const,
@@ -742,8 +766,9 @@ export function GraphicsStudio({
         ),
     )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const prepareLabel =
-    activeTask.status === "planned"
+  const prepareLabel = selectionProblem
+    ? "제작 옵션을 선택하세요"
+    : activeTask.status === "planned"
       ? "실행 연결 준비 중"
       : taskId === "N01"
         ? "측면 이미지 만들기 · 입력 확인"
@@ -806,6 +831,30 @@ export function GraphicsStudio({
     } finally {
       setPending(false);
     }
+  }
+  async function inspectLegacy() {
+    if (disabled) return;
+    setPending(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = (await onAction({
+        kind: "inspect-legacy",
+      })) as GraphicsWorkspace;
+      if (!result?.legacyPreview)
+        throw Error("기존 자료 목록을 확인하지 못했습니다.");
+      setLegacySelection([]);
+      setLegacyPreview(result.legacyPreview);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  }
+  function closeLegacyDialog() {
+    if (pending) return;
+    setLegacyPreview(undefined);
+    setUnlinkObjectId(undefined);
   }
   function setting(key: string, value: string | number | boolean) {
     if (key === "clipName") {
@@ -940,7 +989,8 @@ export function GraphicsStudio({
       (active && !["A01", "A02", "A03"].includes(activeTask.id)) ||
       activeTask.status === "planned" ||
       multiviewProblem ||
-      modelProblem
+      modelProblem ||
+      selectionProblem
     )
       return;
     if (activeTask.id === "A01") return importSource();
@@ -1092,6 +1142,19 @@ export function GraphicsStudio({
             </button>
           ))}
         </div>
+        {object?.id === "legacy" && (
+          <button
+            className="gs-legacy"
+            data-testid="graphics-unlink-legacy"
+            disabled={disabled}
+            onClick={() => {
+              setError("");
+              setUnlinkObjectId(object.id);
+            }}
+          >
+            <X size={15} /> 선택한 오브젝트 연결 해제
+          </button>
+        )}
         <details
           className="gs-create-disclosure"
           open={!workspace?.objects.length}
@@ -1136,12 +1199,7 @@ export function GraphicsStudio({
         <button
           className="gs-legacy"
           disabled={disabled}
-          onClick={() =>
-            void run(
-              { kind: "import-legacy" },
-              "기존 작업의 자료를 확인했습니다.",
-            )
-          }
+          onClick={() => void inspectLegacy()}
         >
           <FolderInput size={15} /> 기존 프로젝트 자료 연결
         </button>
@@ -1169,14 +1227,15 @@ export function GraphicsStudio({
             <div className="gs-creation-execute" aria-label="현재 단계 실행">
               <div>
                 <strong>{activeTask.name}</strong>
-                <small>
-                  {activeTask.status === "planned"
-                    ? activeTask.reason
-                    : active
-                      ? "기존 작업의 승인 또는 결과를 확인하세요."
-                      : activeTask.executor === "local"
-                        ? "로컬 처리 · GPT 요청 없이 준비"
-                        : "실행 전 입력과 비용을 앱에서 확인합니다."}
+                <small role={selectionProblem ? "status" : undefined}>
+                  {selectionProblem ||
+                    (activeTask.status === "planned"
+                      ? activeTask.reason
+                      : active
+                        ? "기존 작업의 승인 또는 결과를 확인하세요."
+                        : activeTask.executor === "local"
+                          ? "로컬 처리 · GPT 요청 없이 준비"
+                          : "실행 전 입력과 비용을 앱에서 확인합니다.")}
                 </small>
               </div>
               <button
@@ -1184,7 +1243,9 @@ export function GraphicsStudio({
                 data-testid="graphics-prepare"
                 disabled={
                   disabled ||
-                  Boolean(multiviewProblem || modelProblem) ||
+                  Boolean(
+                    multiviewProblem || modelProblem || selectionProblem,
+                  ) ||
                   activeTask.status === "planned" ||
                   active ||
                   (stage === "rig" && settings.rigType === "none") ||
@@ -2382,7 +2443,12 @@ export function GraphicsStudio({
                             step={100}
                             value={String(settings.faceLimit ?? 10000)}
                             onChange={(event) =>
-                              setting("faceLimit", Number(event.target.value))
+                              setting(
+                                "faceLimit",
+                                event.target.value === ""
+                                  ? ""
+                                  : Number(event.target.value),
+                              )
                             }
                           />
                         </label>
@@ -2894,6 +2960,158 @@ export function GraphicsStudio({
           </div>
         </main>
       </div>
+      {(legacyPreview || unlinkObject) && (
+        <dialog
+          ref={legacyDialog}
+          className="gs-aux-dialog gs-legacy-dialog"
+          aria-label={
+            legacyPreview ? "연결할 기존 자료 선택" : "기존 오브젝트 연결 해제"
+          }
+          onCancel={(event) => {
+            event.preventDefault();
+            closeLegacyDialog();
+          }}
+        >
+          <header>
+            <h2>
+              {legacyPreview
+                ? "연결할 기존 자료 선택"
+                : "기존 오브젝트 연결 해제"}
+            </h2>
+            <button autoFocus disabled={pending} onClick={closeLegacyDialog}>
+              <X size={15} /> 취소
+            </button>
+          </header>
+          <div className="gs-aux-body">
+            {error && (
+              <p className="gs-error" role="alert">
+                {error}
+              </p>
+            )}
+            {legacyPreview ? (
+              <>
+                <p>
+                  현재 프로젝트 ‘{project.name}’에 저장된 기존 자료입니다.
+                  선택한 자료를 ‘{legacyPreview.objectName}’ 오브젝트에
+                  연결합니다.
+                </p>
+                <p className="gs-muted">
+                  원본 파일은 그대로 보관하며, 연결 후 사용할 버전을 직접 채택할
+                  수 있습니다.
+                </p>
+                {!legacyPreview.versions.length && (
+                  <p>
+                    새로 연결할 수 있는 자료가 없습니다. 이미 연결했거나 원본
+                    파일을 확인할 수 없는 자료는 제외됩니다.
+                  </p>
+                )}
+                <div className="gs-legacy-candidates">
+                  {legacyPreview.versions.map((version) => {
+                    const thumbnail = version.files.find((file) =>
+                      /\.(png|jpe?g|webp)$/i.test(file.path),
+                    );
+                    return (
+                      <label className="gs-legacy-candidate" key={version.id}>
+                        <input
+                          type="checkbox"
+                          aria-label={`${version.label} 연결`}
+                          disabled={disabled}
+                          checked={legacySelection.includes(version.id)}
+                          onChange={(event) =>
+                            setLegacySelection((current) =>
+                              event.target.checked
+                                ? [...current, version.id]
+                                : current.filter((id) => id !== version.id),
+                            )
+                          }
+                        />
+                        {thumbnail && (
+                          <img
+                            alt={version.label}
+                            src={window.desktop.assetUrl(
+                              project.id,
+                              thumbnail.path,
+                            )}
+                          />
+                        )}
+                        <span>
+                          <strong>{version.label}</strong>
+                          <small>
+                            {roles[version.role]} · {version.files.length}개
+                            파일 · {stamp(version.createdAt)}
+                          </small>
+                          {version.files.map((file) => (
+                            <small className="gs-file-path" key={file.path}>
+                              {file.path}
+                            </small>
+                          ))}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <button
+                  className="gs-primary"
+                  data-testid="graphics-confirm-legacy-link"
+                  disabled={disabled || !legacySelection.length}
+                  onClick={async () => {
+                    if (
+                      await run(
+                        {
+                          kind: "import-legacy",
+                          versionIds: legacySelection,
+                          fingerprint: legacyPreview.fingerprint,
+                        },
+                        "선택한 기존 자료를 연결했습니다.",
+                      )
+                    )
+                      setLegacyPreview(undefined);
+                  }}
+                >
+                  선택한 {legacySelection.length}개 자료 연결
+                </button>
+              </>
+            ) : (
+              unlinkObject && (
+                <>
+                  <strong>{unlinkObject.name}</strong>
+                  <p>
+                    이 오브젝트와 연결된{" "}
+                    {workspace?.versions.filter(
+                      (version) => version.objectId === unlinkObject.id,
+                    ).length ?? 0}
+                    개 버전을 현재 제작실 목록에서 제거합니다.
+                  </p>
+                  <p>
+                    원본 파일과 기존 프로젝트의 작업 기록은 보관됩니다. 필요하면
+                    기존 프로젝트 자료 연결에서 다시 선택할 수 있습니다.
+                  </p>
+                  {unlinkProblem && (
+                    <p className="gs-warning" role="alert">
+                      {unlinkProblem}
+                    </p>
+                  )}
+                  <button
+                    data-testid="graphics-confirm-legacy-unlink"
+                    disabled={disabled || !!unlinkProblem}
+                    onClick={async () => {
+                      if (
+                        await run(
+                          { kind: "unlink-legacy", objectId: unlinkObject.id },
+                          "기존 오브젝트의 연결을 해제했습니다. 원본 자료는 보관됩니다.",
+                        )
+                      )
+                        setUnlinkObjectId(undefined);
+                    }}
+                  >
+                    이 오브젝트 연결 해제
+                  </button>
+                </>
+              )
+            )}
+          </div>
+        </dialog>
+      )}
       {auxiliary && (
         <dialog
           ref={auxiliaryDialog}

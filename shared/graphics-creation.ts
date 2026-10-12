@@ -3,6 +3,10 @@ import { isGraphicsClipName } from './graphics';
 
 export type CreationStage = 'design' | 'model' | 'surface' | 'assembly' | 'rig' | 'animation' | 'unity';
 export type CreationValues = Record<string, string | number | boolean>;
+/** Empty string is an explicit cleared choice, distinct from absent legacy defaults. */
+export function toggleCreationChoice(current: string | number | boolean | undefined, selected: string): string {
+  return String(current) === selected ? '' : selected;
+}
 export type PartSpec = { id: string; label: string; enabled: boolean; instruction: string; faceLimit: number; count: number };
 export type CreationSpec = {
   schemaVersion: 1; subject: string; attributes: CreationValues; instruction: string; locks: string[];
@@ -103,8 +107,29 @@ export function creationSettings(object: GraphicsObject, stage: CreationStage): 
   return { ...stageDefaults[stage], ...spec.stageSettings[stage]?.values };
 }
 export function creationInstruction(object: GraphicsObject, stage: CreationStage): string { return effectiveCreation(object).stageSettings[stage]?.instruction ?? ''; }
+const stageRouteChoice: Record<CreationStage, [string, string]> = {
+  design: ['designMode', '이미지 제작 방식'], model: ['modelMethod', '제작 방식'], surface: ['surfaceOperation', '이번에 할 작업'],
+  assembly: ['assemblyMode', '이번에 할 작업'], rig: ['rigType', 'Unity 리그 종류'], animation: ['animationMode', '이번에 만들 결과'], unity: ['deliveryMode', '전달 방식'],
+};
+/** Saving incomplete options is allowed; only execution requires these choices. */
+export function creationSelectionProblem(spec: CreationSpec, stage: CreationStage): string | undefined {
+  const s = { ...stageDefaults[stage], ...spec.stageSettings[stage]?.values };
+  const required = [stageRouteChoice[stage]];
+  if (stage === 'model') {
+    if (s.modelMethod !== 'local') required.push(['inputMode', '모델에 사용할 이미지']);
+    if (spec.attributes.composition !== 'parts') required.push(['faceLimit', '목표 면 수']);
+  } else if (stage === 'surface') {
+    if (s.surfaceOperation === 'uv') required.push(['uvMode', 'UV 방식']);
+    else { required.push(['textureMode', '표면 제작 방식']); if (s.textureMode !== 'local') required.push(['textureReference', '텍스처 참조']); }
+  } else if (stage === 'unity' && s.deliveryMode !== 'files') required.push(['collider', '충돌체'], ['deliveryCompression', '전달본 압축']);
+  const missing = required.find(([key]) => s[key] === '');
+  if (missing) return `${missing[1]} 선택이 필요합니다.`;
+  if (['design', 'model', 'surface', 'assembly'].includes(stage) && spec.attributes.composition === '') return '모델 구성 선택이 필요합니다. 이미지 또는 모델 단계에서 선택하세요.';
+  return undefined;
+}
 export function creationTaskId(spec: CreationSpec, stage: CreationStage): string {
   const s = { ...stageDefaults[stage], ...spec.stageSettings[stage]?.values };
+  if (s[stageRouteChoice[stage][0]] === '') return '';
   if (stage === 'design') return ({ new: 'I01', reference: 'I02', revision: 'I03', variation: 'I05', equipment: 'I06', multiview: 'I07', parts: 'I08' } as Record<string, string>)[String(s.designMode)] ?? 'I01';
   if (stage === 'model') return s.modelMethod === 'local' ? 'M04' : s.modelMethod === 'astra' ? 'M15' : s.inputMode === 'multiview' ? 'M02' : 'M01';
   if (stage === 'surface') return s.surfaceOperation === 'uv' ? s.uvMode === 'tripo' ? 'T01' : 'T02' : s.textureMode === 'local' ? 'T05' : 'T03';
@@ -161,10 +186,15 @@ const imageLabels: Record<string, Record<string, string>> = {
 /** Deterministic option compilation. No model call, no execution on option changes. */
 export function compileCreation(object: GraphicsObject, taskId: string): { settings: CreationValues; instruction: string; spec: CreationSpec } {
   const spec = validateCreation(effectiveCreation(object), object.kind), stage = stageForTask(taskId), settings = creationSettings(object, stage);
+  const selectionProblem = creationSelectionProblem(spec, stage);
+  if (selectionProblem) throw Error(selectionProblem);
+  // Cleared optional descriptions must not become default wording in the frozen request.
+  for (const key of ['direction', 'framing', 'pose', 'background', 'perspective', 'margin', 'motionPreset'])
+    if (settings[key] === '') delete settings[key];
   const part = spec.attributes.composition === 'parts' && spec.activePartId ? spec.parts.find(p => p.id === spec.activePartId && p.enabled) : undefined;
   settings.subject = spec.subject;
   if (stage === 'design') settings.imageSchedule = 'parallel-native-4';
-  for (const [key, value] of Object.entries(spec.attributes)) settings[`attr.${key}`] = value;
+  for (const [key, value] of Object.entries(spec.attributes)) if (value !== '') settings[`attr.${key}`] = value;
   for (const lock of spec.locks) settings[`lock.${lock}`] = true;
   const free = [spec.instruction, spec.stageSettings[stage]?.instruction, ...Object.entries(spec.attributes).filter(([k]) => k.startsWith('custom.')).map(([, v]) => String(v))].filter(Boolean).join('\n');
   settings.freeInstruction = (['T02','T05'].includes(taskId) ? spec.stageSettings[stage]?.instruction ?? '' : free).slice(0, 12000);
@@ -172,9 +202,9 @@ export function compileCreation(object: GraphicsObject, taskId: string): { setti
   const partWork = part && !['I01','I02','M07','M08'].includes(taskId) && ['design','model','surface','assembly'].includes(stage);
   if (partWork) { settings.partId = part.id; settings.partLabel = part.label; if (stage === 'model') { settings.count = part.count; settings.faceLimit = part.faceLimit; } }
   const descriptions = [...summarizeCreation(spec), spec.instruction, spec.stageSettings[stage]?.instruction].filter(Boolean);
-  if (stage === 'design') for (const [key, labels] of Object.entries(imageLabels)) descriptions.push(`${key}: ${labels[String(settings[key])] ?? String(settings[key] ?? '')}`);
+  if (stage === 'design') for (const [key, labels] of Object.entries(imageLabels)) if (settings[key] !== undefined) descriptions.push(`${key}: ${labels[String(settings[key])] ?? String(settings[key])}`);
   if (partWork) descriptions.push(`제작 대상 파츠만: ${part.label}. ${part.instruction}. 전체 디자인의 비율·색·스타일을 유지하고 다른 파츠는 생성하지 마세요.`);
   if (spec.locks.length) descriptions.push(`유지할 특징: ${spec.locks.map(id => creationLocks.find(l => l.id === id)!.label).join(', ')}. 변경 지시와 충돌하면 무시하지 말고 원인을 보고하세요. 외형 보존을 자동 검증했다고 주장하지 마세요.`);
-  if (stage === 'animation') descriptions.push(`동작: ${settings.motionPreset ?? '직접 설명'}, ${settings.rootMotion ? '이동 동작' : '제자리'}, ${settings.loop ? '반복' : '단발'}`);
+  if (stage === 'animation') descriptions.push([settings.motionPreset ? `동작: ${settings.motionPreset}` : '', settings.rootMotion ? '이동 동작' : '제자리', settings.loop ? '반복' : '단발'].filter(Boolean).join(', '));
   return { settings, instruction: descriptions.join('\n'), spec };
 }

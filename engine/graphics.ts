@@ -9,7 +9,7 @@ import { workbenchUsage } from "../shared/workbench-usage";
 import type { Workbench, WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from "../shared/workbench";
 import type { Generation, Quote } from "../shared/types";
 import type { AssetVersion, GraphicsAction, GraphicsFile, GraphicsObject, GraphicsRole, GraphicsTask, GraphicsWorkspace, UnityClipSettings } from "../shared/graphics";
-import { isGraphicsClipName } from "../shared/graphics";
+import { isGraphicsClipName, graphicsLegacyUnlinkProblem } from "../shared/graphics";
 import { compileCreation, validateCreation } from "../shared/graphics-creation";
 import { executeGraphicsProcedural, proceduralProblem } from "./graphics-procedural";
 import { executeGraphicsNative } from "./graphics-native";
@@ -361,7 +361,17 @@ export class GraphicsEngine {
         const connections = await this.options.probe();
         const latest = this.get(id); latest.connections = connections; return this.save(latest);
       }
-      case "import-legacy": return this.importLegacy(id);
+      case "inspect-legacy": return { ...w, legacyPreview: this.inspectLegacy(id) };
+      case "import-legacy": return this.importLegacy(id, action.versionIds, action.fingerprint);
+      case "unlink-legacy": {
+        if (this.isActive(id) || this.engine.isProjectActive(id) || this.options.legacyActive?.(id)) throw Error("실행 중인 작업이 있습니다. 완료 후 연결을 해제하세요.");
+        const problem = graphicsLegacyUnlinkProblem(w, action.objectId);
+        if (problem) throw Error(problem);
+        w.objects = w.objects.filter(object => object.id !== action.objectId);
+        w.versions = w.versions.filter(version => version.objectId !== action.objectId);
+        // Only collection metadata is removed. Project/Workbench records and all files remain intact.
+        return this.save(w);
+      }
       case "prepare": return this.prepare(id, action.objectId, action.taskId);
       case "approve": return this.approve(id, action.taskId);
       case "recover": return this.recover(id, action.taskId);
@@ -783,15 +793,14 @@ export class GraphicsEngine {
       if (changed) this.save(w);
     }
   }
-  private importLegacy(id: string) {
+  private inspectLegacy(id: string): NonNullable<GraphicsWorkspace["legacyPreview"]> {
     const w = this.get(id), p = this.store.project(id);
-    let o = w.objects.find(o => o.id === "legacy");
-    if (!o) { o = { id: "legacy", name: `${p.name} · 기존 결과`, kind: "prop", createdAt: now(), selectedTasks: [], instruction: "", settings: { count: 1 }, references: [], accepted: {} }; w.objects.push(o); }
+    const versions: AssetVersion[] = [];
     for (const a of p.assets) {
       const versionId = `legacy-${a.id}`;
       if (w.versions.some(v => v.id === versionId) || a.id.startsWith("graphics-")) continue;
       try { const files = [...new Set([a.file, a.nativeFile].filter((v): v is string => !!v))].map(rel => this.file(id, rel, a.kind));
-        w.versions.push({ id: versionId, objectId: o.id, role: a.kind === "image" ? "design" : "model", slot: "main", label: a.label, files, createdAt: a.createdAt, sourceVersionIds: [], provenance: { type: "legacy", jobId: a.jobId }, warnings: [] });
+        if (files.length) versions.push({ id: versionId, objectId: "legacy", role: a.kind === "image" ? "design" : "model", slot: "main", label: a.label, files, createdAt: a.createdAt, sourceVersionIds: [], provenance: { type: "legacy", ...(a.jobId ? { jobId: a.jobId } : {}) }, warnings: [] });
       } catch { /* Missing originals remain in legacy history; do not invent copies. */ }
     }
     const roles: Record<string, GraphicsRole> = { concept: "design", separate: "design", model: "model", surface: "model", assembly: "model", rig: "rig", reference: "motion-reference", animation: "animation" };
@@ -799,10 +808,24 @@ export class GraphicsEngine {
       for (const j of bench.jobs.filter(j => j.status === "review" && roles[j.step])) for (const c of j.candidates) {
         const versionId = `legacy-${j.id}-${c.id}`; if (w.versions.some(v => v.id === versionId)) continue;
         try { const files = c.artifacts.map(f => { this.verified(id, f); return { path: f.path, kind: f.kind, sha256: f.sha256, bytes: f.bytes }; });
-          w.versions.push({ id: versionId, objectId: o.id, role: roles[j.step], slot: j.step === "animation" ? j.slot : "main", label: c.label, files, createdAt: j.createdAt, sourceVersionIds: [], provenance: { type: "legacy", jobId: j.id }, warnings: ["기존 기록에서 가져온 결과입니다. 새 작업 공간에서는 채택을 다시 확인하세요."] });
+          if (files.length) versions.push({ id: versionId, objectId: "legacy", role: roles[j.step], slot: j.step === "animation" ? j.slot : "main", label: c.label, files, createdAt: j.createdAt, sourceVersionIds: [], provenance: { type: "legacy", jobId: j.id }, warnings: ["기존 기록에서 가져온 결과입니다. 새 작업 공간에서는 채택을 다시 확인하세요."] });
         } catch { /* Invalid old artifacts stay visible in the original workbench only. */ }
       }
     }
+    const objectName = w.objects.find(object => object.id === "legacy")?.name ?? `${p.name} · 기존 결과`;
+    return { versions, objectName, fingerprint: hash(JSON.stringify({ projectId: id, objectName, versions })) };
+  }
+  private importLegacy(id: string, versionIds: string[], fingerprint: string) {
+    if (!Array.isArray(versionIds) || !versionIds.length || versionIds.some(value => typeof value !== "string") || new Set(versionIds).size !== versionIds.length)
+      throw Error("연결할 기존 자료를 선택하세요.");
+    const preview = this.inspectLegacy(id);
+    const selected = versionIds.map(versionId => preview.versions.find(version => version.id === versionId));
+    if (fingerprint !== preview.fingerprint || selected.some(version => !version))
+      throw Error("기존 자료가 변경됐습니다. 연결할 자료를 다시 확인하세요.");
+    const w = this.get(id);
+    if (!w.objects.some(object => object.id === "legacy"))
+      w.objects.push({ id: "legacy", name: preview.objectName, kind: "prop", createdAt: now(), selectedTasks: [], instruction: "", settings: { count: 1 }, references: [], accepted: {} });
+    w.versions.push(...selected as AssetVersion[]);
     return this.save(w);
   }
   private audit(id: string) {

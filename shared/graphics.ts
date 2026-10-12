@@ -68,7 +68,31 @@ export type GraphicsWorkspace = {
   deliveries: UnityDelivery[]; target?: UnityTargetProfile; usage?: GraphicsUsageAudit;
   tripoBudget?: { limit: number; setAt: string };
   connections?: { name: string; available: boolean; message: string; checkedAt: string }[];
+  /** Read-only inspect-legacy response only; never saved in the workspace. */
+  legacyPreview?: { versions: AssetVersion[]; fingerprint: string; objectName: string };
 };
+
+/** Unlink only an unused legacy collection. Never remove production objects or their history. */
+export function graphicsLegacyUnlinkProblem(workspace: GraphicsWorkspace, objectId: string): string | undefined {
+  const object = workspace.objects.find(item => item.id === objectId);
+  const versions = workspace.versions.filter(version => version.objectId === objectId);
+  if (!object || object.id !== "legacy" || versions.some(version => version.provenance.type !== "legacy"))
+    return "기존 프로젝트에서 연결한 오브젝트만 연결 해제할 수 있습니다.";
+  if (workspace.tasks.some(task => task.status === "running" || task.status === "submission_unknown"))
+    return "실행 중이거나 제출 여부를 확인 중인 작업이 있습니다. 완료 후 연결을 해제하세요.";
+  if (workspace.tasks.some(task => task.objectId === objectId) || workspace.deliveries.some(delivery => delivery.objectId === objectId))
+    return "이 오브젝트에 제작 또는 Unity 전달 기록이 있어 연결을 해제할 수 없습니다.";
+  const ids = new Set(versions.map(version => version.id));
+  const refers = (value: unknown): boolean => typeof value === "string" ? ids.has(value)
+    : Array.isArray(value) ? value.some(refers)
+    : !!value && typeof value === "object" && Object.values(value).some(refers);
+  if (workspace.objects.some(item => item.id !== objectId && refers([item.references, item.accepted, item.settings, item.creation])) ||
+    workspace.versions.some(version => version.objectId !== objectId && refers(version.sourceVersionIds)) ||
+    workspace.tasks.some(task => refers([task.inputVersionIds, task.outputVersionIds, task.objectSnapshot, task.settings, task.unityClipSettings])) ||
+    workspace.deliveries.some(delivery => refers(delivery.versionIds)))
+    return "다른 오브젝트나 작업이 이 자료를 참조하고 있어 연결을 해제할 수 없습니다.";
+  return undefined;
+}
 /** Exact Blender/Unity Action identity, never a filesystem path or sanitized name. */
 export function isGraphicsClipName(value: unknown): value is string {
   return typeof value === "string" && value.length <= 100 && value.trim().length > 0 &&
@@ -84,4 +108,6 @@ export type GraphicsAction =
   | { kind: "approve" | "cancel" | "recover"; taskId: string }
   | { kind: "runtime-approval"; taskId: string; approvalId: string; answer: WorkbenchRuntimeAnswer }
   | { kind: "set-tripo-budget"; credits: number }
-  | { kind: "inspect-target" | "audit-usage" | "import-legacy" | "probe-connections" };
+  | { kind: "import-legacy"; versionIds: string[]; fingerprint: string }
+  | { kind: "unlink-legacy"; objectId: string }
+  | { kind: "inspect-target" | "audit-usage" | "inspect-legacy" | "probe-connections" };

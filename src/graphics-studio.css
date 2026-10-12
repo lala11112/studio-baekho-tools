@@ -435,6 +435,38 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+.gs-legacy-dialog {
+  max-width: 700px;
+}
+.gs-legacy-candidates {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+.graphics-studio .gs-legacy-candidate {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--gs-border);
+  border-radius: 6px;
+}
+.gs-legacy-candidate img {
+  width: 72px;
+  height: 72px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+.gs-legacy-candidate > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.gs-legacy-candidate .gs-file-path {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .gs-main {
   padding: 8px 10px;
   min-width: 0;

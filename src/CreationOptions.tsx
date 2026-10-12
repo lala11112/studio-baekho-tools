@@ -4,6 +4,7 @@ import {
   creationSubjects,
   creationLocks,
   humanParts,
+  toggleCreationChoice,
   type CreationSpec,
   type CreationStage,
 } from "../shared/graphics-creation";
@@ -42,7 +43,10 @@ function Choices({
 }) {
   return (
     <fieldset className="gs-choice">
-      <legend>{label}</legend>
+      <legend>
+        {label}
+        {value === "" && <small> · 미선택</small>}
+      </legend>
       <div>
         {values.map(([key, text]) => (
           <button
@@ -50,7 +54,7 @@ function Choices({
             key={key}
             aria-pressed={String(value) === key}
             disabled={disabled}
-            onClick={() => onChange(key)}
+            onClick={() => onChange(toggleCreationChoice(value, key))}
           >
             {text}
           </button>
@@ -247,7 +251,9 @@ export function CreationOptions({
                 ["10000", "보통 · 10,000면"],
                 ["50000", "높게 · 50,000면"],
               ]}
-              onChange={(value) => onSetting("faceLimit", Number(value))}
+              onChange={(value) =>
+                onSetting("faceLimit", value === "" ? "" : Number(value))
+              }
               disabled={disabled}
             />
           )}

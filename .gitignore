@@ -4,6 +4,7 @@ dist-electron/
 release/
 .local/
 artifacts/runtime/
+artifacts/preserved-validation-files/
 *.log
 *.key
 *.db
