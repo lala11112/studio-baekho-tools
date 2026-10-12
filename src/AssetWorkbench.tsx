@@ -1400,7 +1400,7 @@ export function AssetWorkbench({
                   continueOnce:(currentStatus.externalExecution!.worker?.attempt ?? 0) >= 3});setExternalReply("");}}>
                 {(currentStatus.externalExecution.worker?.attempt ?? 0) >= 3 ? "작성한 지시로 기존 작업 1회 이어서 확인" : currentStatus.externalExecution.worker ? "답변하고 기존 작업 이어서 확인" : "Codex로 실행"}
               </button>
-              {(currentStatus.externalExecution.worker?.attempt ?? 0) >= 3 && <p>기본 3회 실행이 끝났습니다. 해결한 문제와 이어서 할 내용을 작성하면 기존 제출·비용 기록을 보존해 한 번만 실행합니다. 완료된 생성은 반복하지 않습니다.</p>}
+              {!active && (currentStatus.externalExecution.worker?.attempt ?? 0) >= 3 && <p>기본 3회 실행이 끝났습니다. 해결한 문제와 이어서 할 내용을 작성하면 기존 제출·비용 기록을 보존해 한 번만 실행합니다. 완료된 생성은 반복하지 않습니다.</p>}
               <button onClick={() => void run({ type: "workbench.open", id: p.id })}>작업 폴더 열기</button>
               <button data-testid="workbench-external-receive"
                 disabled={currentStatus.externalExecution.state !== "reserved" || locked}
@@ -1408,6 +1408,9 @@ export function AssetWorkbench({
               <button data-testid="workbench-external-recover"
                 disabled={locked || currentStatus.externalExecution.state !== "reserved" || !currentStatus.externalExecution.worker}
                 onClick={()=>void action({kind:"external-recover",jobId:currentStatus.id})}>원본 수집·등록 복구 · 새 생성 없음</button>
+              {currentStatus.status==='submission_unknown' && currentStatus.request.externalSurface?.costApproval==='in-app' && <button
+                data-testid="workbench-repair-approval" disabled={locked}
+                onClick={()=>void action({kind:'external-repair-approval',jobId:currentStatus.id})}>승인 전달 오류 검사·복구 · 추가 과금 없음</button>}
               <button disabled={currentStatus.status !== "needs_input" || locked}
                 onClick={() => void action({kind: "external-cancel", jobId: currentStatus.id})}>외부 작업 추적 중지</button>
             </div>}

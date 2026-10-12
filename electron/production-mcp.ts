@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import {postProductionBridge} from '../engine/production-bridge-http';
 
 // Child-only MCP server. The token exists in this process's environment, not in
 // user MCP configuration, renderer state or command-line arguments.
@@ -19,18 +20,7 @@ const bridge = async (body: unknown) => {
   // These calls wait for a human cost decision in Partsmith. No inference
   // or repeat request is needed while waiting. Ordinary operations stay bounded.
   const humanDecision=call.method === "tools/call" && ["studio_model_begin","studio_motion_begin","studio_surface_begin"].includes(call.name ?? "");
-  const response = await fetch(`http://127.0.0.1:${port}/tools`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(humanDecision || ["studio_models_finish","studio_surface_finish"].includes(call.name ?? "") ? 15 * 60 * 1000 : 45000),
-  });
-  if (!response.ok)
-    throw Error("Production browser bridge rejected the request");
-  return response.json();
+  return postProductionBridge(port,token,body,humanDecision || ["studio_models_finish","studio_surface_finish"].includes(call.name ?? "") ? 15 * 60 * 1000 : 45000);
 };
 readline
   .createInterface({ input: process.stdin, crlfDelay: Infinity })

@@ -209,6 +209,16 @@ export class WorkbenchEngine {
       }
       case "external-run":
         return this.runExternal(w, action.jobId, action.reply, action.continueOnce);
+      case "external-repair-approval": {
+        this.idle(w);const job=this.job(w,action.jobId),external=job.externalExecution;
+        if(!this.externalRunner?.repairApproval||!external||job.status!=='submission_unknown'||!this.current(w,job))throw Error('승인 전달 오류를 확인할 수 있는 대기 작업이 아닙니다.');
+        const workspace=this.workspace(w,job);
+        if(hash(path.join(workspace,'external-request.json'))!==external.requestHash)throw Error('작업 명세가 변경됐습니다.');
+        this.externalRunner.repairApproval({workbench:structuredClone(w),job:structuredClone(job),workspace,inputs:[],signal:new AbortController().signal});
+        job.status='needs_input';job.summary='승인 도구가 실패한 뒤 기록된 UV 예약을 복구했습니다. 기존 이력은 보존했습니다. 계속하면 실제 비용을 앱에서 다시 확인받습니다. 아직 실행하지 않았습니다.';
+        if(external.worker)external.worker.question='승인 대기 연결을 수정했습니다. 같은 작업을 이어가면 UV 비용을 다시 확인받습니다.';
+        return this.save(w);
+      }
       case "external-recover":
         return this.runExternal(w,action.jobId,"기존 생성 결과와 원본 다운로드를 수집하고 등록 정보를 복구하세요. 새 제출·생성은 금지합니다.",true,true);
       case "external-reserve":

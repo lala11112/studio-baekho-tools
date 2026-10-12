@@ -213,5 +213,7 @@ export class RunwayWorkbenchRunner implements ExternalWorkbenchRunner {
 
 export function routeExternalRunners(chrome: ExternalWorkbenchRunner, runway: ExternalWorkbenchRunner): ExternalWorkbenchRunner {
   const choose = (ctx: WorkbenchExecutionContext) => ctx.job.request.motionVideo?.backend === "runway-mcp" ? runway : chrome;
-  return { run: (ctx, progress) => choose(ctx).run(ctx, progress), verifyReceipt: ctx => choose(ctx).verifyReceipt(ctx), shutdown: () => { chrome.shutdown?.(); runway.shutdown?.(); } };
+  return { run: (ctx, progress) => choose(ctx).run(ctx, progress), verifyReceipt: ctx => choose(ctx).verifyReceipt(ctx),
+    repairApproval:ctx=>{if(ctx.job.request.motionVideo||!chrome.repairApproval)throw Error('UV 승인 전달 복구 대상이 아닙니다.');chrome.repairApproval(ctx);},
+    shutdown: () => { chrome.shutdown?.(); runway.shutdown?.(); } };
 }

@@ -36,7 +36,7 @@ export type SurfacePlan = {
   phase: "uv" | "texture"; observedCost:number; sourceModelId:string; url:string;
   textureResolution:"2K"|"4K"|"8K"; removeLighting:boolean;
 };
-type Journal = { jobId: string; requestHash: string; entries: Entry[]; surfaceObservations?:string[]; modelResults?: {modelId:string;url:string;observations?:string[]}[] };
+type Journal = { jobId: string; requestHash: string; entries: Entry[]; undeliveredApprovals?:{entry:Entry;failedAt:string;evidenceSha256:string;repairedAt:string}[]; surfaceObservations?:string[]; modelResults?: {modelId:string;url:string;observations?:string[]}[] };
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const validUrl = (
   value: string,
@@ -83,6 +83,12 @@ export class ChromeJobLedger {
   }
   read() {
     return structuredClone(this.journal);
+  }
+  /** Host-only repair: the tool failed BEFORE reservation existed, so it could not receive permission to click. */
+  repairUndeliveredUv(failedAt:string,evidenceSha256:string){
+    const e=this.journal.entries[0],delta=Date.parse(e?.reservedAt??'')-Date.parse(failedAt);
+    if(this.packet.request.externalSurface?.costApproval!=='in-app'||this.journal.entries.length!==1||e.phase!=='uv'||e.state!=='reserved'||!e.approvedSurfacePlan||!Number.isFinite(delta)||delta<=0||delta>900000||!/^[a-f0-9]{64}$/.test(evidenceSha256))throw Error('승인 전달 실패가 확정된 미실행 UV 예약만 복구할 수 있습니다.');
+    (this.journal.undeliveredApprovals??=[]).push({entry:structuredClone(e),failedAt,evidenceSha256,repairedAt:new Date().toISOString()});this.journal.entries=[];this.persist();
   }
   private persist() {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
