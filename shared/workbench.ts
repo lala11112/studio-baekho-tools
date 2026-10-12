@@ -6,6 +6,7 @@ export type WorkbenchStep =
   | "surface"
   | "assembly"
   | "rig"
+  | "motion-source"
   | "reference"
   | "animation"
   | "unity";
@@ -96,6 +97,7 @@ export type WorkbenchRequest = {
   rigTargets?: WorkbenchRigTarget[];
   /** Frozen input route; omitted legacy jobs use the accepted assembly. */
   rigSource?: "assembly" | "surface";
+  motionSourceAxis?: "X" | "Y";
   /** Anatomical controls are independent of optional clothing/hair object bones. */
   rigProfile?: "automatic" | "quadruped";
   rigControls?: { ears: boolean; tail: boolean };
@@ -107,6 +109,7 @@ export type WorkbenchRequest = {
   /** Absent on historical jobs means independent static poses. New UI uses video AI. */
   motionVideo?: { serviceUrl: string; model: string; mode?: "side" | "multiview";
     backend?: "runway-mcp"; sourceView?: "left" | "right";
+    sourceSlot?: "whole-reference" | "motion-source";
     resolution?: "720p" | "1080p"; nativeDuration?: number; framing?: "full-body-v1" };
   loop?: boolean;
 };
@@ -282,6 +285,7 @@ export const WORKBENCH_STEPS: { id: WorkbenchStep; title: string }[] = [
   { id: "surface", title: "Smart UV · 텍스처" },
   { id: "assembly", title: "조립 · 반복 수정" },
   { id: "rig", title: "오브젝트 리깅" },
+  { id: "motion-source", title: "모델 측면 이미지 준비" },
   { id: "reference", title: "동작 참조 확인" },
   { id: "animation", title: "3D 애니메이션" },
   { id: "unity", title: "Unity 내보내기" },

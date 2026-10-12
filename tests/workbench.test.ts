@@ -83,6 +83,9 @@ class MockExecutor implements WorkbenchExecutor {
       );
       if (step === "concept")
         write("candidate.png", image(`${ctx.job.id}-${i}`), "image");
+      if (step === "motion-source")
+        for (const view of ["left","right"] as const)
+          write(`${view}.png`,image(view),"image","motion-source",view);
       if (step === "model")
         write(
           "candidate.glb",
@@ -281,6 +284,20 @@ test("requested image sets and new model counts are frozen and require explicit 
         /생성 개수/,
       );
   assert.equal(x.executor.calls.length, calls);
+});
+
+test("motion input render requires an accepted rig, awaits adoption, and expires when that rig changes",async(t)=>{
+  const x=await setup(t);
+  assert.throws(()=>x.engine.execute(x.w.id,{step:"motion-source",prompt:"render"}),/rig/);
+  await x.assemble();await x.execute({step:"rig",prompt:"rig"},true);
+  const rendered=await x.execute({step:"motion-source",prompt:"local render",motionSourceAxis:"X"});
+  assert.equal(rendered.status,"review");assert.deepEqual(Object.keys(rendered.dependencies),["rig"]);
+  assert(!x.engine.get(x.w.id).selections["motion-source"]);
+  x.engine.accept(x.w.id,rendered.id);
+  assert(x.engine.get(x.w.id).selections["motion-source"]);
+  await x.execute({step:"rig",prompt:"replacement rig"},true);
+  assert(!x.engine.get(x.w.id).selections["motion-source"]);
+  assert(x.engine.get(x.w.id).jobs.some(j=>j.id===rendered.id));
 });
 
 test("whole surface can skip assembly without a worker, persist, and freeze direct rig lineage", async (t) => {

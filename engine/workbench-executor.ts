@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import {executeWorkbenchUnity} from "./workbench-unity";
+import {prepareMotionSource} from "./workbench-motion-source";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -1964,6 +1965,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     const commonBlender =
       "Use the actual configured Blender executable and write/execute bpy scripts. Export editable packed .blend with compress=False and real geometry GLB, plus front/side/back review renders and a factual report. Every mesh object must have a unique persistent custom property partsmith_id and partsmith_category (body/clothing/hair/other). Preserve existing IDs and objects when editing. Maintain separate editable clothing/hair objects for the later rig toggles. No procedural demo replacement. Preserve original input files. Pack images using bpy.ops.file.pack_all(). Do not call Tripo for assembly, rigging or animation.";
     const instructions: Record<WorkbenchStep, string> = {
+      "motion-source": "Host-only Blender rendering; never dispatch a worker.",
       concept:
         request.provider === "tripo"
           ? `Use the visible Tripo Studio image generation workspace to create exactly ${countWord(count)} genuine image candidates from the user prompt. Observe and verify the actually selected native count=${count} UI value; do not assume a price or unsupported batch option. A single observed approved charge is allowed. Download all ${count} actual image results. If the native count is unavailable or requires independent paid submissions, report needs_input before submitting; never clamp or loop Generate.`
@@ -2110,6 +2112,7 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       prompt,
     );
     const legacyKind: Record<WorkbenchStep, ProductionStage["kind"]> = {
+      "motion-source": "animation-reference",
       concept: "view-reference",
       separate: "separate",
       model: "generate",
@@ -2609,6 +2612,15 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
     context: WorkbenchExecutionContext,
     onProgress: (message: string) => void,
   ): Promise<WorkbenchResult> {
+    if(context.job.step === "motion-source") {
+      try {
+        return await prepareMotionSource(context,{projectRoot:this.services.projectRoot(context.workbench.projectId),resources:this.services.resourcesPath,blender:this.services.blenderPath(),runBlender},onProgress);
+      }catch(error){
+        if(context.signal.aborted)throw error;
+        const summary=error instanceof Error?error.message:String(error);
+        return {status:"needs_input",summary,candidates:[],checks:[],recovery:{kind:"blocked",reason:summary}};
+      }
+    }
     if(context.job.step==='unity' && context.job.request.unityExecution==='local') {
       try {
         return await executeWorkbenchUnity(context,{

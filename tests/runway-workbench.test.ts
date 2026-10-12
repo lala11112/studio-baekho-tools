@@ -50,6 +50,20 @@ test("side video manifest requires one side original; legacy three-view requirem
   assert.throws(() => validateVideoSources({ ...side, front: side.side }, "side"));
 });
 
+test("accepted local rig-side render uploads exact bytes and still requires a separate paid approval",async t=>{
+  const f=setup(t);
+  f.ctx.job.request.motionVideo!.sourceSlot="motion-source";
+  f.ctx.job.dependencies["motion-source"]=f.ctx.job.dependencies["whole-reference"];
+  delete f.ctx.job.dependencies["whole-reference"];
+  f.ctx.workbench.jobs[0].candidates[0].artifacts[0].role="motion-source";
+  const packet=JSON.stringify({jobId:f.ctx.job.id,request:f.ctx.job.request,approval:f.ctx.job.approval});
+  fs.writeFileSync(path.join(f.ctx.workspace,"external-request.json"),packet);f.ctx.job.externalExecution!.requestHash=digest(packet);
+  let asked=0;
+  const result=await f.runner.run({...f.ctx,requestApproval:async()=>{asked++;return {accepted:false,values:{}};}},()=>{});
+  assert.equal(result.status,"needs_input");assert.equal(asked,1);
+  assert.equal(f.state().uploads,1);assert.equal(f.state().submits,0);
+});
+
 test("full-body upload waits for a fresh 24-credit approval, preserves source and sends explicit 16:9/720p only once", async t => {
   const f = setup(t, true), original = fs.readFileSync(path.join(f.root, "side.png"));
   await f.runner.run({ ...f.ctx, requestApproval: async a => { assert.match(a.detail, /추가 예상 24크레딧/); assert.match(a.detail, /16:9 전신/); return { accepted: false, values: {} }; } }, () => {});

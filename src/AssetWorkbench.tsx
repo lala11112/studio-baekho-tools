@@ -399,6 +399,8 @@ export function AssetWorkbench({
   );
   const [motionPrompt, setMotionPrompt] = useState("");
   const latestVideo = w?.jobs.find(j => j.request.motionVideo)?.request.motionVideo;
+  const [videoSourceSlot,setVideoSourceSlot]=useState<"whole-reference"|"motion-source">(latestVideo?.sourceSlot ?? (w?.selections["whole-reference"] ? "whole-reference" : "motion-source"));
+  const [motionSourceAxis,setMotionSourceAxis]=useState<"X"|"Y">("X");
   const videoServiceUrl = "https://app.runwayml.com";
   const [videoSourceView, setVideoSourceView] = useState<"left" | "right">(latestVideo?.sourceView ?? "left");
   const videoModel = RUNWAY_RATE.model;
@@ -596,6 +598,12 @@ export function AssetWorkbench({
     (a) => a.kind === "image",
   );
   const wholeReference = selection("whole-reference");
+  const preparedMotion = selection("motion-source");
+  const sourceJob = jobs.find(j=>j.step === "motion-source" && currentInputs(j));
+  const motionSourceCandidate = videoSourceSlot === "whole-reference" ? wholeReference?.candidate
+    : sourceJob?.status === "review" ? sourceJob.candidates[0] : preparedMotion?.candidate;
+  const motionSourceImage = motionSourceCandidate?.artifacts.find(a=>a.kind==="image" && a.view===videoSourceView && a.role===(videoSourceSlot === "whole-reference" ? "whole" : "motion-source"));
+  const motionSourceAccepted = videoSourceSlot === "whole-reference" ? !!wholeReference : !!preparedMotion && (sourceJob?.status !== "review" || preparedMotion.job.id === sourceJob.id);
   const ready: Record<Page, boolean> = {
     concept: true,
     parts: !!concept,
@@ -2432,9 +2440,22 @@ export function AssetWorkbench({
             {page === "motion" && (
               <>
                 <p>
-                  4방향 이미지는 외형 참고로 보존하고, 선택한 측면 한 장으로 대기와 점프 영상을 각각 만듭니다. 영상을 확인·채택한 뒤 Blender + Astra로 3D 애니메이션을 만듭니다.
+                  채택한 모델의 측면 이미지 한 장으로 대기와 점프 영상을 각각 만듭니다. 기존 4방향 이미지가 있으면 외형 참고로 보존합니다. 영상을 확인·채택한 뒤 Blender + Astra로 3D 애니메이션을 만듭니다.
                 </p>
                 {motionMode === "reference" && <>
+                  <label className="field"><span>동작 영상 입력 이미지</span>
+                    <select data-testid="motion-source-kind" value={videoSourceSlot} onChange={e=>setVideoSourceSlot(e.target.value as typeof videoSourceSlot)}>
+                      <option value="motion-source">채택한 모델에서 측면 촬영</option>
+                      {wholeReference && <option value="whole-reference">기존 4방향 원본의 측면</option>}
+                    </select>
+                  </label>
+                  {videoSourceSlot === "motion-source" && <div className="wb-note">
+                    <p>현재 모델을 Blender로 촬영합니다. 원본을 바꾸지 않으며 GPT·생성 크레딧을 사용하지 않습니다.</p>
+                    <label className="field"><span>촬영 방향</span><select data-testid="motion-source-axis" value={motionSourceAxis} onChange={e=>setMotionSourceAxis(e.target.value as "X"|"Y")}><option value="X">기본 측면</option><option value="Y">90도 다른 방향</option></select></label>
+                    <button data-testid="motion-source-prepare" disabled={locked} onClick={()=>action({kind:"execute",request:{step:"motion-source",prompt:"채택한 리그의 전신 측면 촬영",motionSourceAxis}})}>{sourceJob ? "측면 다시 촬영" : "측면 입력 이미지 준비"}</button>
+                    {sourceJob && <p>{sourceJob.summary}</p>}
+                    {sourceJob?.status === "review" && <button data-testid="motion-source-accept" disabled={locked || preparedMotion?.job.id===sourceJob.id} onClick={()=>action({kind:"accept",jobId:sourceJob.id})}>{preparedMotion?.job.id===sourceJob.id ? "채택한 측면 이미지" : "촬영 이미지 확인 · 입력으로 채택"}</button>}
+                  </div>}
                   <div className="wb-pair">
                     <button onClick={() => { setMotion("Rabbit_Idle"); setDuration(2); setFps(30); setLoop(true); setReferenceFrameCount(3); setReferenceTimes("0, 1, 2"); setViewJobId(""); setMotionPrompt("채택한 둥근 흰색 네 발 토끼. 네 발은 제자리에 접지하고 몸통이 미세하게 숨 쉬며 귀가 자연스럽게 움직이는 2초 반복 대기. 시작과 끝 자세 일치. 입력 이미지와 같은 측면 고정 카메라. 토끼 전체와 발이 화면에 유지되고 회전·줌·장면 전환 없음. 옷·소품 없음."); }}>대기 설정</button>
                     <button onClick={() => { setMotion("Rabbit_Jump"); setDuration(2); setFps(30); setLoop(false); setReferenceFrameCount(5); setReferenceTimes("0, 0.4, 0.9, 1.4, 2"); setViewJobId(""); setMotionPrompt("채택한 둥근 흰색 네 발 토끼의 제자리 점프. 0초 중립 → 0.4초 웅크림 → 0.9초 네 발 모두 공중인 정점 → 1.4초 같은 자리에 착지·충격 흡수 → 2초 중립 복귀. 전진·옆 이동 없음. 입력 이미지와 같은 측면 고정 카메라. 토끼 전체와 발이 화면에 유지되고 회전·줌·장면 전환 없음. 귀와 꼬리의 자연스러운 후속 움직임."); }}>제자리 점프 설정</button>
@@ -2442,14 +2463,14 @@ export function AssetWorkbench({
                   <p className="wb-note">Runway 계정 연결 · {videoModel} · 720p (1280×720) · 16:9 · {duration}초 · 새 영상 1개당 추가 예상 {duration * RUNWAY_RATE.creditsPerSecond}크레딧. 브라우저 탭을 열어 둘 필요가 없습니다.</p>
                   <p className="wb-muted">공개 요율 기준({RUNWAY_RATE.checkedAt})이며 실시간 견적은 아닙니다. 원본 업로드 후 앱에서 생성 비용을 확인받습니다.</p>
                   <div className="wb-pair">{(["left", "right"] as const).map(view => {
-                    const source = wholeReference?.candidate.artifacts.find(a => a.kind === "image" && a.role === "whole" && a.view === view);
+                    const source = motionSourceCandidate?.artifacts.find(a => a.kind === "image" && a.view === view && a.role === (videoSourceSlot === "whole-reference" ? "whole" : "motion-source"));
                     return <label className="field" key={view}>
                       <span><input type="radio" name="motion-source-side" data-testid={`motion-source-${view}`} checked={videoSourceView === view} onChange={() => setVideoSourceView(view)} /> {view === "left" ? "측면 원본 1" : "측면 원본 2"}</span>
                       {source && <img alt={`${view} 측면 원본`} src={window.desktop.assetUrl(p.id, source.path)} style={{ width: "100%", maxHeight: 180, objectFit: "contain" }} />}
                     </label>;
                   })}</div>
-                  <p className="wb-muted">위에서 선택한 이미지 한 장만 영상 입력으로 사용합니다. 기존 4방향 원본은 이후 Astra의 외형 참고로 함께 전달합니다.</p>
-                  <RunwayFramePreview src={(() => { const source = wholeReference?.candidate.artifacts.find(a => a.kind === "image" && a.role === "whole" && a.view === videoSourceView); return source ? window.desktop.assetUrl(p.id, source.path) : undefined; })()} loop={loop} onReady={setVideoFrameReady} />
+                  <p className="wb-muted">선택한 한 장만 영상 입력으로 사용합니다. 모델 촬영 이미지는 AI가 새로 그린 이미지가 아닙니다.</p>
+                  <RunwayFramePreview src={motionSourceImage ? window.desktop.assetUrl(p.id, motionSourceImage.path) : undefined} loop={loop} onReady={setVideoFrameReady} />
                 </>}
                 <label className="field">
                   <span>동작 이름</span>
@@ -2554,27 +2575,7 @@ export function AssetWorkbench({
                 </label>
                 {motionMode === "reference" ? (
                   <>
-                    {approvalBox()}
-                    {launch(
-                      editBase
-                        ? "측면 동작 수정본 만들기"
-                        : "전신 구도로 동작 만들기 · 비용 확인",
-                      {
-                        step: "reference",
-                        executionMode: "codex-app",
-                        motionVideo: { serviceUrl: videoServiceUrl, model: videoModel, mode: "side", backend: "runway-mcp", sourceView: videoSourceView, resolution: "720p", nativeDuration: duration, framing: "full-body-v1" },
-                        prompt: motionPrompt.trim() || motion,
-                        provider: "gpt",
-                        motion,
-                        duration,
-                        fps,
-                        referenceFrameCount,
-                        referenceTimes: referenceTimes.trim() ? referenceTimes.split(",").map(t => Number(t.trim())) : undefined,
-                        loop,
-                        baseJobId: editBase?.request.motionVideo ? editBase.id : undefined,
-                      },
-                      !motion.trim() || !wholeReference || !videoFrameReady,
-                    )}
+                    <p className="wb-muted">오른쪽 위 ‘동작 영상 생성 · 비용 확인’에서 실행하세요.</p>
                   </>
                 ) : (
                   <>
@@ -2713,6 +2714,32 @@ export function AssetWorkbench({
                 </button>
               </div>
             )}
+            {page === "motion" && motionMode === "reference" && <div className="wb-note" data-testid="workbench-motion-create">
+              <h3>AI 동작 영상 만들기</h3>
+              <p>대기·점프 중 현재 설정한 동작 1개 · 720p · {duration}초 · 예상 {duration * RUNWAY_RATE.creditsPerSecond}크레딧. 실제 실행 전 앱에서 비용을 확인합니다.</p>
+              {!motionSourceAccepted && <p role="status">먼저왼쪽에서 측면 입력을 준비하고 확인·채택하세요.</p>}
+                    {approvalBox()}
+                    {launch(
+                      editBase
+                        ? "동작 영상 수정본 생성 · 비용 확인"
+                        : "동작 영상 생성 · 비용 확인",
+                      {
+                        step: "reference",
+                        executionMode: "codex-app",
+                        motionVideo: { serviceUrl: videoServiceUrl, model: videoModel, mode: "side", backend: "runway-mcp", sourceView: videoSourceView, sourceSlot: videoSourceSlot, resolution: "720p", nativeDuration: duration, framing: "full-body-v1" },
+                        prompt: motionPrompt.trim() || motion,
+                        provider: "gpt",
+                        motion,
+                        duration,
+                        fps,
+                        referenceFrameCount,
+                        referenceTimes: referenceTimes.trim() ? referenceTimes.split(",").map(t => Number(t.trim())) : undefined,
+                        loop,
+                        baseJobId: editBase?.request.motionVideo ? editBase.id : undefined,
+                      },
+                      !motion.trim() || !motionSourceAccepted || !motionSourceImage || !videoFrameReady,
+                    )}
+            </div>}
             {viewing?.status === "review" && (
               <p className="wb-muted" style={{ marginBottom: 15 }}>
                 {viewing.summary}
@@ -2895,6 +2922,12 @@ export function AssetWorkbench({
               </>
             ) : draftImages.length > 0 ? (
               separationGallery(draftImages, true)
+            ) : page === "motion" && motionMode === "reference" && motionSourceImage ? (
+              <div className="wb-note" data-testid="motion-input-review">
+                <h3>영상에 사용할 측면 이미지</h3>
+                <img src={url(motionSourceImage)} alt="동작 영상 입력 · 귀와 발이 보이는 전신 측면" style={{width:"100%",maxHeight:480,objectFit:"contain"}} />
+                <p>아직 동작 영상이 아닙니다. 귀·발·방향을 확인한 뒤 입력을 채택하고 위의 영상 생성 버튼을 누르세요.</p>
+              </div>
             ) : (
               <div className="wb-empty">
                 {active?.slot === slot ? (
@@ -2972,7 +3005,7 @@ export function AssetWorkbench({
             {page === "motion" && motionMode === "reference" && (
               <div className="wb-next">
                 <p>
-                  {viewing?.request.motionVideo?.mode === "side" ? "측면 영상의 전신 구도·발 접지·반복 연결을 확인하고 채택하세요." : "같은 시점의 정면·측면·후면 동작이 일치하는지 확인하고 채택하세요."}
+                  {!viewing || viewing.request.motionVideo?.mode === "side" ? "측면 영상의 전신 구도·발 접지·반복 연결을 확인하고 채택하세요." : "같은 시점의 정면·측면·후면 동작이 일치하는지 확인하고 채택하세요."}
                 </p>
                 <button
                   className="primary"

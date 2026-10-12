@@ -2669,6 +2669,15 @@ test("whole character surface performs only whole UV and texture operations", as
   assert(executor.hasConfirmedSubmission(f.context.job));
   fs.rmSync(f.root, { recursive: true, force: true });
 });
+test("motion source preparation never probes or dispatches Codex even when its source is missing",async()=>{
+  const f=fixture("motion-source"),worker=new Worker();
+  worker.probe=async()=>{throw Error("Unexpected model probe");};
+  try {
+    const result=await new CodexWorkbenchExecutor(worker,f.services).execute(f.context,()=>{});
+    assert.equal(result.status,"needs_input");assert.match(result.summary,/리깅 Blender 원본/);assert.equal(worker.calls.length,0);
+  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
 test("direct surface rig uses Astra native import while rig revisions keep the accepted blend",async()=>{
   const f=fixture("rig"),worker=new Worker();
   f.context.job.request.rigSource="surface";

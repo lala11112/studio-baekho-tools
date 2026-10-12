@@ -440,8 +440,10 @@ export class WorkbenchEngine {
           return ["concept", ...(source.job.dependencies["whole-reference"] ? ["whole-reference"] : []), "surface"];
         }
         return ["assembly"];
+      case "motion-source":
+        return ["rig"];
       case "reference":
-        return ["concept", ...(request.motionVideo && w.selections["whole-reference"] ? ["whole-reference"] : []), "rig"];
+        return ["concept", ...(request.motionVideo?.sourceSlot === "motion-source" ? ["motion-source"] : request.motionVideo && w.selections["whole-reference"] ? ["whole-reference"] : []), "rig"];
       case "animation":
         return ["rig", ...(w.selections["whole-reference"] ? ["whole-reference"] : []), `reference:${request.motion}`];
       case "unity": {
@@ -460,6 +462,11 @@ export class WorkbenchEngine {
     if (typeof request.prompt !== "string" || request.prompt.length > 12000)
       throw new Error("작업 지시는 12,000자 이내로 작성하세요.");
     const r = structuredClone(request);
+    if (r.motionSourceAxis !== undefined && (r.step !== "motion-source" || !["X","Y"].includes(r.motionSourceAxis))) throw Error("측면 촬영 방향을 확인하세요.");
+    if (r.step === "motion-source") {
+      if (r.baseJobId || r.executionMode && r.executionMode !== "worker") throw Error("측면 이미지는 로컬 Blender에서 준비합니다.");
+      r.motionSourceAxis ??= "X";
+    }
     if (r.rigSource !== undefined && (r.step !== "rig" || !["assembly", "surface"].includes(r.rigSource)))
       throw Error("리깅 입력 방식을 확인하세요.");
     if (r.motionVideo) {
@@ -471,6 +478,7 @@ export class WorkbenchEngine {
       if (r.motionVideo.mode !== undefined && !["side", "multiview"].includes(r.motionVideo.mode)) throw Error("알 수 없는 동작 참조 방식입니다.");
       if (r.motionVideo.backend !== undefined && r.motionVideo.backend !== "runway-mcp") throw Error("알 수 없는 영상 연결입니다.");
       if (r.motionVideo.backend === "runway-mcp") {
+        if (r.motionVideo.sourceSlot !== undefined && !["whole-reference","motion-source"].includes(r.motionVideo.sourceSlot)) throw Error("영상 입력 이미지 출처를 확인하세요.");
         if (r.motionVideo.mode !== "side" || r.motionVideo.serviceUrl !== "https://app.runwayml.com" ||
             !["left", "right"].includes(r.motionVideo.sourceView ?? "") ||
             r.motionVideo.model !== "gen-4.5" || !["720p", "1080p"].includes(r.motionVideo.resolution ?? "") ||
@@ -895,6 +903,14 @@ export class WorkbenchEngine {
       const base = this.baseCandidate(w, r);
       r.baseCandidateId = base.id;
       inputs.push(...base.artifacts);
+    }
+    if (r.motionVideo?.backend === "runway-mcp") {
+      const slot = r.motionVideo.sourceSlot ?? "whole-reference";
+      const source = this.chosen(w, slot);
+      if (!source.candidate.artifacts.some(a => a.kind === "image" &&
+          a.role === (slot === "motion-source" ? "motion-source" : "whole") &&
+          a.view === r.motionVideo!.sourceView && /\.png$/i.test(a.path)))
+        throw Error("먼저 영상 입력으로 사용할 측면 이미지를 준비하고 채택하세요.");
     }
     if (r.step === "assembly" && r.objectIds?.length) {
       if (!r.baseJobId)
@@ -1914,6 +1930,12 @@ export class WorkbenchEngine {
           ))
       )
         throw new Error("안정적인 ID가 있는 오브젝트 목록이 필요합니다.");
+    }
+    if (job.step === "motion-source") {
+      const images = c.artifacts.filter(a => a.kind === "image");
+      if (images.length !== 2 || ["left", "right"].some(view =>
+        !images.some(a => a.role === "motion-source" && a.view === view && /\.png$/i.test(a.path))) || !has(c,"report"))
+        throw Error("실제 모델에서 촬영한 두 측면 PNG와 촬영 기록이 필요합니다.");
     }
     if (job.step === "reference")
       this.validateFrames(job, result.candidates[0], workspace);

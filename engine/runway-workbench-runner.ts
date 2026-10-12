@@ -44,10 +44,11 @@ export class RunwayWorkbenchRunner implements ExternalWorkbenchRunner {
     return { packet, stateFile: base + "-state.json", ledger: new MotionVideoLedger(base + ".json", packet, hash(raw)) };
   }
   private source(ctx: Context): { artifact: WorkbenchArtifact; bytes: Buffer } {
-    const selection = ctx.job.dependencies["whole-reference"];
+    const slot = ctx.job.request.motionVideo?.sourceSlot ?? "whole-reference";
+    const selection = ctx.job.dependencies[slot];
     const candidate = ctx.workbench.jobs.find(j => j.id === selection?.jobId)?.candidates.find(c => c.id === selection?.candidateId);
-    const artifact = candidate?.artifacts.find(a => a.kind === "image" && a.role === "whole" && a.view === ctx.job.request.motionVideo?.sourceView);
-    if (!artifact || !ctx.inputs.some(a => a.path === artifact.path && a.sha256 === artifact.sha256)) throw Error("채택한 4방향 원본 중 선택한 측면 이미지가 필요합니다.");
+    const artifact = candidate?.artifacts.find(a => a.kind === "image" && a.role === (slot === "motion-source" ? "motion-source" : "whole") && a.view === ctx.job.request.motionVideo?.sourceView);
+    if (!artifact || !ctx.inputs.some(a => a.path === artifact.path && a.sha256 === artifact.sha256)) throw Error("채택한 영상 입력 중 선택한 측면 이미지가 필요합니다.");
     const root = fs.realpathSync(this.options.projectRoot(ctx.workbench.projectId)), file = fs.realpathSync(path.resolve(root, artifact.path));
     if (!file.startsWith(root + path.sep)) throw Error("측면 원본이 프로젝트 밖에 있습니다.");
     const bytes = fs.readFileSync(file);
