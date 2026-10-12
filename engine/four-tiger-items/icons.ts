@@ -460,6 +460,57 @@ export class FourTigerIconQueue {
       return p;
     });
   }
+  async abandonUnknown(
+    projectId: string,
+    expectedRevision: number,
+    jobId: string,
+  ): Promise<SainGeomItemProject> {
+    if (this.hasActiveWork())
+      throw new FourTigerError(
+        "INVALID_INPUT",
+        "실행 중 작업이 끝난 후 결과를 확인하세요.",
+      );
+    const p = await this.store.read(projectId),
+      job = p.jobs.find((j) => j.jobId === jobId);
+    if (p.revision !== expectedRevision)
+      throw new FourTigerError(
+        "REVISION_CONFLICT",
+        "최신 내용을 확인한 뒤 다시 선택하세요.",
+      );
+    if (!job || job.status !== "unknown")
+      throw new FourTigerError(
+        "INVALID_INPUT",
+        "결과 불명 작업만 명시적으로 종료할 수 있습니다.",
+      );
+    try {
+      await this.store.resolveFile(
+        projectId,
+        `jobs/${jobId}/outputs/source.png`,
+      );
+      throw new FourTigerError(
+        "REVIEW_REQUIRED",
+        "결과 파일이 있습니다. 기존 결과 복구를 먼저 선택하세요.",
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    return this.store.update(projectId, expectedRevision, (current) => {
+      const j = current.jobs.find((j) => j.jobId === jobId)!;
+      j.status = "cancelled";
+      j.updatedAt = new Date().toISOString();
+      j.error =
+        "사용자가 결과 없는 불명 요청 기록을 종료했습니다. 원격 중단을 뜻하지 않습니다. 새 생성은 별도 승인입니다.";
+      current.reviewHistory.push({
+        candidateKey: j.candidateKey,
+        action: "abandonUnknownRequest",
+        note: j.error,
+        at: j.updatedAt,
+        contentRevision: j.contentRevision,
+        policyRevision: current.ruleProfile.revision,
+      });
+      return current;
+    });
+  }
   async readIcon(
     projectId: string,
     candidateKey: string,

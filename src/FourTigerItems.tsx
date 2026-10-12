@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   elements,
   elementNames,
@@ -57,23 +57,48 @@ export function FourTigerItems({
     [previewForm, setPreviewForm] = useState<Element>("wood"),
     [previewTimed, setPreviewTimed] = useState(false),
     [style, setStyle] = useState(""),
-    [policies, setPolicies] = useState<PolicyValues | null>(null);
+    [policies, setPolicies] = useState<PolicyValues | null>(null),
+    [editorDirty, setEditorDirty] = useState(false);
+  const navigationEpoch = useRef(0);
+  const applyProject = (next: SainGeomItemProject) =>
+    setProject((current) =>
+      current?.projectId === next.projectId && current.revision > next.revision
+        ? current
+        : next,
+    );
   const refreshList = () => api.list().then(setProjects);
   const load = async (id: string) => {
-    const p = await api.read({ projectId: id });
-    setProject(p);
-    setSelected(p.items[0]?.candidateKey ?? "");
-    setMarked([]);
-    setStyle(p.iconStyle);
-    setPolicies({ ...p.ruleProfile.proposed });
-    setError("");
-    setReceipt(null);
+    const epoch = ++navigationEpoch.current;
+    setBusy(true);
+    try {
+      if (!id) {
+        setProject(null);
+        setReceipt(null);
+        return;
+      }
+      const p = await api.read({ projectId: id });
+      if (epoch !== navigationEpoch.current) return;
+      applyProject(p);
+      setSelected(p.items[0]?.candidateKey ?? "");
+      setMarked([]);
+      setStyle(p.iconStyle);
+      setPolicies({ ...p.ruleProfile.proposed });
+      setError("");
+      setReceipt(null);
+    } catch (e) {
+      if (epoch === navigationEpoch.current)
+        setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (epoch === navigationEpoch.current) setBusy(false);
+    }
   };
   useEffect(() => {
     if (active) void refreshList().catch((e) => setError(e.message));
+  }, [active]);
+  useEffect(() => {
     if (navigation.projectId)
       void load(navigation.projectId).catch((e) => setError(e.message));
-  }, [active, navigation.key]);
+  }, [navigation.key]);
   useEffect(() => {
     if (!project) return;
     let live = true;
@@ -93,12 +118,13 @@ export function FourTigerItems({
   useEffect(() => {
     if (!active || !running || !project) return;
     const id = project.projectId;
+    const epoch = navigationEpoch.current;
     let live = true;
     const timer = setInterval(() => {
       void api
         .read({ projectId: id })
         .then((p) => {
-          if (live) setProject(p);
+          if (live && epoch === navigationEpoch.current) applyProject(p);
         })
         .catch((e) => setError(e.message));
     }, 1000);
@@ -108,46 +134,70 @@ export function FourTigerItems({
     };
   }, [active, running, project?.projectId]);
   async function act(fn: () => Promise<unknown>): Promise<boolean> {
+    const epoch = navigationEpoch.current;
     setBusy(true);
     setError("");
     try {
       const result = await fn();
+      if (epoch !== navigationEpoch.current) {
+        await refreshList();
+        return false;
+      }
       if (result && typeof result === "object" && "items" in result)
-        setProject(result as SainGeomItemProject);
-      else if (project)
-        setProject(await api.read({ projectId: project.projectId }));
+        applyProject(result as SainGeomItemProject);
+      else if (project) {
+        const latest = await api.read({ projectId: project.projectId });
+        if (epoch === navigationEpoch.current) applyProject(latest);
+      }
       await refreshList();
-      setNotice("저장됨");
-      return true;
+      if (epoch === navigationEpoch.current) setNotice("저장됨");
+      return epoch === navigationEpoch.current;
     } catch (e) {
+      if (epoch !== navigationEpoch.current) return false;
       setError(e instanceof Error ? e.message : String(e));
       if (project)
         void api
           .read({ projectId: project.projectId })
-          .then(setProject)
+          .then((p) => {
+            if (epoch === navigationEpoch.current) applyProject(p);
+          })
           .catch(() => {});
       return false;
     } finally {
-      setBusy(false);
+      if (epoch === navigationEpoch.current) setBusy(false);
     }
   }
-  const create = () =>
-    act(async () => {
+  const create = () => {
+    const epoch = ++navigationEpoch.current;
+    return act(async () => {
       const p = await api.create({
         name: `사인검 초안 ${new Date().toLocaleDateString("ko-KR")}`,
       });
-      setSelected(p.items[0].candidateKey);
-      setStyle(p.iconStyle);
-      setPolicies({ ...p.ruleProfile.proposed });
-      setMarked([]);
-      setReceipt(null);
+      if (epoch === navigationEpoch.current) {
+        setSelected(p.items[0].candidateKey);
+        setStyle(p.iconStyle);
+        setPolicies({ ...p.ruleProfile.proposed });
+        setMarked([]);
+        setReceipt(null);
+      }
       return p;
     });
+  };
   const item = project?.items.find((i) => i.candidateKey === selected),
     input = project
       ? { projectId: project.projectId, expectedRevision: project.revision }
       : null;
   const selection = marked.length ? marked : item ? [item.candidateKey] : [];
+  const policiesDirty =
+    !!project &&
+    JSON.stringify(policies) !== JSON.stringify(project.ruleProfile.proposed);
+  const exportCurrent = (kind: "draft" | "release") => {
+    const epoch = navigationEpoch.current;
+    return act(async () => {
+      const receipt = await api.exportPackage({ ...input!, kind });
+      if (epoch === navigationEpoch.current) setReceipt(receipt);
+    });
+  };
   const preview = project
     ? previewSp(project, previewForm, previewTimed)
     : null;
@@ -269,7 +319,7 @@ export function FourTigerItems({
               남은 작업 취소
             </button>
             <button
-              disabled={busy || running}
+              disabled={busy}
               onClick={() =>
                 void act(() => api.reconcile({ projectId: project.projectId }))
               }
@@ -383,7 +433,7 @@ export function FourTigerItems({
               <div className="fti-toolbar">
                 <span>{selection.length}개 선택</span>
                 <button
-                  disabled={busy || !selection.length}
+                  disabled={busy || editorDirty || !selection.length}
                   onClick={() =>
                     void act(() =>
                       api.reviewItems({
@@ -398,7 +448,7 @@ export function FourTigerItems({
                   선택 데이터 검토 완료
                 </button>
                 <button
-                  disabled={busy || !selection.length}
+                  disabled={busy || editorDirty || !selection.length}
                   onClick={() =>
                     void act(() =>
                       api.reviewItems({
@@ -414,7 +464,7 @@ export function FourTigerItems({
                 </button>
                 <button
                   data-testid="adopt-items"
-                  disabled={busy || !selection.length}
+                  disabled={busy || editorDirty || !selection.length}
                   onClick={() => setConfirm(true)}
                 >
                   선택 항목 채택
@@ -441,6 +491,12 @@ export function FourTigerItems({
                   {Object.keys(project.ruleProfile.adoptions).length}/10 채택
                 </summary>
                 <p>상한·하한과 합산·중첩은 확정 기획과 구분되는 제안입니다.</p>
+                {policiesDirty && (
+                  <p className="fti-warning">
+                    저장 전 정책 수정이 있습니다. 표시한 값을 먼저 저장한 뒤
+                    채택하세요.
+                  </p>
+                )}
                 {policies &&
                   (Object.keys(policyNames) as PolicyKey[]).map((key) => (
                     <label className="fti-policy" key={key}>
@@ -479,7 +535,7 @@ export function FourTigerItems({
                   </button>
                   <button
                     data-testid="adopt-policies"
-                    disabled={busy}
+                    disabled={busy || policiesDirty}
                     onClick={() =>
                       void act(() =>
                         api.adoptPolicies({
@@ -586,14 +642,8 @@ export function FourTigerItems({
                 <div className="fti-row">
                   <button
                     data-testid="export-draft"
-                    disabled={busy}
-                    onClick={() =>
-                      void act(async () => {
-                        setReceipt(
-                          await api.exportPackage({ ...input!, kind: "draft" }),
-                        );
-                      })
-                    }
+                    disabled={busy || editorDirty || policiesDirty}
+                    onClick={() => void exportCurrent("draft")}
                   >
                     초안 묶음 보관
                   </button>
@@ -602,19 +652,13 @@ export function FourTigerItems({
                     className="fti-primary"
                     disabled={
                       busy ||
+                      editorDirty ||
+                      policiesDirty ||
                       !report?.canExport ||
+                      report.projectId !== project.projectId ||
                       report.revision !== project.revision
                     }
-                    onClick={() =>
-                      void act(async () => {
-                        setReceipt(
-                          await api.exportPackage({
-                            ...input!,
-                            kind: "release",
-                          }),
-                        );
-                      })
-                    }
+                    onClick={() => void exportCurrent("release")}
                   >
                     채택본 Unity 데이터 출력
                   </button>
@@ -640,6 +684,7 @@ export function FourTigerItems({
                 project={project}
                 item={item}
                 busy={busy}
+                onDirtyChange={setEditorDirty}
                 act={act}
                 save={(patch) =>
                   act(() =>

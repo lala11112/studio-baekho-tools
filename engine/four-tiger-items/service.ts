@@ -126,6 +126,13 @@ export class FourTigerItemsService implements FourTigerItemsApi {
   reconcile(input: Input<"reconcile">) {
     return this.queue.reconcile(input.projectId);
   }
+  abandonUnknown(input: Input<"abandonUnknown">) {
+    return this.queue.abandonUnknown(
+      input.projectId,
+      input.expectedRevision,
+      input.jobId,
+    );
+  }
   selectIcon(input: Input<"selectIcon">) {
     return this.queue.selectIcon(
       input.projectId,
@@ -216,6 +223,7 @@ export const fourTigerMethodSchemas = {
   }),
   cancelPending: object(project),
   reconcile: object(project),
+  abandonUnknown: object({ ...revision, jobId: z.string().uuid() }),
   selectIcon: object({
     ...revision,
     candidateKey,

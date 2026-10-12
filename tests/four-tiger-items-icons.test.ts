@@ -54,6 +54,27 @@ test('invalid PNG, opaque/empty images, oversize, path escape and duplicate iden
 test('reconcile of empty unknown request never submits generation',async()=>{
   let calls=0;const s=await setup(async()=>{calls++;throw new Error('lost');});await s.queue.enqueue(s.p.projectId,s.p.revision,[s.p.items[0].candidateKey]);await idle(s.queue);await s.queue.reconcile(s.p.projectId);assert.equal(calls,1);assert.equal((await s.store.read(s.p.projectId)).jobs[0].status,'unknown');
 });
+
+test('explicitly abandoning an empty unknown request preserves history and requires a separate new generation',async()=>{
+  let calls=0;const s=await setup(async()=>{calls++;throw new Error('lost');});
+  await s.queue.enqueue(s.p.projectId,s.p.revision,[s.p.items[0].candidateKey]);await idle(s.queue);
+  let p=await s.queue.reconcile(s.p.projectId),old=p.jobs[0];
+  p=await s.queue.abandonUnknown(p.projectId,p.revision,old.jobId);
+  assert.equal(p.jobs[0].status,'cancelled');assert.equal(p.jobs[0].jobId,old.jobId);assert.equal(calls,1);
+  assert.equal(p.reviewHistory.at(-1)?.action,'abandonUnknownRequest');
+  assert.equal(p.items[0].icons.length,0);
+  await s.queue.enqueue(p.projectId,p.revision,[p.items[0].candidateKey]);await idle(s.queue);
+  p=await s.store.read(p.projectId);assert.equal(calls,2);assert.equal(p.jobs.length,2);assert.notEqual(p.jobs[1].jobId,old.jobId);
+});
+
+test('abandon unknown refuses a newly arrived output so recovery remains possible',async()=>{
+  const s=await setup(async()=>{throw new Error('lost');});
+  await s.queue.enqueue(s.p.projectId,s.p.revision,[s.p.items[0].candidateKey]);await idle(s.queue);
+  const p=await s.store.read(s.p.projectId),job=p.jobs[0];
+  await writeTestPng(path.join(s.store.directory(p.projectId),'jobs',job.jobId,'outputs/source.png'),'valid');
+  await assert.rejects(s.queue.abandonUnknown(p.projectId,p.revision,job.jobId),{code:'REVIEW_REQUIRED'});
+  const recovered=await s.queue.reconcile(p.projectId);assert.equal(recovered.items[0].icons.length,1);
+});
 test('a completed PNG survives manifest write failure and recovery adds exactly one version',async(t)=>{
   let calls=0;const s=await setup(async r=>{calls++;await writeTestPng(path.join(r.jobDirectory,'outputs/source.png'),'valid');return {status:'generated',relativePath:'outputs/source.png',tool:'imagegen',observedModel:null};});
   const original=s.store.update.bind(s.store);let fail=true;

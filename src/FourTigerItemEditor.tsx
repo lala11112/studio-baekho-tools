@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   elementNames,
   elements,
@@ -58,18 +58,34 @@ type Props = {
   busy: boolean;
   save: (patch: ItemPatch) => Promise<boolean>;
   act: (fn: () => Promise<unknown>) => Promise<boolean>;
+  onDirtyChange?: (dirty: boolean) => void;
 };
-export function FourTigerItemEditor({ project, item, busy, save, act }: Props) {
+export function FourTigerItemEditor({
+  project,
+  item,
+  busy,
+  save,
+  act,
+  onDirtyChange,
+}: Props) {
   const [draft, setDraft] = useState<ItemDraft>(item),
     [dirty, setDirty] = useState(false),
-    [light, setLight] = useState(false);
+    [light, setLight] = useState(false),
+    [abandonJob, setAbandonJob] = useState<string | null>(null);
+  const editGeneration = useRef(0),
+    currentCandidate = useRef(item.candidateKey);
+  currentCandidate.current = item.candidateKey;
   useEffect(() => {
+    editGeneration.current++;
     setDraft(item);
     setDirty(false);
   }, [item.candidateKey]);
   useEffect(() => {
     if (!dirty) setDraft(item);
   }, [item, dirty]);
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, item.candidateKey, onDirtyChange]);
   const api = window.fourTigerItems,
     revisionInput = {
       projectId: project.projectId,
@@ -77,6 +93,7 @@ export function FourTigerItemEditor({ project, item, busy, save, act }: Props) {
     },
     input = { ...revisionInput, candidateKey: item.candidateKey };
   const edit = (patch: ItemPatch) => {
+    editGeneration.current++;
     setDraft((d) => ({ ...d, ...patch }));
     setDirty(true);
   };
@@ -94,6 +111,8 @@ export function FourTigerItemEditor({ project, item, busy, save, act }: Props) {
     ) ||
     itemSeeds.find((s) => s.element === item.element && s.grade === item.grade);
   const commit = async () => {
+    const generation = editGeneration.current,
+      candidate = item.candidateKey;
     const {
       name,
       itemId,
@@ -106,7 +125,7 @@ export function FourTigerItemEditor({ project, item, busy, save, act }: Props) {
       iconPrompt,
     } = draft;
     if (
-      await save({
+      (await save({
         name,
         itemId,
         description,
@@ -116,7 +135,9 @@ export function FourTigerItemEditor({ project, item, busy, save, act }: Props) {
         unsupportedEffectNotes,
         synergyTags,
         iconPrompt,
-      })
+      })) &&
+      generation === editGeneration.current &&
+      candidate === currentCandidate.current
     )
       setDirty(false);
   };
@@ -473,12 +494,52 @@ export function FourTigerItemEditor({ project, item, busy, save, act }: Props) {
         .filter((j) => j.candidateKey === item.candidateKey)
         .slice(-2)
         .map((j) => (
-          <p className="fti-muted" key={j.jobId}>
+          <div className="fti-muted" key={j.jobId}>
             {j.status}
             {j.error ? ` · ${j.error}` : ""}
-          </p>
+            {j.status === "unknown" && (
+              <button
+                data-testid="abandon-unknown"
+                disabled={busy || dirty}
+                onClick={() => setAbandonJob(j.jobId)}
+              >
+                결과 없는 요청 기록 종료
+              </button>
+            )}
+          </div>
         ))}
       <h3>검토 기록</h3>
+      {abandonJob && (
+        <div
+          className="fti-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label="불명 요청 기록 종료 확인"
+        >
+          <div>
+            <h2>기존 결과를 확인했나요?</h2>
+            <p>
+              먼저 ‘기존 결과 복구’를 확인하세요. 원격 작업은 나중에 완료될 수
+              있습니다. 이 동작은 원격 취소가 아니며 기록과 파일을 보존합니다.
+              새 아이콘 생성은 별도 버튼으로 요청해야 합니다.
+            </p>
+            <button onClick={() => setAbandonJob(null)}>돌아가기</button>
+            <button
+              data-testid="confirm-abandon"
+              disabled={busy}
+              onClick={() =>
+                void act(() =>
+                  api.abandonUnknown({ ...revisionInput, jobId: abandonJob }),
+                ).then((ok) => {
+                  if (ok) setAbandonJob(null);
+                })
+              }
+            >
+              결과 없음 확인 · 기록 종료
+            </button>
+          </div>
+        </div>
+      )}
       <p className="fti-muted">
         데이터{" "}
         {item.review.dataRevision === item.contentRevision

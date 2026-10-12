@@ -410,6 +410,9 @@ export interface FourTigerItemsApi {
   ): Promise<SainGeomItemProject>;
   cancelPending(input: ProjectInput): Promise<SainGeomItemProject>;
   reconcile(input: ProjectInput): Promise<SainGeomItemProject>;
+  abandonUnknown(
+    input: RevisionInput & { jobId: string },
+  ): Promise<SainGeomItemProject>;
   selectIcon(
     input: RevisionInput & { candidateKey: string; versionId: string },
   ): Promise<SainGeomItemProject>;
