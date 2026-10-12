@@ -35,8 +35,12 @@ test('corrupt and future schemas are visible and never silently replaced',async(
   await assert.rejects(store.read(p.projectId),{code:'CORRUPT_PROJECT'});
   assert.match((await store.list())[0].readError??'',/복구/);assert.equal(await fs.readFile(file,'utf8'),'{bad');
   const restored=await store.restorePrevious(p.projectId);assert.equal(restored.items[0].name,'새싹 부적');
+  const preserved=(await fs.readdir(path.join(root,p.projectId))).find(name=>name.startsWith('corrupt-'));
+  assert.ok(preserved);assert.equal(await fs.readFile(path.join(root,p.projectId,preserved),'utf8'),'{bad');
   await fs.writeFile(file,JSON.stringify({...restored,schemaVersion:2}));
   await assert.rejects(store.read(p.projectId),{code:'UNSUPPORTED_SCHEMA'});assert.equal(JSON.parse(await fs.readFile(file,'utf8')).schemaVersion,2);
+  await assert.rejects(store.restorePrevious(p.projectId),{code:'UNSUPPORTED_SCHEMA'});
+  assert.equal(JSON.parse(await fs.readFile(file,'utf8')).schemaVersion,2);
 });
 test('invalid project IDs cannot escape storage or create files',async()=>{
   const {root,store}=await setup();const before=await fs.readdir(root);

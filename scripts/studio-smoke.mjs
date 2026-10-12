@@ -204,6 +204,18 @@ try {
   assert.equal(await hitPage.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, "compact timing tool has no horizontal clipping");
   await capture("compact-hit-timing");
   checks.push("third tool remains usable inside the compact window");
+  await page.getByTestId('nav-home').click();
+  await page.getByTestId('tool-four-tiger-items').click();
+  await page.getByTestId('create-items').click();
+  await page.getByTestId('item-IT_WOOD_01').waitFor();
+  assert.equal(await page.locator('.fti-card').count(),20);
+  await page.getByLabel('아이템 이름',{exact:true}).fill('미저장 아이템 편집 유지');
+  await until(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].contentView.children.every(v=>!v.getVisible())));
+  await page.getByTestId('nav-home').click();await page.getByTestId('tool-combat').click();
+  assert.equal(await combatPage.locator('#goal').inputValue(),'타격감 초안 보존 확인 · 생성하지 않음');
+  await page.getByTestId('nav-home').click();await page.getByTestId('tool-four-tiger-items').click();
+  assert.equal(await page.getByLabel('아이템 이름',{exact:true}).inputValue(),'미저장 아이템 편집 유지');
+  checks.push('fourth React tool hides native views and preserves unsaved state in both directions');
   assert.deepEqual(errors, []);
   checks.push("no renderer exceptions");
   assert.equal(fs.existsSync(path.join(project, "Library/CombatLabBridge/requests")), false);

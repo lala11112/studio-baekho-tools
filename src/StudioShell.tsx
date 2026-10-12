@@ -22,6 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { App } from "./App";
+import { FourTigerItems } from './FourTigerItems';
 import type {
   StudioBounds,
   StudioEntry,
@@ -62,8 +63,9 @@ const toolNames: Record<StudioTool, string> = {
   modeling: "3D 모델링",
   combat: "타격감 찾기",
   "hit-timing": "타격 타이밍",
+  "four-tiger-items": "사인검 아이템",
 };
-const toolOrder = ["modeling", "combat", "hit-timing"] as const;
+const toolOrder = ["modeling", "combat", "hit-timing", "four-tiger-items"] as const;
 const toolCopy: Record<
   StudioTool,
   {
@@ -74,6 +76,7 @@ const toolCopy: Record<
     output: string;
   }
 > = {
+  'four-tiger-items': {category:'ITEM WORKSHOP',description:'20개 아이템과 아이콘을 만들고 검토.',flow:'초안 → 아이콘·편집 → 채택·출력',input:'입력: 사인검 기획·효과·아이콘 요청',output:'결과: 검토한 아이템 JSON·PNG'},
   modeling: {
     category: "ASSET CREATION",
     description: "아이디어에서 게임에 쓸 3D 에셋까지.",
@@ -160,6 +163,7 @@ function TigerMark() {
 }
 
 function ToolArt({ tool }: { tool: StudioTool }) {
+  if(tool==='four-tiger-items')return <div className="bkh-tool-art" aria-hidden="true" style={{display:'grid',placeItems:'center',color:'#6d8268'}}><Layers3 size={88} strokeWidth={1}/></div>;
   if (tool === "hit-timing")
     return (
       <div className="bkh-tool-art bkh-tool-art-hit-timing" aria-hidden="true">
@@ -505,6 +509,8 @@ export function StudioShell() {
   const [choosingProject, setChoosingProject] =
     useState<StudioNativeTool | null>(null);
   const [modelingMounted, setModelingMounted] = useState(false);
+  const [itemsMounted,setItemsMounted]=useState(false);
+  const [itemsNavigation,setItemsNavigation]=useState<{key:number;projectId?:string}>({key:0});
   const [modelingNavigation, setModelingNavigation] =
     useState<ModelingNavigation>({ key: 0, tab: "home" });
   const [nativeNavigation, setNativeNavigation] = useState<{
@@ -521,7 +527,7 @@ export function StudioShell() {
   const request = useRef<Promise<void> | null>(null);
   const nativeEpoch = useRef(0);
   const nativeTool =
-    activeTool && activeTool !== "modeling" ? activeTool : null;
+    activeTool === 'combat' || activeTool === 'hit-timing' ? activeTool : null;
 
   const refresh = useCallback((): Promise<void> => {
     if (!bridge) return Promise.resolve();
@@ -593,6 +599,9 @@ export function StudioShell() {
             create: target.create,
           }));
         }
+      } else if(target.tool==='four-tiger-items') {
+        setItemsMounted(true);
+        setItemsNavigation(previous=>({key:previous.key+1,projectId:target.projectId}));
       } else {
         setNativeError("");
         setNativeNavigation((previous) => ({ key: previous.key + 1, target }));
@@ -695,7 +704,7 @@ export function StudioShell() {
     ? {
         title: toolNames[activeTool],
         subtitle:
-          activeTool === "modeling"
+          activeTool === 'four-tiger-items' ? '아이템 초안 · 아이콘 제작 · 검토와 데이터 출력' : activeTool === "modeling"
             ? "이미지부터 모델링, 리깅, Unity 연결까지"
             : activeTool === "hit-timing"
               ? summary?.hitTimer.projectName
@@ -1273,6 +1282,7 @@ export function StudioShell() {
                         </code>
                       </div>
                     </section>
+                    <section className="bkh-storage-row"><span className="bkh-storage-label">사인검 아이템</span><code className="bkh-storage-path">{summary?.storage.fourTigerItems||'불러오는 중…'}</code></section>
                     {summary?.combat.error && (
                       <div className="bkh-setting-warning">
                         <CircleAlert size={17} />
@@ -1313,6 +1323,7 @@ export function StudioShell() {
                 <App embedded navigation={modelingNavigation} />
               </div>
             )}
+            {itemsMounted && <div className="bkh-modeling" style={{display:activeTool==='four-tiger-items'?'block':'none'}} aria-hidden={activeTool!=='four-tiger-items'}><FourTigerItems active={activeTool==='four-tiger-items'} navigation={itemsNavigation}/></div>}
             {nativeTool && (
               <div
                 data-testid={`workspace-${nativeTool}`}

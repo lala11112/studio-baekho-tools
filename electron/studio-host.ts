@@ -21,7 +21,7 @@ type HitTimerFactory = (o: WindowAccess & { dataRoot: string; legacyDataRoot?: s
 type Entry = { service: NativeService<unknown>; label: string; preload: string; url: string; tabs: string[]; view?: WebContentsView; loading?: Promise<void>; bounds?: StudioBounds; crash: string };
 
 /** One visible native workspace; each hidden workspace retains its own state. */
-export function installStudioHost(options: { window: BrowserWindow; root: string; modeling: () => Pick<SummaryInput, "projects" | "workbenches" | "productionRuns">; modelingBusy: () => boolean }) {
+export function installStudioHost(options: { window: BrowserWindow; root: string; modeling: () => Pick<SummaryInput, "projects" | "workbenches" | "productionRuns">; modelingBusy: () => boolean; itemProjects:()=>Promise<NonNullable<SummaryInput['itemProjects']>>; itemsBusy:()=>boolean }) {
   const win = options.window;
   const require = createRequire(__filename);
   const { createCombatService } = require(path.join(app.getAppPath(), "Desktop/src/main.cjs")) as { createCombatService: CombatFactory };
@@ -95,7 +95,7 @@ export function installStudioHost(options: { window: BrowserWindow; root: string
     ipcMain.handle(channel, (event, ...args) => { trusted(event); return callback(...args); });
   }
   function resize(tool: StudioNativeTool, rectangle: unknown) { entryFor(tool).bounds = fitStudioBounds(rectangle, 100000, 100000); layout(); }
-  handle("summary", () => {
+  handle("summary", async () => {
     const warnings = Object.values(entries).map(e => e.crash).filter(Boolean);
     let combatSnapshot: CombatSummary, hitSnapshot: HitTimerSummary;
     try { combatSnapshot = combat.getSummary(); }
@@ -110,7 +110,9 @@ export function installStudioHost(options: { window: BrowserWindow; root: string
       warnings.push("타격 타이밍 기록 확인 필요: " + message);
       hitSnapshot = { projectName: "", projectPath: "", connected: false, busy: false, error: message, jobs: [] };
     }
-    return buildStudioSummary({ ...options.modeling(), version: app.getVersion(), combat: combatSnapshot, hitTimer: hitSnapshot, storage: { modeling: options.root, combat: path.dirname(settingsPath), hitTimer: hitTimerRoot }, warnings });
+    let itemProjects:NonNullable<SummaryInput['itemProjects']>=[];
+    try{itemProjects=await options.itemProjects();}catch{warnings.push('사인검 아이템 기록 확인 필요');}
+    return buildStudioSummary({ ...options.modeling(), itemProjects, version: app.getVersion(), combat: combatSnapshot, hitTimer: hitSnapshot, storage: { modeling: options.root, combat: path.dirname(settingsPath), hitTimer: hitTimerRoot, fourTigerItems:path.join(options.root,'four-tiger-items') }, warnings });
   });
   handle("show-tool", show); handle("hide-tools", hideAll); handle("resize-tool", resize);
   // Compatibility for existing 0.7 diagnostics.
@@ -122,7 +124,7 @@ export function installStudioHost(options: { window: BrowserWindow; root: string
   win.on("resize", layout); win.on("restore", layout); win.on("show", layout);
   let allowClose = false, closePrompt = false;
   win.on("close", event => {
-    if (allowClose || disposed || (!combat.hasActiveWork() && !hitTimer.hasActiveWork() && !options.modelingBusy())) return;
+    if (allowClose || disposed || (!combat.hasActiveWork() && !hitTimer.hasActiveWork() && !options.modelingBusy() && !options.itemsBusy())) return;
     event.preventDefault(); if (closePrompt) return; closePrompt = true;
     void dialog.showMessageBox(win, { type: "warning", title: "진행 중인 작업이 있습니다", message: "백호툴을 종료할까요?", detail: "로컬 분석을 중단하고 저장된 초안을 유지합니다. 이미 제출한 원격 작업이나 Unity 저장은 계속될 수 있으며 결과는 다음 연결에서 확인합니다.", buttons: ["계속 작업", "앱 종료"], defaultId: 0, cancelId: 0 })
       .then(({ response }) => { closePrompt = false; if (response === 1) { allowClose = true; win.close(); } }).catch(() => { closePrompt = false; });

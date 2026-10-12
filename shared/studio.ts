@@ -1,5 +1,5 @@
-export type StudioTool = "modeling" | "combat" | "hit-timing";
-export type StudioNativeTool = Exclude<StudioTool, "modeling">;
+export type StudioTool = "modeling" | "combat" | "hit-timing" | "four-tiger-items";
+export type StudioNativeTool = "combat" | "hit-timing";
 export type StudioPage = "home" | "tools" | "runs" | "results" | "settings";
 export interface StudioTarget {
   tool: StudioTool;
@@ -43,7 +43,7 @@ export interface StudioSummary {
     error: string;
     experimental: true;
   };
-  storage: { modeling: string; combat: string; hitTimer: string };
+  storage: { modeling: string; combat: string; hitTimer: string; fourTigerItems: string };
   warnings: string[];
 }
 export interface StudioBounds { x: number; y: number; width: number; height: number }

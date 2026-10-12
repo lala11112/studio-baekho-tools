@@ -27,6 +27,9 @@ import { LocalPipeline } from "../engine/local";
 import { Vault } from "./vault";
 import { catalog } from "../shared/catalog";
 import { installStudioHost } from "./studio-host";
+import { FourTigerItemsService } from '../engine/four-tiger-items/service';
+import { CodexFourTigerIconRunner } from '../engine/four-tiger-items/icon-runner';
+import { installFourTigerItemsIpc } from './four-tiger-items-ipc';
 import type { Command, Project } from "../shared/types";
 protocol.registerSchemesAsPrivileged([
   { scheme: "aht", privileges: { standard: true, secure: true, supportFetchAPI: true } },
@@ -672,9 +675,13 @@ app.whenReady().then(async () => {
       };
     }
   });
+  const itemService = new FourTigerItemsService(root,new CodexFourTigerIconRunner());
+  const disposeItems = installFourTigerItemsIpc(win,itemService);
   const host = installStudioHost({
     window: win,
     root,
+    itemProjects: () => itemService.list(),
+    itemsBusy: () => itemService.hasActiveWork(),
     modeling: () => ({ projects: store.projects(), workbenches: workbench.list(), productionRuns: production.list() }),
     modelingBusy: () => workbench.list().some(w => w.jobs.some(j => j.status === "running")) || production.list().some(r => r.status === "running") || store.projects().some(p => p.jobs.some(j => ["queued", "submitting", "running"].includes(j.status))),
   });
@@ -694,7 +701,8 @@ app.whenReady().then(async () => {
     production.shutdown();
     workbench.shutdown();
     studio.close();
-    void host.shutdown().catch(() => { console.error("백호툴 종료 중 일부 작업을 정리하지 못했습니다. 다음 실행에서 저장 상태를 확인하세요."); }).finally(() => {
+    disposeItems();
+    void Promise.all([host.shutdown(),itemService.shutdown()]).catch(() => { console.error("백호툴 종료 중 일부 작업을 정리하지 못했습니다. 다음 실행에서 저장 상태를 확인하세요."); }).finally(() => {
       shutdownComplete = true;
       app.quit();
     });
