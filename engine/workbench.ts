@@ -195,6 +195,18 @@ export class WorkbenchEngine {
         "jobId" in action && this.job(w, action.jobId).externalExecution)
       throw new Error("현재 대화 실행 작업은 새 작업자로 재시도하지 않습니다. 기존 대화의 결과만 등록하세요.");
     switch (action.kind) {
+      case "rig-source": {
+        this.idle(w);
+        if (!["surface", "assembly"].includes(action.source)) throw Error("리깅 입력을 확인하세요.");
+        if (action.source === "surface") this.directRigSource(w);
+        else this.chosen(w, "assembly");
+        w.rigSource = action.source;
+        this.pruneSelections(w);
+        w.message = action.source === "surface"
+          ? "조립·보정을 생략합니다. 채택한 모델로 리깅 설정을 확인한 뒤 직접 실행하세요."
+          : "채택한 조립·보정본을 리깅에 사용합니다.";
+        return this.save(w);
+      }
       case "external-approval": {
         const pending=this.pendingApprovals.get(w.id);
         if(!pending || pending.jobId!==action.jobId || pending.approvalId!==action.approvalId ||
@@ -304,6 +316,7 @@ export class WorkbenchEngine {
     return { job, candidate, selected };
   }
   private current(w: Workbench, job: WorkbenchJob) {
+    if (job.step === "rig" && (job.request.rigSource ?? "assembly") !== (w.rigSource ?? "assembly")) return false;
     return Object.entries(job.dependencies).every(
       ([slot, selection]) =>
         equal(w.selections[slot], selection) ||
@@ -316,6 +329,25 @@ export class WorkbenchEngine {
             job.request.role!,
           )),
     );
+  }
+  private pruneSelections(w: Workbench) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [slot, selection] of Object.entries(w.selections)) {
+        if (!this.current(w, this.job(w, selection.jobId))) {
+          delete w.selections[slot];
+          changed = true;
+        }
+      }
+    }
+  }
+  private directRigSource(w: Workbench) {
+    const source = this.chosen(w, "surface");
+    if (workbenchModelInput(source.job.request) !== "whole" ||
+        !source.candidate.artifacts.some(a => a.kind === "model" && /\.(fbx|glb)$/i.test(a.path)))
+      throw Error("조립 생략에는 채택한 단일 모델의 UV·텍스처 결과가 필요합니다. 분리한 파츠는 먼저 조립하세요.");
+    return source;
   }
   private samePartImages(
     w: Workbench,
@@ -403,6 +435,10 @@ export class WorkbenchEngine {
           ...(this.chosen(w, "surface").job.dependencies["whole-reference"] ? ["whole-reference"] : []),
           "surface"];
       case "rig":
+        if (request.rigSource === "surface") {
+          const source = this.directRigSource(w);
+          return ["concept", ...(source.job.dependencies["whole-reference"] ? ["whole-reference"] : []), "surface"];
+        }
         return ["assembly"];
       case "reference":
         return ["concept", ...(request.motionVideo && w.selections["whole-reference"] ? ["whole-reference"] : []), "rig"];
@@ -424,6 +460,8 @@ export class WorkbenchEngine {
     if (typeof request.prompt !== "string" || request.prompt.length > 12000)
       throw new Error("작업 지시는 12,000자 이내로 작성하세요.");
     const r = structuredClone(request);
+    if (r.rigSource !== undefined && (r.step !== "rig" || !["assembly", "surface"].includes(r.rigSource)))
+      throw Error("리깅 입력 방식을 확인하세요.");
     if (r.motionVideo) {
       if (r.step !== "reference" || r.executionMode !== "codex-app" ||
           typeof r.motionVideo.model !== "string" || !r.motionVideo.model.trim() || r.motionVideo.model.length > 100)
@@ -708,6 +746,10 @@ export class WorkbenchEngine {
         );
     }
     const r = this.normalize(input);
+    if (r.step === "rig") {
+      r.rigSource ??= w.rigSource ?? "assembly";
+      if (r.rigSource !== (w.rigSource ?? "assembly")) throw Error("앱에서 리깅 입력을 먼저 선택하세요.");
+    }
     if (r.step === "model" && r.modelInput === "whole" && !r.baseJobId && r.externalModel?.inputMode !== "single" &&
         w.jobs.some(j => j.slot === "whole-reference" && j.status !== "cancelled" && this.current(w, j))) {
       if (!w.selections["whole-reference"])
@@ -815,7 +857,13 @@ export class WorkbenchEngine {
       }
       dependencies[dep] = selected.selected;
       // The concept remains a lineage dependency, never an extra fifth upload.
-      if (!(r.externalModel && r.externalModel.inputMode !== "single" && dep === "concept")) inputs.push(...selected.candidate.artifacts);
+      if (!(r.externalModel && r.externalModel.inputMode !== "single" && dep === "concept")) {
+        // A surface receipt also preserves UV-only checkpoints. Never pass those as rig sources.
+        const artifacts = r.step === "rig" && r.rigSource === "surface" && dep === "surface"
+          ? selected.candidate.artifacts.filter(a => a.kind === "model" || (a.kind === "image" && a.role === "texture"))
+          : selected.candidate.artifacts;
+        inputs.push(...artifacts);
+      }
       if (r.externalModel?.inputMode === "single" && dep === "concept" &&
           selected.candidate.artifacts.filter(a => a.kind === "image").length !== 1)
         throw new Error("단일 이미지 모델링에는 채택한 원본 이미지 한 장이 필요합니다.");
@@ -859,8 +907,10 @@ export class WorkbenchEngine {
         throw new Error("기준 버전에 존재하는 오브젝트를 선택하세요.");
     }
     if (r.step === "rig") {
-      const objects = this.chosen(w, "assembly").candidate.objects ?? [];
-      if (!objects.length)
+      const source = r.baseJobId ? this.baseCandidate(w, r) : this.chosen(w, r.rigSource ?? "assembly").candidate;
+      const objects = source.objects?.length ? source.objects :
+        r.rigSource === "surface" ? [] : this.chosen(w, "assembly").candidate.objects ?? [];
+      if (!objects.length && (r.rigSource !== "surface" || r.baseJobId))
         throw new Error("조립 결과의 오브젝트 목록을 먼저 확인해야 합니다.");
       r.rigTargets ??= objects.map((o) => ({
         objectId: o.id,
@@ -1998,8 +2048,10 @@ export class WorkbenchEngine {
         );
     }
     w.selections[job.slot] = { jobId, candidateId };
+    const changedRigRoute = job.step === "assembly" && w.rigSource === "surface";
+    if (job.step === "assembly") w.rigSource = "assembly";
     for (const slot of replacedSlots) delete w.selections[slot];
-    if (changed) {
+    if (changed || changedRigRoute) {
       let again = true;
       while (again) {
         again = false;
@@ -2083,8 +2135,11 @@ export class WorkbenchEngine {
         "제출 여부가 불명확합니다. 외부 서비스에서 미제출을 확인한 뒤 새 승인을 해주세요.",
       );
     const inputs: WorkbenchArtifact[] = [];
-    for (const slot of Object.keys(job.dependencies))
-      inputs.push(...this.chosen(w, slot).candidate.artifacts);
+    for (const slot of Object.keys(job.dependencies)) {
+      const artifacts = this.chosen(w, slot).candidate.artifacts;
+      inputs.push(...(job.step === "rig" && job.request.rigSource === "surface" && slot === "surface"
+        ? artifacts.filter(a => a.kind === "model" || (a.kind === "image" && a.role === "texture")) : artifacts));
+    }
     if (job.request.baseJobId) {
       inputs.push(...this.baseCandidate(w, job.request).artifacts);
     }

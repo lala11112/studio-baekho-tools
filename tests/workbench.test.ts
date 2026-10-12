@@ -283,6 +283,59 @@ test("requested image sets and new model counts are frozen and require explicit 
   assert.equal(x.executor.calls.length, calls);
 });
 
+test("whole surface can skip assembly without a worker, persist, and freeze direct rig lineage", async (t) => {
+  const x = await setup(t);
+  await x.execute({step:"model",prompt:"whole"},true);
+  const surface = await x.execute({step:"surface",prompt:"texture"},true);
+  const before=x.engine.get(x.w.id), calls=x.executor.calls.length;
+  x.engine.action(x.project.id,{kind:"rig-source",source:"surface"});
+  assert.equal(x.executor.calls.length,calls);
+  assert.equal(x.engine.get(x.w.id).jobs.length,before.jobs.length);
+  const restored=new WorkbenchEngine(x.store,x.executor,{recoveryDelaysMs:[0,0,0]});
+  assert.equal(restored.get(x.w.id).rigSource,"surface");
+  restored.shutdown();
+  const rig=await x.execute({step:"rig",prompt:"actual rig",rigProfile:"quadruped",rigControls:{ears:true,tail:true}},true);
+  assert.equal(rig.request.rigSource,"surface");
+  assert.deepEqual(rig.request.rigTargets,[]);
+  assert.deepEqual(Object.keys(rig.dependencies),["concept","surface"]);
+  assert.equal(rig.dependencies.surface.jobId,surface.id);
+  assert(x.executor.calls.at(-1)!.inputs.some(a=>a.sha256===surface.candidates[0].artifacts.find(a=>a.kind==="model")!.sha256));
+  assert(!x.engine.get(x.w.id).jobs.some(j=>j.step==="assembly"));
+  // Selecting a correction later changes the route and invalidates only downstream choices.
+  await x.execute({step:"assembly",prompt:"later correction"},true);
+  assert.equal(x.engine.get(x.w.id).rigSource,"assembly");
+  assert(!x.engine.get(x.w.id).selections.rig);
+  assert(x.engine.get(x.w.id).jobs.some(j=>j.id===rig.id));
+});
+
+test("assembly skip rejects missing, unaccepted, parts and tampered sources before any worker", async (t) => {
+  const x=await setup(t);
+  const skip=()=>x.engine.action(x.project.id,{kind:"rig-source",source:"surface"});
+  assert.throws(skip,/채택/);
+  await x.execute({step:"model",prompt:"whole"},true);
+  const surface=await x.execute({step:"surface",prompt:"texture"});
+  assert.throws(skip,/채택/);
+  x.engine.accept(x.w.id,surface.id);
+  const calls=x.executor.calls.length;
+  fs.appendFileSync(x.store.file(x.project.id,surface.candidates[0].artifacts[0].path),"tampered");
+  assert.throws(skip);
+  assert.equal(x.executor.calls.length,calls);
+  const y=await setup(t);
+  await y.assemble();
+  assert.throws(()=>y.engine.action(y.project.id,{kind:"rig-source",source:"surface"}),/분리한 파츠/);
+});
+
+test("new surface selection invalidates direct rig while preserving its files and history",async(t)=>{
+  const x=await setup(t);
+  await x.execute({step:"model",prompt:"whole"},true);
+  await x.execute({step:"surface",prompt:"texture"},true);
+  x.engine.action(x.project.id,{kind:"rig-source",source:"surface"});
+  const rig=await x.execute({step:"rig",prompt:"rig"},true);
+  await x.execute({step:"surface",prompt:"new version"},true);
+  assert(!x.engine.get(x.w.id).selections.rig);
+  assert(fs.existsSync(x.store.file(x.project.id,rig.candidates[0].artifacts[0].path)));
+});
+
 test("whole-image modeling is the new default and proceeds to texture without a separation job", async (t) => {
   const x = await setup(t);
   const source = x.engine.get(x.w.id).selections.concept;

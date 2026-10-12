@@ -503,6 +503,7 @@ export function AssetWorkbench({
   const jobs = w?.jobs ?? [];
   const currentInputs = (job?: WorkbenchJob) =>
     !!job &&
+    (job.step !== "rig" || (job.request.rigSource ?? "assembly") === (w?.rigSource ?? "assembly")) &&
     Object.entries(job.dependencies).every(([key, value]) => {
       const current = w?.selections[key];
       if (
@@ -586,6 +587,9 @@ export function AssetWorkbench({
       ? surface
       : undefined;
   const assembly = selection("assembly");
+  const canSkipAssembly = !!surfaceForRoute && modelInput === "whole" &&
+    surfaceForRoute.candidate.artifacts.some(a => a.kind === "model" && /\.(fbx|glb)$/i.test(a.path));
+  const directRig = w?.rigSource === "surface" && canSkipAssembly;
   const rig = selection("rig");
   const reference = selection(`reference:${motion.trim()}`);
   const selectedSource = concept?.candidate.artifacts.find(
@@ -597,7 +601,7 @@ export function AssetWorkbench({
     parts: !!concept,
     surface: allModels,
     assembly: !!surfaceForRoute,
-    rig: !!assembly,
+    rig: directRig || (w?.rigSource !== "surface" && !!assembly),
     motion: !!rig,
     unity:
       !!rig &&
@@ -611,7 +615,7 @@ export function AssetWorkbench({
         ? "사용할 전체 캐릭터 모델을 선택하세요."
         : "머리·머리카락·몸통의 모델을 각각 선택하세요.",
     assembly: "먼저 UV·텍스처 결과를 채택하세요.",
-    rig: "먼저 조립된 모델의 버전을 채택하세요.",
+    rig: "조립·보정본을 채택하거나 단일 모델에서 ‘보정 없이 리깅으로’를 선택하세요.",
     motion: "먼저 리깅 결과를 채택하세요.",
     unity: "먼저 리깅과 3D 애니메이션 결과를 채택하세요.",
   };
@@ -764,7 +768,7 @@ export function AssetWorkbench({
   const viewingAccepted = !!viewing && selectedHere?.job.id === viewing.id;
   const sourceObjects =
     (page === "rig"
-      ? assembly?.candidate
+      ? (editBase?.candidates[0] ?? (directRig ? surfaceForRoute?.candidate : assembly?.candidate))
       : (editBase?.candidates[0] ?? assembly?.candidate)
     )?.objects ?? [];
   const paid = [
@@ -2246,6 +2250,14 @@ export function AssetWorkbench({
             )}
             {page === "assembly" && (
               <>
+                {canSkipAssembly && <div className="wb-note" data-testid="workbench-optional-assembly">
+                  <p>이미 완성된 단일 모델이라면 조립·보정을 생략할 수 있습니다. 채택한 UV·텍스처 원본을 그대로 리깅에 사용합니다.</p>
+                  <button data-testid="workbench-skip-assembly" disabled={locked} onClick={async () => {
+                    await action({ kind: "rig-source", source: "surface" });
+                    setViewJobId(""); setPage("rig");
+                  }}>보정 없이 리깅으로</button>
+                  <p className="wb-muted">단계 이동에는 GPT 호출이나 추가 생성 비용이 없습니다. 리깅은 다음 화면에서 직접 실행합니다.</p>
+                </div>}
                 <p>
                   Blender + Astra가 원본의 비율과 실루엣에 맞춰 조립합니다.
                   명령을 더하며 계속 수정할 수 있습니다.
@@ -2317,6 +2329,12 @@ export function AssetWorkbench({
             )}
             {page === "rig" && (
               <>
+                {directRig && <div className="wb-note" data-testid="workbench-direct-rig-source">
+                  채택한 UV·텍스처 모델 사용 · 조립·보정 생략
+                  <p>원본 FBX와 텍스처를 리깅할 때 Blender로 가져옵니다. 귀·꼬리 제어는 아래에서 설정하세요.</p>
+                  <button disabled={locked} onClick={() => setPage("assembly")}>조립·보정으로 돌아가기</button>
+                  {assembly && <button disabled={locked} onClick={async () => { await action({kind:"rig-source",source:"assembly"});setViewJobId(""); }}>채택한 보정본 사용</button>}
+                </div>}
                 <p>몸체의 기본 리깅과 함께, 별도로 움직일 오브젝트를 켭니다.</p>
                 <div className="wb-note">
                   몸체 리깅 · 항상 사용
@@ -2392,6 +2410,7 @@ export function AssetWorkbench({
                   editBase ? "리깅 수정 · 리롤" : "Blender + Astra로 리깅",
                   {
                     step: "rig",
+                    rigSource: w?.rigSource ?? "assembly",
                     rigProfile,
                     rigControls: { ears: rigEars, tail: rigTail },
                     prompt:
@@ -2406,7 +2425,7 @@ export function AssetWorkbench({
                         extraRigIds.includes(o.id),
                     })),
                   },
-                  !sourceObjects.length,
+                  !sourceObjects.length && !directRig,
                 )}
               </>
             )}
@@ -2894,7 +2913,7 @@ export function AssetWorkbench({
                     : step === "separate"
                       ? `머리·머리카락·몸통의 ${requestedSeparationViews.map((v) => viewLabels[v]).join("·")} 이미지를 확인합니다. 저장된 이미지를 유지하고 빠진 방향만 추가할 수 있습니다.`
                       : step === "rig"
-                        ? "채택한 조립 모델의 실제 오브젝트를 기준으로 추가 리깅을 설정합니다."
+                        ? directRig ? "채택한 UV·텍스처 모델을 그대로 사용합니다. 체형과 귀·꼬리 제어를 설정한 뒤 리깅을 실행하세요." : "채택한 조립 모델의 실제 오브젝트를 기준으로 추가 리깅을 설정합니다."
                         : "아직 검토할 결과가 없습니다. 왼쪽에서 설정하고 실행하면 결과가 여기에 표시됩니다."}
                 </p>
               </div>
@@ -2948,7 +2967,7 @@ export function AssetWorkbench({
                 </>
               )}
             {page === "surface" && nextButton("assembly")}
-            {page === "assembly" && nextButton("rig", "조립 완료 · 리깅으로")}
+            {page === "assembly" && nextButton("rig", directRig ? "보정 생략 · 리깅으로" : "조립 완료 · 리깅으로")}
             {page === "rig" && nextButton("motion")}
             {page === "motion" && motionMode === "reference" && (
               <div className="wb-next">

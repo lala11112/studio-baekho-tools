@@ -2669,6 +2669,28 @@ test("whole character surface performs only whole UV and texture operations", as
   assert(executor.hasConfirmedSubmission(f.context.job));
   fs.rmSync(f.root, { recursive: true, force: true });
 });
+test("direct surface rig uses Astra native import while rig revisions keep the accepted blend",async()=>{
+  const f=fixture("rig"),worker=new Worker();
+  f.context.job.request.rigSource="surface";
+  try {
+    const executor=new CodexWorkbenchExecutor(worker,f.services);
+    await executor.execute(f.context,()=>{});
+    assert.equal(worker.calls.length,1);
+    assert.equal(worker.calls[0].requestedModel,"gpt-6-astra");
+    assert.match(worker.calls[0].prompt,/Import the selected WHOLE textured native FBX/);
+    assert.match(worker.calls[0].prompt,/Never import the UV-only export checkpoint/);
+    assert.match(worker.calls[0].prompt,/Do not assemble, remesh, refine shape/);
+    const revision=fixture("rig"),revisionWorker=new Worker();
+    try {
+      revision.context.job.request.rigSource="surface";
+      revision.context.job.request.baseJobId="prior-rig";
+      await new CodexWorkbenchExecutor(revisionWorker,revision.services).execute(revision.context,()=>{});
+      assert.match(revisionWorker.calls[0].prompt,/prior accepted rig .blend, never reimport/);
+      assert(!revisionWorker.calls[0].prompt.includes("Assembly/correction was explicitly skipped"));
+    }finally{fs.rmSync(revision.root,{recursive:true,force:true});}
+  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
 test("whole character assembly refines the selected character with Astra without inventing three input parts", async () => {
   const f = fixture("assembly"),
     worker = new Worker();

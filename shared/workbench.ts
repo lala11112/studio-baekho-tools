@@ -94,6 +94,8 @@ export type WorkbenchRequest = {
   modelEditTarget?: string;
   objectIds?: string[];
   rigTargets?: WorkbenchRigTarget[];
+  /** Frozen input route; omitted legacy jobs use the accepted assembly. */
+  rigSource?: "assembly" | "surface";
   /** Anatomical controls are independent of optional clothing/hair object bones. */
   rigProfile?: "automatic" | "quadruped";
   rigControls?: { ears: boolean; tail: boolean };
@@ -191,6 +193,7 @@ export type Workbench = {
   updatedAt: string;
   jobs: WorkbenchJob[];
   selections: Record<string, WorkbenchSelection>;
+  rigSource?: "assembly" | "surface";
   activeJobId?: string;
   message: string;
 };
@@ -253,6 +256,7 @@ export type WorkbenchRuntimeApproval = {
 };
 export type WorkbenchRuntimeAnswer = {accepted:boolean;values:Record<string,string>};
 export type WorkbenchAction =
+  | { kind: "rig-source"; source: "assembly" | "surface" }
   | {kind:"external-repair-approval";jobId:string}
   | {kind:"external-recover";jobId:string}
   | {kind:"external-approval";jobId:string;approvalId:string;answer:WorkbenchRuntimeAnswer}

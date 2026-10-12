@@ -1,0 +1,27 @@
+// Upgrade only while idle; select the optional route through the real app. No rig submission.
+import {_electron as electron,chromium} from 'playwright';
+import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+const data=path.join(process.env.APPDATA,'partsmith'),project='c73ee321-703d-4ad5-a595-364c1b8d6c88',bench='fa6cdada-1e5b-4298-8880-6ac5af24aef9';
+const journal=path.join(data,'workbench-chrome-journals',bench,'3f65e6b3-6adb-465d-a9fd-f65d31ec8f0b.json');
+const sha=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex'),journalHash=sha(journal);
+const browser=await chromium.connectOverCDP('http://127.0.0.1:'+fs.readFileSync(path.join(data,'DevToolsActivePort'),'utf8').split('\n')[0]);
+const old=browser.contexts()[0].pages().find(p=>p.url().includes('index.html'));
+const state=await old.evaluate(()=>window.desktop.call({type:'state'}));
+assert(!state.workbenches.some(w=>w.activeJobId||w.jobs.some(j=>j.status==='running')));
+const before=state.workbenches.find(w=>w.id===bench);assert(before.selections.surface);assert(!before.jobs.some(j=>j.step==='rig'));
+await old.close();await browser.close();
+const app=await electron.launch({executablePath:path.resolve('release/0.6.34/win-unpacked/Partsmith.exe')});
+const page=await app.firstWindow();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+await page.locator(`[data-project-id="${project}"]`).getByTestId('project-open').click();
+await page.getByTestId('workbench-step-assembly').click();
+await page.getByTestId('workbench-skip-assembly').click();
+await page.getByTestId('workbench-direct-rig-source').waitFor();
+assert(await page.getByTestId('workbench-execute-rig').isEnabled());
+const after=(await page.evaluate(()=>window.desktop.call({type:'state'}))).workbenches.find(w=>w.id===bench);
+assert.equal(after.rigSource,'surface');assert(!after.activeJobId);
+assert.deepEqual(after.jobs,before.jobs);assert.deepEqual(after.selections,before.selections);assert.equal(sha(journal),journalHash);assert.deepEqual(errors,[]);
+await page.screenshot({path:'artifacts/runtime/0.6.34-live-rig-settings.png',fullPage:true});
+fs.writeFileSync('artifacts/runtime/0.6.34-live-skip.json',JSON.stringify({version:'0.6.34',project,bench,rigSource:after.rigSource,jobsUnchanged:true,selectionsUnchanged:true,journalHash,workerStarted:false,errors},null,2));
+console.log('Live 0.6.34 app skip verified. Rig settings open; no generation/rig worker started.');
+await new Promise(resolve=>app.on('close',resolve));
