@@ -3,6 +3,7 @@ import {
   Box,
   ChevronRight,
   Check,
+  Download,
   FilePlus2,
   FolderOpen,
   FolderInput,
@@ -51,6 +52,7 @@ type Props = {
   busy: boolean;
   onAction: (action: GraphicsAction) => Promise<unknown>;
   onOpenSettings?: () => void;
+  onExportProject?: () => void;
 };
 const usesModelMultiview = (
   taskId: string,
@@ -433,6 +435,7 @@ export function GraphicsStudio({
   busy,
   onAction,
   onOpenSettings,
+  onExportProject,
 }: Props) {
   const [objectId, setObjectId] = useState("");
   const [newName, setNewName] = useState("");
@@ -845,7 +848,6 @@ export function GraphicsStudio({
     <section className="graphics-studio" data-testid="graphics-studio">
       <header className="gs-header">
         <div>
-          <span className="gs-eyebrow">UNITY · PC GRAPHICS</span>
           <h1>Unity 오브젝트 제작실</h1>
           <p>
             {project.name} <ChevronRight size={13} />{" "}
@@ -853,7 +855,16 @@ export function GraphicsStudio({
           </p>
         </div>
         <div className="gs-header-actions">
-          <span className="gs-tag">특징 선택 → 이미지 확인 → 3D 제작</span>
+          {onExportProject && (
+            <button
+              aria-label="프로젝트 백업"
+              title="프로젝트 백업"
+              disabled={disabled}
+              onClick={onExportProject}
+            >
+              <Download size={14} />
+            </button>
+          )}
           {onOpenSettings && (
             <button onClick={onOpenSettings}>
               <Settings2 size={15} /> 연결 설정
@@ -892,38 +903,47 @@ export function GraphicsStudio({
             </button>
           ))}
         </div>
-        <form className="gs-create" onSubmit={createObject}>
-          <h3>오브젝트 추가</h3>
-          <label htmlFor="gs-object-name">이름</label>
-          <input
-            id="gs-object-name"
-            placeholder="예: 기사 대검"
-            value={newName}
-            onChange={(event) => setNewName(event.target.value)}
-            maxLength={100}
-          />
-          <label htmlFor="gs-object-kind">종류</label>
-          <select
-            id="gs-object-kind"
-            value={newKind}
-            onChange={(event) => setNewKind(event.target.value as GraphicsKind)}
-          >
-            {Object.entries(kinds).map(([value, label]) => (
-              <option
-                key={value}
-                value={value}
-                disabled={["sprite", "ui", "vfx"].includes(value)}
-              >
-                {label}
-                {["sprite", "ui", "vfx"].includes(value) ? " · 후속 지원" : ""}
-              </option>
-            ))}
-          </select>
-          <button type="submit" disabled={disabled || !newName.trim()}>
-            <FilePlus2 size={15} /> 오브젝트 만들기
-          </button>
-          <p>파일과 작업은 생성 후 연결합니다.</p>
-        </form>
+        <details
+          className="gs-create-disclosure"
+          open={!workspace?.objects.length}
+        >
+          <summary>오브젝트 추가</summary>
+          <form className="gs-create" onSubmit={createObject}>
+            <label htmlFor="gs-object-name">이름</label>
+            <input
+              id="gs-object-name"
+              placeholder="예: 기사 대검"
+              value={newName}
+              onChange={(event) => setNewName(event.target.value)}
+              maxLength={100}
+            />
+            <label htmlFor="gs-object-kind">종류</label>
+            <select
+              id="gs-object-kind"
+              value={newKind}
+              onChange={(event) =>
+                setNewKind(event.target.value as GraphicsKind)
+              }
+            >
+              {Object.entries(kinds).map(([value, label]) => (
+                <option
+                  key={value}
+                  value={value}
+                  disabled={["sprite", "ui", "vfx"].includes(value)}
+                >
+                  {label}
+                  {["sprite", "ui", "vfx"].includes(value)
+                    ? " · 후속 지원"
+                    : ""}
+                </option>
+              ))}
+            </select>
+            <button type="submit" disabled={disabled || !newName.trim()}>
+              <FilePlus2 size={15} /> 오브젝트 만들기
+            </button>
+            <p>파일과 작업은 생성 후 연결합니다.</p>
+          </form>
+        </details>
         <button
           className="gs-legacy"
           disabled={disabled}
@@ -977,14 +997,16 @@ export function GraphicsStudio({
               ))}
             </nav>
             <section className="gs-current-options" aria-label="현재 제작 옵션">
-              <div>
-                <strong>{object.name}</strong>
+              <details>
+                <summary>
+                  <strong>{object.name}</strong> · 선택한 특징
+                </summary>
                 <p>{summarizeCreation(creation).join(" · ")}</p>
                 <small>
                   옵션 변경과 단계 이동은 생성하지 않습니다. 이미지를 채택한 뒤
                   모델을 제작하세요.
                 </small>
-              </div>
+              </details>
               <button
                 type="button"
                 disabled={disabled}

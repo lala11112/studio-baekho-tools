@@ -547,7 +547,7 @@ export function App() {
         )}
         {p && tab !== "home" && tab !== "settings" && (
           <>
-            <div className="stage-heading">
+            {tab !== "graphics" && <div className="stage-heading">
               <div>
                 <span className="eyebrow">
                   {String(steps.findIndex((s) => s[0] === tab) + 1).padStart(
@@ -592,7 +592,7 @@ export function App() {
                   </button>
                 )}
               </div>
-            </div>
+            </div>}
             {tab === "graphics" && (
               <GraphicsStudio project={p} workspace={state.graphicsWorkspaces?.find(w => w.projectId === p.id)} busy={busy}
                 onAction={async action => {
@@ -600,7 +600,8 @@ export function App() {
                   if (!result) throw new Error("그래픽 요청을 완료하지 못했습니다. 표시된 오류를 확인하세요. 다음 작업은 시작하지 않았습니다.");
                   return result;
                 }}
-                onOpenSettings={() => setTab("settings")} />
+                onOpenSettings={() => setTab("settings")}
+                onExportProject={() => void run({ type: "project.export", id: p.id }, "프로젝트 백업을 저장했습니다.")} />
             )}
             {tab === "workbench" && (
               <AssetWorkbench

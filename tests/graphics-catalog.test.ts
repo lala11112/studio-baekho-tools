@@ -535,6 +535,7 @@ test(
       assert.equal(sword.accepted["model:main"], "new");
       assert.equal(result.workspace.versions.length, 3);
       assert.equal(sword.references.length, 1);
+      await page.locator(".gs-create-disclosure > summary").click();
       await page.getByLabel("이름", { exact: true }).fill("Shield");
       await page.getByLabel("종류", { exact: true }).selectOption("weapon");
       await page

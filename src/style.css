@@ -2472,45 +2472,45 @@ svg {
 
 /* Compact shell for the graphics workspace; legacy editors keep their layout. */
 .app:has(.graphics-studio) > .sidebar {
-  width: 164px;
-  padding: 16px 9px 10px;
+  width: 140px;
+  padding: 12px 7px 8px;
 }
 .app:has(.graphics-studio) .brand {
   gap: 6px;
-  padding: 0 2px 20px;
+  padding: 0 2px 12px;
 }
 .app:has(.graphics-studio) .brand > span {
-  font-size: 20px;
+  font-size: 18px;
 }
 .app:has(.graphics-studio) .brand-mark {
-  width: 26px;
-  height: 30px;
+  width: 22px;
+  height: 26px;
 }
 .app:has(.graphics-studio) .workspace-label {
-  padding: 0 5px 10px;
+  padding: 0 4px 8px;
 }
 .app:has(.graphics-studio) .nav {
-  min-height: 36px;
-  padding: 8px 7px;
-  gap: 7px;
-  font-size: 12.5px;
+  min-height: 30px;
+  padding: 6px 5px;
+  gap: 5px;
+  font-size: 12px;
 }
 .app:has(.graphics-studio) .nav-label {
-  margin: 18px 7px 8px;
+  margin: 12px 5px 6px;
 }
 .app:has(.graphics-studio) .manual-tools summary {
-  padding: 10px 6px;
+  padding: 8px 4px;
 }
 .app:has(.graphics-studio) .local-note {
-  padding: 12px 5px;
-  margin-bottom: 10px;
+  padding: 8px 4px;
+  margin-bottom: 6px;
 }
 .app:has(.graphics-studio) .version {
-  padding: 10px 6px 0;
+  padding: 7px 4px 0;
 }
 .app-body:has(> .graphics-studio) > .topbar {
-  height: 46px;
-  padding: 0 16px;
+  height: 34px;
+  padding: 0 10px;
 }
 .app-body:has(> .graphics-studio) > .stage-heading {
   min-height: 48px;
@@ -2537,7 +2537,7 @@ svg {
 }
 @media (max-width: 1050px) {
   .app:has(.graphics-studio) > .sidebar {
-    width: 148px;
+    width: 132px;
     padding-right: 6px;
     padding-left: 6px;
   }

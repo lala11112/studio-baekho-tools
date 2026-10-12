@@ -38,10 +38,11 @@ versions.push(measured('measured'),{...measured('postprocess'),sourceVersionIds:
 const task=(id,ids,date,taskId='I01',objectId='object')=>({id,objectId,taskId,createdAt:date,updatedAt:date,status:'review',inputVersionIds:[],settings:{count:2},instruction:'',requestHash:id,outputVersionIds:ids,backendJobIds:[],message:'Fixture only',localOnly:false});
 const initial={schemaVersion:1,id:'ws',projectId:'p',revision:1,objects:[{...object,settings:{faceLimit:77777}}],versions,tasks:[task('old-batch',['old-a','old-b'],'2026-10-12'),task('new-batch',['new-a','new-b'],'2026-10-13'),{...task('model-batch',['measured'],'2026-10-13','M01'),settings:{faceLimit:5000}},task('postprocess-batch',['postprocess'],'2026-10-13','T01')],deliveries:[]};
 const project={id:'p',name:'격리 후보 비교',assets:[],parts:[]};
-function Harness(){const[workspace,setWorkspace]=useState(initial);window.workspace=workspace;window.refreshFixture=()=>setWorkspace(w=>({...w,versions:[...w.versions]}));
+function Harness(){const[workspace,setWorkspace]=useState(initial),[forcedBusy,setForcedBusy]=useState(false);window.setBusyFixture=setForcedBusy;window.workspace=workspace;window.refreshFixture=()=>setWorkspace(w=>({...w,versions:[...w.versions]}));window.resetFixture=()=>setWorkspace(initial);window.exportClicks=0;
+window.compactFixture=()=>{const creation=defaultCreation('character');creation.subject='animal';creation.attributes={style:'stylized',shape:'round',legs:'four',ears:'long',tail:'short',composition:'whole'};setWorkspace({...initial,objects:[{...object,id:'compact-model',name:'흰 네발 토끼',kind:'character',creation,accepted:{'design:main':'new-a','model:main':'model'}}],versions:versions.filter(v=>['new-a','model'].includes(v.id)).map(v=>({...v,objectId:'compact-model',...(v.id==='model'?{preview:'new-a.png'}:{})})),tasks:[]});};
 window.textureFixture=kind=>{const id='texture-'+kind,creation=defaultCreation('prop'),accepted=kind==='missing'?{}:{'design:main':'old-a'};if(kind.includes('part')){creation.attributes.composition='parts';creation.parts=[{id:'head',label:'머리',enabled:true,instruction:'',faceLimit:5000,count:1}];creation.activePartId='head';if(kind==='part')accepted['design:part-head']='new-a';}setWorkspace({...initial,objects:[{...object,id,creation,accepted}],versions:versions.map(v=>({...v,objectId:id,...(kind==='part'&&v.id==='new-a'?{slot:'part-head'}:{})})),tasks:[]});};
 window.videoFixture=()=>setWorkspace({...initial,objects:[{...object,id:'video-object',accepted:{}}],versions:[version('video-a','동작 후보 1','2026-10-13','motion-reference','video-object'),version('video-b','동작 후보 2','2026-10-13','motion-reference','video-object')],tasks:[task('video-batch',['video-a','video-b'],'2026-10-13','N02','video-object')]});
-return <div className="app"><aside className="sidebar">Partsmith fixture</aside><div className="app-body"><header className="topbar">격리 UI 확인</header><GraphicsStudio project={project} workspace={workspace} busy={false} onAction={async action=>{window.actions.push(action);if(action.kind!=='accept')throw Error('Service/production actions forbidden');setWorkspace(w=>({...w,objects:w.objects.map(o=>o.id===action.objectId?{...o,accepted:{...o.accepted,'design:main':action.versionId}}:o)}));}}/></div></div>}
+return <div className="app"><aside className="sidebar"><div className="brand"><span>Partsmith</span></div><button className="nav selected">Unity 그래픽 제작</button></aside><div className="app-body"><header className="topbar">작업 공간 · 격리 UI 확인</header><GraphicsStudio project={project} workspace={workspace} busy={forcedBusy} onExportProject={()=>window.exportClicks++} onOpenSettings={()=>{}} onAction={async action=>{window.actions.push(action);if(action.kind!=='accept')throw Error('Service/production actions forbidden');setWorkspace(w=>({...w,objects:w.objects.map(o=>o.id===action.objectId?{...o,accepted:{...o.accepted,'design:main':action.versionId}}:o)}));}}/></div></div>}
 createRoot(document.getElementById('root')).render(<Harness/>);
 `;
 await build({
@@ -58,7 +59,7 @@ fs.writeFileSync(
 const browser = await chromium.launch({ headless: true, channel: "chrome" });
 const reports = [];
 try {
-  for (const width of [1280, 960, 853]) {
+  for (const width of [1426, 1280, 960, 853]) {
     const context = await browser.newContext({
       viewport: { width, height: 800 },
       deviceScaleFactor: 1.5,
@@ -67,6 +68,95 @@ try {
       errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(pathToFileURL(path.join(root, "index.html")).href);
+    await page.getByTestId("graphics-object-object").waitFor();
+    await page.evaluate(() => window.compactFixture());
+    await page.getByTestId("graphics-object-compact-model").waitFor();
+    await page
+      .getByRole("navigation", { name: "제작 단계" })
+      .getByRole("button", { name: "4 조립·수정", exact: true })
+      .click();
+    await page.getByTestId("graphics-version-model").click();
+    await page.locator(".gs-main").evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    const compact = await page.evaluate(() => {
+      const rect = (selector) => {
+        const r = document.querySelector(selector).getBoundingClientRect();
+        return {
+          x: r.x,
+          y: r.y,
+          width: r.width,
+          height: r.height,
+          bottom: r.bottom,
+          right: r.right,
+        };
+      };
+      return {
+        sidebar: rect(".sidebar"),
+        objectList: rect(".gs-objects"),
+        header: rect(".gs-header"),
+        topbar: rect(".topbar"),
+        stage: rect(".gs-creation-stages button"),
+        execute: rect(".gs-creation-execute"),
+        button: rect('[data-testid="graphics-prepare"]'),
+        settings: rect(".gs-instruction"),
+        result: rect(".gs-result"),
+        preview: rect(".gs-preview"),
+        font: getComputedStyle(document.querySelector(".graphics-studio"))
+          .fontSize,
+        secondary: getComputedStyle(
+          document.querySelector(".gs-creation-execute small"),
+        ).fontSize,
+        createOpen: document.querySelector(".gs-create-disclosure").open,
+        optionsOpen: document.querySelector(".gs-current-options details").open,
+        overflow:
+          document.querySelector(".gs-main").scrollWidth >
+          document.querySelector(".gs-main").clientWidth,
+      };
+    });
+    assert.equal(compact.createOpen, false);
+    assert.equal(compact.optionsOpen, false);
+    assert.equal(compact.font, "13px");
+    assert.equal(compact.secondary, "12px");
+    assert(compact.stage.height <= 32 && compact.button.height <= 32);
+    assert(compact.preview.y <= 265, JSON.stringify(compact));
+    assert(
+      compact.button.y >= 0 &&
+        compact.button.right <= width &&
+        compact.button.bottom <= 800,
+    );
+    assert.equal(compact.overflow, false);
+    if (width > 1020) {
+      assert(compact.settings.width <= 310);
+      assert(compact.result.width > compact.settings.width);
+    }
+    await page.screenshot({
+      path: path.join(root, "compact-model-" + width + ".png"),
+    });
+    await page.locator(".gs-current-options summary").click();
+    assert.equal(
+      await page
+        .locator(".gs-current-options details")
+        .evaluate((element) => element.open),
+      true,
+    );
+    await page.locator(".gs-current-options summary").click();
+    await page.locator(".gs-create-disclosure > summary").click();
+    assert(await page.getByLabel("이름", { exact: true }).isVisible());
+    await page.locator(".gs-create-disclosure > summary").click();
+    await page
+      .getByRole("button", { name: "프로젝트 백업", exact: true })
+      .click();
+    assert.equal(await page.evaluate(() => window.exportClicks), 1);
+    await page.evaluate(() => window.setBusyFixture(true));
+    assert(
+      await page
+        .getByRole("button", { name: "프로젝트 백업", exact: true })
+        .isDisabled(),
+    );
+    await page.evaluate(() => window.setBusyFixture(false));
+    assert.equal(await page.evaluate(() => window.actions.length), 0);
+    await page.evaluate(() => window.resetFixture());
     const comparison = page.getByTestId("graphics-candidate-comparison");
     await comparison.waitFor();
     assert.equal(
@@ -346,6 +436,7 @@ try {
     reports.push({
       width,
       scale: 1.5,
+      compact,
       grid,
       distinctBatches: true,
       previewOnlyBeforeAcceptance: true,
