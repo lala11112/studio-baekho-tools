@@ -3,17 +3,20 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { Store, uid } from "./store";
 import { Engine } from "./engine";
-import { findGraphicsTask, graphicsAstraTasks, graphicsVideoTasks, graphicsTripoReserved } from "../shared/graphics-catalog";
+import { findGraphicsTask, graphicsAstraTasks, graphicsVideoTasks, graphicsProceduralTasks, graphicsTripoReserved } from "../shared/graphics-catalog";
 import { getGraphicsCompatibility } from "../shared/graphics-lineage";
 import { workbenchUsage } from "../shared/workbench-usage";
 import type { Workbench } from "../shared/workbench";
 import type { Generation, Quote } from "../shared/types";
 import type { AssetVersion, GraphicsAction, GraphicsFile, GraphicsObject, GraphicsRole, GraphicsTask, GraphicsWorkspace } from "../shared/graphics";
 import { isGraphicsClipName } from "../shared/graphics";
+import { compileCreation, validateCreation } from "../shared/graphics-creation";
+import { executeGraphicsProcedural, proceduralProblem } from "./graphics-procedural";
 import { executeGraphicsNative } from "./graphics-native";
 import { executeGraphicsAstra } from "./graphics-astra";
 import { prepareGraphicsVideo } from "./graphics-video";
 import { executeGraphicsMotionSource } from "./graphics-motion-source";
+import { prepareGraphicsMotionImport } from "./graphics-motion-import";
 import { readUnityTarget, prepareUnityDelivery, inspectUnityDelivery, cancelUnityDelivery } from "./graphics-unity";
 
 const hash = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
@@ -21,12 +24,25 @@ const now = () => new Date().toISOString();
 const image = /\.(png|jpe?g|webp)$/i;
 const model = /\.(blend|fbx|glb|obj|stl)$/i;
 const API = new Set(["M01", "M02", "M03", "M10", "T01", "T03"]);
+const BATCH = new Set(['M04', 'M15', 'N02', 'N04', 'N05', 'N06']);
+function candidateTasks(task: GraphicsTask): GraphicsTask[] {
+  const count = Number(task.settings.count ?? 1);
+  if (!BATCH.has(task.taskId) || count <= 1) return [task];
+  return Array.from({ length: count }, (_, index) => {
+    const settings = { ...task.settings, count: 1, variationSeed: index + 1 };
+    const requestHash = hash(JSON.stringify({ parent: task.requestHash, candidate: index + 1, settings }));
+    return { ...task, id: `${task.id}-c${index + 1}`, settings, requestHash,
+      ...(task.paidApproval ? { paidApproval: { ...task.paidApproval, requestHash, credits: task.paidApproval.credits / count } } : {}) };
+  });
+}
 type Options = {
   resources: string;
+  ffmpegPath?: string;
   native?: typeof executeGraphicsNative;
   astra?: typeof executeGraphicsNative;
   video?: typeof executeGraphicsNative;
   motionSource?: typeof executeGraphicsNative;
+  procedural?: typeof executeGraphicsNative;
   prepareUnity?: typeof prepareUnityDelivery;
   legacyActive?: (id: string) => boolean;
   probe?: () => Promise<NonNullable<GraphicsWorkspace["connections"]>>;
@@ -91,7 +107,8 @@ export class GraphicsEngine {
     return result;
   }
   private selected(w: GraphicsWorkspace, o: GraphicsObject, role: GraphicsRole) {
-    return w.versions.find(v => v.id === o.accepted[`${role}:main`]);
+    const slot = o.settings.partId && ['design', 'model', 'material'].includes(role) ? `part-${o.settings.partId}` : 'main';
+    return w.versions.find(v => v.id === o.accepted[`${role}:${slot}`] && v.objectId === o.id && v.role === role && v.slot === slot);
   }
   private inputs(w: GraphicsWorkspace, o: GraphicsObject, taskId: string): AssetVersion[] {
     const refs = [...new Set(o.references.map(r => r.versionId))].map(id => w.versions.find(v => v.id === id)).filter((v): v is AssetVersion => !!v);
@@ -104,17 +121,36 @@ export class GraphicsEngine {
     let values: AssetVersion[] = [];
     if (taskId === "I01") values = refs;
     else if (["I02", "I06"].includes(taskId)) { if (!refs.length) throw Error("참고 자료를 먼저 연결하세요."); values = refs; }
-    else if (["I03", "I05", "I07", "M01"].includes(taskId)) { if (!design) throw Error("사용할 이미지 버전을 먼저 채택하세요."); values = [design, ...(["I05", "I07"].includes(taskId) ? refs : [])]; }
+    else if (taskId === 'I08') {
+      const whole = w.versions.find(v => v.id === o.accepted['design:main'] && v.objectId === o.id && v.role === 'design');
+      if (!whole || !o.settings.partId) throw Error('전체 디자인을 채택하고 제작할 파츠를 선택하세요.'); values = [whole];
+    }
+    else if (["I03", "I05", "I07", "M01", 'M04', 'M15'].includes(taskId)) {
+      if (!design) throw Error("사용할 이미지 버전을 먼저 채택하세요."); values = [design, ...(["I05", "I07", 'M15'].includes(taskId) ? refs : [])];
+      if (taskId === 'M15' && o.settings.inputMode === 'multiview') {
+        const views = ['front','left','back','right'].map(direction => {
+          const version = w.versions.find(v => v.id === o.settings[`${direction}VersionId`] && v.objectId === o.id && v.role === 'design' && v.slot === design.slot);
+          if (!version || !version.files.some(f => image.test(f.path))) throw Error(`${direction} 방향의 같은 대상·파츠 원본을 지정하세요.`); return version;
+        });
+        if (new Set(views.map(v => v.id)).size !== 4) throw Error('멀티뷰는 네 방향의 서로 다른 원본이 필요합니다.');
+        values.push(...views);
+      }
+    }
     else if (taskId === "M02") {
       values = ["front", "left", "back", "right"].map(direction => {
         const v = w.versions.find(v => v.id === o.settings[`${direction}VersionId`]);
-        if (!v || !v.files.some(f => image.test(f.path))) throw Error(`${direction} 방향의 독립 원본을 지정하세요.`);
+        if (!v || !v.files.some(f => image.test(f.path)) || o.creation && (v.objectId !== o.id || v.role !== 'design' || v.slot !== design?.slot)) throw Error(`${direction} 방향의 같은 대상·파츠 독립 원본을 지정하세요.`);
         return v;
       });
       if (new Set(values.map(v => v.id)).size !== 4) throw Error("멀티뷰는 네 방향의 서로 다른 원본이 필요합니다.");
     } else if (taskId === "M03") values = [];
-    else if (["T01", "T03", "M10"].includes(taskId)) {
+    else if (["T01", "T02", "T03", 'T05', "M10"].includes(taskId)) {
       if (!mesh) throw Error("채택한 모델이 필요합니다."); values = [mesh];
+    } else if (taskId === 'M08') {
+      const parts = o.creation?.parts.filter(part => part.enabled) ?? [];
+      if (parts.length < 2) throw Error('조립할 파츠를 두 개 이상 설정하세요.');
+      values = parts.map(part => { const v = w.versions.find(v => v.id === o.accepted[`model:part-${part.id}`] && v.objectId === o.id && v.slot === `part-${part.id}` && v.role === 'model'); if (!v) throw Error(`${part.label} 모델을 먼저 채택하세요.`); return v; });
+      const whole = w.versions.find(v => v.id === o.accepted['design:main']); if (whole) values.push(whole);
     } else if (graphicsAstraTasks.has(taskId)) {
       const source = taskId === "N06" ? acceptedClip("animation") : ["R03", "N04", "N05"].includes(taskId) ? rig : mesh;
       if (!source) throw Error(taskId === "N06" ? "수정할 클립의 애니메이션을 먼저 채택하세요." : ["R03", "N04", "N05"].includes(taskId) ? "사용할 리그를 먼저 채택하세요." : "사용할 모델을 먼저 채택하세요.");
@@ -161,6 +197,7 @@ export class GraphicsEngine {
   importFiles(id: string, objectId: string, role: GraphicsRole, sources: string[], clipName?: string) {
     const w = this.get(id), o = this.object(w, objectId);
     if (!sources.length) return w;
+    if (role === 'motion-reference') throw Error('동작 영상은 앱의 영상 가져오기에서 로컬 검사를 거쳐 등록하세요.');
     if (role === "animation") {
       if (!isGraphicsClipName(clipName))
         throw Error("애니메이션 원본의 정확한 Blender 액션 이름을 100자 이내로 입력하세요. 경로 구분자와 제어 문자는 사용할 수 없습니다.");
@@ -183,11 +220,29 @@ export class GraphicsEngine {
         this.store.write(id, rel, fs.readFileSync(source));
         return this.file(id, rel, role === "animation" ? "blend" : image.test(name) ? "image" : model.test(name) ? "model" : /\.(mp4|webm)$/i.test(name) ? "video" : "companion");
       });
-      w.versions.push({ id: versionId, objectId: o.id, role, slot: role === "animation" ? clipName! : "main", label: path.basename(group[0]), files,
+      const part = o.creation?.attributes.composition === 'parts' && o.creation.activePartId && (role === 'model' || role === 'design' && o.creation.stageSettings.design?.values.designMode === 'parts') ? o.creation.activePartId : undefined;
+      w.versions.push({ id: versionId, objectId: o.id, role, slot: role === "animation" ? clipName! : part ? `part-${part}` : "main", label: path.basename(group[0]), files,
         createdAt: now(), sourceVersionIds: [], provenance: { type: "import" }, warnings: [],
         preview: files.find(f => image.test(f.path))?.path });
     }
     return this.save(w);
+  }
+  async importMotionFile(id: string, objectId: string, source: string, clipName: string) {
+    const o = this.object(this.get(id), objectId);
+    if (!isGraphicsClipName(clipName) || !/\.(mp4|webm)$/i.test(source) || !fs.statSync(source).isFile()) throw Error('클립 이름과 MP4/WebM 동작 원본 한 개를 확인하세요.');
+    if (this.isActive(id) || this.engine.isProjectActive(id)) throw Error('현재 작업이 끝난 뒤 동작 영상을 가져오세요.');
+    if (!this.options.ffmpegPath) throw Error('앱의 영상 해독 도구를 찾을 수 없습니다.');
+    if (fs.statSync(source).size > 512 * 1024 ** 2) throw Error('가져올 동작 참조 영상은 512 MiB 이하여야 합니다. 원본을 변경하지 않았습니다.');
+    const versionId = uid(), relative = `graphics/originals/${versionId}/${path.basename(source)}`;
+    this.store.write(id, relative, fs.readFileSync(source));
+    const controller = new AbortController(); this.active.set(versionId, { projectId:id, controller });
+    try {
+      const imported = await prepareGraphicsMotionImport({ projectRoot:this.store.directory(id), source:this.file(id,relative,'video'), versionId, clipName, ffmpegPath:this.options.ffmpegPath, signal:controller.signal });
+      controller.signal.throwIfAborted();
+      const w = this.get(id);
+      w.versions.push({ id:versionId,objectId:o.id,role:'motion-reference',slot:imported.slot,label:imported.label,files:imported.files,preview:imported.preview,warnings:imported.warnings,createdAt:now(),sourceVersionIds:[],provenance:{type:'import'} });
+      return this.save(w);
+    } finally { this.active.delete(versionId); }
   }
   async action(id: string, action: GraphicsAction): Promise<GraphicsWorkspace> {
     const w = this.get(id);
@@ -202,6 +257,7 @@ export class GraphicsEngine {
         const o = this.object(w, action.objectId), p = action.patch;
         if (p.name !== undefined) { if (!p.name.trim() || p.name.length > 100) throw Error("이름을 확인하세요."); o.name = p.name.trim(); }
         if (p.instruction !== undefined) { if (p.instruction.length > 12000) throw Error("지시는 12,000자 이내로 입력하세요."); o.instruction = p.instruction; }
+        if (p.creation !== undefined) o.creation = validateCreation(p.creation, o.kind);
         if (p.selectedTasks) { if (p.selectedTasks.some(id => !findGraphicsTask(id))) throw Error("등록되지 않은 작업입니다."); o.selectedTasks = [...new Set(p.selectedTasks)]; }
         if (p.references) { if (p.references.some(r => !w.versions.some(v => v.id === r.versionId) || !["appearance", "style", "motion", "dimensions"].includes(r.role))) throw Error("참고 자료 연결을 확인하세요."); o.references = p.references; }
         if (p.settings) {
@@ -255,9 +311,15 @@ export class GraphicsEngine {
     }
   }
   private prepare(id: string, objectId: string, taskId: string) {
-    const w = this.get(id), o = this.object(w, objectId), definition = findGraphicsTask(taskId);
+    const w = this.get(id), stored = this.object(w, objectId), definition = findGraphicsTask(taskId);
+    const compiled = stored.creation ? compileCreation(stored, taskId) : undefined;
+    const o = compiled ? { ...stored, settings: compiled.settings, instruction: compiled.instruction, creation: compiled.spec } : stored;
     if (!definition || definition.status === "planned") throw Error(definition?.reason ?? "등록되지 않은 작업입니다.");
     if (["A01", "A02", "A03"].includes(taskId)) throw Error("자료 가져오기·대상 추가·참고 연결 버튼을 사용하세요.");
+    if (compiled && ['sprite', 'ui', 'vfx'].includes(o.kind)) throw Error('2D·게임 UI·이펙트는 이번 3D 제작 범위 밖입니다. 기존 자료는 보존됩니다.');
+    if (compiled && taskId.startsWith('R') && o.settings.rigType === 'none') throw Error('리깅 없음이 선택돼 있습니다. 다음 단계로 이동하거나 리그 유형을 선택하세요.');
+    if (compiled && ['M01','M02','M04','M15'].includes(taskId) && o.creation?.attributes.composition === 'parts' && !o.settings.partId) throw Error('파츠별 제작에서는 제작할 파츠와 해당 채택 이미지를 선택하세요.');
+    if (graphicsProceduralTasks.has(taskId)) { const problem = proceduralProblem({ ...o.settings, count: 1 }, taskId); if (problem) throw Error(problem); }
     if (w.tasks.some(t => t.objectId === o.id && ["awaiting_approval", "running", "submission_unknown"].includes(t.status))) throw Error("이 대상의 기존 작업을 확인하거나 취소한 뒤 새 작업을 준비하세요.");
     const inputs = this.inputs(w, o, taskId);
     const count = Number(o.settings.count ?? 1);
@@ -274,7 +336,7 @@ export class GraphicsEngine {
       if (issues.length) throw Error(issues.join(" · "));
     }
     const snapshot = { taskId, objectId, inputVersionIds: inputs.map(v => v.id), settings: { ...o.settings }, instruction: o.instruction };
-    if (graphicsAstraTasks.has(taskId)) snapshot.settings.sourceVersionId = inputs[0].id;
+    if (graphicsAstraTasks.has(taskId) && taskId !== 'M08') snapshot.settings.sourceVersionId = inputs[0].id;
     if (taskId === "N06" && inputs[0].provenance.type === "import") {
       if (inputs[0].role !== "animation" || inputs[0].slot !== snapshot.settings.clipName || !inputs[0].files.some(file => /\.blend$/i.test(file.path)))
         throw Error("가져온 애니메이션의 원래 클립 이름과 편집 가능한 .blend 원본을 확인하세요.");
@@ -282,18 +344,19 @@ export class GraphicsEngine {
         throw Error("가져온 애니메이션 수정은 등록한 원래 액션 이름과 같아야 합니다.");
       snapshot.settings.actionName = inputs[0].slot;
     }
-    if (["M01", "M02", "M03"].includes(taskId)) snapshot.settings.model = "P2-20260801";
-    if (!["I01", "I02", "I03", "I05", "I06", "I07", "M01", "M02", "M03"].includes(taskId)) snapshot.settings.count = 1;
+    if (["M01", "M02", "M03"].includes(taskId)) snapshot.settings.model ??= "P2-20260801";
+    if (!["I01", "I02", "I03", "I05", "I06", "I07", 'I08', "M01", "M02", "M03", 'M04', 'M15', 'T03', 'N02', 'N04', 'N05', 'N06'].includes(taskId)) snapshot.settings.count = 1;
     if (taskId === "N02") snapshot.settings.motionSourceView ??= "left";
     const t: GraphicsTask = { ...snapshot, id: uid(), createdAt: now(), updatedAt: now(), status: "awaiting_approval", requestHash: hash(JSON.stringify(snapshot)), outputVersionIds: [], backendJobIds: [], localOnly: definition.executor === "local", message: "요청을 저장했습니다. 실행 전까지 작업자·유료 서비스 호출은 없습니다." };
-    t.objectSnapshot = { name: o.name, kind: o.kind, references: structuredClone(o.references), accepted: structuredClone(o.accepted) };
+    t.objectSnapshot = { name: o.name, kind: o.kind, references: structuredClone(o.references), accepted: structuredClone(o.accepted), ...(o.creation ? { creation: structuredClone(o.creation) } : {}) };
     if (taskId === "X05") t.targetProfile = structuredClone(w.target);
     t.requestHash = hash(JSON.stringify({ ...snapshot, object: t.objectSnapshot, target: t.targetProfile }));
     if (API.has(taskId)) {
       const q = this.apiQuote(w, o, t, inputs); t.quoteId = q.id;
       t.cost = { provider: "Tripo API", credits: q.estimatedCredits, basis: q.costSource, expiresAt: q.expiresAt };
     } else if (graphicsVideoTasks.has(taskId)) {
-      t.cost = prepareGraphicsVideo({ projectRoot: this.store.directory(id), object: { ...o, settings: t.settings }, task: t, inputs }).cost;
+      const unit = prepareGraphicsVideo({ projectRoot: this.store.directory(id), object: { ...o, settings: t.settings }, task: { ...t, settings: { ...t.settings, count: 1 } }, inputs }).cost;
+      t.cost = { ...unit, credits: unit.credits * count, basis: `${unit.basis} · 독립 후보 ${count}개 합계 ${unit.credits * count}크레딧` };
     } else t.cost = { provider: t.localOnly ? "로컬" : "Codex", credits: t.localOnly ? 0 : null, basis: t.localOnly ? "로컬 처리 · GPT 요청 0회" : graphicsAstraTasks.has(taskId) ? "Blender + gpt-6-astra · Codex 계정 사용량. 저장 결과 복구·파일 변환은 새 GPT 요청 없이 처리합니다." : "Codex 계정 사용량을 사용합니다. 비교 가능한 실측이 없어 예상 토큰 수를 표시하지 않습니다." };
     w.tasks.push(t); return this.save(w);
   }
@@ -309,10 +372,12 @@ export class GraphicsEngine {
     };
     let request: Generation, unit: number;
     if (["M01", "M02", "M03"].includes(t.taskId)) {
-      request = { kind: "model", prompt: t.instruction, model: "P2-20260801", count: Number(t.settings.count), faceLimit: Number(t.settings.faceLimit ?? 10000), quad: t.settings.quad !== false, texture: false, inputMode: t.taskId === "M03" ? "text" : t.taskId === "M02" ? "multiview" : "image" };
+      const version = String(t.settings.model ?? 'P2-20260801');
+      if (!['P2-20260801','P1-20260311','v3.1-20260211'].includes(version)) throw Error('지원되는 Tripo 제작 모델을 선택하세요.');
+      request = { kind: "model", prompt: t.instruction, model: version, count: Number(t.settings.count), faceLimit: Number(t.settings.faceLimit ?? 10000), quad: t.settings.quad !== false, texture: false, inputMode: t.taskId === "M03" ? "text" : t.taskId === "M02" ? "multiview" : "image" };
       if (t.taskId === "M01") request.sourceId = alias(inputs[0], true);
       if (t.taskId === "M02") request.sourceIds = inputs.map(v => alias(v, true));
-      unit = 100;
+      unit = version === 'P2-20260801' ? 100 : version === 'P1-20260311' ? (t.taskId === 'M03' ? 30 : 40) : (t.taskId === 'M03' ? 10 : 20) + (request.quad ? 5 : 0);
     } else if (t.taskId === "T01") {
       request = { kind: "smart-uv", model: "default", prompt: "", count: 1, sourceId: alias(inputs[0], false), bake: true }; unit = 20;
     } else if (t.taskId === "M10") {
@@ -320,7 +385,7 @@ export class GraphicsEngine {
     } else {
       const resolution = Number(t.settings.textureSize ?? 4096);
       if (![2048, 4096, 8192].includes(resolution)) throw Error("텍스처 해상도는 2048/4096/8192 중 선택하세요.");
-      request = { kind: "texture", model: "v3.5-20260815", prompt: t.instruction, count: 1, sourceId: alias(inputs[0], false), textureQuality: resolution === 8192 ? "extreme" : resolution === 4096 ? "detailed" : "standard", pbr: true }; unit = resolution === 8192 ? 30 : resolution === 4096 ? 20 : 10;
+      request = { kind: "texture", model: "v3.5-20260815", prompt: t.instruction, count: Number(t.settings.count ?? 1), sourceId: alias(inputs[0], false), textureQuality: resolution === 8192 ? "extreme" : resolution === 4096 ? "detailed" : "standard", pbr: true }; unit = resolution === 8192 ? 30 : resolution === 4096 ? 20 : 10;
     }
     this.store.save(p);
     const q = this.engine.quote(w.projectId, request);
@@ -398,6 +463,13 @@ export class GraphicsEngine {
     }).finally(() => this.active.delete(taskId));
   }
   private savedNativeUsage(id: string, taskId: string): unknown {
+    const task = this.get(id).tasks.find(t => t.id === taskId);
+    if (task && candidateTasks(task).length > 1) {
+      const values = candidateTasks(task).map(child => this.savedNativeUsage(id, child.id));
+      const records = values.filter((v): v is { input_tokens: number; cached_input_tokens: number; output_tokens: number } => !!v && typeof v === 'object' && ['input_tokens','cached_input_tokens','output_tokens'].every(k => Number.isSafeInteger((v as Record<string,unknown>)[k])));
+      if (!records.length) return undefined;
+      return { ...records.reduce((sum, r) => ({ input_tokens: sum.input_tokens + r.input_tokens, cached_input_tokens: sum.cached_input_tokens + r.cached_input_tokens, output_tokens: sum.output_tokens + r.output_tokens }), { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 }), measuredCandidates: records.length, totalCandidates: values.length, incomplete: records.length !== values.length };
+    }
     for (const relative of [`graphics/jobs/${taskId}/usage.json`, `graphics/jobs/${taskId}/astra/usage.json`]) {
       const file = this.store.file(id, relative);
       try { if (fs.statSync(file).size <= 65536) return JSON.parse(fs.readFileSync(file, "utf8")); } catch { /* Missing metadata is unknown, not zero usage. */ }
@@ -418,17 +490,57 @@ export class GraphicsEngine {
       current.message = delivery.errors.length ? delivery.errors.join(" · ") : delivery.status === "imported" ? "동일한 Unity 전달본을 재사용했습니다. 새 생성·재생은 없습니다." : "Unity 가져오기 요청을 저장했습니다. 연결된 Editor가 열리면 처리합니다. 재생은 실행하지 않습니다.";
       current.outputVersionIds = []; this.save(w); return;
     }
-    const executor = t.taskId === "N01" ? this.options.motionSource ?? executeGraphicsMotionSource : graphicsAstraTasks.has(t.taskId) ? this.astra : graphicsVideoTasks.has(t.taskId) ? this.options.video! : this.native;
-    const result = await executor({ projectRoot: this.store.directory(id), workspacePath: this.store.file(id, "graphics/workspace.json"), object: { ...o, settings: t.settings, instruction: t.instruction }, task: t, inputs, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal, recoveryOnly,
-      onProgress: message => { const latest = this.get(id), task = latest.tasks.find(x => x.id === taskId)!; if (task.status === "running") { task.message = message; task.updatedAt = now(); this.save(latest); } } });
-    if (signal.aborted) return;
+    const executor = graphicsProceduralTasks.has(t.taskId) ? this.options.procedural ?? executeGraphicsProcedural : t.taskId === "N01" ? this.options.motionSource ?? executeGraphicsMotionSource : graphicsAstraTasks.has(t.taskId) ? this.astra : graphicsVideoTasks.has(t.taskId) ? this.options.video! : this.native;
+    const executions = candidateTasks(t);
+    const executeCandidate = async (child: GraphicsTask, candidateIndex: number) => {
+      signal.throwIfAborted();
+      w = this.get(id);
+      if (w.tasks.find(x => x.id === taskId)!.completedExecutions?.includes(child.id)) {
+        const existing = w.versions.filter(v => v.provenance.jobId === child.id);
+        if (!existing.length) throw Error('완료 후보의 등록 기록이 없습니다. 재생성하지 않습니다.');
+        for (const version of existing) for (const file of version.files) this.verified(id, file);
+        return;
+      }
+      const result = await executor({ projectRoot: this.store.directory(id), workspacePath: this.store.file(id, "graphics/workspace.json"), object: { ...o, settings: child.settings, instruction: t.instruction }, task: child, inputs, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal, recoveryOnly,
+        onProgress: message => { const latest = this.get(id), task = latest.tasks.find(x => x.id === taskId)!; if (task.status === "running") { task.message = `${executions.length > 1 ? `후보 ${candidateIndex + 1}/${executions.length} · ` : ''}${message}`; task.updatedAt = now(); this.save(latest); } } });
+      if (signal.aborted) return;
+      w = this.get(id); const current = w.tasks.find(x => x.id === taskId)!;
+      const files = result.files.map(f => this.file(id, f.path, f.kind));
+      const groups = result.candidates ?? (["I01", "I02", "I03", "I05", "I06", "I07", "I08"].includes(t.taskId)
+        ? files.filter(f => image.test(f.path)).map(f => ({ files: [f], role: result.role, slot: result.slot, label: result.imageCandidates?.find(c => c.path === f.path)?.label ?? result.label, warnings: result.warnings }))
+        : [{ files, role: result.role, slot: result.slot, label: result.label, warnings: result.warnings }]);
+      if (!groups.length || groups.some(g => !g.files.length)) throw Error("등록할 원본 결과가 없습니다.");
+      const versions = groups.map((group): AssetVersion => {
+        const verified = group.files.map(f => this.file(id, f.path, f.kind));
+        return { id: uid(), objectId: o.id, role: group.role, slot: t.settings.partId && ['design','model','material'].includes(group.role) ? `part-${t.settings.partId}` : group.slot,
+          label: `${group.label}${executions.length > 1 ? ` · 후보 ${candidateIndex + 1}` : ''}`, files: verified, createdAt: now(), sourceVersionIds: t.inputVersionIds,
+          provenance: { type: t.localOnly ? "local" : graphicsVideoTasks.has(t.taskId) ? "runway" : "codex", jobId: child.id },
+          preview: group.role === "motion-reference" ? verified.find(f => /\.(mp4|webm)$/i.test(f.path))?.path : verified.find(f => image.test(f.path))?.path, warnings: group.warnings };
+      });
+      w.versions.push(...versions); current.outputVersionIds.push(...versions.map(v => v.id));
+      current.completedExecutions = [...(current.completedExecutions ?? []), child.id];
+      current.message = `후보 ${candidateIndex + 1}/${executions.length} 원본 저장 완료. 나머지 후보 실패 시에도 이 결과는 유지됩니다.`;
+      current.updatedAt = now(); current.usage = executions.length === 1 ? result.usage : this.savedNativeUsage(id, taskId);
+      this.save(w);
+    };
+    // Separate immutable work folders and receipts allow independent candidates to overlap.
+    // On failure, finish collecting already-started candidates, but do not start additional ones.
+    let cursor = 0, failure: unknown;
+    const concurrency = graphicsVideoTasks.has(t.taskId) ? 4 : 2;
+    await Promise.all(Array.from({ length: Math.min(concurrency, executions.length) }, async () => {
+      while (cursor < executions.length && failure === undefined && !signal.aborted) {
+        const index = cursor++;
+        try { await executeCandidate(executions[index], index); } catch (error) {
+          // Any ambiguous paid submission must keep the whole batch blocked,
+          // even when an ordinary sibling failure arrived first.
+          if (failure === undefined || (error as { code?: string } | null)?.code === "submission_unknown") failure = error;
+        }
+      }
+    }));
+    signal.throwIfAborted();
+    if (failure !== undefined) throw failure;
     w = this.get(id); const current = w.tasks.find(x => x.id === taskId)!;
-    const files = result.files.map(f => this.file(id, f.path, f.kind));
-    const groups = ["I01", "I02", "I03", "I05", "I06", "I07"].includes(t.taskId) ? files.filter(f => image.test(f.path)).map(f => [f]) : [files];
-    if (!groups.length || groups.some(g => !g.length)) throw Error("등록할 원본 결과가 없습니다.");
-    const versions = groups.map((group, index): AssetVersion => ({ id: uid(), objectId: o.id, role: result.role, slot: result.slot, label: result.imageCandidates?.find(c => c.path === group[0].path)?.label ?? (groups.length > 1 ? `${result.label} ${index + 1}` : result.label), files: group, createdAt: now(), sourceVersionIds: t.inputVersionIds, provenance: { type: t.localOnly ? "local" : graphicsVideoTasks.has(t.taskId) ? "runway" : "codex", jobId: t.id }, preview: result.role === "motion-reference" ? group.find(f => /\.(mp4|webm)$/i.test(f.path))?.path : group.find(f => image.test(f.path))?.path, warnings: result.warnings }));
-    w.versions.push(...versions); current.outputVersionIds = versions.map(v => v.id); current.status = "review"; current.message = "원본을 보존해 새 결과를 등록했습니다. 확인 후 채택하세요."; current.updatedAt = now(); current.usage = result.usage;
-    this.save(w);
+    current.status = "review"; current.message = "원본을 보존해 새 결과를 등록했습니다. 확인 후 채택하세요."; current.updatedAt = now(); this.save(w);
   }
   async recover(id: string, taskId: string) {
     const w = this.get(id), t = w.tasks.find(t => t.id === taskId);
@@ -450,15 +562,21 @@ export class GraphicsEngine {
           return JSON.parse(fs.readFileSync(file, "utf8"));
         } catch { return undefined; }
       };
+      const pending = candidateTasks(t).filter(child => !t.completedExecutions?.includes(child.id));
+      const first = pending[0];
       if (graphicsVideoTasks.has(t.taskId)) {
-        const packet = readProof(`graphics/jobs/${t.id}/external-request.json`);
-        const state = readProof(`graphics/video-journal/${t.objectId}/${t.id}-state.json`);
-        const receipt = readProof(`graphics/jobs/${t.id}/external-result.json`);
-        if (packet?.jobId !== t.id || (!receipt && (typeof state?.taskId !== "string" || !/^[\w-]{1,200}$/.test(state.taskId))))
-          throw Error("기존 영상의 원격 작업 ID 또는 저장 결과가 없습니다. 복구에서 첫 업로드·유료 제출을 시작하지 않습니다.");
-      } else {
-        const relative = graphicsAstraTasks.has(t.taskId) ? `graphics/jobs/${t.id}/astra/dispatch.json` : `graphics/jobs/${t.id}/dispatch.json`;
-        if (readProof(relative)?.taskId !== t.id) throw Error("저장된 원본 생성 실행 기록이 없습니다. 복구에서 새 GPT 요청을 시작하지 않습니다.");
+        // Checking only the first child lets a later ambiguous submission enter
+        // recovery and then be downgraded to an ordinary failed task.
+        for (const child of pending) {
+          const packet = readProof(`graphics/jobs/${child.id}/external-request.json`);
+          const state = readProof(`graphics/video-journal/${t.objectId}/${child.id}-state.json`);
+          const receipt = readProof(`graphics/jobs/${child.id}/external-result.json`);
+          if (packet?.jobId !== child.id || (!receipt && (typeof state?.taskId !== "string" || !/^[\w-]{1,200}$/.test(state.taskId))))
+            throw Error("기존 영상의 원격 작업 ID 또는 저장 결과가 없습니다. 완료 후보는 유지하며 복구에서 첫 업로드·유료 제출을 시작하지 않습니다.");
+        }
+      } else if (first) {
+        const relative = graphicsAstraTasks.has(t.taskId) ? `graphics/jobs/${first.id}/astra/dispatch.json` : `graphics/jobs/${first.id}/dispatch.json`;
+        if (readProof(relative)?.taskId !== first.id) throw Error("저장된 원본 생성 실행 기록이 없습니다. 완료 후보는 유지하며 복구에서 새 GPT 요청을 시작하지 않습니다.");
       }
     }
     // Recovery explicitly forbids first dispatch even when failure happened before
@@ -496,7 +614,7 @@ export class GraphicsEngine {
                 const rels = [...new Set([a.nativeFile, a.file, ...(j.nativeFiles ?? [])].filter((r): r is string => typeof r === "string"))];
                 const files = rels.map(rel => this.file(w.projectId, rel, a.kind));
                 const label = (findGraphicsTask(t.taskId)?.name ?? a.label) + (batchAssets.length > 1 ? ` · ${batchAssets.indexOf(a) + 1}` : "");
-                const v: AssetVersion = { id: uid(), objectId: t.objectId, role: "model", slot: "main", label, files, createdAt: now(), sourceVersionIds: t.inputVersionIds, provenance: { type: "tripo", jobId: j.id, remoteId: j.remoteId }, warnings: j.message ? [j.message] : [] };
+                const v: AssetVersion = { id: uid(), objectId: t.objectId, role: "model", slot: t.settings.partId ? `part-${t.settings.partId}` : "main", label, files, createdAt: now(), sourceVersionIds: t.inputVersionIds, provenance: { type: "tripo", jobId: j.id, remoteId: j.remoteId }, warnings: j.message ? [j.message] : [] };
                 newVersions.push(v);
               }
             }
@@ -561,6 +679,7 @@ export class GraphicsEngine {
         if (API.has(task.taskId)) { apiTasks++; continue; }
         const raw = (task.usage ?? this.savedNativeUsage(entry.projectId, task.id)) as { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number } | undefined;
         if (!raw || ![raw.input_tokens, raw.cached_input_tokens, raw.output_tokens].every(n => typeof n === "number" && Number.isSafeInteger(n) && n >= 0) || raw.cached_input_tokens! > raw.input_tokens!) { usage.missingWorkers++; continue; }
+        if ((raw as { incomplete?: boolean }).incomplete) usage.missingWorkers++;
         usage.measuredWorkers++; usage.inputTokens += raw.input_tokens!; usage.cachedInputTokens += raw.cached_input_tokens!; usage.uncachedInputTokens += raw.input_tokens! - raw.cached_input_tokens!; usage.outputTokens += raw.output_tokens!;
       }
     }

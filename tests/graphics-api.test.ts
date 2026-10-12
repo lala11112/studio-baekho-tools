@@ -9,6 +9,7 @@ import { Engine } from "../engine/engine";
 import { GraphicsEngine } from "../engine/graphics";
 import type { Tripo } from "../engine/tripo";
 import type { Quote } from "../shared/types";
+import { defaultCreation } from "../shared/graphics-creation";
 
 const sha = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 function glb() {
@@ -116,6 +117,28 @@ test("P2 count two costs 200 API credits explicitly separate from Studio and sub
     assert.equal(request.body.texture, false);
   }
   assert.equal(f.calls.uploads.length, 0); assert.equal(f.calls.native, 0);
+});
+
+test("creation texture candidates quote a total and all submit before any result finishes", async t => {
+  const f = await fixture(t), creation = defaultCreation('prop');
+  creation.stageSettings.surface!.values = { surfaceMode: 'texture', textureMethod: 'tripo', textureSize: 4096, count: 4 };
+  await f.graphics.action(f.project.id, { kind: 'update-object', objectId: f.objectId, patch: { creation } });
+  const task = await f.prepare('T03'), quote = f.store.get<Quote>('quote', task.quoteId!)!;
+  assert.equal(task.cost?.credits, 80);
+  assert.equal(quote.request.count, 4);
+  assert.equal(f.calls.submits.length, 0);
+  await f.graphics.action(f.project.id, { kind: 'approve', taskId: task.id });
+  const jobs = await settled(f.store, f.project.id);
+  assert.equal(jobs.length, 4);
+  assert(jobs.every(job => job.status === 'running' && job.request.count === 1));
+  assert.equal(new Set(jobs.map(job => job.remoteId)).size, 4);
+  assert.equal(f.calls.submits.length, 4);
+  assert.equal(f.calls.polls.length, 0);
+  assert.equal(f.calls.native, 0);
+  assert(jobs.every(job => job.request.sourceId === quote.request.sourceId));
+  await assert.rejects(f.graphics.action(f.project.id, { kind: 'approve', taskId: task.id }));
+  assert.equal(f.calls.submits.length, 4);
+  assert.throws(() => f.engine.quote(f.project.id, { kind: 'smart-uv', model: 'default', prompt: '', count: 2, sourceId: quote.request.sourceId, bake: true }), /한 번씩/);
 });
 
 test("API polling and original download register review without GPT, duplicate download or new submission", async t => {

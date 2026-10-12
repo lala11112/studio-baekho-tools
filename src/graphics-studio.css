@@ -10,8 +10,163 @@
   min-height: 100%;
   color: #e7eee8;
   background: var(--gs-bg);
-  font-size: 13px;
+  font-size: 16px;
   line-height: 1.55;
+}
+
+/* Creation choices describe the object; execution details remain secondary. */
+.gs-creation-stages {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 16px;
+}
+.graphics-studio .gs-creation-stages button {
+  flex-direction: column;
+  min-height: 68px;
+  padding: 9px 5px;
+  font-size: 14px;
+}
+.gs-creation-stages button > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--gs-border);
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  font-size: 14px;
+}
+.graphics-studio .gs-creation-stages button[aria-current="step"] {
+  background: #354b37;
+  color: #e2f2d8;
+  border-color: #adc892;
+}
+.gs-current-options {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  padding: 16px 20px;
+  border: 1px solid #476147;
+  border-radius: 10px;
+  background: #213126;
+  margin-bottom: 12px;
+}
+.gs-current-options p {
+  color: #d8e6d2;
+}
+.gs-current-options button {
+  flex: 0 0 auto;
+}
+.gs-creation-execute {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  background: #17251f;
+  border: 1px solid #597055;
+  box-shadow: 0 8px 20px #08120c50;
+  border-radius: 10px;
+  margin-bottom: 18px;
+}
+.gs-creation-execute > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gs-creation-execute > button {
+  min-height: 48px;
+  flex: 0 0 auto;
+}
+.gs-creation-options {
+  display: grid;
+  gap: 17px;
+  margin-bottom: 22px;
+}
+.gs-choice {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.gs-choice legend {
+  color: #c8d9c7;
+  margin-bottom: 8px;
+  font-size: 16px;
+}
+.gs-choice > div {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.gs-choice button {
+  min-height: 42px;
+}
+.graphics-studio .gs-choice button[aria-pressed="true"],
+.graphics-studio .gs-part button[aria-pressed="true"] {
+  color: #eef8e7;
+  background: #3b5439;
+  border-color: #a8c58e;
+}
+.gs-creation-options details .gs-choice {
+  margin-top: 17px;
+}
+.gs-lock-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.gs-lock-options label,
+.gs-part > label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gs-parts {
+  border: 1px solid var(--gs-border);
+  padding: 14px;
+  border-radius: 8px;
+}
+.gs-part {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  margin-top: 12px;
+  border-top: 1px solid var(--gs-border);
+  padding-top: 12px;
+}
+.gs-part > label:not(:first-child),
+.gs-part > .gs-settings-grid {
+  grid-column: 1 / -1;
+}
+.gs-reference-thumb {
+  width: 80px;
+  height: 80px;
+  object-fit: contain;
+  background: #111916;
+  border-radius: 5px;
+  flex: 0 0 auto;
+}
+.gs-reference-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--gs-border);
+  border-radius: 9px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+.gs-reference-strip > div {
+  display: flex;
+  flex-direction: column;
+  margin-right: auto;
+  gap: 4px;
 }
 .graphics-studio * {
   box-sizing: border-box;
@@ -73,7 +228,7 @@
 .graphics-studio label {
   display: block;
   color: #bccbc0;
-  font-size: 12px;
+  font-size: 14px;
 }
 .graphics-studio label > input,
 .graphics-studio label > select {
@@ -93,17 +248,17 @@
   letter-spacing: -0.7px;
 }
 .graphics-studio h2 {
-  font-size: 15px;
+  font-size: 20px;
 }
 .graphics-studio h3 {
-  font-size: 15px;
+  font-size: 17px;
 }
 .graphics-studio strong {
   font-weight: 600;
 }
 .graphics-studio small {
   color: var(--gs-muted);
-  font-size: 11px;
+  font-size: 14px;
 }
 .graphics-studio details {
   border-top: 1px solid var(--gs-border);
@@ -932,5 +1087,102 @@
   }
   .gs-preview {
     height: 300px;
+  }
+}
+
+.graphics-studio .gs-work-layout {
+  grid-template-columns: minmax(310px, 0.85fr) minmax(440px, 1.25fr);
+}
+.graphics-studio .gs-instruction {
+  order: 0;
+}
+.graphics-studio .gs-result {
+  order: 1;
+  position: sticky;
+  top: 100px;
+}
+.graphics-studio .gs-preview {
+  height: min(58vh, 650px);
+  min-height: 420px;
+}
+.graphics-studio
+  :is(
+    .gs-fine,
+    .gs-muted,
+    .gs-tag,
+    .gs-create p,
+    .gs-file span,
+    .gs-file-actions button,
+    .gs-file-path,
+    .gs-file-hash,
+    .gs-section-title > span,
+    .gs-availability > span,
+    .gs-task-open small,
+    .gs-preview-empty p,
+    .gs-preview-empty span,
+    .gs-version-detail > p,
+    .gs-cost small,
+    .gs-legacy
+  ) {
+  font-size: 14px;
+}
+.graphics-studio :is(input, textarea, select, button) {
+  font-size: 16px;
+}
+.graphics-studio .gs-history > summary,
+.graphics-studio .gs-catalog > summary {
+  font-size: 16px;
+  font-weight: 600;
+}
+.graphics-studio .gs-catalog > .gs-section-title,
+.graphics-studio .gs-history > .gs-section-title {
+  margin-top: 18px;
+}
+.graphics-studio .gs-task-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.graphics-studio .gs-execution-detail {
+  margin-top: 0;
+}
+.graphics-studio .gs-instruction > .gs-import-details {
+  margin-bottom: 20px;
+}
+.graphics-studio .gs-current-options small,
+.graphics-studio .gs-creation-execute small {
+  font-size: 14px;
+}
+@media (max-width: 1180px) {
+  .graphics-studio .gs-work-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .graphics-studio .gs-result {
+    position: static;
+    order: 0;
+  }
+  .graphics-studio .gs-instruction {
+    order: 1;
+  }
+  .graphics-studio .gs-preview {
+    height: 48vh;
+    min-height: 320px;
+  }
+  .gs-creation-stages {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@media (max-width: 740px) {
+  .gs-creation-execute,
+  .gs-current-options {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .gs-creation-execute {
+    position: static;
+  }
+  .gs-creation-stages {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .gs-lock-options {
+    grid-template-columns: 1fr;
   }
 }

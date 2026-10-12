@@ -66,6 +66,7 @@ export function graphicsMultiviewProblem(
 
 const ready = new Set(["A01", "A02", "A03", "A05", "N01", "X04", "X05"]);
 const verified = new Set([...ready, "I01", "M01", "M05", "T01", "T03"]);
+export const graphicsProceduralTasks = new Set(['M04','T02','T05']);
 const verifiedScope: Record<string, string> = {
   I01: "대검 이미지 1장의 실제 앱 생성·원본 수집·재시작 보존을 확인했습니다. 다른 개수와 대상의 외형은 직접 검토하세요.",
   M01: "실제 대검 이미지로 P2 모델 1개 생성·FBX 수집·앱 등록을 확인했습니다. 후보당 100 API 크레딧이며 원본별 외형과 실제 면 수를 검토하세요.",
@@ -73,9 +74,9 @@ const verifiedScope: Record<string, string> = {
   T01: "실제 P2 대검의 Smart UV 처리·FBX 수집과 최종 UV 존재를 확인했습니다. 예상 20 API 크레딧이며 UV 품질은 모델별 검토가 필요합니다.",
   T03: "실제 대검에 텍스처를 생성해 4096px PBR 맵 3개와 Unity 가져오기를 확인했습니다. 출력 해상도와 외형은 결과별로 검토하세요.",
 };
-const image = new Set(["I01", "I02", "I03", "I05", "I06", "I07"]);
+const image = new Set(["I01", "I02", "I03", "I05", "I06", "I07", 'I08']);
 const tripo = new Set(["M01", "M02", "M03", "M10", "T01", "T03"]);
-export const graphicsAstraTasks = new Set(["M05", "R01", "R02", "R03", "N04", "N05", "N06"]);
+export const graphicsAstraTasks = new Set(["M05", 'M06', 'M07', 'M08', 'M15', "R01", "R02", "R03", "N04", "N05", "N06"]);
 export const graphicsVideoTasks = new Set(["N02"]);
 const localScope: Record<string, string> = {
   N01: "채택한 모델·리그에서 두 측면을 2048px로 로컬 렌더합니다. 전신 여백을 계산하며 원본과 기존 디자인을 유지합니다. GPT·유료 생성 없음.",
@@ -913,10 +914,10 @@ const definitions = [
   },
 ];
 
-export const graphicsCatalog: GraphicsTaskDefinition[] = definitions.map(
+export const graphicsCatalog: GraphicsTaskDefinition[] = [...definitions, { id: 'M15', name: 'Blender + Astra 모델 제작', group: 'M 모델링', inputs: '채택 이미지·제작 옵션', output: '새 모델·편집 장면·검토 렌더' }].map(
   (entry) => ({
     ...entry,
-    executor: ready.has(entry.id)
+    executor: ready.has(entry.id) || graphicsProceduralTasks.has(entry.id)
       ? "local"
       : image.has(entry.id)
         ? "codex-image"
@@ -926,12 +927,12 @@ export const graphicsCatalog: GraphicsTaskDefinition[] = definitions.map(
           : graphicsVideoTasks.has(entry.id) ? "runway" : "none",
     status: verified.has(entry.id)
       ? "ready"
-      : image.has(entry.id) || tripo.has(entry.id) || graphicsAstraTasks.has(entry.id) || graphicsVideoTasks.has(entry.id)
+      : image.has(entry.id) || tripo.has(entry.id) || graphicsAstraTasks.has(entry.id) || graphicsVideoTasks.has(entry.id) || graphicsProceduralTasks.has(entry.id)
         ? "unverified"
         : "planned",
     reason: ready.has(entry.id)
       ? localScope[entry.id]
-      : verifiedScope[entry.id] ?? (image.has(entry.id)
+      : graphicsProceduralTasks.has(entry.id) ? 'Blender 로컬 제작·UV·재질 실행 경로입니다. 지원 프리셋과 수치를 검사하며 자유로운 이미지 재현을 보장하지 않습니다.' : verifiedScope[entry.id] ?? (image.has(entry.id)
         ? entry.id === "I01"
           ? "새 디자인 1장: 실제 앱 생성·원본 수집·재시작 보존 확인. CLI 기록 누락 시 저장 실행 기록만 조회해 복구했습니다. 다른 개수·대상의 품질은 개별 검토가 필요합니다."
           : "앱의 참조/수정 이미지 실행 경로가 연결되었습니다. 이 작업 공간에서 해당 작업의 실제 생성·수집·품질 검증은 아직 완료되지 않았습니다."

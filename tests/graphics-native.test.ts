@@ -53,6 +53,34 @@ test("explicit saved-image recovery without dispatch never starts a first genera
   await assert.rejects(execute(f.args), /복구에서 새 이미지 요청/); assert.equal(calls, 0);
 });
 
+test('four native candidates share one worker, request parallel tools, and retain separate originals', async t => {
+  const f = fixture(t, 'I01'); f.args.task.settings = { count: 4, imageSchedule: 'parallel-native-4' };
+  let workers = 0;
+  const execute = createGraphicsNativeExecutor({ workerFactory: () => { workers++; return workerMock(task => {
+    assert.match(task.prompt, /FOUR independent native image-generation calls concurrently/);
+    assert.match(task.prompt, /ONE native worker/); assert.match(task.prompt, /Only the coordinator writes result.json/);
+    return generated(task, ['image-1','image-2','image-3','image-4']);
+  }); } });
+  const result = await execute(f.args);
+  assert.equal(workers, 1); assert.equal(result.files.length, 4);
+  assert.equal(new Set(result.files.map(file => hash(path.join(f.root, file.path)))).size, 4);
+  await execute({ ...f.args, recoveryOnly: true }); assert.equal(workers, 1);
+});
+
+test('part originals freeze the whole adopted source and register a distinct part slot', async t => {
+  const f = fixture(t, 'I08'), original = f.addInput(), before = hash(original);
+  f.args.object.accepted['design:main'] = 'version-1';
+  f.args.task.objectSnapshot = { name:f.args.object.name,kind:f.args.object.kind,references:[],accepted:{'design:main':'version-1'} };
+  f.args.task.settings = { partId:'hair',partLabel:'머리카락',count:1 };
+  const execute = createGraphicsNativeExecutor({ workerFactory: () => workerMock(task => {
+    assert.match(task.prompt, /PART DESIGN/); assert.match(task.prompt, /whole-subject-part-source/);
+    assert.match(task.prompt, /not crops/); assert.equal(hash(task.imagePaths[0]), before);
+    return generated(task);
+  }) });
+  const result = await execute(f.args); assert.equal(result.slot, 'part-hair'); assert.equal(hash(original), before);
+  assert.equal(f.args.object.accepted['design:main'], 'version-1');
+});
+
 test("native image uses original bytes, inherited model/effort, native events and project-owned originals", async t => {
   const f = fixture(t, "I02"), original = f.addInput();
   let calls = 0;

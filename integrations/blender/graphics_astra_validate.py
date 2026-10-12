@@ -100,7 +100,30 @@ def material_evidence():
     return sorted(result, key=lambda value: value['name'])
 
 
-def snapshot():
+def surface_evidence():
+    """Exact partition proof, independent of mesh/vertex ordering and object transforms."""
+    faces = []
+    for obj in bpy.context.scene.objects:
+        if obj.type != 'MESH':
+            continue
+        for face in obj.data.polygons:
+            corners = []
+            for loop_index in face.loop_indices:
+                vertex = obj.data.vertices[obj.data.loops[loop_index].vertex_index]
+                weights = sorted([obj.vertex_groups[group.group].name, round(group.weight, 7)] for group in vertex.groups)
+                corners.append(json.dumps([numbers(obj.matrix_world @ vertex.co),
+                    [[layer.name, numbers(layer.data[loop_index].uv)] for layer in obj.data.uv_layers], weights], separators=(',', ':')))
+            # Rotation of the first corner is immaterial; reversed winding is not.
+            cycle = min(tuple(corners[index:] + corners[:index]) for index in range(len(corners)))
+            material = obj.data.materials[face.material_index].name if face.material_index < len(obj.data.materials) and obj.data.materials[face.material_index] else None
+            skin = [[modifier.object.name if modifier.object else None, modifier.show_viewport, modifier.show_render,
+                     modifier.vertex_group, modifier.use_vertex_groups, modifier.use_bone_envelopes, modifier.use_deform_preserve_volume]
+                    for modifier in obj.modifiers if modifier.type == 'ARMATURE']
+            faces.append(digest([cycle, material, skin]))
+    return {'surfaceSha256': digest(sorted(faces)), 'surfaceFaces': len(faces)}
+
+
+def snapshot(allow_empty=False):
     if any(obj.library or obj.data and obj.data.library for obj in bpy.context.scene.objects):
         raise RuntimeError('External linked scene data is not a self-contained editable scene')
     meshes, rigs = [], []
@@ -130,11 +153,19 @@ def snapshot():
                        'materials': [slot.material.name if slot.material else None for slot in obj.material_slots],
                        'faceMaterials': digest([face.material_index for face in obj.data.polygons]),
                        'armatures': [rig.name for rig in armatures], 'weightedVertices': weighted, 'invalidWeightVertices': invalid})
-    if not meshes or len({item['id'] for item in meshes}) != len(meshes) or any(not item['id'] for item in meshes):
+        meshes[-1]['weights'] = digest([sorted([obj.vertex_groups[group.group].name, round(group.weight, 7)] for group in vertex.groups) for vertex in obj.data.vertices])
+        meshes[-1]['partId'] = obj.get('partsmith_part_id', '')
+        meshes[-1]['modifiers'] = [{'type': modifier.type, 'target': modifier.object.name if modifier.type == 'ARMATURE' and modifier.object else None,
+            'viewport': modifier.show_viewport, 'render': modifier.show_render,
+            'vertexGroup': getattr(modifier, 'vertex_group', ''), 'envelopes': getattr(modifier, 'use_bone_envelopes', False),
+            'vertexGroups': getattr(modifier, 'use_vertex_groups', False), 'preserveVolume': getattr(modifier, 'use_deform_preserve_volume', False)} for modifier in obj.modifiers]
+        meshes[-1]['shapeKeys'] = digest([[key.name, [numbers(vertex.co) for vertex in key.data], key.value] for key in obj.data.shape_keys.key_blocks]) if obj.data.shape_keys else None
+    if (not meshes and not allow_empty) or len({item['id'] for item in meshes}) != len(meshes) or any(not item['id'] for item in meshes):
         raise RuntimeError('Every original mesh requires one unique stable partsmith_id')
     return {'meshes': sorted(meshes, key=lambda value: value['id']), 'rigs': sorted(rigs, key=lambda value: value['name']),
             'textures': texture_evidence(), 'materials': material_evidence(),
-            'actions': sorted([action_evidence(action) for action in bpy.data.actions], key=lambda value: value['name'])}
+            'actions': sorted([action_evidence(action) for action in bpy.data.actions], key=lambda value: value['name']),
+            'rigTransforms': {obj.name: matrix(obj.matrix_world) for obj in bpy.context.scene.objects if obj.type == 'ARMATURE'}, **surface_evidence()}
 
 
 def save_json(file, value):
@@ -148,7 +179,11 @@ def prepare(q):
     source = pathlib.Path(q['source'])
     if file_hash(source) != q['sourceSha256']:
         raise RuntimeError('Source hash does not match frozen request')
-    if source.suffix.lower() == '.blend':
+    if q['operation'] == 'M15':
+        if source.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.webp'):
+            raise RuntimeError('New model requires the accepted design image')
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+    elif source.suffix.lower() == '.blend':
         bpy.ops.wm.open_mainfile(filepath=str(source), load_ui=False, use_scripts=False)
     elif source.suffix.lower() in ('.fbx', '.glb'):
         bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -180,7 +215,7 @@ def prepare(q):
     for obj in bpy.context.scene.objects:
         if obj.type == 'MESH' and not obj.get('partsmith_id'):
             obj['partsmith_id'] = 'mesh-' + digest([q['sourceSha256'], obj.name])[:24]
-    evidence = snapshot()
+    evidence = snapshot(allow_empty=q['operation'] == 'M15')
     if q['operation'] in ('R03', 'N04', 'N05', 'N06') and not evidence['rigs']:
         raise RuntimeError('Accepted editable source has no actual rig')
     if q['operation'] == 'N06' and not any(action['name'] == q['actionName'] for action in evidence['actions']):
@@ -189,6 +224,48 @@ def prepare(q):
     if file_hash(source) != q['sourceSha256']:
         raise RuntimeError('Original source changed')
     evidence.update({'schemaVersion': 1, 'identity': q['identity'], 'nonce': q['nonce'], 'sourceSha256': q['sourceSha256'], 'blenderVersion': bpy.app.version_string})
+    save_json(q['report'], evidence)
+
+
+def prepare_assembly(q):
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    sources = q['sources']
+    if len(sources) < 2 or len({item['versionId'] for item in sources}) != len(sources):
+        raise RuntimeError('Assembly needs distinct accepted part versions')
+    for source in sources:
+        if file_hash(source['path']) != source['sha256'] or pathlib.Path(source['path']).suffix.lower() != '.blend':
+            raise RuntimeError('Assembly original hash or format differs')
+        with bpy.data.libraries.load(source['path'], link=False) as (available, loaded):
+            if len(available.scenes) != 1:
+                raise RuntimeError('Accepted assembly part must contain one unambiguous scene')
+            loaded.scenes = list(available.scenes)
+            loaded.actions = list(available.actions)
+        part_scene = loaded.scenes[0]
+        objects = list(part_scene.objects)
+        meshes = [obj for obj in objects if obj.type == 'MESH']
+        if not meshes:
+            raise RuntimeError('Accepted part has no original meshes')
+        ids = [obj.get('partsmith_id') for obj in meshes]
+        if any(not value for value in ids) or len(set(ids)) != len(ids):
+            raise RuntimeError('Accepted part needs unique original mesh IDs')
+        for obj in objects:
+            if obj and obj.type in ('MESH', 'ARMATURE', 'EMPTY'):
+                bpy.context.scene.collection.objects.link(obj)
+                if obj.type == 'MESH':
+                    obj['partsmith_id'] = source['versionId'] + ':' + obj['partsmith_id']
+                    obj['partsmith_part_id'] = source['slot']
+        for action in loaded.actions:
+            if action:
+                action.use_fake_user = True
+        bpy.data.scenes.remove(part_scene)
+    bpy.context.view_layer.update()
+    evidence = snapshot()
+    bpy.ops.wm.save_as_mainfile(filepath=q['outputBlend'], compress=False)
+    for source in sources:
+        if file_hash(source['path']) != source['sha256']:
+            raise RuntimeError('Assembly source changed')
+    evidence.update({'schemaVersion': 1, 'identity': q['identity'], 'nonce': q['nonce'],
+                     'sourceSha256': q['sourceSha256'], 'blenderVersion': bpy.app.version_string})
     save_json(q['report'], evidence)
 
 
@@ -263,6 +340,61 @@ def bind_action(rig, action):
         if len(suitable) != 1:
             raise RuntimeError('Animation action slot is ambiguous for rig: ' + rig.name)
         rig.animation_data.action_slot = suitable[0]
+
+
+def rig_feature_test(features):
+    """Each explicitly enabled appendage must have weighted, moving deform joints."""
+    if not isinstance(features, list) or len(set(features)) != len(features) or any(feature not in ('ears', 'tail', 'hair', 'cloth', 'wings', 'accessories') for feature in features):
+        raise RuntimeError('Unknown or duplicate requested rig control feature')
+    rigs = [obj for obj in bpy.context.scene.objects if obj.type == 'ARMATURE']
+    saved = [(rig, rig.animation_data.action if rig.animation_data else None,
+              rig.animation_data.action_slot if rig.animation_data and hasattr(rig.animation_data, 'action_slot') else None,
+              [(bone, bone.matrix_basis.copy(), bone.rotation_mode) for bone in rig.pose.bones]) for rig in rigs]
+    evidence = {}
+    try:
+        for rig, action, slot, poses in saved:
+            if rig.animation_data:
+                rig.animation_data.action = None
+            for bone, basis, mode in poses:
+                bone.matrix_basis.identity()
+        bpy.context.view_layer.update()
+        base = coordinates()
+        for feature in features:
+            tested = []
+            for rig, action, slot, poses in saved:
+                for bone, basis, mode in poses:
+                    if bone.bone.get('partsmith_feature') != feature or not bone.parent or not bone.bone.use_deform:
+                        continue
+                    influenced = []
+                    for obj in bpy.context.scene.objects:
+                        if obj.type != 'MESH' or not any(mod.type == 'ARMATURE' and mod.object == rig and mod.show_viewport and mod.show_render for mod in obj.modifiers):
+                            continue
+                        group = obj.vertex_groups.get(bone.name)
+                        if group and any(any(value.group == group.index and value.weight > 1e-6 for value in vertex.groups) for vertex in obj.data.vertices):
+                            influenced.append(obj.get('partsmith_id'))
+                    bone.rotation_mode = 'QUATERNION'
+                    bone.rotation_quaternion = Quaternion(Vector((0.3, 0.7, 0.5)).normalized(), 0.23)
+                    bpy.context.view_layer.update()
+                    moving = sorted(set(influenced) & different(base, coordinates()))
+                    bone.matrix_basis.identity()
+                    bone.rotation_mode = mode
+                    bpy.context.view_layer.update()
+                    if moving:
+                        tested.append({'bone': rig.name + '/' + bone.name, 'movingMeshIds': moving})
+            if not tested:
+                raise RuntimeError('Requested appendage lacks a tagged non-root deform bone with actual weighted pose response: ' + feature)
+            evidence[feature] = tested
+    finally:
+        for rig, action, slot, poses in saved:
+            for bone, basis, mode in poses:
+                bone.rotation_mode = mode
+                bone.matrix_basis = basis
+            if rig.animation_data:
+                rig.animation_data.action = action
+                if action and slot:
+                    rig.animation_data.action_slot = slot
+        bpy.context.view_layer.update()
+    return evidence
 
 
 def motion_test(q):
@@ -359,6 +491,87 @@ def preview(q):
     return files, glb_images
 
 
+def model_checks(q, baseline, current):
+    operation = q['operation']
+    old, new = ({mesh['id']: mesh for mesh in value['meshes']} for value in (baseline, current))
+    checks = {'meshLineage': set(old) == set(new), 'skeleton': baseline['rigs'] == current['rigs'] and (operation == 'M08' and not q.get('locks', {}).get('rig') or baseline.get('rigTransforms') == current.get('rigTransforms'))}
+    checks['topology'] = checks['meshLineage'] and all(all(old[key][field] == new[key][field] for field in ('vertices', 'faces', 'topology')) for key in old)
+    checks['materials'] = baseline['textures'] == current['textures'] and baseline['materials'] == current['materials']
+    checks['actionsPreserved'] = all(action in current['actions'] for action in baseline['actions'])
+    if any(any(modifier['type'] != 'ARMATURE' for modifier in mesh['modifiers']) or mesh['shapeKeys'] for mesh in current['meshes'] + baseline['meshes']):
+        raise RuntimeError('Partial edit, partition, assembly and new-model verification currently require baked non-armature modifiers and no shape keys')
+    if operation == 'M15':
+        checks['newGeometry'] = not old and bool(new)
+        if not checks['newGeometry']:
+            raise RuntimeError('New model must start from the empty prepared scene and contain actual geometry')
+    elif operation == 'M07':
+        parts = q['requestedParts']
+        checks['partition'] = (len(parts) >= 2 and set(mesh['partId'] for mesh in new.values()) == {part['id'] for part in parts}
+            and baseline['surfaceFaces'] == current['surfaceFaces'] and baseline['surfaceSha256'] == current['surfaceSha256'])
+        if not checks['partition']:
+            raise RuntimeError('Part separation must partition every original polygon exactly once with unchanged world positions, UV, materials and weights')
+        if not checks['materials'] or not checks['skeleton'] or not checks['actionsPreserved']:
+            raise RuntimeError('Part separation changed original packed textures, materials, skeleton or actions')
+    else:
+        if not checks['meshLineage'] or not checks['topology']:
+            raise RuntimeError('This partial edit/assembly preserves original mesh IDs and topology; replacement/remeshing is unsupported')
+        checks['materials'] = checks['materials'] and all(all(old[key][field] == new[key][field] for field in ('uv', 'materials', 'faceMaterials')) for key in old)
+        if not checks['materials'] or not checks['skeleton'] or not checks['actionsPreserved'] or any(old[key]['weights'] != new[key]['weights'] or old[key]['modifiers'] != new[key]['modifiers'] for key in old):
+            raise RuntimeError('Partial edit/assembly changed original UV, materials, weights, skeleton or actions')
+        if operation == 'M06':
+            targets = set(q['editMeshIds'])
+            checks['partialEdit'] = bool(targets) and targets.issubset(old) and any(old[key]['positions'] != new[key]['positions'] or old[key]['transform'] != new[key]['transform'] for key in targets)
+            if not checks['partialEdit'] or any(old[key]['positions'] != new[key]['positions'] or old[key]['transform'] != new[key]['transform'] for key in old if key not in targets):
+                raise RuntimeError('Partial edit must change the named meshes only and preserve all untargeted positions/transforms')
+        elif operation == 'M08' and any(old[key]['positions'] != new[key]['positions'] for key in old):
+            raise RuntimeError('Part assembly supports object transforms only; original vertex positions changed')
+    for lock, check in [('topology', 'topology'), ('materials', 'materials'), ('rig', 'skeleton')]:
+        if q.get('locks', {}).get(lock) is True and not checks[check]:
+            raise RuntimeError('Explicit structural lock failed: ' + lock)
+    return checks
+
+
+def part_previews(q, current):
+    original_scene = bpy.context.scene
+    base = pathlib.Path(q['output'])
+    candidates, files, images = [], [], []
+    for part in q['requestedParts']:
+        folder = base / ('part-' + part['id'])
+        folder.mkdir()
+        scene = bpy.data.scenes.new('Partsmith_' + part['id'])
+        members = [obj for obj in original_scene.objects if obj.type in ('ARMATURE', 'EMPTY') or obj.type == 'MESH' and obj.get('partsmith_part_id') == part['id']]
+        for obj in members:
+            ancestor = obj.parent
+            while ancestor:
+                if ancestor not in members:
+                    raise RuntimeError('Part depends on an object outside its separate scene')
+                ancestor = ancestor.parent
+            scene.collection.objects.link(obj)
+        scene.frame_start, scene.frame_end = original_scene.frame_start, original_scene.frame_end
+        scene.render.fps, scene.render.fps_base = original_scene.render.fps, original_scene.render.fps_base
+        bpy.context.window.scene = scene
+        try:
+            bpy.data.libraries.write(str(folder / 'asset.blend'), {scene, *bpy.data.actions}, fake_user=True, compress=False)
+            part_files, part_images = preview({**q, 'output': str(folder)})
+            bpy.ops.object.select_all(action='DESELECT')
+            for obj in members:
+                obj.select_set(True)
+            bpy.context.view_layer.objects.active = next(obj for obj in members if obj.type == 'MESH')
+            bpy.ops.export_scene.fbx(filepath=str(folder / 'asset.fbx'), use_selection=True,
+                object_types={'ARMATURE', 'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y', apply_unit_scale=True,
+                apply_scale_options='FBX_SCALE_UNITS', add_leaf_bones=False, bake_anim=True,
+                bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False, bake_anim_simplify_factor=0.0,
+                path_mode='COPY', embed_textures=True)
+            paths = [('part-' + part['id'] + '/' + file) for file in ['asset.blend', 'asset.fbx', *part_files]]
+            candidates.append({'slot': part['id'], 'label': part['label'], 'files': paths,
+                               'meshIds': [mesh['id'] for mesh in current['meshes'] if mesh['partId'] == part['id']]})
+            files.extend(paths)
+            images.extend(part_images)
+        finally:
+            bpy.context.window.scene = original_scene
+    return files, images, candidates
+
+
 def validate(q):
     output_hash, source_hash = file_hash(q['outputBlend']), file_hash(q['sourceBlend'])
     baseline = json.loads(pathlib.Path(q['baseline']).read_text(encoding='utf8'))
@@ -367,20 +580,23 @@ def validate(q):
     bpy.ops.wm.open_mainfile(filepath=q['outputBlend'], load_ui=False, use_scripts=False)
     current = snapshot()
     checks = {}
+    expanded_model = q['operation'] in ('M06', 'M07', 'M08', 'M15')
     old = {mesh['id']: mesh for mesh in baseline['meshes']}
     new = {mesh['id']: mesh for mesh in current['meshes']}
     checks['meshLineage'] = set(old) == set(new)
-    if not checks['meshLineage']:
+    if not checks['meshLineage'] and not expanded_model:
         raise RuntimeError('Original stable mesh IDs were lost, added or replaced')
-    checks['topology'] = all(all(old[key][field] == new[key][field] for field in ('vertices', 'faces', 'topology')) for key in old)
-    checks['materials'] = baseline['textures'] == current['textures'] and baseline['materials'] == current['materials'] and all(all(old[key][field] == new[key][field] for field in ('uv', 'materials', 'faceMaterials')) for key in old)
-    if not checks['topology'] or not checks['materials']:
+    checks['topology'] = checks['meshLineage'] and all(all(old[key][field] == new[key][field] for field in ('vertices', 'faces', 'topology')) for key in old)
+    checks['materials'] = checks['meshLineage'] and baseline['textures'] == current['textures'] and baseline['materials'] == current['materials'] and all(all(old[key][field] == new[key][field] for field in ('uv', 'materials', 'faceMaterials')) for key in old)
+    if not expanded_model and (not checks['topology'] or not checks['materials']):
         raise RuntimeError('Original topology/UV/materials/full-resolution packed textures changed')
-    if q['operation'] != 'M05' and any(old[key]['positions'] != new[key]['positions'] or old[key]['transform'] != new[key]['transform'] for key in old):
+    if not expanded_model and q['operation'] != 'M05' and any(old[key]['positions'] != new[key]['positions'] or old[key]['transform'] != new[key]['transform'] for key in old):
         raise RuntimeError('Rig/animation authoring changed original mesh positions or transform')
     if q['operation'] == 'M05' and all(old[key]['positions'] == new[key]['positions'] and old[key]['transform'] == new[key]['transform'] for key in old):
         raise RuntimeError('Shape correction did not change any mesh shape or transform')
     checks['skeleton'] = baseline['rigs'] == current['rigs']
+    if q.get('locks', {}).get('rig'):
+        checks['skeleton'] = checks['skeleton'] and baseline.get('rigTransforms') == current.get('rigTransforms')
     if q['operation'] in ('M05', 'R03', 'N04', 'N05', 'N06') and not checks['skeleton']:
         raise RuntimeError('Original skeleton/rest pose/rotation mode changed')
     new_actions = {action['name']: action for action in current['actions']}
@@ -388,7 +604,12 @@ def validate(q):
     if not checks['actionsPreserved']:
         raise RuntimeError('An untargeted original animation action was removed or modified')
     evidence = {}
-    if q['operation'] != 'M05':
+    if expanded_model:
+        checks = model_checks(q, baseline, current)
+    for lock, check in [('topology', 'topology'), ('materials', 'materials'), ('rig', 'skeleton')]:
+        if q.get('locks', {}).get(lock) is True and not checks.get(check):
+            raise RuntimeError('Explicit structural lock failed: ' + lock)
+    if q['operation'].startswith(('R', 'N')):
         rigs = current['rigs']
         if not rigs or any(len(rig['bones']) < 3 or not any(bone['parent'] for bone in rig['bones']) or any(bone['length'] < 1e-7 for bone in rig['bones']) for rig in rigs):
             raise RuntimeError('Missing, degenerate or unparented skeleton')
@@ -401,16 +622,23 @@ def validate(q):
             raise RuntimeError('Missing armature, unweighted vertices or invalid/non-normalized deform weights')
         evidence['deformingMeshIds'] = pose_test()
         checks['deformation'] = True
+        if q['operation'] in ('R01', 'R02') and q.get('rigFeatures'):
+            evidence['rigFeatures'] = rig_feature_test(q['rigFeatures'])
+            checks['rigFeatures'] = True
     if q['operation'].startswith('N'):
         evidence['clip'] = motion_test(q)
         checks['clipRange'] = checks['motion'] = True
-    files, glb_images = preview(q)
+    candidates = []
+    if q['operation'] == 'M07':
+        files, glb_images, candidates = part_previews(q, current)
+    else:
+        files, glb_images = preview(q)
     if file_hash(q['sourceBlend']) != source_hash or file_hash(q['outputBlend']) != output_hash:
         raise RuntimeError('Native source or authored blend changed during read-only validation')
     report = {'schemaVersion': 1, 'identity': q['identity'], 'nonce': q['nonce'], 'operation': q['operation'],
               'sourceSha256': q['sourceSha256'], 'outputSha256': output_hash, 'passed': True, 'checks': checks,
               'blenderVersion': bpy.app.version_string, **current, **evidence, 'files': files,
-              'glbImages': glb_images, 'validatorFingerprint': q.get('validatorFingerprint'),
+              'glbImages': glb_images, 'candidates': candidates, 'validatorFingerprint': q.get('validatorFingerprint'),
               'visualQualityVerified': False, 'contactVerified': False, 'unityPlaybackVerified': False}
     save_json(q['report'], report)
 
@@ -418,6 +646,8 @@ def validate(q):
 q = json.loads(pathlib.Path(sys.argv[sys.argv.index('--') + 1]).read_text(encoding='utf8'))
 if q['mode'] == 'prepare':
     prepare(q)
+elif q['mode'] == 'prepare-assembly':
+    prepare_assembly(q)
 elif q['mode'] == 'validate':
     validate(q)
 else:

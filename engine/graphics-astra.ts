@@ -9,7 +9,7 @@ import type { AssetVersion, GraphicsRole } from "../shared/graphics";
 import { isGraphicsClipName } from "../shared/graphics";
 import type { ProductionRun, ProductionStage } from "../shared/production";
 
-export const graphicsAstraOperations = ["M05", "R01", "R02", "R03", "N04", "N05", "N06"] as const;
+export const graphicsAstraOperations = ["M05", "M06", "M07", "M08", "M15", "R01", "R02", "R03", "N04", "N05", "N06"] as const;
 type Dependencies = {
   workerFactory?: () => ProductionWorker;
   runBlender?: (executable: string, args: string[], signal: AbortSignal) => Promise<void>;
@@ -49,6 +49,35 @@ function accepted(args: GraphicsNativeArgs, version: AssetVersion) {
   const snapshot = args.task.objectSnapshot ?? args.object;
   return version.objectId === args.object.id && snapshot.accepted[`${version.role}:${version.slot}`] === version.id;
 }
+function jsonSetting(value: unknown, label: string): unknown {
+  if (typeof value !== "string") return value;
+  try { return JSON.parse(value); } catch { throw Error(label + " JSON 형식을 확인하세요."); }
+}
+function modelingContract(args: GraphicsNativeArgs) {
+  const settings = args.task.settings, operation = args.task.taskId;
+  if (["M06", "M07", "M08", "M15"].includes(operation) && Number(settings.count ?? 1) !== 1)
+    throw Error("Astra 모델 후보는 독립 작업으로 한 개씩 실행해야 합니다.");
+  const requested = operation === "M07" ? jsonSetting(settings.requestedParts, "분리 파츠") : [];
+  if (!Array.isArray(requested) || operation === "M07" && (requested.length < 2 || requested.length > 32)) throw Error("분리할 파츠 2–32개를 명시하세요.");
+  const requestedParts = requested.map((part: any) => {
+    if (!part || typeof part.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(part.id) || part.id === "main" || typeof part.label !== "string" || !part.label.trim()) throw Error("분리 파츠의 고유 ID와 이름이 필요합니다.");
+    return { id: part.id, label: part.label.trim().slice(0, 120) };
+  });
+  if (new Set(requestedParts.map(part => part.id)).size !== requestedParts.length) throw Error("분리 파츠 ID가 중복됩니다.");
+  const editMeshIds = operation === "M06" ? jsonSetting(settings.editMeshIds, "부분 수정 메시 ID") : [];
+  if (!Array.isArray(editMeshIds) || editMeshIds.some(value => typeof value !== "string" || !value.trim() || value.length > 200) || new Set(editMeshIds).size !== editMeshIds.length || operation === "M06" && !editMeshIds.length)
+    throw Error("부분 수정에는 원본 partsmith_id 목록(editMeshIds)이 필요합니다. 지정 메시의 형태만 수정하며 재토폴로지·재생성은 지원하지 않습니다.");
+  const locks = Object.fromEntries(["topology", "materials", "rig"].map(name => [name, settings[`lock.${name}`] === true]));
+  return { requestedParts, editMeshIds, locks };
+}
+function requestedRigFeatures(settings: GraphicsNativeArgs["task"]["settings"]) {
+  const enabled: Record<string, boolean> = {
+    ears: settings.rigEars === true, tail: settings.rigTail === true, hair: settings.rigHair === true,
+    cloth: settings.rigClothing === true || settings.rigCloth === true,
+    wings: settings.rigWings === true, accessories: settings.rigAccessories === true,
+  };
+  return Object.keys(enabled).filter(name => enabled[name]);
+}
 function selectInputs(args: GraphicsNativeArgs, root: string) {
   if (args.task.objectId !== args.object.id) throw Error("Astra 작업의 대상이 다릅니다.");
   const ids = new Set(args.task.inputVersionIds), files: Input[] = [];
@@ -60,14 +89,17 @@ function selectInputs(args: GraphicsNativeArgs, root: string) {
   unchanged(files);
   const operation = args.task.taskId, animation = operation.startsWith("N"), clipName = String(args.task.settings.clipName ?? "");
   if (animation && !isGraphicsClipName(clipName)) throw Error("명시적인 클립 이름이 필요합니다.");
-  const roles: GraphicsRole[] = operation === "N06" ? ["animation"] : animation || operation === "R03" ? ["rig"] : ["model", "material", "rig"];
+  const roles: GraphicsRole[] = operation === "M15" ? ["design"] : operation === "N06" ? ["animation"] : animation || operation === "R03" ? ["rig"] : ["model", "material", "rig"];
   const specified = args.task.settings.sourceVersionId;
   let candidates = args.inputs.filter(version => roles.includes(version.role) && accepted(args, version) && (operation !== "N06" || version.slot === clipName));
-  if (specified !== undefined) candidates = candidates.filter(version => version.id === specified);
+  if (operation === "M08") candidates = candidates.filter(version => version.role === "model" && version.slot !== "main");
+  else if (operation === "M15" && specified === undefined) candidates = candidates.sort((a, b) => Number(b.slot === "main") - Number(a.slot === "main") || a.id.localeCompare(b.id)).slice(0, 1);
+  else if (specified !== undefined) candidates = candidates.filter(version => version.id === specified);
   // Resolve different accepted representations explicitly; never choose by file order.
-  if (candidates.length !== 1) throw Error("편집할 채택 원본 버전 하나를 명시적으로 지정하세요.");
+  if (operation === "M08" ? candidates.length < 2 || new Set(candidates.map(version => version.slot)).size !== candidates.length : candidates.length !== 1) throw Error(operation === "M08" ? "서로 다른 파츠 슬롯에서 채택한 모델 두 개 이상이 필요합니다." : "편집할 채택 원본 버전 하나를 명시적으로 지정하세요.");
   const version = candidates[0], editable = files.filter(file => file.version.id === version.id);
-  const source = editable.find(file => /\.blend$/i.test(file.path)) ?? (!animation && operation !== "R03" ? editable.find(file => /\.fbx$/i.test(file.path)) ?? editable.find(file => /\.glb$/i.test(file.path)) : undefined);
+  const preferred = (entries: Input[]) => entries.find(file => /\.blend$/i.test(file.path)) ?? (!animation && operation !== "R03" ? entries.find(file => /\.fbx$/i.test(file.path)) ?? entries.find(file => /\.glb$/i.test(file.path)) : undefined);
+  const source = operation === "M15" ? editable.find(file => /\.(png|jpe?g|webp)$/i.test(file.path)) : preferred(editable);
   if (!source) throw Error(animation || operation === "R03" ? "이 작업에는 채택된 편집 가능한 원본 .blend가 필요합니다." : "채택 원본 BLEND·FBX·GLB가 필요합니다.");
   const fps = animation ? Number(args.task.settings.fps ?? 30) : 30, duration = animation ? Number(args.task.settings.duration ?? 2) : 2;
   if (!Number.isInteger(fps) || fps < 1 || fps > 120 || !Number.isFinite(duration) || duration <= 0 || duration > 120 || Math.abs(duration * fps - Math.round(duration * fps)) > 1e-6) throw Error("클립 FPS·길이를 확인하세요. 프레임 수는 정수여야 합니다.");
@@ -82,7 +114,7 @@ function selectInputs(args: GraphicsNativeArgs, root: string) {
   if (motion.length) {
     if (motion.length !== 1) throw Error("동작 참조 버전이 모호합니다.");
     const manifests = motionFiles.filter(file => file.kind === "frames" || /(?:motion-reference|frames)\.json$/i.test(file.path));
-    const manifest = manifests.map(file => { try { return read(file.localPath); } catch { return null; } }).find(value => value?.source === "video-ai" && Array.isArray(value.frames) && value.videos);
+    const manifest = manifests.map(file => { try { return read(file.localPath); } catch { return null; } }).find(value => ["video-ai", "video-import"].includes(value?.source) && Array.isArray(value.frames) && value.videos);
     if (!manifest || (manifest.clipName ?? manifest.motion) !== clipName || !manifest.frames.length) throw Error("채택 동작 참조의 실제 영상·프레임 명세가 없습니다.");
     const find = (file: string, digest: string) => motionFiles.find(input => path.resolve(root, input.path) === path.resolve(root, file) && input.sha256 === digest);
     for (const video of Object.values(manifest.videos) as any[]) if (!video || !find(video.path, video.sha256) || !/\.(mp4|mov|webm)$/i.test(video.path)) throw Error("채택 영상의 경로·해시가 명세와 다릅니다.");
@@ -91,7 +123,9 @@ function selectInputs(args: GraphicsNativeArgs, root: string) {
       if (!Number.isFinite(frame.time) || frame.time < 0 || frame.time > Number(manifest.duration) + 0.1 || !find(frame.side, frame.sha256) || !/\.(png|jpe?g|webp)$/i.test(frame.side)) throw Error("채택 동작 프레임의 경로·해시·시간이 잘못됐습니다.");
     }
   }
-  return { files, source, animation, clipName, actionName, fps, duration, motionFiles };
+  const sources = operation === "M08" ? candidates.map(candidate => preferred(files.filter(file => file.version.id === candidate.id))) : [source];
+  if (sources.some(file => !file || !/\.blend$/i.test(file.path)) && operation === "M08") throw Error("파츠 조립에는 각 채택 파츠의 편집 가능한 .blend가 필요합니다.");
+  return { files, source, sources: sources as Input[], animation, clipName, actionName, fps, duration, motionFiles };
 }
 
 function runBlender(executable: string, args: string[], signal: AbortSignal) {
@@ -124,8 +158,9 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     args.signal.throwIfAborted();
     if (!(graphicsAstraOperations as readonly string[]).includes(args.task.taskId)) throw Error("이 Astra 작업은 아직 구현하지 않았습니다.");
     if (!args.task.instruction.trim()) throw Error("보정·리깅·동작의 구체적인 작업 지시가 필요합니다.");
-    const root = fs.realpathSync(args.projectRoot), task = args.task, selected = selectInputs(args, root);
-    const { source, files, animation, clipName, actionName, fps, duration, motionFiles } = selected;
+    const root = fs.realpathSync(args.projectRoot), task = args.task, selected = selectInputs(args, root), contract = modelingContract(args);
+    const { source, sources, files, animation, clipName, actionName, fps, duration, motionFiles } = selected;
+    const rigFeatures = requestedRigFeatures(task.settings);
     const folder = path.resolve(root, "graphics/jobs", task.id, "astra"), work = path.join(folder, "work");
     directory(root, folder); directory(root, work);
     const identity = hash(JSON.stringify({ schemaVersion: 1, taskId: task.id, operation: task.taskId, requestHash: task.requestHash, settings: task.settings, instruction: task.instruction, object: task.objectSnapshot ?? args.object, inputs: files.map(file => ({ versionId: file.version.id, role: file.version.role, slot: file.version.slot, path: file.path, sha256: file.sha256, bytes: file.bytes })), source: source.version.id }));
@@ -167,7 +202,11 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
       const preparedBlend = path.join(work, "source.blend"), baseline = path.join(folder, "baseline.json");
       const nonce = randomUUID();
       const originalCopy = copies.find(copy => copy.sourcePath === source.path)!;
-      if (/\.fbx$/i.test(originalCopy.localPath)) {
+      if (task.taskId === "M08") {
+        await invoke({ mode: "prepare-assembly", identity, nonce, operation: task.taskId, sourceSha256: source.sha256,
+          sources: sources.map(input => ({ path: copies.find(copy => copy.sourcePath === input.path)!.localPath, sha256: input.sha256, versionId: input.version.id, slot: input.version.slot })),
+          outputBlend: preparedBlend, report: baseline }, "prepare-request");
+      } else if (/\.fbx$/i.test(originalCopy.localPath)) {
         // Blender's FBX importer can fail on Windows paths readable by Node.
         // Keep import, embedded texture extraction, packing and native save in a
         // short private directory, then copy the prepared outputs back unchanged.
@@ -195,7 +234,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
         }
       } else await invoke({ mode: "prepare", identity, nonce, operation: task.taskId, source: originalCopy.localPath, sourceSha256: source.sha256, outputBlend: preparedBlend, report: baseline, actionName }, "prepare-request");
       const report = read(baseline);
-      if (report.identity !== identity || report.nonce !== nonce || report.sourceSha256 !== source.sha256 || !report.meshes?.length) throw Error("Blender 원본 준비 증거가 잘못됐습니다.");
+      if (report.identity !== identity || report.nonce !== nonce || report.sourceSha256 !== source.sha256 || (task.taskId !== "M15" && !report.meshes?.length)) throw Error("Blender 원본 준비 증거가 잘못됐습니다.");
       fileWithin(work, preparedBlend);
       write(preparedPath, { identity, copies, preparedBlend, preparedSha256: hashFile(preparedBlend), preparedBytes: fs.statSync(preparedBlend).size, baseline, baselineSha256: hashFile(baseline) });
     }
@@ -204,6 +243,10 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     const protectedFiles = [...files, ...prepared.copies, { localPath: fileWithin(work, prepared.preparedBlend), sha256: prepared.preparedSha256, bytes: prepared.preparedBytes }];
     unchanged(protectedFiles);
     if (hashFile(fileWithin(folder, prepared.baseline)) !== prepared.baselineSha256) throw Error("원본 Blender 검사 기록이 변경됐습니다.");
+    const baseline = read(prepared.baseline);
+    if (task.taskId === "M06" && contract.editMeshIds.some(id => !baseline.meshes.some((mesh: any) => mesh.id === id))) throw Error("부분 수정 메시 ID가 채택 원본에 없습니다. 원본 partsmith_id를 확인하세요.");
+    if (["M06", "M07", "M08"].includes(task.taskId) && baseline.meshes.some((mesh: any) => mesh.shapeKeys || mesh.modifiers?.some((modifier: any) => modifier.type !== "ARMATURE"))) throw Error("부분 수정·분리·조립은 셰이프 키나 적용하지 않은 변형 모디파이어가 있는 원본을 아직 검증하지 못합니다. 원본을 보존하고 중지합니다.");
+    if (task.taskId === "M15" && Object.values(contract.locks).some(Boolean)) throw Error("신규 모델에는 보존할 원본 3D 구조가 없어 구조 잠금을 검증할 수 없습니다.");
     const resultPath = path.join(work, "result.json"), schemaPath = path.join(work, "result.schema.json"), outputBlend = path.join(work, "outputs/asset.blend");
     directory(root, path.dirname(outputBlend));
     if (!fs.existsSync(dispatchPath)) {
@@ -213,6 +256,10 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
       const run: ProductionRun = { schemaVersion: 1, id: task.id, projectId: args.object.id, projectRevision: 1, workspace: work, status: "running", createdAt: task.createdAt, updatedAt: task.updatedAt, config: { sourceId: task.objectId, brief: task.instruction, motions: animation ? [clipName] : [], maxIterations: 1, studioCreditLimit: 0, videoCreditLimit: 0, mode: "studio" }, source: { path: prepared.preparedBlend, sha256: prepared.preparedSha256, label: args.object.name }, stages: [stage], message: "App-owned local Blender Astra authoring" };
       const modes: Record<string, string> = {
         M05: "Edit ONLY requested shape/proportion of the existing meshes; preserve topology, mesh IDs, UVs, textures, materials, existing armatures and actions. Do not rebuild, decimate, replace or discard the model. Initial FBX/GLB has already been imported into the original working scene by the host.",
+        M06: `PARTIAL EDIT: edit positions only within exact mesh IDs ${JSON.stringify(contract.editMeshIds)}. Every untargeted mesh must retain its original positions and world transform. Preserve every mesh ID, topology, UV, material, rig and action. Rebuilding, adding/removing meshes or topology-changing surgery is unsupported; return needs_input when required.`,
+        M07: `PART SEPARATION: partition every original polygon exactly once into these requested parts: ${JSON.stringify(contract.requestedParts)}. Assign each output MESH custom property partsmith_part_id to exactly one requested id, and retain a unique partsmith_id. Do not duplicate, omit, triangulate, remesh or move any surface. Retain world-space positions, per-corner UVs, materials and skin weights, original rigs and actions. Host exports separate editable BLEND/FBX/GLB for each part from this one authored scene.`,
+        M08: "PART ASSEMBLY: arrange ALL supplied accepted parts in the prepared scene using object/root transforms only. Preserve mesh IDs, vertices, topology, UV, materials, packed texture originals, rigs and actions. Do not fuse, remesh, substitute, delete or regenerate parts. Inspect the whole-appearance references for proportions; report uncertain alignment. Produce one combined editable scene.",
+        M15: "NEW LOCAL MODEL: author exactly one independent editable Blender model using the accepted design images and compiled request. The prepared scene is intentionally empty. Create actual finite mesh geometry with unique partsmith_id on each mesh, coherent UV/material assignments and packed file textures if used. Bake non-armature modifiers into the new mesh; shape keys are not supported in this initial model contract. Do not use a prior generated model or copy another candidate. Semantic similarity, style, silhouette and requested quality require human visual review; do not claim they are machine verified.",
         R01: "Create an anatomically appropriate humanoid skeleton and skin the supplied character. Use canonical bones pelvis, spine, chest, neck, head, upper_arm.L/R, forearm.L/R, hand.L/R, thigh.L/R, shin.L/R, foot.L/R. Use a connected hierarchy and valid normalized deform weights. Include real joint pose checks; appearance/Humanoid compatibility still requires review.",
         R02: "Create an anatomically appropriate animal/nonhuman Generic skeleton using the actual supplied shape and requested species/limbs/wings. Do not impose a humanoid preset. Use a hierarchy with at least 3 nondegenerate bones, valid normalized deform weights and actual per-mesh joint pose checks.",
         R03: "Edit skinning/weights of the existing accepted rig only. Preserve the exact original bone names, hierarchy, rest matrices, mesh topology/positions, UVs, textures, materials and actions. Normalize every mesh vertex's valid deform-bone weights and inspect actual deformation; never replace the skeleton.",
@@ -222,9 +269,11 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
       };
       const prompt = [
         "You are the app-owned gpt-6-astra Blender authoring worker. Execute exactly this frozen task using the configured Blender executable and local bpy/headless tooling. Preserve the configured reasoning effort; no model/effort downgrade, no configuration changes, no MCP toggling.",
-        "No browser production, paid/cloud service, image generation, video generation, Tripo, remote upload, API key, separate asset regeneration or external account operation. Keep all existing integrations enabled. Do not inspect credentials or unrelated projects. Only author this task's local output.",
+        "No browser production, paid/cloud service, image generation, video generation, Tripo, remote upload, API key or external account operation. No separate asset regeneration except the explicitly requested NEW LOCAL MODEL operation M15. Keep all existing integrations enabled. Do not inspect credentials or unrelated projects. Only author this task's local output.",
         `Operation: ${task.taskId}. Object kind: ${args.object.kind}. Blender: ${JSON.stringify(args.blenderPath)}. Open ${JSON.stringify(prepared.preparedBlend)} with load_ui=False,use_scripts=False. Original/source copies are immutable. Save ONE new editable, uncompressed .blend ONLY to ${JSON.stringify(outputBlend)}. Never save over source.blend or any input file. Retain packed original textures at full resolution and original partsmith_id on every mesh. No external linked libraries/textures.`,
         modes[task.taskId],
+        `Independent candidate variationSeed: ${JSON.stringify(task.settings.variationSeed ?? null)}; candidateIndex: ${JSON.stringify(task.settings.candidateIndex ?? null)}. For a candidate batch, create a distinct authored interpretation of this same request within all preservation constraints. Do not duplicate another candidate's scene or merely rename/re-save identical geometry/actions. No borrowing prior candidate outputs. If the allowed edit has no meaningful independent variation, report needs_input rather than claim multiple originals.`,
+        `Structural lock flags: ${JSON.stringify(contract.locks)}. These are hard host checks only when explicitly true; operation-specific preservation requirements above still apply. For R01/R02 requested controls use deform-bone custom property partsmith_feature with value ears, tail, hair, cloth, wings or accessories on the actual corresponding bones. Required features: ${JSON.stringify(rigFeatures)}. rigClothing and legacy rigCloth both request cloth controls; rigAccessories requests independent equipment/accessory controls. Every required feature needs real non-root bones, direct normalized vertex influence and measurable pose response, not labels alone.`,
         `Frozen settings: ${JSON.stringify(task.settings)}. Clip: ${JSON.stringify(clipName)}; exact action name: ${JSON.stringify(actionName)}; FPS: ${fps}; duration seconds: ${duration}; use frames 1..${1 + Math.round(duration * fps)} inclusive. Set action, frame range and render fps explicitly. Loop setting: ${Boolean(task.settings.loop)}. Preserve pose bone rotation modes.`,
         "For rig/animation every mesh must have an actual enabled armature modifier and all vertices normalized to existing deform bones. At least one non-root joint must produce measurable mesh deformation; names/key counts alone do not qualify. For model correction retain all existing rigs/actions. For animation retain every untargeted action with original curves, handles, interpolation and timing. Keep evaluated geometry finite. Respect requested hair/tail/wing switches and report anatomical uncertainty.",
         `Immutable input copies with roles and lineage: ${JSON.stringify(prepared.copies)}. Accepted motion reference version IDs: ${JSON.stringify([...new Set(motionFiles.map(file => file.version.id))])}. Source version: ${source.version.id}. Reference paths in copied JSON are original project-relative identities; use the matching sourcePath-to-localPath mapping above to open each copied file.`,
@@ -263,28 +312,54 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     const validation = path.join(folder, "validated-" + hash(hashFile(blend) + validatorFingerprint).slice(0, 20) + "-" + randomUUID().slice(0, 8)); directory(root, validation);
     const reportPath = path.join(validation, "report.json"), nonce = randomUUID();
     args.onProgress("실제 Blender에서 원본 계보·메시·웨이트·액션·변형을 검사하고 미리보기를 만듭니다.");
-    await invoke({ mode: "validate", identity, nonce, validatorFingerprint, operation: task.taskId, sourceSha256: source.sha256, sourceBlend: prepared.preparedBlend, outputBlend: blend, baseline: prepared.baseline, output: validation, report: reportPath, actionName, clipName, fps, duration, loop: Boolean(task.settings.loop) }, "validate-request");
+    await invoke({ mode: "validate", identity, nonce, validatorFingerprint, operation: task.taskId, sourceSha256: source.sha256, sourceBlend: prepared.preparedBlend, outputBlend: blend, baseline: prepared.baseline, output: validation, report: reportPath, actionName, clipName, fps, duration, loop: Boolean(task.settings.loop), ...contract,
+      rigFeatures }, "validate-request");
     unchanged(protectedFiles);
     if (hashFile(prepared.baseline) !== prepared.baselineSha256) throw Error("원본 Blender 검사 기록이 변경됐습니다.");
     const report = read(reportPath);
     if (report.identity !== identity || report.nonce !== nonce || report.operation !== task.taskId || report.sourceSha256 !== source.sha256 || report.outputSha256 !== hashFile(blend) || report.passed !== true || !report.meshes?.length || !Array.isArray(report.files)) throw Error("실제 Blender 결과의 검증 증거가 잘못됐습니다.");
-    const required = ["meshLineage", "topology", "materials", "actionsPreserved", ...(task.taskId !== "M05" ? ["weights", "deformation"] : []), ...(animation ? ["skeleton", "clipRange", "motion"] : [])];
+    const modelOperation = task.taskId.startsWith("M");
+    const required = task.taskId === "M15" ? ["newGeometry"] : task.taskId === "M07" ? ["partition", "materials", "skeleton", "actionsPreserved"] : ["meshLineage", "topology", "materials", "actionsPreserved", ...(!modelOperation ? ["weights", "deformation"] : []), ...(animation ? ["skeleton", "clipRange", "motion"] : []), ...(task.taskId === "M06" ? ["partialEdit"] : [])];
     if (required.some(check => report.checks?.[check] !== true)) throw Error("Blender 원본 보존·변형·액션 검사가 통과하지 않았습니다.");
+    if (["R01", "R02"].includes(task.taskId) && rigFeatures.length && (report.checks?.rigFeatures !== true || rigFeatures.some(feature => !report.rigFeatures?.[feature]?.length))) throw Error("요청한 부속 관절의 웨이트·실제 변형 검사가 없습니다.");
+    if (Object.entries(contract.locks).some(([lock, enabled]) => enabled && report.checks?.[{ topology: "topology", materials: "materials", rig: "skeleton" }[lock]!] !== true)) throw Error("명시한 구조 잠금 검사가 통과하지 않았습니다.");
     const outputFiles: GraphicsNativeResult["files"] = [{ path: relative(root, blend), kind: "blend" }];
     for (const item of report.files) {
       if (typeof item !== "string") throw Error("Blender 출력 파일 목록이 잘못됐습니다.");
       const output = fileWithin(validation, item), extension = path.extname(output).toLowerCase();
-      if (![".glb", ".png"].includes(extension) || !fs.statSync(output).size) throw Error("Blender 출력 파일 형식이 잘못됐습니다.");
+      if (!(task.taskId === "M07" ? [".glb", ".png", ".blend", ".fbx"] : [".glb", ".png"]).includes(extension) || !fs.statSync(output).size) throw Error("Blender 출력 파일 형식이 잘못됐습니다.");
       if (extension === ".glb") {
         const bytes = fs.readFileSync(output);
         if (bytes.length < 20 || bytes.toString("ascii", 0, 4) !== "glTF" || bytes.readUInt32LE(4) !== 2 || bytes.readUInt32LE(8) !== bytes.length) throw Error("Blender GLB 미리보기가 손상됐습니다.");
       }
-      outputFiles.push({ path: relative(root, output), kind: extension === ".glb" ? "model" : "image" });
+      const outputPath = relative(root, output);
+      if (outputFiles.some(file => file.path === outputPath)) throw Error("Blender 출력 파일 경로가 중복됩니다.");
+      outputFiles.push({ path: outputPath, kind: extension === ".blend" ? "blend" : extension === ".png" ? "image" : "model" });
     }
     if (!outputFiles.some(file => file.kind === "model") || outputFiles.filter(file => file.kind === "image").length < 3) throw Error("실제 모델·정면·측면·후면 미리보기가 없습니다.");
     outputFiles.push({ path: relative(root, reportPath), kind: "report" });
     if (recoveredWithoutMessage) write(path.join(folder, "native-recovery.json"), { schemaVersion: 1, identity, mode: "saved-blend-without-completion-message", outputSha256: hashFile(blend), validation: relative(root, reportPath), modelTurns: 0, recoveredAt: new Date().toISOString() });
-    const result: GraphicsNativeResult = { files: outputFiles, label: animation ? `${clipName} · ${task.taskId === "N06" ? "동작 수정" : "3D 동작"}` : task.taskId === "M05" ? "형태·비율 보정" : "리그·웨이트", role: animation ? "animation" : task.taskId === "M05" ? source.version.role : "rig", slot: animation ? clipName : "main", warnings: [...authored.warnings.filter((value: unknown) => typeof value === "string").slice(0, 30), "구조·실제 변형을 검사했습니다. 해부학적 품질·접지·관통·루프의 시각 품질과 Unity 재생은 별도 검토가 필요합니다."], ...(fs.existsSync(path.join(folder, "usage.json")) ? { usage: read(path.join(folder, "usage.json")) } : {}) };
+    const warnings = [...authored.warnings.filter((value: unknown) => typeof value === "string").slice(0, 30), "구조 검사를 통과했습니다. 요청한 형태·스타일·해부학적 품질·접지·관통·루프의 시각 품질과 Unity 재생은 별도 검토가 필요합니다."];
+    const candidates: NonNullable<GraphicsNativeResult["candidates"]> = [];
+    if (task.taskId === "M07") {
+      const used = new Set<string>();
+      if (!Array.isArray(report.candidates) || report.candidates.length !== contract.requestedParts.length) throw Error("분리 파츠별 결과 명세가 없습니다.");
+      for (const part of contract.requestedParts) {
+        const matches = report.candidates.filter((item: any) => item.slot === part.id);
+        if (matches.length !== 1 || !Array.isArray(matches[0].files) || !matches[0].meshIds?.length) throw Error("분리 파츠 결과가 누락되거나 중복됐습니다.");
+        const files = matches[0].files.map((item: unknown) => {
+          if (typeof item !== "string") throw Error("분리 파츠 파일 명세가 잘못됐습니다.");
+          const candidatePath = relative(root, fileWithin(validation, item)), file = outputFiles.find(file => file.path === candidatePath);
+          if (!file || used.has(candidatePath)) throw Error("분리 파츠 파일이 검증 목록 밖이거나 다른 파츠와 중복됩니다.");
+          used.add(candidatePath); return file;
+        });
+        if (![".blend", ".fbx", ".glb"].every(extension => files.some((file: { path: string }) => file.path.endsWith(extension))) || files.filter((file: { kind: string }) => file.kind === "image").length < 3) throw Error("각 파츠에 편집 가능한 BLEND·FBX·GLB 및 세 방향 미리보기가 필요합니다.");
+        candidates.push({ slot: `part-${part.id}`, label: part.label, files: [...files, outputFiles.at(-1)!], role: "model", warnings });
+      }
+      if (used.size !== report.files.length) throw Error("어느 파츠에도 연결되지 않은 분리 출력이 있습니다.");
+    }
+    const labels: Record<string, string> = { M05: "형태·비율 보정", M06: "부분 형태 수정", M07: "파츠 분리", M08: "파츠 조립", M15: "새 Blender 모델" };
+    const result: GraphicsNativeResult = { files: outputFiles, label: animation ? `${clipName} · ${task.taskId === "N06" ? "동작 수정" : "3D 동작"}` : labels[task.taskId] ?? "리그·웨이트", role: animation ? "animation" : task.taskId === "M05" ? source.version.role : modelOperation ? "model" : "rig", slot: animation ? clipName : "main", warnings, ...(candidates.length ? { candidates } : {}), ...(fs.existsSync(path.join(folder, "usage.json")) ? { usage: read(path.join(folder, "usage.json")) } : {}) };
     write(checkpointPath, { schemaVersion: 1, identity, validatorFingerprint, createdAt: new Date().toISOString(), files: outputFiles.map(file => { const localPath = fileWithin(root, file.path); return { path: file.path, bytes: fs.statSync(localPath).size, sha256: hashFile(localPath) }; }), result });
     return result;
   };

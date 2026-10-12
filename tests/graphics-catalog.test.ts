@@ -6,6 +6,7 @@ import path from "node:path";
 import { build } from "esbuild";
 import { _electron as electron } from "playwright";
 import electronBinary from "electron";
+import { compileCreation } from "../shared/graphics-creation";
 import type {
   AssetVersion,
   GraphicsAction,
@@ -151,7 +152,7 @@ test("multiview mapping requires four distinct image originals and preserves exp
   assert.equal(settings.rightVersionId, "right");
 });
 
-test("graphics catalog contains exactly the 116 reviewed tasks with unchanged meanings", () => {
+test("graphics catalog preserves all 116 reviewed tasks and declares the added Astra model path separately", () => {
   const text = fs.readFileSync(
     path.resolve("docs/graphics-studio/02-전체-작업-선택표.md"),
     "utf8",
@@ -166,8 +167,27 @@ test("graphics catalog contains exactly the 116 reviewed tasks with unchanged me
         .map((column) => column.trim()),
     );
   assert.equal(expected.length, 116);
-  assert.equal(graphicsCatalog.length, 116);
-  assert.equal(new Set(graphicsCatalog.map((task) => task.id)).size, 116);
+  assert.equal(graphicsCatalog.length, 117);
+  assert.equal(new Set(graphicsCatalog.map((task) => task.id)).size, 117);
+  const originalIds = new Set(expected.map(([id]) => id));
+  assert.deepEqual(
+    graphicsCatalog
+      .filter((task) => !originalIds.has(task.id))
+      .map((task) => ({
+        id: task.id,
+        name: task.name,
+        executor: task.executor,
+        status: task.status,
+      })),
+    [
+      {
+        id: "M15",
+        name: "Blender + Astra 모델 제작",
+        executor: "astra",
+        status: "unverified",
+      },
+    ],
+  );
   for (const [id, name, inputs, output] of expected) {
     const task = findGraphicsTask(id);
     assert(task, id);
@@ -185,18 +205,47 @@ test("catalog distinguishes connected unverified paths from local and unavailabl
   const ready = graphicsCatalog
     .filter((task) => task.status === "ready")
     .map((task) => task.id);
-  assert.deepEqual(ready, ["A01", "A02", "A03", "A05", "I01", "M01", "M05", "T01", "T03", "N01", "X04", "X05"]);
+  assert.deepEqual(ready, [
+    "A01",
+    "A02",
+    "A03",
+    "A05",
+    "I01",
+    "M01",
+    "M05",
+    "T01",
+    "T03",
+    "N01",
+    "X04",
+    "X05",
+  ]);
   const connected = graphicsCatalog
     .filter((task) => task.status === "unverified")
     .map((task) => task.id);
   assert.deepEqual(connected, [
     "I02",
     "I03",
-    "I05", "I06", "I07",
+    "I05",
+    "I06",
+    "I07",
+    "I08",
     "M02",
     "M03",
+    "M04",
+    "M06",
+    "M07",
+    "M08",
     "M10",
-    "R01", "R02", "R03", "N02", "N04", "N05", "N06",
+    "T02",
+    "T05",
+    "R01",
+    "R02",
+    "R03",
+    "N02",
+    "N04",
+    "N05",
+    "N06",
+    "M15",
   ]);
   assert(
     graphicsCatalog
@@ -246,7 +295,7 @@ test("recommendations preserve a supplied model and search covers inputs and rev
 
 test(
   "graphics UI dispatches real typed actions, preserves versions and requires durable cost approval",
-  { timeout: 90000 },
+  { timeout: 180000 },
   async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "partsmith-graphics-ui-"),
@@ -297,7 +346,7 @@ test(
     );
     fs.writeFileSync(
       path.join(root, "main.cjs"),
-      `process.on('uncaughtException',error=>{console.error(error.stack);process.exit(1)});const {app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(root, "profile"))});app.whenReady().then(()=>{const w=new BrowserWindow({show:false,width:1440,height:1100,webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true}});w.loadFile(${JSON.stringify(path.join(root, "index.html"))});});`,
+      `process.on('uncaughtException',error=>{console.error(error.stack);process.exit(1)});const {app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(root, "profile"))});app.whenReady().then(()=>{const w=new BrowserWindow({show:false,width:1440,height:1100,webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,backgroundThrottling:false}});w.loadFile(${JSON.stringify(path.join(root, "index.html"))});});`,
     );
     const app = await electron.launch({
       executablePath: electronBinary as unknown as string,
@@ -305,41 +354,53 @@ test(
     });
     try {
       const page = await app.firstWindow();
+      page.setDefaultTimeout(10000);
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await page.getByTestId("graphics-studio").waitFor();
       await page.getByTestId("graphics-object-sword").click();
-      assert.equal(await page.locator("[data-task-id]").count(), 116);
+      assert.equal(await page.locator("[data-task-id]").count(), 117);
+      assert.equal(
+        await page
+          .locator("details.gs-catalog")
+          .evaluate((node) => (node as HTMLDetailsElement).open),
+        false,
+      );
+      await page.locator("details.gs-catalog > summary").click();
       await page.getByRole("tab", { name: "추천", exact: true }).click();
       assert.equal(await page.locator('[data-task-id="M01"]').count(), 0);
       assert.equal(await page.locator('[data-task-id="X05"]').count(), 1);
       await page.getByRole("tab", { name: "전체", exact: true }).click();
       await page.getByRole("textbox", { name: "작업 검색" }).fill("I04");
       await page.locator('[data-task-id="I04"] button').click();
+      assert.match(
+        await page.getByRole("status").innerText(),
+        /특정 영역만 수정/,
+      );
       assert.equal(
-        await page.getByTestId("graphics-prepare").isDisabled(),
-        true,
+        await page.evaluate(() => (window as any).graphicsActions.length),
+        0,
+        "Support catalog browsing must not change or execute production settings",
       );
       await page.getByRole("textbox", { name: "작업 검색" }).fill("I03");
       assert.match(
         await page.getByTestId("graphics-task-list").innerText(),
         /기존 이미지 수정/,
       );
-      await page.getByRole("textbox", { name: "작업 검색" }).fill("M01");
-      await page.locator('[data-task-id="M01"] button').click();
+      await page.locator("details.gs-catalog > summary").click();
       await page
-        .getByRole("checkbox", { name: "M01 단일 이미지 모델링 작업 선택" })
-        .check();
+        .getByRole("navigation", { name: "제작 단계" })
+        .getByRole("button", { name: "7 Unity 전달", exact: true })
+        .click();
       await page
-        .getByLabel("원하는 결과와 유지할 특징")
+        .getByLabel("이 단계 추가 지시 · 선택지에 없는 내용")
         .fill("Keep the original geometry and markings");
       await page.getByLabel("출력 배율", { exact: true }).fill("2");
       await page.getByLabel("피벗", { exact: true }).selectOption("bottom");
       await page.getByLabel("출력 형식", { exact: true }).selectOption("fbx");
       await page
-        .getByRole("button", { name: "설정 저장", exact: true })
+        .getByText("이미 가진 이미지 · 모델 · 동작 가져오기", { exact: true })
         .click();
-      await page.getByRole("status").waitFor();
       await page.getByLabel("가져올 자료의 역할").selectOption("rig");
       await page.getByTestId("graphics-import").click();
       await page.getByTestId("graphics-reference-version").selectOption("ref");
@@ -359,6 +420,10 @@ test(
         .getByTestId("graphics-accept-version")
         .filter({ hasText: "현재 채택 버전" })
         .waitFor();
+      await page
+        .getByRole("navigation", { name: "제작 단계" })
+        .getByRole("button", { name: "2 모델", exact: true })
+        .click();
       await page.getByTestId("graphics-prepare").click();
       await page.getByRole("alert").waitFor();
       assert.match(
@@ -366,12 +431,17 @@ test(
         /기존 원본과 채택 결과는 유지/,
       );
       assert.equal(await page.getByTestId("graphics-version-old").count(), 1);
-      await page.getByRole("textbox", { name: "작업 검색" }).fill("X04");
-      await page.locator('[data-task-id="X04"] button').click();
+      await page
+        .getByRole("navigation", { name: "제작 단계" })
+        .getByRole("button", { name: "7 Unity 전달", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "FBX · GLB 파일 내보내기", exact: true })
+        .click();
       await page.getByTestId("graphics-prepare").click();
       await page.getByTestId("graphics-cost-quote").waitFor();
       await page
-        .getByLabel("원하는 결과와 유지할 특징")
+        .getByLabel("이 단계 추가 지시 · 선택지에 없는 내용")
         .fill("New unsaved instructions must not change the approved request");
       assert.match(
         await page.getByTestId("graphics-cost-quote").innerText(),
@@ -402,7 +472,7 @@ test(
       );
       assert(!actionsBefore.some((action) => action.kind === "approve"));
       await page.getByTestId("graphics-approve-quote").click();
-      await page.locator(".gs-history summary").click();
+      await page.locator(".gs-history > details > summary").click();
       await page
         .getByRole("button", { name: "추적 중지", exact: true })
         .click();
@@ -422,6 +492,7 @@ test(
               objects: {
                 id: string;
                 settings: Record<string, unknown>;
+                creation: GraphicsObject["creation"];
                 accepted: Record<string, string>;
                 references: unknown[];
               }[];
@@ -451,10 +522,16 @@ test(
       const sword = result.workspace.objects.find(
         (object) => object.id === "sword",
       )!;
-      assert.equal(sword.settings.scale, 2);
-      assert.equal(sword.settings.pivot, "bottom");
-      assert.equal(sword.settings.exportFormat, "fbx");
-      assert.equal(sword.settings.textureSize, 4096);
+      assert.equal(sword.creation?.stageSettings.unity?.values.scale, 2);
+      assert.equal(sword.creation?.stageSettings.unity?.values.pivot, "bottom");
+      assert.equal(
+        sword.creation?.stageSettings.unity?.values.exportFormat,
+        "fbx",
+      );
+      assert.equal(
+        sword.creation?.stageSettings.surface?.values.textureSize,
+        4096,
+      );
       assert.equal(sword.accepted["model:main"], "new");
       assert.equal(result.workspace.versions.length, 3);
       assert.equal(sword.references.length, 1);
@@ -479,12 +556,18 @@ test(
   },
 );
 
-test("graphics UI freezes equipment, directions, side PNG selection and rig controls without executing services", { timeout: 90000 }, async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "partsmith-graphics-settings-ui-"));
-  const entry = `
+test(
+  "graphics UI freezes equipment, directions, side PNG selection and rig controls without executing services",
+  { timeout: 180000 },
+  async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "partsmith-graphics-settings-ui-"),
+    );
+    const entry = `
     import React, {useState} from 'react';
     import {createRoot} from 'react-dom/client';
     import {GraphicsStudio} from ${JSON.stringify(path.resolve("src/GraphicsStudio.tsx"))};
+    import {compileCreation} from ${JSON.stringify(path.resolve("shared/graphics-creation.ts"))};
     const createdAt='2026-10-13T00:00:00Z';
     const png=(path,letter)=>({path,kind:'image',sha256:letter.repeat(64),bytes:123});
     const version=(id,objectId,slot,files)=>({id,objectId,role:'design',slot,label:id,files,createdAt,sourceVersionIds:[],provenance:{type:'import'},warnings:[]});
@@ -507,8 +590,8 @@ test("graphics UI freezes equipment, directions, side PNG selection and rig cont
         if(value.kind==='prepare'){
           const object=current.objects.find(o=>o.id===value.objectId),index=window.graphicsPrepared.length;
           window.graphicsPrepared.push({taskId:value.taskId,object:structuredClone(object)});
-          const settings=structuredClone(object.settings);if(value.taskId==='N02')settings.motionSourceView??='left';
-          current.tasks.push({id:'prepared-'+index,objectId:value.objectId,taskId:value.taskId,createdAt,updatedAt:createdAt,status:'awaiting_approval',inputVersionIds:value.taskId==='N02'?[settings.motionSourceVersionId]:[],settings,instruction:object.instruction,objectSnapshot:{name:object.name,kind:object.kind,accepted:structuredClone(object.accepted),references:structuredClone(object.references)},requestHash:'frozen-'+index,outputVersionIds:[],backendJobIds:[],message:'UI fixture only',localOnly:false,cost:value.taskId==='N02'?{provider:'Runway',credits:Number(settings.duration??2)*12,basis:'Fixture published estimate'}:{provider:'Codex',credits:null,basis:'Fixture account usage'}});
+          const compiled=compileCreation(object,value.taskId),settings=structuredClone(compiled.settings);if(value.taskId==='N02')settings.motionSourceView??='left';
+          current.tasks.push({id:'prepared-'+index,objectId:value.objectId,taskId:value.taskId,createdAt,updatedAt:createdAt,status:'awaiting_approval',inputVersionIds:value.taskId==='N02'?[settings.motionSourceVersionId]:[],settings,instruction:compiled.instruction,objectSnapshot:{name:object.name,kind:object.kind,accepted:structuredClone(object.accepted),references:structuredClone(object.references)},requestHash:'frozen-'+index,outputVersionIds:[],backendJobIds:[],message:'UI fixture only',localOnly:false,cost:value.taskId==='N02'?{provider:'Runway',credits:Number(settings.duration??2)*12,basis:'Fixture published estimate'}:{provider:'Codex',credits:null,basis:'Fixture account usage'}});
         }
         setWorkspace(current);
       };
@@ -516,104 +599,381 @@ test("graphics UI freezes equipment, directions, side PNG selection and rig cont
     }
     createRoot(document.getElementById('root')).render(<Harness/>);
   `;
-  await build({ stdin: { contents: entry, resolveDir: process.cwd(), loader: "tsx" }, bundle: true, format: "iife", outfile: path.join(root, "ui.js"), jsx: "automatic", logLevel: "silent" });
-  fs.writeFileSync(path.join(root, "index.html"), '<!doctype html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src \'self\'; script-src \'self\'; style-src \'self\'; connect-src \'none\'; img-src \'self\' data:"><link rel="stylesheet" href="ui.css"></head><body style="margin:0"><div id="root"></div><script src="ui.js"></script></body></html>');
-  fs.writeFileSync(path.join(root, "main.cjs"), `const {app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(root, "profile"))});app.whenReady().then(()=>{const window=new BrowserWindow({show:false,width:1440,height:1100,webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true}});window.loadFile(${JSON.stringify(path.join(root, "index.html"))});});`);
-  const app = await electron.launch({ executablePath: electronBinary as unknown as string, args: [path.join(root, "main.cjs")] });
-  try {
-    const page = await app.firstWindow(), errors: string[] = [];
-    page.on("pageerror", error => errors.push(error.message));
-    await page.getByTestId("graphics-studio").waitFor();
-    await page.getByTestId("graphics-object-target").click();
-    const choose = async (id: string) => {
-      await page.getByRole("textbox", { name: "작업 검색" }).fill(id);
-      await page.locator(`[data-task-id="${id}"] button`).click();
-    };
-    const prepare = async (index: number) => {
-      await page.getByTestId("graphics-prepare").click();
-      const card = page.getByTestId(`graphics-cost-prepared-${index}`); await card.waitFor(); return card;
-    };
-    const cancel = async (index: number) => {
-      await page.getByTestId(`graphics-cost-prepared-${index}`).getByRole("button", { name: "취소", exact: true }).click();
-      await page.getByTestId(`graphics-cost-prepared-${index}`).waitFor({ state: "detached" });
-    };
-    const snapshots = () => page.evaluate(() => (window as unknown as { graphicsPrepared: { taskId: string; object: GraphicsObject }[] }).graphicsPrepared);
+    await build({
+      stdin: { contents: entry, resolveDir: process.cwd(), loader: "tsx" },
+      bundle: true,
+      format: "iife",
+      outfile: path.join(root, "ui.js"),
+      jsx: "automatic",
+      logLevel: "silent",
+    });
+    fs.writeFileSync(
+      path.join(root, "index.html"),
+      '<!doctype html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src \'self\'; script-src \'self\'; style-src \'self\'; connect-src \'none\'; img-src \'self\' data:"><link rel="stylesheet" href="ui.css"></head><body style="margin:0"><div id="root"></div><script src="ui.js"></script></body></html>',
+    );
+    fs.writeFileSync(
+      path.join(root, "main.cjs"),
+      `const {app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(root, "profile"))});app.whenReady().then(()=>{const window=new BrowserWindow({show:false,width:1440,height:1100,webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,backgroundThrottling:false}});window.loadFile(${JSON.stringify(path.join(root, "index.html"))});});`,
+    );
+    const app = await electron.launch({
+      executablePath: electronBinary as unknown as string,
+      args: [path.join(root, "main.cjs")],
+    });
+    try {
+      const page = await app.firstWindow(),
+        errors: string[] = [];
+      page.setDefaultTimeout(10000);
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.getByTestId("graphics-studio").waitFor();
+      await page.getByTestId("graphics-object-target").click();
+      const choose = async (id: string) => {
+        const choices: Record<string, [string, string]> = {
+          I06: ["1 이미지", "참조 캐릭터 장비"],
+          I07: ["1 이미지", "멀티뷰"],
+          N02: ["6 애니메이션", "AI 동작 영상"],
+          R01: ["5 리깅", "Humanoid · 사람형"],
+          M15: ["2 모델", "Blender + Astra"],
+        };
+        const [stage, mode] = choices[id];
+        await page
+          .getByRole("navigation", { name: "제작 단계" })
+          .getByRole("button", { name: stage, exact: true })
+          .click();
+        await page.getByRole("button", { name: mode, exact: true }).click();
+      };
+      const prepare = async (index: number) => {
+        await page.getByTestId("graphics-prepare").click();
+        const card = page.getByTestId(`graphics-cost-prepared-${index}`);
+        await card.waitFor();
+        return card;
+      };
+      const cancel = async (index: number) => {
+        await page
+          .getByTestId(`graphics-cost-prepared-${index}`)
+          .getByRole("button", { name: "취소", exact: true })
+          .click();
+        await page
+          .getByTestId(`graphics-cost-prepared-${index}`)
+          .waitFor({ state: "detached" });
+      };
+      const snapshots = () =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                graphicsPrepared: { taskId: string; object: GraphicsObject }[];
+              }
+            ).graphicsPrepared,
+        );
 
-    await choose("I06");
-    assert.equal(await page.getByLabel("장비 결과", { exact: true }).inputValue(), "standalone");
-    await page.getByLabel("장비 결과", { exact: true }).selectOption("worn");
-    await page.getByLabel("후보 개수", { exact: true }).fill("2");
-    await page.getByLabel("원하는 결과와 유지할 특징").fill("Matching armor worn by the reference character");
-    await prepare(0);
-    let captured = (await snapshots())[0];
-    assert.equal(captured.taskId, "I06"); assert.equal(captured.object.settings.equipmentOutput, "worn"); assert.equal(captured.object.settings.count, 2);
-    assert.deepEqual(captured.object.references, [{ versionId: "foreign", role: "appearance" }]);
-    await cancel(0);
+      await choose("M15");
+      await page
+        .getByRole("button", { name: "네 방향 원본", exact: true })
+        .click();
+      assert.equal(
+        await page.getByTestId("graphics-prepare").isDisabled(),
+        true,
+      );
+      await page
+        .getByLabel("정면 원본", { exact: true })
+        .selectOption("foreign");
+      await page
+        .getByLabel("후면 원본", { exact: true })
+        .selectOption("foreign");
+      await page
+        .getByLabel("왼쪽 원본", { exact: true })
+        .selectOption("accepted-sides");
+      await page
+        .getByLabel("오른쪽 원본", { exact: true })
+        .selectOption("unaccepted");
+      assert.equal(
+        await page.getByTestId("graphics-prepare").isDisabled(),
+        true,
+        "Astra multiview also rejects duplicate directions",
+      );
+      await page
+        .getByLabel("후면 원본", { exact: true })
+        .selectOption("accepted-design");
+      assert.equal(
+        await page.getByTestId("graphics-prepare").isEnabled(),
+        true,
+      );
+      assert.equal(
+        await page.evaluate(() => (window as any).graphicsActions.length),
+        0,
+        "Mapping Astra directions alone cannot create a request",
+      );
 
-    await choose("I07");
-    for (const name of ["정면", "후면", "좌측", "우측"]) assert.equal(await page.getByRole("checkbox", { name, exact: true }).isChecked(), true);
-    await page.getByRole("checkbox", { name: "정면", exact: true }).uncheck(); await page.getByRole("checkbox", { name: "정면", exact: true }).check();
-    await page.getByRole("checkbox", { name: "후면", exact: true }).uncheck(); await page.getByRole("checkbox", { name: "좌측", exact: true }).uncheck();
-    await page.getByRole("checkbox", { name: "우측", exact: true }).uncheck(); await page.getByRole("checkbox", { name: "우측", exact: true }).check();
-    await page.getByLabel("후보 개수", { exact: true }).fill("3");
-    const directions = await prepare(1); captured = (await snapshots())[1];
-    assert.deepEqual(Object.fromEntries(["viewFront", "viewBack", "viewLeft", "viewRight", "count"].map(key => [key, captured.object.settings[key]])), { viewFront: true, viewBack: false, viewLeft: false, viewRight: true, count: 3 });
-    await page.getByRole("checkbox", { name: "정면", exact: true }).uncheck();
-    await directions.getByText("고정된 요청 확인").click();
-    const frozenDirections = JSON.parse(await directions.locator("pre").innerText()); assert.equal(frozenDirections.viewFront, true); assert.equal(frozenDirections.count, 3);
-    await cancel(1);
+      await choose("I06");
+      assert.equal(
+        await page.getByLabel("장비 결과", { exact: true }).inputValue(),
+        "standalone",
+      );
+      await page.getByLabel("장비 결과", { exact: true }).selectOption("worn");
+      await page.getByLabel("후보 개수", { exact: true }).fill("2");
+      await page
+        .getByLabel("이 단계 추가 지시 · 선택지에 없는 내용")
+        .fill("Matching armor worn by the reference character");
+      await prepare(0);
+      let captured = (await snapshots())[0];
+      assert.equal(captured.taskId, "I06");
+      assert.equal(
+        compileCreation(captured.object, captured.taskId).settings
+          .equipmentOutput,
+        "worn",
+      );
+      assert.equal(
+        compileCreation(captured.object, captured.taskId).settings.count,
+        2,
+      );
+      assert.deepEqual(captured.object.references, [
+        { versionId: "foreign", role: "appearance" },
+      ]);
+      await cancel(0);
 
-    await choose("N02");
-    const sources = await page.getByLabel("영상 입력 원본", { exact: true }).locator("option").evaluateAll(options => options.map(option => (option as HTMLOptionElement).value));
-    assert.deepEqual(sources, ["", "accepted-design", "accepted-sides"]);
-    assert.equal(await page.getByLabel("영상 측면 방향", { exact: true }).inputValue(), "left");
-    await page.getByLabel("영상 입력 원본", { exact: true }).selectOption("accepted-sides");
-    assert.equal(await page.getByLabel("영상 원본 파일", { exact: true }).inputValue(), "sides/left.png");
-    assert.deepEqual(await page.getByLabel("영상 원본 파일", { exact: true }).locator("option").evaluateAll(options => options.map(option => (option as HTMLOptionElement).value)), ["", "sides/left.png", "sides/right.png"]);
-    await page.getByLabel("클립 이름", { exact: true }).fill("Rabbit_Idle"); await page.getByLabel("동작 길이", { exact: true }).fill("2");
-    await page.getByRole("checkbox", { name: "반복 동작", exact: true }).check();
-    let videoCard = await prepare(2); captured = (await snapshots())[2];
-    assert.equal(captured.object.settings.motionSourceVersionId, "accepted-sides"); assert.equal(captured.object.settings.motionSourcePath, "sides/left.png");
-    // The UI displays the left default; the real host normalizes this omitted setting before hashing.
-    assert.equal(captured.object.settings.motionSourceView ?? "left", "left");
-    await videoCard.getByText("고정된 요청 확인").click();
-    assert.equal(JSON.parse(await videoCard.locator("pre").innerText()).motionSourceView, "left"); assert.match(await videoCard.innerText(), /24 크레딧/);
-    await cancel(2);
-    await page.getByLabel("영상 원본 파일", { exact: true }).selectOption("sides/right.png");
-    await page.getByLabel("영상 측면 방향", { exact: true }).selectOption("right");
-    videoCard = await prepare(3); captured = (await snapshots())[3];
-    assert.equal(captured.object.settings.motionSourcePath, "sides/right.png"); assert.equal(captured.object.settings.motionSourceView, "right");
-    assert.match((await videoCard.getByLabel("고정된 입력 버전").locator("img").getAttribute("src"))!, /#sides\/right\.png$/);
-    assert.equal(await videoCard.getByLabel("고정된 입력 버전").locator("code").innerText(), "c".repeat(64));
-    await cancel(3);
+      await choose("I07");
+      for (const name of ["정면", "후면", "좌측", "우측"])
+        assert.equal(
+          await page.getByRole("checkbox", { name, exact: true }).isChecked(),
+          true,
+        );
+      await page.getByRole("checkbox", { name: "정면", exact: true }).uncheck();
+      await page.getByRole("checkbox", { name: "정면", exact: true }).check();
+      await page.getByRole("checkbox", { name: "후면", exact: true }).uncheck();
+      await page.getByRole("checkbox", { name: "좌측", exact: true }).uncheck();
+      await page.getByRole("checkbox", { name: "우측", exact: true }).uncheck();
+      await page.getByRole("checkbox", { name: "우측", exact: true }).check();
+      await page.getByLabel("후보 개수", { exact: true }).fill("3");
+      const directions = await prepare(1);
+      captured = (await snapshots())[1];
+      assert.deepEqual(
+        Object.fromEntries(
+          ["viewFront", "viewBack", "viewLeft", "viewRight", "count"].map(
+            (key) => [
+              key,
+              compileCreation(captured.object, captured.taskId).settings[key],
+            ],
+          ),
+        ),
+        {
+          viewFront: true,
+          viewBack: false,
+          viewLeft: false,
+          viewRight: true,
+          count: 3,
+        },
+      );
+      await page.getByRole("checkbox", { name: "정면", exact: true }).uncheck();
+      await directions.getByText("고정된 요청 확인").click();
+      const frozenDirections = JSON.parse(
+        await directions.locator("pre").innerText(),
+      );
+      assert.equal(frozenDirections.viewFront, true);
+      assert.equal(frozenDirections.count, 3);
+      await cancel(1);
 
-    await choose("R01");
-    await page.getByRole("checkbox", { name: "귀", exact: true }).check();
-    await page.getByRole("checkbox", { name: "꼬리", exact: true }).check(); await page.getByRole("checkbox", { name: "꼬리", exact: true }).uncheck();
-    await page.getByRole("checkbox", { name: "머리카락", exact: true }).check();
-    await page.getByRole("checkbox", { name: "옷", exact: true }).check(); await page.getByRole("checkbox", { name: "옷", exact: true }).uncheck();
-    await page.getByRole("checkbox", { name: "장비·소품", exact: true }).check();
-    await prepare(4); captured = (await snapshots())[4];
-    assert.deepEqual(Object.fromEntries(["rigEars", "rigTail", "rigHair", "rigClothing", "rigAccessories"].map(key => [key, captured.object.settings[key]])), { rigEars: true, rigTail: false, rigHair: true, rigClothing: false, rigAccessories: true });
-    await cancel(4);
-    await page.getByText("Tripo API 누적 승인 한도", { exact: true }).click();
-    assert.match(await page.getByLabel("Tripo API 한도").locator("..").locator("..").innerText(), /70 \/ 100 크레딧/);
-    await page.getByLabel("Tripo API 한도").fill("300"); await page.getByRole("button", { name: "한도 저장", exact: true }).click();
-    await page.getByRole("status").filter({ hasText: "Tripo 승인 한도를 저장" }).waitFor();
-    assert.match(await page.getByLabel("Tripo API 한도").locator("..").locator("..").innerText(), /70 \/ 300 크레딧/);
-    const actions = await page.evaluate(() => (window as unknown as { graphicsActions: GraphicsAction[] }).graphicsActions);
-    assert(actions.some(action => action.kind === "set-tripo-budget" && action.credits === 300));
-    assert(!actions.some(action => action.kind === "approve"));
-    for (const [index, action] of actions.entries()) if (action.kind === "prepare") {
-      assert.equal(actions[index - 1]?.kind, "update-object", "Every prepare must first save the visible settings through the typed action");
+      await choose("N02");
+      await page.getByLabel("클립 이름", { exact: true }).fill("Rabbit_Idle");
+      await page.getByLabel("클립 이름", { exact: true }).press("Enter");
+      const sources = await page
+        .getByLabel("영상 입력 원본", { exact: true })
+        .locator("option")
+        .evaluateAll((options) =>
+          options.map((option) => (option as HTMLOptionElement).value),
+        );
+      assert.deepEqual(sources, ["", "accepted-design", "accepted-sides"]);
+      assert.equal(
+        await page.getByLabel("영상 측면 방향", { exact: true }).inputValue(),
+        "left",
+      );
+      await page
+        .getByLabel("영상 입력 원본", { exact: true })
+        .selectOption("accepted-sides");
+      assert.equal(
+        await page.getByLabel("영상 원본 파일", { exact: true }).inputValue(),
+        "sides/left.png",
+      );
+      assert.deepEqual(
+        await page
+          .getByLabel("영상 원본 파일", { exact: true })
+          .locator("option")
+          .evaluateAll((options) =>
+            options.map((option) => (option as HTMLOptionElement).value),
+          ),
+        ["", "sides/left.png", "sides/right.png"],
+      );
+      await page.getByLabel("동작 길이", { exact: true }).fill("2");
+      await page
+        .getByRole("checkbox", { name: "반복 동작", exact: true })
+        .check();
+      let videoCard = await prepare(2);
+      captured = (await snapshots())[2];
+      assert.equal(
+        compileCreation(captured.object, captured.taskId).settings
+          .motionSourceVersionId,
+        "accepted-sides",
+      );
+      assert.equal(
+        compileCreation(captured.object, captured.taskId).settings
+          .motionSourcePath,
+        "sides/left.png",
+      );
+      // The UI displays the left default; the real host normalizes this omitted setting before hashing.
+      assert.equal(
+        compileCreation(captured.object, captured.taskId).settings
+          .motionSourceView ?? "left",
+        "left",
+      );
+      await videoCard.getByText("고정된 요청 확인").click();
+      assert.equal(
+        JSON.parse(await videoCard.locator("pre").innerText()).motionSourceView,
+        "left",
+      );
+      assert.match(await videoCard.innerText(), /24 크레딧/);
+      await cancel(2);
+      await page
+        .getByLabel("영상 원본 파일", { exact: true })
+        .selectOption("sides/right.png");
+      await page
+        .getByLabel("영상 측면 방향", { exact: true })
+        .selectOption("right");
+      videoCard = await prepare(3);
+      captured = (await snapshots())[3];
+      assert.equal(
+        compileCreation(captured.object, captured.taskId).settings
+          .motionSourcePath,
+        "sides/right.png",
+      );
+      assert.equal(
+        compileCreation(captured.object, captured.taskId).settings
+          .motionSourceView,
+        "right",
+      );
+      assert.match(
+        (await videoCard
+          .getByLabel("고정된 입력 버전")
+          .locator("img")
+          .getAttribute("src"))!,
+        /#sides\/right\.png$/,
+      );
+      assert.equal(
+        await videoCard
+          .getByLabel("고정된 입력 버전")
+          .locator("code")
+          .innerText(),
+        "c".repeat(64),
+      );
+      await cancel(3);
+
+      await choose("R01");
+      await page.getByRole("checkbox", { name: "귀", exact: true }).check();
+      await page.getByRole("checkbox", { name: "꼬리", exact: true }).check();
+      await page.getByRole("checkbox", { name: "꼬리", exact: true }).uncheck();
+      await page
+        .getByRole("checkbox", { name: "머리카락", exact: true })
+        .check();
+      await page.getByRole("checkbox", { name: "옷", exact: true }).check();
+      await page.getByRole("checkbox", { name: "옷", exact: true }).uncheck();
+      await page
+        .getByRole("checkbox", { name: "장비·소품", exact: true })
+        .check();
+      await prepare(4);
+      captured = (await snapshots())[4];
+      assert.deepEqual(
+        Object.fromEntries(
+          [
+            "rigEars",
+            "rigTail",
+            "rigHair",
+            "rigClothing",
+            "rigAccessories",
+          ].map((key) => [
+            key,
+            compileCreation(captured.object, captured.taskId).settings[key],
+          ]),
+        ),
+        {
+          rigEars: true,
+          rigTail: false,
+          rigHair: true,
+          rigClothing: false,
+          rigAccessories: true,
+        },
+      );
+      await cancel(4);
+      await page.getByText("Tripo API 누적 승인 한도", { exact: true }).click();
+      assert.match(
+        await page
+          .getByLabel("Tripo API 한도")
+          .locator("..")
+          .locator("..")
+          .innerText(),
+        /70 \/ 100 크레딧/,
+      );
+      await page.getByLabel("Tripo API 한도").fill("300");
+      await page
+        .getByRole("button", { name: "한도 저장", exact: true })
+        .click();
+      await page
+        .getByRole("status")
+        .filter({ hasText: "Tripo 승인 한도를 저장" })
+        .waitFor();
+      assert.match(
+        await page
+          .getByLabel("Tripo API 한도")
+          .locator("..")
+          .locator("..")
+          .innerText(),
+        /70 \/ 300 크레딧/,
+      );
+      const actions = await page.evaluate(
+        () =>
+          (window as unknown as { graphicsActions: GraphicsAction[] })
+            .graphicsActions,
+      );
+      assert(
+        actions.some(
+          (action) =>
+            action.kind === "set-tripo-budget" && action.credits === 300,
+        ),
+      );
+      assert(!actions.some((action) => action.kind === "approve"));
+      for (const [index, action] of actions.entries())
+        if (action.kind === "prepare") {
+          assert.equal(
+            actions[index - 1]?.kind,
+            "update-object",
+            "Every prepare must first save the visible settings through the typed action",
+          );
+        }
+      const final = await page.evaluate(
+        () => (window as any).graphicsWorkspace,
+      );
+      assert.equal(final.versions.length, 5);
+      assert.equal(
+        final.objects.find((object: any) => object.id === "target").accepted[
+          "design:main"
+        ],
+        "accepted-design",
+      );
+      assert.equal(
+        final.tasks.find((task: any) => task.id === "prior-paid").status,
+        "submission_unknown",
+      );
+      assert.deepEqual(errors, []);
+    } finally {
+      await app.close();
+      assert(
+        path
+          .resolve(root)
+          .startsWith(
+            path.join(
+              path.resolve(os.tmpdir()),
+              "partsmith-graphics-settings-ui-",
+            ),
+          ),
+      );
+      fs.rmSync(root, { recursive: true, force: true });
     }
-    const final = await page.evaluate(() => (window as any).graphicsWorkspace);
-    assert.equal(final.versions.length, 5); assert.equal(final.objects.find((object: any) => object.id === "target").accepted["design:main"], "accepted-design");
-    assert.equal(final.tasks.find((task: any) => task.id === "prior-paid").status, "submission_unknown");
-    assert.deepEqual(errors, []);
-  } finally {
-    await app.close();
-    assert(path.resolve(root).startsWith(path.join(path.resolve(os.tmpdir()), "partsmith-graphics-settings-ui-")));
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
+  },
+);

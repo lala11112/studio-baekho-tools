@@ -141,12 +141,14 @@ async function dispatch(c: Command): Promise<unknown> {
     case "graphics.action": {
       if (c.action.kind === "import") {
         const animation = c.action.role === "animation";
+        const motion = c.action.role === 'motion-reference';
         const result = await dialog.showOpenDialog(win, {
-          title: animation ? "원래 액션과 리그가 담긴 Blender 애니메이션 원본 선택" : "원본과 같은 폴더의 동반 파일 선택",
-          properties: animation ? ["openFile"] : ["openFile", "multiSelections"],
-          filters: animation ? [{ name: "Blender 애니메이션 원본", extensions: ["blend"] }] : [{ name: "그래픽 원본", extensions: ["png", "jpg", "jpeg", "webp", "fbx", "glb", "blend", "obj", "mtl", "stl", "mp4", "webm"] }],
+          title: animation ? "원래 액션과 리그가 담긴 Blender 애니메이션 원본 선택" : motion ? '채택할 동작 영상 원본 한 개 선택' : "원본과 같은 폴더의 동반 파일 선택",
+          properties: animation || motion ? ["openFile"] : ["openFile", "multiSelections"],
+          filters: animation ? [{ name: "Blender 애니메이션 원본", extensions: ["blend"] }] : motion ? [{ name:'동작 영상 원본',extensions:['mp4','webm'] }] : [{ name: "그래픽 원본", extensions: ["png", "jpg", "jpeg", "webp", "fbx", "glb", "blend", "obj", "mtl", "stl", "mp4", "webm"] }],
         });
         if (result.canceled) return graphics.get(c.id);
+        if (motion) return graphics.importMotionFile(c.id, c.action.objectId, result.filePaths[0], c.action.clipName ?? '');
         return graphics.importFiles(c.id, c.action.objectId, c.action.role, result.filePaths, c.action.clipName);
       }
       return graphics.action(c.id, c.action);
@@ -673,6 +675,7 @@ app.whenReady().then(async () => {
     })) },
   );
   graphics = new GraphicsEngine(store, engine, {
+    ffmpegPath: app.isPackaged ? path.join(process.resourcesPath, "media", "ffmpeg.exe") : path.join(app.getAppPath(), "node_modules", "ffmpeg-static", "ffmpeg.exe"),
     video: createGraphicsVideoExecutor({
       ffmpegPath: app.isPackaged ? path.join(process.resourcesPath, "media", "ffmpeg.exe") : path.join(app.getAppPath(), "node_modules", "ffmpeg-static", "ffmpeg.exe"),
       encrypt: value => { if (!safeStorage.isEncryptionAvailable()) throw Error("Windows 보안 저장을 사용할 수 없습니다."); return safeStorage.encryptString(value).toString("base64"); },

@@ -97,12 +97,22 @@ export function readUnityTarget(projectPath: string): UnityTargetProfile {
 
 type Input = GraphicsFile & { absolute: string; versionId: string };
 type Output = { source: string; destination: string; sha256: string; bytes: number; kind: string };
+export type GraphicsUnityOptimization = { lodEnabled:boolean; lodRatio:number; collider:"none"|"box"|"mesh"|"convex"; deliveryTextureSize:number; deliveryCompression:"none"|"normal" };
+export function graphicsUnityOptimization(settings:GraphicsObject["settings"]):GraphicsUnityOptimization {
+  if(settings.lodEnabled!==undefined&&typeof settings.lodEnabled!=="boolean")throw Error("LOD 사용 여부는 참/거짓이어야 합니다.");
+  const lodRatio=Number(settings.lodRatio??.5),collider=String(settings.collider??"none"),deliveryTextureSize=Number(settings.deliveryTextureSize??0),deliveryCompression=String(settings.deliveryCompression??"none");
+  if(!Number.isFinite(lodRatio)||lodRatio<.05||lodRatio>.95)throw Error("LOD 비율은 0.05–0.95입니다.");
+  if(!["none","box","mesh","convex"].includes(collider))throw Error("지원하는 충돌체는 none/box/mesh/convex입니다.");
+  if(![0,256,512,1024,2048,4096,8192,16384].includes(deliveryTextureSize))throw Error("Unity 전달 텍스처 크기는 원본(0) 또는 256–16384의 2제곱 크기입니다.");
+  if(!["none","normal"].includes(deliveryCompression))throw Error("지원하는 Unity 전달 압축은 none/normal입니다.");
+  return {lodEnabled:settings.lodEnabled===true,lodRatio,collider:collider as GraphicsUnityOptimization["collider"],deliveryTextureSize,deliveryCompression:deliveryCompression as "none"|"normal"};
+}
 type QueueRequest = {
   schemaVersion: number; requestId: string; objectId: string; objectName: string;
   destination: string; resultPath: string; profileFingerprint: string; unityVersion: string;
   pipeline: string; converterVersion: string; structure: string; rigType: string;
   mode: string; files: Output[]; expectedClips: string[]; sources: { path: string; sha256: string }[];
-  profileFiles: { path: string; sha256: string }[]; spritePixelsPerUnit: number; materialManifest?: string;
+  profileFiles: { path: string; sha256: string }[]; spritePixelsPerUnit: number; materialManifest?: string; optimization?:GraphicsUnityOptimization;
 };
 function assertRequestBinding(root:string, delivery:UnityDelivery, q:QueueRequest) {
   if(q.files?.some(file=>file.destination===delivery.destination+"/Generated/materials.json") && q.materialManifest!==delivery.destination+"/Generated/materials.json")throw Error("Unity 재질 역할 manifest 연결이 고정 요청과 다릅니다.");
@@ -113,6 +123,11 @@ function assertRequestBinding(root:string, delivery:UnityDelivery, q:QueueReques
   for(const output of q.files){
     const matches=delivery.files.filter(file=>file.path===output.destination);
     if(matches.length!==1||matches[0].sha256!==output.sha256||matches[0].bytes!==output.bytes||matches[0].kind!==output.kind)throw Error("Unity 전달 파일의 경로·해시·크기가 고정 요청과 다릅니다.");
+  }
+  const optimizationFile=q.files.find(file=>file.destination===delivery.destination+"/Generated/optimization.json");
+  if(optimizationFile){
+    const file=safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/optimization.json`);
+    if(sha(file)!==optimizationFile.sha256||JSON.stringify(graphicsUnityOptimization(json(file).settings??{}))!==JSON.stringify(graphicsUnityOptimization(q.optimization??{})))throw Error("Unity 최적화 옵션이 고정된 파생 결과와 다릅니다.");
   }
 }
 export type PrepareUnityDeliveryArgs = { projectRoot: string; object: GraphicsObject; versions: AssetVersion[]; profile: UnityTargetProfile; blenderPath: string; resources: string; signal?: AbortSignal };
@@ -164,6 +179,8 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
   if (target.pipeline === "unknown") throw Error("렌더 파이프라인을 확인한 뒤 Unity로 보낼 수 있습니다.");
   const inputs = validateSources(a.projectRoot, a.object, a.versions);
   const sprite = a.object.kind === "sprite" || a.object.kind === "ui";
+  const optimization=graphicsUnityOptimization(a.object.settings);
+  if(sprite&&(optimization.lodEnabled||optimization.collider!=="none"))throw Error("스프라이트 전달은 3D LOD·충돌체를 지원하지 않습니다.");
   const models = inputs.filter(i=>/\.(fbx|blend|glb|obj)$/i.test(i.path));
   // A version may contain preview GLB beside its editable/native source.
   const preferred = a.versions.map(v=>{
@@ -190,7 +207,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
   const converterSource = path.join(a.resources,"blender/graphics_prepare.py");
   const combineSource = path.join(a.resources,"blender/graphics_combine.py");
   const converterVersion = GRAPHICS_UNITY_CONVERTER + "-" + digest(fs.readFileSync(bridgeSource)).slice(0,12) + "-" + digest(fs.readFileSync(converterSource)).slice(0,12) + (combine ? "-" + digest(fs.readFileSync(combineSource)).slice(0,12) : "");
-  const identity = digest(JSON.stringify({ objectId:a.object.id, versionIds:a.versions.map(v=>v.id), inputs:inputs.map(i=>({path:i.path,sha256:i.sha256})), ...(combine?{clips:clips.map(v=>({versionId:v.id,action:v.slot})),rigVersion:rigs[0].id}:{}), profile:target.fingerprint, converterVersion, rigType, sprite, spritePixelsPerUnit }));
+  const identity = digest(JSON.stringify({ objectId:a.object.id, versionIds:a.versions.map(v=>v.id), inputs:inputs.map(i=>({path:i.path,sha256:i.sha256})), ...(combine?{clips:clips.map(v=>({versionId:v.id,action:v.slot})),rigVersion:rigs[0].id}:{}), profile:target.fingerprint, converterVersion, rigType, sprite, spritePixelsPerUnit,optimization }));
   const id = identity.slice(0,32), dest = `Assets/PartsmithGraphics/${objectFolder(a.object.id)}`;
   const staging = safePath(root,`Library/PartsmithGraphicsStaging/${id}`);
   const deliveryFile = safePath(root,`Library/PartsmithGraphicsStaging/${id}/delivery.json`);
@@ -260,12 +277,15 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
           merge=combinedReport; nativeSource=combined;
           copied.push({original:combined,local:combined,sha256:sha(combined)});
         }
-        write(spec,{source:nativeSource,inputRoot,files:copied,output:path.join(temp,"export")});
+        write(spec,{source:nativeSource,inputRoot,files:copied,output:path.join(temp,"export"),optimization});
         a.signal?.throwIfAborted();
         await runProcess(a.blenderPath,["--background","--factory-startup","--disable-autoexec","--python-exit-code","1","--python",converterSource,"--",spec]);
         a.signal?.throwIfAborted();
         const converted=json(path.join(temp,"export/inspection.json"));
         if(!converted.structure || !Array.isArray(converted.clips)) throw Error("Blender 구조 검사 결과가 없습니다.");
+        const optimizationManifest=json(path.join(temp,"export/optimization.json"));
+        if(optimizationManifest.schemaVersion!==1||JSON.stringify(graphicsUnityOptimization(optimizationManifest.settings??{}))!==JSON.stringify(optimization)||!Array.isArray(optimizationManifest.lods))throw Error("Blender 최적화 옵션 검사 결과가 고정 요청과 다릅니다.");
+        if(optimization.lodEnabled&&(optimizationManifest.lods.length!==converted.structure.meshes.length||optimizationManifest.lods.some((lod:{source:string;derived:string;sourceTriangles:number;derivedTriangles:number})=>!converted.structure.meshes.some((mesh:{name:string})=>mesh.name===lod.source)||lod.derived!==lod.source+"__PS_LOD1"||!Number.isInteger(lod.derivedTriangles)||lod.derivedTriangles<1||lod.derivedTriangles>=lod.sourceTriangles)))throw Error("Blender LOD 감소·메시 연결 검증 결과가 없습니다.");
         const materialManifest=json(path.join(temp,"export/materials.json"));
         if(materialManifest.schemaVersion!==1 || !Array.isArray(materialManifest.materials) || !Array.isArray(materialManifest.originalImages) || !Array.isArray(materialManifest.derivedImages))throw Error("Blender 재질 역할 검사 결과가 없습니다.");
         if(new Set(materialManifest.materials.map((m:{name:string})=>m.name)).size!==materialManifest.materials.length)throw Error("Blender 재질 이름이 중복됩니다.");
@@ -293,7 +313,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
     validateSources(a.projectRoot,a.object,a.versions);
     if(readUnityTarget(root).fingerprint!==target.fingerprint)throw Error("처리 중 Unity 대상 설정이 변경됐습니다.");
     a.signal?.throwIfAborted();
-    const request: QueueRequest={schemaVersion:1,requestId:id,objectId:a.object.id,objectName:a.object.name,destination:dest,resultPath,profileFingerprint:target.fingerprint,unityVersion:target.unityVersion,pipeline:target.pipeline,converterVersion,structure,rigType,mode:sprite?"sprite":"model",files:outputs,expectedClips,sources:inputs.map(i=>({path:i.absolute,sha256:i.sha256})),profileFiles:profileFiles(root),spritePixelsPerUnit,...(!sprite?{materialManifest:dest+"/Generated/materials.json"}:{})};
+    const request: QueueRequest={schemaVersion:1,requestId:id,objectId:a.object.id,objectName:a.object.name,destination:dest,resultPath,profileFingerprint:target.fingerprint,unityVersion:target.unityVersion,pipeline:target.pipeline,converterVersion,structure,rigType,mode:sprite?"sprite":"model",files:outputs,expectedClips,sources:inputs.map(i=>({path:i.absolute,sha256:i.sha256})),profileFiles:profileFiles(root),spritePixelsPerUnit,optimization,...(!sprite?{materialManifest:dest+"/Generated/materials.json"}:{})};
     // User code is not overwritten. Existing .meta files are deliberately never replaced.
     if(!fs.existsSync(bridgeDest)||sha(bridgeDest)!==bridgeHash){fs.mkdirSync(path.dirname(bridgeDest),{recursive:true});fs.copyFileSync(bridgeSource,bridgeDest);}
     write(bridgeRecord,{sha256:bridgeHash,converterVersion});

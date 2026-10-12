@@ -254,7 +254,35 @@ if clips and not rigs:
 if any(o.modifiers for o in meshes):
     warnings.append('Blender modifiers are evaluated in the FBX derivative; source geometry remains unchanged.')
 
-if suffix == '.fbx':
+optimization=q.get('optimization',{})
+lods=[]
+lod_enabled=optimization.get('lodEnabled',False)
+if lod_enabled:
+    ratio=float(optimization.get('lodRatio',.5))
+    if not .05<=ratio<=.95:
+        raise RuntimeError('LOD ratio must be between .05 and .95')
+    if rigs or clips or any(o.data.shape_keys or o.modifiers for o in meshes):
+        raise RuntimeError('Local LOD supports static meshes without shape keys, animation or modifiers only')
+    for original in list(meshes):
+        name=original.name+'__PS_LOD1'
+        if name in bpy.data.objects:
+            raise RuntimeError('LOD derivative name collides with an original object')
+        derived=original.copy();derived.data=original.data.copy();derived.name=name;bpy.context.collection.objects.link(derived)
+        bpy.ops.object.select_all(action='DESELECT');derived.select_set(True);bpy.context.view_layer.objects.active=derived
+        decimate=derived.modifiers.new('Partsmith delivery LOD','DECIMATE');decimate.ratio=ratio;decimate.use_collapse_triangulate=True
+        before=sum(max(0,len(p.vertices)-2) for p in original.data.polygons)
+        bpy.ops.object.modifier_apply(modifier=decimate.name)
+        after=sum(max(0,len(p.vertices)-2) for p in derived.data.polygons)
+        if after>=before or after<1:
+            raise RuntimeError('LOD could not reduce this mesh; original preserved: '+original.name)
+        lods.append({'source':original.name,'derived':derived.name,'sourceTriangles':before,'derivedTriangles':after})
+        meshes.append(derived)
+    warnings.append('LOD1 is a local decimation derivative. Silhouette, UV distortion and switching need visual review.')
+if optimization.get('collider') in {'mesh','convex'} and rigs:
+    raise RuntimeError('Mesh/convex collision delivery supports static meshes only; choose box for a rig')
+(out/'optimization.json').write_text(json.dumps({'schemaVersion':1,'settings':optimization,'lods':lods},ensure_ascii=False),encoding='utf8')
+
+if suffix == '.fbx' and not lod_enabled:
     # Preserve native animation curves and original FBX bytes instead of re-encoding them.
     shutil.copyfile(source, out/'Asset.fbx')
     # FBX take names are reported by Unity rather than guessed from Blender action names.

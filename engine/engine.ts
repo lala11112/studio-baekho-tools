@@ -491,7 +491,9 @@ export class Engine {
       !["preset:biped:idle", "preset:biped:walk"].includes(r.animation ?? "")
     )
       throw new Error("기본 대기·걷기만 지원합니다.");
-    if (processing.includes(r.kind) && r.count !== 1)
+    // Texture candidates share one frozen source and approval, while each
+    // independent one-result request retains its own submission journal.
+    if (processing.includes(r.kind) && r.kind !== "texture" && r.count !== 1)
       throw new Error("후처리는 한 번씩 승인하세요.");
     if (r.kind === "rig") r.rigType ??= "biped";
     const inputDetails: string[] = [];

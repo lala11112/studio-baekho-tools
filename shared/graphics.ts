@@ -1,3 +1,4 @@
+import type { CreationSpec } from './graphics-creation';
 /** App-owned Unity graphics tasks. Assets are immutable; acceptance never executes a task. */
 export type GraphicsKind = "character" | "weapon" | "prop" | "environment" | "sprite" | "ui" | "vfx";
 export type GraphicsRole = "design" | "model" | "material" | "rig" | "motion-reference" | "animation" | "unity";
@@ -25,6 +26,7 @@ export type GraphicsObject = {
   selectedTasks: string[]; instruction: string; settings: Record<string, string | number | boolean>;
   references: { versionId: string; role: "appearance" | "style" | "motion" | "dimensions" }[];
   accepted: Record<string, string>;
+  creation?: CreationSpec;
 };
 export type GraphicsTaskDefinition = {
   id: string; name: string; group: string; inputs: string; output: string;
@@ -40,7 +42,9 @@ export type GraphicsTask = {
   cost?: { provider: string; credits: number | null; basis: string; expiresAt?: number };
   message: string; localOnly: boolean; errorCode?: string;
   usage?: unknown;
-  objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted">;
+  /** Durable, independently registered candidate executions; never repeat them on recovery. */
+  completedExecutions?: string[];
+  objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted" | "creation">;
   targetProfile?: UnityTargetProfile;
   deliveryId?: string;
   paidApproval?: { requestHash: string; provider: string; credits: number; approvedAt: string };
@@ -65,7 +69,7 @@ export function isGraphicsClipName(value: unknown): value is string {
 
 export type GraphicsAction =
   | { kind: "create-object"; name: string; objectKind: GraphicsKind }
-  | { kind: "update-object"; objectId: string; patch: Partial<Pick<GraphicsObject, "name" | "selectedTasks" | "instruction" | "settings" | "references">> }
+  | { kind: "update-object"; objectId: string; patch: Partial<Pick<GraphicsObject, "name" | "selectedTasks" | "instruction" | "settings" | "references" | "creation">> }
   | { kind: "import"; objectId: string; role: GraphicsRole; clipName?: string }
   | { kind: "accept"; objectId: string; versionId: string }
   | { kind: "prepare"; objectId: string; taskId: string }

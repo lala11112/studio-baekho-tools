@@ -32,6 +32,17 @@ import {
 } from "../shared/graphics-catalog";
 import { catalog } from "../shared/catalog";
 import { Viewport } from "./Viewport";
+import { CreationOptions } from "./CreationOptions";
+import {
+  creationStages,
+  creationTaskId,
+  creationSettings,
+  defaultCreation,
+  effectiveCreation,
+  summarizeCreation,
+  type CreationSpec,
+  type CreationStage,
+} from "../shared/graphics-creation";
 import "./graphics-studio.css";
 
 type Props = {
@@ -41,6 +52,11 @@ type Props = {
   onAction: (action: GraphicsAction) => Promise<unknown>;
   onOpenSettings?: () => void;
 };
+const usesModelMultiview = (
+  taskId: string,
+  settings: GraphicsTask["settings"],
+) =>
+  taskId === "M02" || (taskId === "M15" && settings.inputMode === "multiview");
 const kinds: Record<GraphicsKind, string> = {
   character: "캐릭터",
   weapon: "무기",
@@ -117,9 +133,9 @@ function VersionPreview({
         <Box size={48} strokeWidth={1} />
         <h3>자료에서 시작하세요</h3>
         <p>
-          이미지, 모델, 리그 또는 동작을 가져오고
+          원하는 특징을 선택해 이미지를 만들거나
           <br />
-          필요한 작업만 골라 실행합니다.
+          이미 가진 이미지와 모델을 가져오세요.
         </p>
       </div>
     );
@@ -203,7 +219,12 @@ export function GraphicsStudio({
   const [catalogTab, setCatalogTab] = useState<
     "all" | "recommended" | "selected"
   >("all");
-  const [taskId, setTaskId] = useState("A01");
+  const [stage, setStage] = useState<CreationStage>("design");
+  const [creation, setCreation] = useState<CreationSpec>(() =>
+    defaultCreation("prop"),
+  );
+  const [taskOverride, setTaskId] = useState<string>();
+  const taskId = taskOverride ?? creationTaskId(creation, stage);
   const [shownVersionId, setShownVersionId] = useState("");
   const [focusedImage, setFocusedImage] = useState<{
     path: string;
@@ -214,8 +235,6 @@ export function GraphicsStudio({
     if (focusedImage && !imageDialog.current?.open)
       imageDialog.current?.showModal();
   }, [focusedImage]);
-  const [instruction, setInstruction] = useState("");
-  const [settings, setSettings] = useState<GraphicsObject["settings"]>({});
   const [importRole, setImportRole] = useState<GraphicsRole>("model");
   const [referenceId, setReferenceId] = useState("");
   const [referenceRole, setReferenceRole] =
@@ -225,8 +244,13 @@ export function GraphicsStudio({
   const [notice, setNotice] = useState("");
   const [clock, setClock] = useState(Date.now());
   const [budget, setBudget] = useState(300);
+  const [clipNameDraft, setClipNameDraft] = useState("");
   const disabled = busy || pending;
   const object = workspace?.objects.find((item) => item.id === objectId);
+  const settings = object
+    ? creationSettings({ ...object, creation }, stage)
+    : (creation.stageSettings[stage]?.values ?? {});
+  const instruction = creation.stageSettings[stage]?.instruction ?? "";
   const versions =
     workspace?.versions.filter((version) => version.objectId === objectId) ??
     [];
@@ -236,19 +260,55 @@ export function GraphicsStudio({
     versions.at(-1);
   const objectTasks =
     workspace?.tasks.filter((task) => task.objectId === objectId) ?? [];
-  const activeTask = findGraphicsTask(taskId)!;
+  const activeTask = findGraphicsTask(taskId) ?? {
+    id: taskId,
+    name: "제작 연결 확인 필요",
+    inputs: "설정 확인",
+    output: "실행 연결 준비 중",
+    executor: "none" as const,
+    status: "planned" as const,
+    reason: "이 설정에 맞는 실행 연결이 아직 없습니다.",
+  };
   const motionTask = ["N02", "N04", "N05", "N06"].includes(taskId);
-  const multipleOutputs = ["I01", "I02", "I03", "I05", "I06", "I07", "M01", "M02", "M03"].includes(
-    taskId,
-  );
+  const multipleOutputs = [
+    "I01",
+    "I02",
+    "I03",
+    "I05",
+    "I06",
+    "I07",
+    "I08",
+    "M01",
+    "M02",
+    "M03",
+    "M04",
+    "M15",
+    "T03",
+    "N02",
+    "N04",
+    "N05",
+    "N06",
+  ].includes(taskId);
   const imageVersions =
     workspace?.versions.filter((version) =>
       version.files.some((file) => /\.(png|jpe?g|webp)$/i.test(file.path)),
     ) ?? [];
-  const videoSources = imageVersions.filter(version => version.objectId === objectId && version.files.some(file => /\.png$/i.test(file.path)) && Object.values(object?.accepted ?? {}).includes(version.id));
-  const multiviewProblem =
-    taskId === "M02"
-      ? graphicsMultiviewProblem(settings, imageVersions)
+  const videoSources = imageVersions.filter(
+    (version) =>
+      version.objectId === objectId &&
+      version.files.some((file) => /\.png$/i.test(file.path)) &&
+      Object.values(object?.accepted ?? {}).includes(version.id),
+  );
+  const multiviewProblem = usesModelMultiview(taskId, settings)
+    ? graphicsMultiviewProblem(settings, imageVersions)
+    : undefined;
+  const modelProblem =
+    stage === "model" &&
+    settings.modelMethod !== "local" &&
+    settings.modelMethod !== "astra" &&
+    settings.model === "P1-20260311" &&
+    settings.quad !== false
+      ? "Smart Mesh P1은 쿼드 출력을 지원하지 않습니다. 삼각형을 선택하거나 제작 모델을 바꾸세요."
       : undefined;
   const recommended = object
     ? recommendedGraphicsTasks(object.kind, versions)
@@ -275,26 +335,30 @@ export function GraphicsStudio({
     if (!workspace?.objects.some((item) => item.id === objectId))
       setObjectId(workspace?.objects.at(-1)?.id ?? "");
   }, [workspace?.objects, objectId]);
-  useEffect(() => { if (workspace?.tripoBudget) setBudget(workspace.tripoBudget.limit); }, [workspace?.tripoBudget?.limit]);
   useEffect(() => {
-    setInstruction(object?.instruction ?? "");
-    setSettings(object?.settings ?? {});
+    if (workspace?.tripoBudget) setBudget(workspace.tripoBudget.limit);
+  }, [workspace?.tripoBudget?.limit]);
+  useEffect(() => {
+    setCreation(object ? effectiveCreation(object) : defaultCreation("prop"));
+    setStage("design");
+    setTaskId(undefined);
     setShownVersionId("");
     setFocusedImage(undefined);
     setReferenceId("");
     setError("");
     setNotice("");
-    setImportRole(
-      object && ["sprite", "ui", "vfx"].includes(object.kind)
-        ? "design"
-        : "model",
-    );
+    setImportRole("design");
   }, [object?.id]);
   useEffect(() => {
     if (!waiting.length) return;
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [waiting.length]);
+  useEffect(() => {
+    setClipNameDraft(
+      String(creation.stageSettings.animation?.values.clipName ?? ""),
+    );
+  }, [objectId, creation.stageSettings.animation?.values.clipName]);
 
   async function run(action: GraphicsAction, success?: string) {
     if (disabled) return false;
@@ -313,7 +377,86 @@ export function GraphicsStudio({
     }
   }
   function setting(key: string, value: string | number | boolean) {
-    setSettings((current) => ({ ...current, [key]: value }));
+    if (key === "clipName") {
+      setClipName(String(value));
+      return;
+    }
+    setCreation((current) => ({
+      ...current,
+      stageSettings: {
+        ...current.stageSettings,
+        [stage]: {
+          instruction: current.stageSettings[stage]?.instruction ?? "",
+          values: {
+            ...(object
+              ? creationSettings({ ...object, creation: current }, stage)
+              : {}),
+            ...current.stageSettings[stage]?.values,
+            [key]: value,
+          },
+        },
+      },
+    }));
+    setTaskId(undefined);
+  }
+  function setClipName(name: string) {
+    setCreation((current) => {
+      const existing =
+        current.stageSettings.animation ??
+        defaultCreation(object?.kind ?? "prop").stageSettings.animation!;
+      const previous = String(existing.values.clipName ?? "");
+      if (name === previous) return current;
+      const saved = {
+        ...current.clipSettings,
+        ...(previous.trim() ? { [previous]: structuredClone(existing) } : {}),
+      };
+      const next = saved[name]
+        ? structuredClone(saved[name])
+        : {
+            instruction: "",
+            values: {
+              ...defaultCreation(object?.kind ?? "prop").stageSettings
+                .animation!.values,
+              animationMode: existing.values.animationMode ?? "text",
+            },
+          };
+      next.values.clipName = name;
+      return {
+        ...current,
+        clipSettings: saved,
+        stageSettings: { ...current.stageSettings, animation: next },
+      };
+    });
+    setTaskId(undefined);
+  }
+  function setInstruction(value: string) {
+    setCreation((current) => ({
+      ...current,
+      stageSettings: {
+        ...current.stageSettings,
+        [stage]: {
+          instruction: value,
+          values: current.stageSettings[stage]?.values ?? {},
+        },
+      },
+    }));
+  }
+  function changeCreation(next: CreationSpec) {
+    setCreation(next);
+    setTaskId(undefined);
+  }
+  function changeStage(next: CreationStage) {
+    setStage(next);
+    setTaskId(undefined);
+    setImportRole(
+      next === "design"
+        ? "design"
+        : next === "rig"
+          ? "rig"
+          : next === "animation"
+            ? "motion-reference"
+            : "model",
+    );
   }
   async function openProjectFolder() {
     if (disabled) return;
@@ -365,11 +508,11 @@ export function GraphicsStudio({
       disabled ||
       (active && !["A01", "A02", "A03"].includes(activeTask.id)) ||
       activeTask.status === "planned" ||
-      multiviewProblem
+      multiviewProblem ||
+      modelProblem
     )
       return;
-    if (activeTask.id === "A01")
-      return run({ kind: "import", objectId: object.id, role: importRole, ...(importRole === "animation" ? { clipName: String(settings.clipName ?? "") } : {}) });
+    if (activeTask.id === "A01") return importSource();
     if (activeTask.id === "A02") {
       document.getElementById("gs-object-name")?.focus();
       return;
@@ -385,12 +528,41 @@ export function GraphicsStudio({
       await onAction({
         kind: "update-object",
         objectId: object.id,
-        patch: { instruction, settings },
+        patch: { creation },
       });
       await onAction({
         kind: "prepare",
         objectId: object.id,
         taskId: activeTask.id,
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  }
+  async function importSource() {
+    if (!object || disabled) return;
+    setPending(true);
+    setError("");
+    setNotice("");
+    try {
+      await onAction({
+        kind: "update-object",
+        objectId: object.id,
+        patch: { creation },
+      });
+      await onAction({
+        kind: "import",
+        objectId: object.id,
+        role: importRole,
+        ...(["animation", "motion-reference"].includes(importRole)
+          ? {
+              clipName: String(
+                creation.stageSettings.animation?.values.clipName ?? "",
+              ),
+            }
+          : {}),
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -418,14 +590,14 @@ export function GraphicsStudio({
       <header className="gs-header">
         <div>
           <span className="gs-eyebrow">UNITY · PC GRAPHICS</span>
-          <h1>그래픽 작업실</h1>
+          <h1>Unity 오브젝트 제작실</h1>
           <p>
             {project.name} <ChevronRight size={13} />{" "}
             {object?.name ?? "새 오브젝트"}
           </p>
         </div>
         <div className="gs-header-actions">
-          <span className="gs-tag">{graphicsCatalog.length}개 작업</span>
+          <span className="gs-tag">특징 선택 → 이미지 확인 → 3D 제작</span>
           {onOpenSettings && (
             <button onClick={onOpenSettings}>
               <Settings2 size={15} /> 연결 설정
@@ -481,8 +653,13 @@ export function GraphicsStudio({
             onChange={(event) => setNewKind(event.target.value as GraphicsKind)}
           >
             {Object.entries(kinds).map(([value, label]) => (
-              <option key={value} value={value}>
+              <option
+                key={value}
+                value={value}
+                disabled={["sprite", "ui", "vfx"].includes(value)}
+              >
                 {label}
+                {["sprite", "ui", "vfx"].includes(value) ? " · 후속 지원" : ""}
               </option>
             ))}
           </select>
@@ -523,18 +700,130 @@ export function GraphicsStudio({
             <Box size={54} strokeWidth={1} />
             <h2>무엇을 만들까요?</h2>
             <p>
-              왼쪽에서 오브젝트를 만든 다음 파일을 가져오거나 작업을 선택하세요.
+              왼쪽에서 만들 대상을 추가하고 원하는 모양과 특징을 선택하세요.
               <br />
               이미 모델이 있다면 이미지 생성 없이 바로 작업할 수 있습니다.
             </p>
           </div>
         ) : (
           <>
+            <nav className="gs-creation-stages" aria-label="제작 단계">
+              {creationStages.map((item, index) => (
+                <button
+                  type="button"
+                  key={item.id}
+                  aria-current={stage === item.id ? "step" : undefined}
+                  onClick={() => changeStage(item.id)}
+                >
+                  <span>{index + 1}</span>
+                  {item.label}
+                </button>
+              ))}
+            </nav>
+            <section className="gs-current-options" aria-label="현재 제작 옵션">
+              <div>
+                <strong>{object.name}</strong>
+                <p>{summarizeCreation(creation).join(" · ")}</p>
+                <small>
+                  옵션 변경과 단계 이동은 생성하지 않습니다. 이미지를 채택한 뒤
+                  모델을 제작하세요.
+                </small>
+              </div>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() =>
+                  void run(
+                    {
+                      kind: "update-object",
+                      objectId: object.id,
+                      patch: { creation },
+                    },
+                    "현재 제작 옵션을 저장했습니다.",
+                  )
+                }
+              >
+                옵션 저장
+              </button>
+            </section>
+            {stage === "design" && (
+              <div className="gs-reference-strip">
+                <div>
+                  <strong>
+                    참고 이미지 {object.references.length}개 연결됨
+                  </strong>
+                  <small>
+                    외형·스타일 참고로 사용하며 원본을 덮어쓰지 않습니다.
+                  </small>
+                </div>
+                {object.references.map((reference) => {
+                  const version = workspace?.versions.find(
+                    (item) => item.id === reference.versionId,
+                  );
+                  const file = version?.files.find((item) =>
+                    isImagePath(item.path),
+                  );
+                  return file ? (
+                    <img
+                      className="gs-reference-thumb"
+                      key={`${reference.versionId}-${reference.role}`}
+                      alt={version?.label ?? "참고 원본"}
+                      src={window.desktop.assetUrl(project.id, file.path)}
+                    />
+                  ) : null;
+                })}
+                <button
+                  type="button"
+                  onClick={() =>
+                    document
+                      .getElementById("gs-reference-version")
+                      ?.scrollIntoView({ behavior: "smooth", block: "center" })
+                  }
+                >
+                  참고 원본 연결
+                </button>
+              </div>
+            )}
+            <div className="gs-creation-execute">
+              <div>
+                <strong>{activeTask.name}</strong>
+                <small>
+                  {activeTask.status === "planned"
+                    ? activeTask.reason
+                    : active
+                      ? "기존 작업의 승인 또는 결과를 확인하세요."
+                      : activeTask.executor === "local"
+                        ? "로컬 처리 · GPT 요청 없이 준비"
+                        : "실행 전 입력과 비용을 앱에서 확인합니다."}
+                </small>
+              </div>
+              <button
+                className="gs-primary"
+                data-testid="graphics-prepare"
+                disabled={
+                  disabled ||
+                  Boolean(multiviewProblem || modelProblem) ||
+                  activeTask.status === "planned" ||
+                  active ||
+                  (stage === "rig" && settings.rigType === "none") ||
+                  ["sprite", "ui", "vfx"].includes(object.kind)
+                }
+                onClick={() => void prepare()}
+              >
+                {activeTask.status === "planned"
+                  ? "실행 연결 준비 중"
+                  : activeTask.executor === "codex-image"
+                    ? "이미지 생성 준비 · 입력 확인"
+                    : "이 단계 준비 · 비용 확인"}
+              </button>
+            </div>
             {waiting.map((task) => {
               const approval = graphicsApprovalState(task, clock);
               const nativeUsage =
                 task.cost?.provider === "Codex" &&
-                ["codex-image", "astra"].includes(findGraphicsTask(task.taskId)?.executor ?? "");
+                ["codex-image", "astra"].includes(
+                  findGraphicsTask(task.taskId)?.executor ?? "",
+                );
               const expired =
                 task.cost?.expiresAt !== undefined &&
                 task.cost.expiresAt <= clock;
@@ -582,18 +871,34 @@ export function GraphicsStudio({
                         const input = workspace?.versions.find(
                           (version) => version.id === versionId,
                         );
-                        const inputFile = task.taskId === "N02"
-                          ? input?.files.find(file => file.path === task.settings.motionSourcePath)
-                          : input?.files.find(file => /\.(png|jpe?g|webp)$/i.test(file.path)) ?? input?.files[0];
-                        const imagePath = inputFile && /\.(png|jpe?g|webp)$/i.test(inputFile.path) ? inputFile.path : undefined;
-                        const direction =
-                          task.taskId === "M02"
-                            ? directions.find(
-                                ([value]) =>
-                                  task.settings[`${value}VersionId`] ===
-                                  versionId,
-                              )?.[1]
-                            : task.taskId === "N02" ? (task.settings.motionSourceView === "right" ? "오른쪽" : "왼쪽") : undefined;
+                        const inputFile =
+                          task.taskId === "N02"
+                            ? input?.files.find(
+                                (file) =>
+                                  file.path === task.settings.motionSourcePath,
+                              )
+                            : (input?.files.find((file) =>
+                                /\.(png|jpe?g|webp)$/i.test(file.path),
+                              ) ?? input?.files[0]);
+                        const imagePath =
+                          inputFile &&
+                          /\.(png|jpe?g|webp)$/i.test(inputFile.path)
+                            ? inputFile.path
+                            : undefined;
+                        const direction = usesModelMultiview(
+                          task.taskId,
+                          task.settings,
+                        )
+                          ? directions.find(
+                              ([value]) =>
+                                task.settings[`${value}VersionId`] ===
+                                versionId,
+                            )?.[1]
+                          : task.taskId === "N02"
+                            ? task.settings.motionSourceView === "right"
+                              ? "오른쪽"
+                              : "왼쪽"
+                            : undefined;
                         return (
                           <div
                             className="gs-frozen-input"
@@ -851,54 +1156,89 @@ export function GraphicsStudio({
               </section>
 
               <section className="gs-instruction">
+                <CreationOptions
+                  kind={object.kind}
+                  spec={creation}
+                  stage={stage}
+                  settings={settings}
+                  disabled={disabled}
+                  onChange={changeCreation}
+                  onSetting={setting}
+                />
                 <div className="gs-section-title">
-                  <h2>작업 설정</h2>
+                  <h3>이번 단계 설정</h3>
                   <span className={`gs-tag gs-${activeTask.status}`}>
                     {statusLabels[activeTask.status]}
                   </span>
                 </div>
-                <div className="gs-task-heading">
-                  <span>{activeTask.id}</span>
-                  <h3>{activeTask.name}</h3>
-                </div>
-                <p className="gs-muted">입력: {activeTask.inputs}</p>
-                <p className="gs-muted">확인할 결과: {activeTask.output}</p>
-                {activeTask.reason && (
-                  <p className="gs-capability-reason">{activeTask.reason}</p>
-                )}
-                <label htmlFor="gs-import-role">가져올 자료의 역할</label>
-                <div className="gs-import-row">
-                  <select
-                    id="gs-import-role"
-                    value={importRole}
-                    onChange={(event) =>
-                      setImportRole(event.target.value as GraphicsRole)
-                    }
-                  >
-                    {Object.entries(roles).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    data-testid="graphics-import"
-                    disabled={disabled}
-                    onClick={() =>
-                      void run({
-                        kind: "import",
-                        objectId: object.id,
-                        role: importRole,
-                        ...(importRole === "animation" ? { clipName: String(settings.clipName ?? "") } : {}),
-                      })
-                    }
-                  >
-                    <FolderInput size={14} /> 파일 가져오기
-                  </button>
-                </div>
-                {importRole === "animation" && <label>가져올 원본의 Action 이름<input aria-label="가져올 Action 이름" placeholder="Rabbit_Idle" value={String(settings.clipName ?? "")} onChange={event=>setting("clipName",event.target.value)} /><span className="gs-fine">편집 가능한 .blend 원본의 정확한 Action 이름을 적으세요. 이 이름의 클립으로 보관하며, 수정 전에 실제 Action 존재를 검사합니다.</span></label>}
+                <details className="gs-execution-detail">
+                  <summary>사용할 제작 기능과 지원 범위</summary>
+                  <div className="gs-task-heading">
+                    <span>{activeTask.id}</span>
+                    <h3>{activeTask.name}</h3>
+                  </div>
+                  <p className="gs-muted">입력: {activeTask.inputs}</p>
+                  <p className="gs-muted">확인할 결과: {activeTask.output}</p>
+                  {activeTask.reason && (
+                    <p className="gs-capability-reason">{activeTask.reason}</p>
+                  )}
+                </details>
+                <details className="gs-import-details">
+                  <summary>이미 가진 이미지 · 모델 · 동작 가져오기</summary>
+                  <label htmlFor="gs-import-role">가져올 자료의 역할</label>
+                  <div className="gs-import-row">
+                    <select
+                      id="gs-import-role"
+                      value={importRole}
+                      onChange={(event) =>
+                        setImportRole(event.target.value as GraphicsRole)
+                      }
+                    >
+                      {Object.entries(roles).map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      data-testid="graphics-import"
+                      disabled={disabled}
+                      onClick={() => void importSource()}
+                    >
+                      <FolderInput size={14} /> 파일 가져오기
+                    </button>
+                  </div>
+                  {["animation", "motion-reference"].includes(importRole) && (
+                    <label>
+                      {importRole === "animation"
+                        ? "가져올 원본의 Action 이름"
+                        : "영상이 참조할 클립 이름"}
+                      <input
+                        aria-label={
+                          importRole === "animation"
+                            ? "가져올 Action 이름"
+                            : "영상 참조 클립 이름"
+                        }
+                        placeholder="Rabbit_Idle"
+                        value={clipNameDraft}
+                        onChange={(event) =>
+                          setClipNameDraft(event.target.value)
+                        }
+                        onBlur={(event) => setClipName(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") event.currentTarget.blur();
+                        }}
+                      />
+                      <span className="gs-fine">
+                        {importRole === "animation"
+                          ? "편집 가능한 .blend 원본의 정확한 Action 이름을 적으세요. 이 이름의 클립으로 보관하며, 수정 전에 실제 Action 존재를 검사합니다."
+                          : "실제 영상 원본을 이 클립의 동작 참조로 보관합니다. 가져온 뒤 내용을 확인하고 채택해야 3D 동작에 사용합니다."}
+                      </span>
+                    </label>
+                  )}
+                </details>
                 <label htmlFor="gs-instruction">
-                  원하는 결과와 유지할 특징
+                  이 단계 추가 지시 · 선택지에 없는 내용
                 </label>
                 <textarea
                   id="gs-instruction"
@@ -912,32 +1252,284 @@ export function GraphicsStudio({
                   onChange={(event) => setInstruction(event.target.value)}
                   maxLength={12000}
                 />
-                {taskId === "I06" && <label>장비 결과<select aria-label="장비 결과" value={String(settings.equipmentOutput ?? "standalone")} onChange={event => setting("equipmentOutput",event.target.value)}><option value="standalone">장비만 독립 이미지로</option><option value="worn">캐릭터가 착용한 참고 이미지로</option></select><span className="gs-fine">외형 참고를 연결하세요. 참고 캐릭터는 보존되고 결과는 현재 오브젝트에 저장됩니다.</span></label>}
-                {taskId === "I07" && <div className="gs-multiview"><h3>생성할 방향</h3><div className="gs-settings-grid">{[["viewFront","정면"],["viewBack","후면"],["viewLeft","좌측"],["viewRight","우측"]].map(([key,label])=><label key={key}><input type="checkbox" checked={settings[key] !== false} onChange={event=>setting(key,event.target.checked)} />{label}</label>)}</div><p className="gs-fine">방향별 독립 원본을 한 요청으로 만듭니다. 후보 개수는 방향마다 적용되며, 출력은 직접 확인한 뒤 모델링 입력에 지정하세요.</p></div>}
-                {motionTask && <div className="gs-multiview">
-                  <h3>동작과 참조</h3>
-                  <div className="gs-settings-grid">
-                    <label>클립 이름<input aria-label="클립 이름" value={String(settings.clipName ?? "")} placeholder="Rabbit_Idle" onChange={event => setting("clipName", event.target.value)} /></label>
-                    <label>길이 (초)<input aria-label="동작 길이" type="number" min={1} max={taskId === "N02" ? 10 : 30} value={String(settings.duration ?? 2)} onChange={event => setting("duration", Number(event.target.value))} /></label>
-                    <label>3D 프레임 속도<select aria-label="3D 프레임 속도" value={String(settings.fps ?? 30)} onChange={event => setting("fps", Number(event.target.value))}>{[24,30,60].map(fps => <option key={fps} value={fps}>{fps} fps</option>)}</select></label>
-                    <label><input type="checkbox" checked={settings.loop === true} onChange={event => setting("loop", event.target.checked)} />반복 동작</label>
+                {taskId === "I06" && (
+                  <label>
+                    장비 결과
+                    <select
+                      aria-label="장비 결과"
+                      value={String(settings.equipmentOutput ?? "standalone")}
+                      onChange={(event) =>
+                        setting("equipmentOutput", event.target.value)
+                      }
+                    >
+                      <option value="standalone">장비만 독립 이미지로</option>
+                      <option value="worn">
+                        캐릭터가 착용한 참고 이미지로
+                      </option>
+                    </select>
+                    <span className="gs-fine">
+                      외형 참고를 연결하세요. 참고 캐릭터는 보존되고 결과는 현재
+                      오브젝트에 저장됩니다.
+                    </span>
+                  </label>
+                )}
+                {taskId === "I07" && (
+                  <div className="gs-multiview">
+                    <h3>생성할 방향</h3>
+                    <div className="gs-settings-grid">
+                      {[
+                        ["viewFront", "정면"],
+                        ["viewBack", "후면"],
+                        ["viewLeft", "좌측"],
+                        ["viewRight", "우측"],
+                      ].map(([key, label]) => (
+                        <label key={key}>
+                          <input
+                            type="checkbox"
+                            checked={settings[key] !== false}
+                            onChange={(event) =>
+                              setting(key, event.target.checked)
+                            }
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                    <p className="gs-fine">
+                      방향별 독립 원본을 한 요청으로 만듭니다. 후보 개수는
+                      방향마다 적용되며, 출력은 직접 확인한 뒤 모델링 입력에
+                      지정하세요.
+                    </p>
                   </div>
-                  {taskId === "N02" && <>
-                    <label>영상 입력 원본<select aria-label="영상 입력 원본" value={String(settings.motionSourceVersionId ?? "")} onChange={event => { setting("motionSourceVersionId", event.target.value); const v = videoSources.find(v => v.id === event.target.value); setting("motionSourcePath", v?.files.find(f => /\.png$/i.test(f.path))?.path ?? ""); }}><option value="">채택한 측면 PNG 선택</option>{videoSources.map(v => <option key={v.id} value={v.id}>{v.label}</option>)}</select></label>
-                    <label>측면 방향<select aria-label="영상 측면 방향" value={String(settings.motionSourceView ?? "left")} onChange={event => setting("motionSourceView", event.target.value)}><option value="left">왼쪽</option><option value="right">오른쪽</option></select></label>
-                    <label>사용할 이미지 파일<select aria-label="영상 원본 파일" value={String(settings.motionSourcePath ?? "")} onChange={event => setting("motionSourcePath", event.target.value)}><option value="">이미지 파일 선택</option>{videoSources.find(v => v.id === settings.motionSourceVersionId)?.files.filter(f => /\.png$/i.test(f.path)).map(f => <option key={f.path} value={f.path}>{fileName(f.path)}</option>)}</select></label>
-                    <p className="gs-fine">Runway · 720p · 16:9 전신 여백. 기존 이미지와 실제 생성 영상은 따로 보존합니다. 생성 전 예상 비용을 확인하고 실행하세요.</p>
-                  </>}
-                  <p className="gs-fine">클립별로 채택합니다. 영상 참조를 채택한 뒤 같은 클립 이름으로 ‘참조 기반 3D 동작’을 실행하세요. 기존 동작 수정은 채택한 애니메이션과 원래 참조를 이어 사용합니다.</p>
-                </div>}
-                {taskId === "N01" && <label>모델의 좌우 축<select aria-label="모델 좌우 축" value={String(settings.motionSourceAxis ?? "X")} onChange={event => setting("motionSourceAxis", event.target.value)}><option value="X">X축 기준 좌·우</option><option value="Y">Y축 기준 좌·우</option></select><span className="gs-fine">2048px 전신 렌더 2장을 만들고 직접 선택합니다. 기존 디자인 원본을 교체하지 않습니다.</span></label>}
-                {["R01", "R02", "R03"].includes(taskId) && <div className="gs-multiview">
-                  <h3>리깅할 부위</h3>
-                  <p className="gs-fine">몸통과 팔다리는 기본으로 처리합니다. 필요한 보조 부위만 추가하세요.</p>
-                  <div className="gs-settings-grid">{[["rigEars","귀"],["rigTail","꼬리"],["rigHair","머리카락"],["rigClothing","옷"],["rigAccessories","장비·소품"]].map(([key,label]) => <label key={key}><input type="checkbox" checked={settings[key] === true} onChange={event => setting(key,event.target.checked)} />{label}</label>)}</div>
-                </div>}
-                {graphicsAstraTasks.has(taskId) && <p className="gs-fine">Blender + Astra가 채택한 원본을 새 버전으로 수정합니다. 결과를 채택하기 전까지 이전 버전이 유지됩니다.</p>}
-                {activeTask.id === "M02" && (
+                )}
+                {motionTask && (
+                  <div className="gs-multiview">
+                    <h3>동작과 참조</h3>
+                    <label>
+                      기존 클립 설정 불러오기
+                      <select
+                        aria-label="기존 클립 설정"
+                        value={String(settings.clipName ?? "")}
+                        onChange={(event) => setClipName(event.target.value)}
+                      >
+                        {[
+                          ...new Set([
+                            String(settings.clipName ?? ""),
+                            ...Object.keys(creation.clipSettings ?? {}),
+                            ...versions
+                              .filter((version) =>
+                                ["animation", "motion-reference"].includes(
+                                  version.role,
+                                ),
+                              )
+                              .map((version) => version.slot),
+                          ]),
+                        ]
+                          .filter(Boolean)
+                          .map((name) => (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    <p className="gs-fine">
+                      클립을 바꾸면 해당 클립의 설정을 불러옵니다. 원본·채택
+                      결과는 바뀌지 않으며, 새 이름을 입력하면 새 클립 설정을
+                      시작합니다.
+                    </p>
+                    <div className="gs-settings-grid">
+                      <label>
+                        클립 이름
+                        <input
+                          aria-label="클립 이름"
+                          value={clipNameDraft}
+                          placeholder="Rabbit_Idle"
+                          onChange={(event) =>
+                            setClipNameDraft(event.target.value)
+                          }
+                          onBlur={(event) => setClipName(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter")
+                              event.currentTarget.blur();
+                          }}
+                        />
+                      </label>
+                      <label>
+                        길이 (초)
+                        <input
+                          aria-label="동작 길이"
+                          type="number"
+                          min={1}
+                          max={taskId === "N02" ? 10 : 30}
+                          value={String(settings.duration ?? 2)}
+                          onChange={(event) =>
+                            setting("duration", Number(event.target.value))
+                          }
+                        />
+                      </label>
+                      <label>
+                        3D 프레임 속도
+                        <select
+                          aria-label="3D 프레임 속도"
+                          value={String(settings.fps ?? 30)}
+                          onChange={(event) =>
+                            setting("fps", Number(event.target.value))
+                          }
+                        >
+                          {[24, 30, 60].map((fps) => (
+                            <option key={fps} value={fps}>
+                              {fps} fps
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={settings.loop === true}
+                          onChange={(event) =>
+                            setting("loop", event.target.checked)
+                          }
+                        />
+                        반복 동작
+                      </label>
+                    </div>
+                    {taskId === "N02" && (
+                      <>
+                        <label>
+                          영상 입력 원본
+                          <select
+                            aria-label="영상 입력 원본"
+                            value={String(settings.motionSourceVersionId ?? "")}
+                            onChange={(event) => {
+                              setting(
+                                "motionSourceVersionId",
+                                event.target.value,
+                              );
+                              const v = videoSources.find(
+                                (v) => v.id === event.target.value,
+                              );
+                              setting(
+                                "motionSourcePath",
+                                v?.files.find((f) => /\.png$/i.test(f.path))
+                                  ?.path ?? "",
+                              );
+                            }}
+                          >
+                            <option value="">채택한 측면 PNG 선택</option>
+                            {videoSources.map((v) => (
+                              <option key={v.id} value={v.id}>
+                                {v.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          측면 방향
+                          <select
+                            aria-label="영상 측면 방향"
+                            value={String(settings.motionSourceView ?? "left")}
+                            onChange={(event) =>
+                              setting("motionSourceView", event.target.value)
+                            }
+                          >
+                            <option value="left">왼쪽</option>
+                            <option value="right">오른쪽</option>
+                          </select>
+                        </label>
+                        <label>
+                          사용할 이미지 파일
+                          <select
+                            aria-label="영상 원본 파일"
+                            value={String(settings.motionSourcePath ?? "")}
+                            onChange={(event) =>
+                              setting("motionSourcePath", event.target.value)
+                            }
+                          >
+                            <option value="">이미지 파일 선택</option>
+                            {videoSources
+                              .find(
+                                (v) => v.id === settings.motionSourceVersionId,
+                              )
+                              ?.files.filter((f) => /\.png$/i.test(f.path))
+                              .map((f) => (
+                                <option key={f.path} value={f.path}>
+                                  {fileName(f.path)}
+                                </option>
+                              ))}
+                          </select>
+                        </label>
+                        <p className="gs-fine">
+                          Runway · 720p · 16:9 전신 여백. 기존 이미지와 실제
+                          생성 영상은 따로 보존합니다. 생성 전 예상 비용을
+                          확인하고 실행하세요.
+                        </p>
+                      </>
+                    )}
+                    <p className="gs-fine">
+                      클립별로 채택합니다. 영상 참조를 채택한 뒤 같은 클립
+                      이름으로 ‘참조 기반 3D 동작’을 실행하세요. 기존 동작
+                      수정은 채택한 애니메이션과 원래 참조를 이어 사용합니다.
+                    </p>
+                  </div>
+                )}
+                {taskId === "N01" && (
+                  <label>
+                    모델의 좌우 축
+                    <select
+                      aria-label="모델 좌우 축"
+                      value={String(settings.motionSourceAxis ?? "X")}
+                      onChange={(event) =>
+                        setting("motionSourceAxis", event.target.value)
+                      }
+                    >
+                      <option value="X">X축 기준 좌·우</option>
+                      <option value="Y">Y축 기준 좌·우</option>
+                    </select>
+                    <span className="gs-fine">
+                      2048px 전신 렌더 2장을 만들고 직접 선택합니다. 기존 디자인
+                      원본을 교체하지 않습니다.
+                    </span>
+                  </label>
+                )}
+                {["R01", "R02", "R03"].includes(taskId) && (
+                  <div className="gs-multiview">
+                    <h3>리깅할 부위</h3>
+                    <p className="gs-fine">
+                      몸통과 팔다리는 기본으로 처리합니다. 필요한 보조 부위만
+                      추가하세요.
+                    </p>
+                    <div className="gs-settings-grid">
+                      {[
+                        ["rigEars", "귀"],
+                        ["rigTail", "꼬리"],
+                        ["rigHair", "머리카락"],
+                        ["rigClothing", "옷"],
+                        ["rigWings", "날개"],
+                        ["rigAccessories", "장비·소품"],
+                      ].map(([key, label]) => (
+                        <label key={key}>
+                          <input
+                            type="checkbox"
+                            checked={settings[key] === true}
+                            onChange={(event) =>
+                              setting(key, event.target.checked)
+                            }
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {graphicsAstraTasks.has(taskId) && (
+                  <p className="gs-fine">
+                    Blender + Astra가 채택한 원본을 새 버전으로 수정합니다.
+                    결과를 채택하기 전까지 이전 버전이 유지됩니다.
+                  </p>
+                )}
+                {usesModelMultiview(activeTask.id, settings) && (
                   <div className="gs-multiview">
                     <h3>네 방향의 실제 입력</h3>
                     <p className="gs-fine">
@@ -976,171 +1568,234 @@ export function GraphicsStudio({
                   </div>
                 )}
                 <div className="gs-settings-grid">
-                  <label>
-                    {taskId === "I07" ? "방향별 후보 개수" : "후보 개수"}
-                    <input
-                      aria-label="후보 개수"
-                      type="number"
-                      min={1}
-                      max={4}
-                      disabled={!multipleOutputs}
-                      value={String(
-                        multipleOutputs ? (settings.count ?? 1) : 1,
-                      )}
-                      onChange={(event) =>
-                        setting("count", Number(event.target.value))
-                      }
-                    />
-                  </label>
-                  <label>
-                    목표 면 수
-                    <input
-                      aria-label="목표 면 수"
-                      type="number"
-                      min={100}
-                      max={1000000}
-                      step={100}
-                      value={String(settings.faceLimit ?? 10000)}
-                      onChange={(event) =>
-                        setting("faceLimit", Number(event.target.value))
-                      }
-                    />
-                  </label>
-                  <label>
-                    텍스처 목표 품질
-                    <select
-                      aria-label="텍스처 해상도"
-                      value={String(settings.textureSize ?? 4096)}
-                      onChange={(event) =>
-                        setting("textureSize", Number(event.target.value))
-                      }
-                    >
-                      {settings.textureSize !== undefined &&
-                        ![2048, 4096, 8192].includes(
-                          Number(settings.textureSize),
-                        ) && (
-                          <option value={String(settings.textureSize)}>
-                            {String(settings.textureSize)}px · 저장된 설정 (현재
-                            API 미지원)
-                          </option>
-                        )}
-                      {[2048, 4096, 8192].map((size) => (
-                        <option key={size} value={size}>
-                          {size === 2048 ? "Standard · 2K 목표" : size === 4096 ? "Detailed · 4K 목표" : "Extreme · 8K"}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    출력 배율
-                    <input
-                      aria-label="출력 배율"
-                      type="number"
-                      min={0.001}
-                      max={1000}
-                      step={0.01}
-                      value={String(settings.scale ?? 1)}
-                      onChange={(event) =>
-                        setting("scale", Number(event.target.value))
-                      }
-                    />
-                  </label>
-                  <label>
-                    피벗
-                    <select
-                      aria-label="피벗"
-                      value={String(settings.pivot ?? "keep")}
-                      onChange={(event) => setting("pivot", event.target.value)}
-                    >
-                      <option value="keep">기존 유지</option>
-                      <option value="center">중심</option>
-                      <option value="bottom">바닥 중심</option>
-                    </select>
-                  </label>
-                  <label>
-                    출력 형식
-                    <select
-                      aria-label="출력 형식"
-                      value={String(settings.exportFormat ?? "both")}
-                      onChange={(event) =>
-                        setting("exportFormat", event.target.value)
-                      }
-                    >
-                      <option value="both">FBX + GLB</option>
-                      <option value="fbx">FBX</option>
-                      <option value="glb">GLB</option>
-                    </select>
-                  </label>
+                  {multipleOutputs &&
+                    !(
+                      stage === "model" &&
+                      creation.attributes.composition === "parts"
+                    ) && (
+                      <label>
+                        {taskId === "I07" ? "방향별 후보 개수" : "후보 개수"}
+                        <input
+                          aria-label="후보 개수"
+                          type="number"
+                          min={1}
+                          max={4}
+                          disabled={!multipleOutputs}
+                          value={String(
+                            multipleOutputs ? (settings.count ?? 1) : 1,
+                          )}
+                          onChange={(event) =>
+                            setting("count", Number(event.target.value))
+                          }
+                        />
+                      </label>
+                    )}
+                  {stage === "model" &&
+                    creation.attributes.composition !== "parts" && (
+                      <label>
+                        목표 면 수
+                        <input
+                          aria-label="목표 면 수"
+                          type="number"
+                          min={100}
+                          max={1000000}
+                          step={100}
+                          value={String(settings.faceLimit ?? 10000)}
+                          onChange={(event) =>
+                            setting("faceLimit", Number(event.target.value))
+                          }
+                        />
+                      </label>
+                    )}
+                  {stage === "surface" &&
+                    settings.surfaceOperation !== "uv" && (
+                      <label>
+                        텍스처 목표 품질
+                        <select
+                          aria-label="텍스처 해상도"
+                          value={String(settings.textureSize ?? 4096)}
+                          onChange={(event) =>
+                            setting("textureSize", Number(event.target.value))
+                          }
+                        >
+                          {settings.textureSize !== undefined &&
+                            ![2048, 4096, 8192].includes(
+                              Number(settings.textureSize),
+                            ) && (
+                              <option value={String(settings.textureSize)}>
+                                {String(settings.textureSize)}px · 저장된 설정
+                                (현재 API 미지원)
+                              </option>
+                            )}
+                          {[2048, 4096, 8192].map((size) => (
+                            <option key={size} value={size}>
+                              {size === 2048
+                                ? "Standard · 2K 목표"
+                                : size === 4096
+                                  ? "Detailed · 4K 목표"
+                                  : "Extreme · 8K"}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                  {stage === "unity" && (
+                    <>
+                      <label>
+                        출력 배율
+                        <input
+                          aria-label="출력 배율"
+                          type="number"
+                          min={0.001}
+                          max={1000}
+                          step={0.01}
+                          value={String(settings.scale ?? 1)}
+                          onChange={(event) =>
+                            setting("scale", Number(event.target.value))
+                          }
+                        />
+                      </label>
+                      <label>
+                        피벗
+                        <select
+                          aria-label="피벗"
+                          value={String(settings.pivot ?? "keep")}
+                          onChange={(event) =>
+                            setting("pivot", event.target.value)
+                          }
+                        >
+                          <option value="keep">기존 유지</option>
+                          <option value="center">중심</option>
+                          <option value="bottom">바닥 중심</option>
+                        </select>
+                      </label>
+                      <label>
+                        출력 형식
+                        <select
+                          aria-label="출력 형식"
+                          value={String(settings.exportFormat ?? "both")}
+                          onChange={(event) =>
+                            setting("exportFormat", event.target.value)
+                          }
+                        >
+                          <option value="both">FBX + GLB</option>
+                          <option value="fbx">FBX</option>
+                          <option value="glb">GLB</option>
+                        </select>
+                      </label>
+                    </>
+                  )}
                 </div>
-                {activeTask.id === "T03" && <p className="gs-fine">API 품질 설정을 사용하며 반환된 원본의 실제 픽셀 크기는 결과에서 확인합니다. 요청 크기로 강제 확대하지 않습니다.</p>}
-                <details className="gs-multiview"><summary>Tripo API 누적 승인 한도</summary>
-                  <p>이 프로젝트 승인 누적 {workspace ? graphicsTripoReserved(workspace) : 0} / {workspace?.tripoBudget?.limit ?? "미설정"} 크레딧</p>
-                  <label>한도 (API 크레딧)<input aria-label="Tripo API 한도" type="number" min={0} max={100000} value={budget} onChange={event => setBudget(Number(event.target.value))} /></label>
-                  <button disabled={disabled} onClick={() => void run({ kind: "set-tripo-budget", credits: budget }, "Tripo 승인 한도를 저장했습니다.")}>한도 저장</button>
-                  <p className="gs-fine">한도 설정만으로 생성하지 않습니다. 실행 시 비용을 별도로 확인하며, 중단·불명확한 제출 비용도 한도에 남겨 중복 결제를 방지합니다. 실제 청구 잔액과 구분됩니다.</p>
-                </details>
-                <label htmlFor="gs-model">모델 제작 모델</label>
-                <select id="gs-model" value={catalog.model[0].id} disabled>
-                  {catalog.model.slice(0, 1).map((model) => (
-                    <option value={model.id} key={model.id}>
-                      {model.label}
-                    </option>
-                  ))}
-                </select>
-                {["M01", "M02", "M03"].includes(activeTask.id) && (
-                  <p className="gs-warning">
-                    현재 앱 견적: 후보당 100 API 크레딧 × 후보 개수. Studio
-                    구독과 별도이며 계정별 실제 요금은 확인되지 않았습니다.
+                {activeTask.id === "T03" && (
+                  <p className="gs-fine">
+                    API 품질 설정을 사용하며 반환된 원본의 실제 픽셀 크기는
+                    결과에서 확인합니다. 요청 크기로 강제 확대하지 않습니다.
                   </p>
                 )}
-                <p className="gs-fine">
-                  모델 제작 API는 현재 P2.0을 사용합니다. 이미지 제작은 기존
-                  Codex 모델·추론 설정을 유지합니다. 요청 설정은 지원과 입력을
-                  확인한 후 고정됩니다. 가져온 원본의 해상도와 품질 설정은
-                  자동으로 낮추지 않습니다.
-                </p>
-                <div className="gs-execute-row">
+                <details className="gs-multiview">
+                  <summary>Tripo API 누적 승인 한도</summary>
+                  <p>
+                    이 프로젝트 승인 누적{" "}
+                    {workspace ? graphicsTripoReserved(workspace) : 0} /{" "}
+                    {workspace?.tripoBudget?.limit ?? "미설정"} 크레딧
+                  </p>
+                  <label>
+                    한도 (API 크레딧)
+                    <input
+                      aria-label="Tripo API 한도"
+                      type="number"
+                      min={0}
+                      max={100000}
+                      value={budget}
+                      onChange={(event) =>
+                        setBudget(Number(event.target.value))
+                      }
+                    />
+                  </label>
                   <button
                     disabled={disabled}
                     onClick={() =>
                       void run(
-                        {
-                          kind: "update-object",
-                          objectId: object.id,
-                          patch: { instruction, settings },
-                        },
-                        "지시와 설정을 저장했습니다.",
+                        { kind: "set-tripo-budget", credits: budget },
+                        "Tripo 승인 한도를 저장했습니다.",
                       )
                     }
                   >
-                    설정 저장
+                    한도 저장
                   </button>
-                  <button
-                    className="gs-primary"
-                    data-testid="graphics-prepare"
-                    disabled={
-                      disabled ||
-                      Boolean(multiviewProblem) ||
-                      activeTask.status === "planned" ||
-                      (active && !["A01", "A02", "A03"].includes(activeTask.id))
-                    }
-                    onClick={() => void prepare()}
-                  >
-                    {activeTask.id === "A01"
-                      ? "자료 가져오기"
-                      : activeTask.id === "A02"
-                        ? "오브젝트 추가로 이동"
-                        : activeTask.id === "A03"
-                          ? "참고 자료 연결로 이동"
-                          : activeTask.status === "planned"
-                            ? "실행 연결 준비 중"
-                            : activeTask.executor === "local"
-                              ? "로컬 작업 준비"
-                              : activeTask.executor === "codex-image"
-                                ? "입력·사용량 확인"
-                                : "입력·비용 확인"}
-                  </button>
-                </div>
+                  <p className="gs-fine">
+                    한도 설정만으로 생성하지 않습니다. 실행 시 비용을 별도로
+                    확인하며, 중단·불명확한 제출 비용도 한도에 남겨 중복 결제를
+                    방지합니다. 실제 청구 잔액과 구분됩니다.
+                  </p>
+                </details>
+                {stage === "model" &&
+                  settings.modelMethod !== "local" &&
+                  settings.modelMethod !== "astra" && (
+                    <details className="gs-api-model-options">
+                      <summary>AI 모델 · 토폴로지 세부 설정</summary>
+                      <label htmlFor="gs-model">모델 제작 모델</label>
+                      <select
+                        id="gs-model"
+                        value={String(settings.model ?? "P2-20260801")}
+                        disabled={disabled}
+                        onChange={(event) =>
+                          setting("model", event.target.value)
+                        }
+                      >
+                        {catalog.model.map((model) => (
+                          <option value={model.id} key={model.id}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </select>
+                      <fieldset className="gs-choice">
+                        <legend>출력 토폴로지</legend>
+                        <div>
+                          <button
+                            type="button"
+                            aria-pressed={settings.quad === false}
+                            disabled={disabled}
+                            onClick={() => setting("quad", false)}
+                          >
+                            삼각형
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={settings.quad !== false}
+                            disabled={
+                              disabled || settings.model === "P1-20260311"
+                            }
+                            onClick={() => setting("quad", true)}
+                          >
+                            쿼드
+                          </button>
+                        </div>
+                      </fieldset>
+                      <p className="gs-fine">
+                        모델별 외형 품질과 지원 기능은 다릅니다. 낮은 비용의
+                        모델이 같은 품질을 보장하지 않습니다. P1은 쿼드 출력을
+                        지원하지 않습니다.
+                      </p>
+                    </details>
+                  )}
+                {modelProblem && (
+                  <p role="alert" className="gs-warning">
+                    {modelProblem}
+                  </p>
+                )}
+                {["M01", "M02", "M03"].includes(activeTask.id) && (
+                  <p className="gs-warning">
+                    선택한 모델·입력·후보 개수에 맞는 API 견적을 실행 전에
+                    확인합니다. Studio 구독과 별도이며 이 화면의 선택만으로
+                    과금하지 않습니다.
+                  </p>
+                )}
+                <p className="gs-fine">
+                  이미지 제작은 기존 Codex 모델·추론 설정을 유지합니다. 요청
+                  설정은 지원과 입력을 확인한 후 고정됩니다. 가져온 원본의
+                  해상도와 품질 설정은 자동으로 낮추지 않습니다.
+                </p>
                 {active && (
                   <p className="gs-warning">
                     진행 중이거나 확인이 필요한 작업이 있습니다. 아래 이력을
@@ -1235,6 +1890,20 @@ export function GraphicsStudio({
                   );
                   return (
                     <div key={`${reference.versionId}-${reference.role}`}>
+                      {version?.files.find((file) =>
+                        isImagePath(file.path),
+                      ) && (
+                        <img
+                          className="gs-reference-thumb"
+                          alt={`${version.label} 참고 원본`}
+                          src={window.desktop.assetUrl(
+                            project.id,
+                            version.files.find((file) =>
+                              isImagePath(file.path),
+                            )!.path,
+                          )}
+                        />
+                      )}
                       <span>
                         <strong>{version?.label ?? "찾을 수 없는 버전"}</strong>
                         <small>
@@ -1271,9 +1940,10 @@ export function GraphicsStudio({
           </>
         )}
 
-        <section className="gs-catalog">
+        <details className="gs-catalog">
+          <summary>기능 지원 현황 · 기존 전체 목록</summary>
           <div className="gs-section-title">
-            <h2>전체 작업 선택표</h2>
+            <h2>제작 기능 지원 현황</h2>
             <span>
               {filteredTasks.length} / {graphicsCatalog.length}
             </span>
@@ -1295,7 +1965,7 @@ export function GraphicsStudio({
               <b className="gs-tag gs-planned">
                 미구현 {availabilityCounts.planned}
               </b>{" "}
-              목록 검토·조합 저장만 가능
+              실행 불가 · 후속 구현 범위
             </span>
           </div>
           <div className="gs-catalog-tools">
@@ -1328,8 +1998,9 @@ export function GraphicsStudio({
             </label>
           </div>
           <p className="gs-fine">
-            체크는 작업 조합만 저장합니다. 실행과 결과 채택은 각각 직접
-            선택합니다.
+            제작은 위의 특징 선택과 단계별 버튼으로 진행합니다. 이 목록은 내부
+            기능의 실제 지원 상태를 보여줍니다. 2D·UI·VFX 제작은 후속
+            범위입니다.
           </p>
           <div className="gs-task-list" data-testid="graphics-task-list">
             {filteredTasks.map((task) => (
@@ -1338,30 +2009,11 @@ export function GraphicsStudio({
                 className={`gs-task-row ${task.id === taskId ? "is-active" : ""}`}
                 data-task-id={task.id}
               >
-                <input
-                  type="checkbox"
-                  aria-label={`${task.id} ${task.name} 작업 선택`}
-                  disabled={disabled || !object}
-                  checked={object?.selectedTasks.includes(task.id) ?? false}
-                  onChange={(event) => {
-                    if (object)
-                      void run({
-                        kind: "update-object",
-                        objectId: object.id,
-                        patch: {
-                          selectedTasks: event.target.checked
-                            ? [...new Set([...object.selectedTasks, task.id])]
-                            : object.selectedTasks.filter(
-                                (id) => id !== task.id,
-                              ),
-                        },
-                      });
-                  }}
-                />
                 <button
                   className="gs-task-open"
-                  onClick={() => setTaskId(task.id)}
-                  aria-pressed={task.id === taskId}
+                  onClick={() =>
+                    setNotice(`${task.name}: ${task.reason ?? task.output}`)
+                  }
                 >
                   <span className="gs-task-id">{task.id}</span>
                   <span>
@@ -1380,10 +2032,16 @@ export function GraphicsStudio({
           {filteredTasks.length === 0 && (
             <p className="gs-muted">조건에 맞는 작업이 없습니다.</p>
           )}
-        </section>
+        </details>
 
         {object && (
-          <section className="gs-history">
+          <details
+            className="gs-history"
+            open={objectTasks.some((task) =>
+              ["running", "failed", "submission_unknown"].includes(task.status),
+            )}
+          >
+            <summary>작업 상태 · 기록 {objectTasks.length}개</summary>
             <div className="gs-section-title">
               <h2>작업 이력</h2>
               <span>{objectTasks.length}</span>
@@ -1454,7 +2112,7 @@ export function GraphicsStudio({
                 )}
               </details>
             ))}
-          </section>
+          </details>
         )}
 
         <div className="gs-bottom-grid">
@@ -1474,8 +2132,8 @@ export function GraphicsStudio({
             </p>
             <p className="gs-fine">
               연결 확인은 생성 성공을 뜻하지 않습니다. Tripo API 크레딧과 Studio
-              구독 잔액은 별도이며, 새 모델 생성 검증은 아직 수행하지
-              않았습니다.
+              구독 잔액은 별도입니다. 각 기능의 실제 지원 범위는 지원 현황에서
+              확인하세요.
             </p>
             {workspace?.connections?.map((connection) => (
               <div className="gs-connection" key={connection.name}>

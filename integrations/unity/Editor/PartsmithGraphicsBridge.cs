@@ -15,7 +15,11 @@ namespace Partsmith.Graphics {
  [Serializable] public class DeliveryRequest {
   public int schemaVersion; public string requestId,objectId,objectName,destination,resultPath,profileFingerprint,unityVersion,pipeline,converterVersion,structure,rigType,mode,materialManifest;
   public FileEntry[] files,sources,profileFiles; public string[] expectedClips; public float spritePixelsPerUnit;
+  public DeliveryOptimization optimization;
  }
+ [Serializable] public class DeliveryOptimization { public bool lodEnabled; public float lodRatio=.5f; public string collider="none",deliveryCompression="none"; public int deliveryTextureSize; }
+ [Serializable] public class DeliveryLod { public string source,derived; public int sourceTriangles,derivedTriangles; }
+ [Serializable] public class OptimizationManifest { public int schemaVersion; public DeliveryOptimization settings; public DeliveryLod[] lods; }
  [Serializable] public class DeliveryReport {
   public string requestId,objectId,profileFingerprint,converterVersion,status,guid,prefabPath,userPrefabPath,unityVersion,pipeline;
   public bool playbackVerified; public string[] clips,warnings,errors;
@@ -74,6 +78,9 @@ namespace Partsmith.Graphics {
     if(Path.GetFullPath(q.resultPath)!=Safe("Library/PartsmithGraphicsResults/"+q.requestId+".json"))throw new Exception("Unsafe result path");
     if(q.files==null||q.files.Length==0||q.files.Select(f=>f.destination).Distinct().Count()!=q.files.Length)throw new Exception("Missing or duplicate delivery files");
     if(q.mode!="model"&&q.mode!="sprite"||q.rigType!="generic"&&q.rigType!="humanoid")throw new Exception("Unsupported import mode");
+    q.optimization=q.optimization??new DeliveryOptimization();
+    if(!new[]{0,256,512,1024,2048,4096,8192,16384}.Contains(q.optimization.deliveryTextureSize)||!new[]{"none","normal"}.Contains(q.optimization.deliveryCompression)||!new[]{"none","box","mesh","convex"}.Contains(q.optimization.collider)||float.IsNaN(q.optimization.lodRatio)||q.optimization.lodRatio<.05f||q.optimization.lodRatio>.95f)throw new Exception("Unsupported frozen optimization settings");
+    if(q.mode=="sprite"&&(q.optimization.lodEnabled||q.optimization.collider!="none"))throw new Exception("3D optimization cannot be inferred for a sprite");
     Profile(q);
     string generated=q.destination+"/Generated",user=q.destination+"/User";
     string manifestPath=Safe(generated+"/partsmith-manifest.json");
@@ -83,6 +90,11 @@ namespace Partsmith.Graphics {
      Safe(Relative(Path.GetFullPath(f.source)));Safe(f.destination);ValidateFile(f.source,f.sha256);
      if(new FileInfo(f.source).Length!=f.bytes)throw new Conflict("Staged file byte count changed");
     }
+    var optimizationFile=q.files.SingleOrDefault(f=>f.destination==generated+"/optimization.json");
+    if(optimizationFile!=null){
+     var optimizationEvidence=JsonUtility.FromJson<OptimizationManifest>(File.ReadAllText(optimizationFile.source));
+     if(optimizationEvidence?.schemaVersion!=1||optimizationEvidence.settings==null||JsonUtility.ToJson(optimizationEvidence.settings)!=JsonUtility.ToJson(q.optimization))throw new Conflict("Optimization settings differ from the immutable derivative manifest");
+    }else if(q.optimization.lodEnabled)throw new Conflict("LOD has no immutable derivative manifest");
     foreach(var f in q.sources??Array.Empty<FileEntry>())ValidateFile(f.path,f.sha256);
     if(File.Exists(Safe("Library/PartsmithGraphicsStaging/"+q.requestId+"/cancelled.json")))throw new Exception("Delivery cancelled before import");
     if(File.Exists(manifestPath)){
@@ -117,12 +129,15 @@ namespace Partsmith.Graphics {
     if(File.Exists(requestFile)){string archive=requestFile+".processed";if(!File.Exists(archive))File.Move(requestFile,archive);else File.Move(requestFile,requestFile+"."+DateTime.UtcNow.Ticks+".processed");}
    }
   }
-  static void Texture(string asset,bool sprite,float ppu,string role="color"){
+  static void Texture(string asset,bool sprite,float ppu,string role="color",DeliveryOptimization optimization=null){
+   optimization=optimization??new DeliveryOptimization();
    var importer=AssetImporter.GetAtPath(asset) as TextureImporter;if(!importer)throw new Exception("Texture importer missing: "+asset);
-   importer.maxTextureSize=16384;importer.textureCompression=TextureImporterCompression.Uncompressed;
+   int limit=optimization.deliveryTextureSize==0?16384:optimization.deliveryTextureSize;
+   var compression=optimization.deliveryCompression=="normal"?TextureImporterCompression.Compressed:TextureImporterCompression.Uncompressed;
+   importer.maxTextureSize=limit;importer.textureCompression=compression;
    importer.npotScale=TextureImporterNPOTScale.None;importer.mipmapEnabled=!sprite;
    if(!sprite){importer.textureType=role=="normal"?TextureImporterType.NormalMap:TextureImporterType.Default;importer.sRGBTexture=role=="color";importer.convertToNormalmap=false;importer.alphaSource=TextureImporterAlphaSource.FromInput;importer.alphaIsTransparency=false;}
-   var defaults=importer.GetDefaultPlatformTextureSettings();defaults.maxTextureSize=16384;defaults.textureCompression=TextureImporterCompression.Uncompressed;importer.SetPlatformTextureSettings(defaults);
+   var defaults=importer.GetDefaultPlatformTextureSettings();defaults.maxTextureSize=limit;defaults.textureCompression=compression;defaults.crunchedCompression=false;importer.SetPlatformTextureSettings(defaults);
    importer.ClearPlatformTextureSettings("Standalone");
    if(sprite){importer.textureType=TextureImporterType.Sprite;importer.spriteImportMode=SpriteImportMode.Single;importer.spritePixelsPerUnit=ppu;importer.alphaIsTransparency=true;}
    importer.SaveAndReimport();
@@ -143,9 +158,11 @@ namespace Partsmith.Graphics {
    var evidence=bindings.originalImages.Concat(bindings.derivedImages).Single(t=>t.path==relative);
    string asset=q.destination+"/Generated/"+relative;
    if(!q.files.Any(f=>f.destination==asset&&f.sha256==evidence.sha256))throw new Exception("Material texture has no immutable file evidence");
-   ValidateFile(Safe(asset),evidence.sha256);Texture(asset,false,100,role);
+   ValidateFile(Safe(asset),evidence.sha256);Texture(asset,false,100,role,q.optimization);
    var texture=AssetDatabase.LoadAssetAtPath<Texture2D>(asset);
-   if(!texture||texture.width!=evidence.width||texture.height!=evidence.height)throw new Exception("Material texture dimensions changed during import: "+asset);
+   int limit=q.optimization?.deliveryTextureSize??0;float scale=limit==0?1:Math.Min(1,limit/(float)Math.Max(evidence.width,evidence.height));
+   int tolerance=scale==1?0:1;
+   if(!texture||Math.Abs(texture.width-Math.Max(1,Math.Round(evidence.width*scale)))>tolerance||Math.Abs(texture.height-Math.Max(1,Math.Round(evidence.height*scale)))>tolerance)throw new Exception("Material texture dimensions differ from explicit delivery settings: "+asset);
    return texture;
   }
   static void ApplyMaterialBinding(DeliveryRequest q,MaterialBindings bindings,MaterialBinding binding,Material mat){
@@ -177,7 +194,7 @@ namespace Partsmith.Graphics {
    }
   }
   static void ImportSprite(DeliveryRequest q,DeliveryReport r,List<string> warnings){
-   var image=q.files.Single(f=>f.kind=="image").destination;Texture(image,true,q.spritePixelsPerUnit);
+   var image=q.files.Single(f=>f.kind=="image").destination;Texture(image,true,q.spritePixelsPerUnit,"color",q.optimization);
    var sprite=AssetDatabase.LoadAssetAtPath<Sprite>(image);if(!sprite)throw new Exception("Sprite subasset missing");
    var scene=EditorSceneManager.NewPreviewScene();
    try{var obj=new GameObject("Asset");UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(obj,scene);obj.AddComponent<SpriteRenderer>().sprite=sprite;SavePrefab(obj,r);UnityEngine.Object.DestroyImmediate(obj);}finally{EditorSceneManager.ClosePreviewScene(scene);}
@@ -196,7 +213,7 @@ namespace Partsmith.Graphics {
    importer.animationType=skinned?(q.rigType=="humanoid"?ModelImporterAnimationType.Human:ModelImporterAnimationType.Generic):ModelImporterAnimationType.Generic;
    importer.avatarSetup=skinned?ModelImporterAvatarSetup.CreateFromThisModel:ModelImporterAvatarSetup.NoAvatar;
    importer.SaveAndReimport();Folder(texturePath);importer.ExtractTextures(texturePath);AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-   foreach(var file in Directory.GetFiles(Safe(texturePath)).Where(f=>new[]{".png",".jpg",".jpeg",".tga"}.Contains(Path.GetExtension(f).ToLowerInvariant())))Texture(Relative(file),false,100);
+   foreach(var file in Directory.GetFiles(Safe(texturePath)).Where(f=>new[]{".png",".jpg",".jpeg",".tga"}.Contains(Path.GetExtension(f).ToLowerInvariant())))Texture(Relative(file),false,100,"color",q.optimization);
    var model=AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);if(!model||model.GetComponentsInChildren<Renderer>(true).Length==0)throw new Exception("Imported model has no renderer");
    var shader=Shader.Find(q.pipeline=="urp"?"Universal Render Pipeline/Lit":q.pipeline=="hdrp"?"HDRP/Lit":"Standard");
    if(!shader)throw new Exception("Required target shader missing; no silent renderer fallback");
@@ -232,10 +249,43 @@ namespace Partsmith.Graphics {
    var scene=EditorSceneManager.NewPreviewScene();
    try{
     var obj=(GameObject)PrefabUtility.InstantiatePrefab(model,scene);obj.name="Asset";
+    ApplyOptimization(q,obj,warnings);
     if(controller||skinned){var animator=obj.GetComponent<Animator>();if(!animator)animator=obj.AddComponent<Animator>();animator.avatar=avatar;animator.runtimeAnimatorController=controller;animator.applyRootMotion=false;}
     SavePrefab(obj,r);UnityEngine.Object.DestroyImmediate(obj);
    }finally{EditorSceneManager.ClosePreviewScene(scene);}
    warnings.Add("Supported opaque Principled materials use source-node base color, tangent normal and explicit metallic R / smoothness A packing. Unsupported graphs use a warned base-color fallback. Appearance still requires visual review.");
+  }
+  static void ApplyOptimization(DeliveryRequest q,GameObject obj,List<string> warnings){
+   var options=q.optimization??new DeliveryOptimization();
+   var renderers=obj.GetComponentsInChildren<Renderer>(true);
+   var originalRenderers=renderers;
+   if(options.lodEnabled){
+    string relative=q.destination+"/Generated/optimization.json";
+    if(!q.files.Any(f=>f.destination==relative))throw new Exception("LOD requires immutable local decimation evidence");
+    var evidence=JsonUtility.FromJson<OptimizationManifest>(File.ReadAllText(Safe(relative)));
+    if(evidence?.schemaVersion!=1||evidence.lods==null||evidence.lods.Length==0||evidence.settings==null||!evidence.settings.lodEnabled||Math.Abs(evidence.settings.lodRatio-options.lodRatio)>.000001f)throw new Exception("LOD settings differ from the local derivative");
+    var low=new List<Renderer>();var high=new List<Renderer>();
+    foreach(var lod in evidence.lods){
+     if(lod.derivedTriangles>=lod.sourceTriangles||lod.derivedTriangles<1)throw new Exception("LOD did not reduce source triangles");
+     high.Add(renderers.Single(r=>r.name==lod.source));low.Add(renderers.Single(r=>r.name==lod.derived));
+    }
+    if(high.Count+low.Count!=renderers.Length)throw new Exception("LOD has an unclassified renderer");
+    var group=obj.AddComponent<LODGroup>();group.SetLODs(new[]{new LOD(.5f,high.ToArray()),new LOD(.1f,low.ToArray())});group.RecalculateBounds();originalRenderers=high.ToArray();
+    warnings.Add("Explicit local LOD1 applied at 50% screen-relative height and culled below 10%; switching and silhouette require visual review.");
+   }
+   if(options.collider=="box"){
+    if(originalRenderers.Length==0)throw new Exception("Box collider has no source renderer bounds");
+    var bounds=new Bounds(obj.transform.InverseTransformPoint(originalRenderers[0].bounds.center),Vector3.zero);
+    foreach(var renderer in originalRenderers){var b=renderer.bounds;for(int x=-1;x<=1;x+=2)for(int y=-1;y<=1;y+=2)for(int z=-1;z<=1;z+=2)bounds.Encapsulate(obj.transform.InverseTransformPoint(b.center+Vector3.Scale(b.extents,new Vector3(x,y,z))));}
+    var collider=obj.AddComponent<BoxCollider>();collider.center=bounds.center;collider.size=bounds.size;
+   }else if(options.collider=="mesh"||options.collider=="convex"){
+    foreach(var renderer in originalRenderers){
+     var filter=renderer.GetComponent<MeshFilter>();if(!filter||!filter.sharedMesh||renderer is SkinnedMeshRenderer)throw new Exception("Mesh collision requires a static MeshFilter source");
+     var collider=renderer.gameObject.AddComponent<MeshCollider>();collider.sharedMesh=filter.sharedMesh;collider.convex=options.collider=="convex";
+    }
+    warnings.Add(options.collider=="convex"?"Convex collision is a Unity-generated hull; concavities are not preserved and cooking/gameplay need review.":"Mesh collision uses the original static render mesh; dynamic Rigidbody use needs explicit convex authoring.");
+   }else if(options.collider!=null&&options.collider!="none")throw new Exception("Unsupported collider option");
+   if(options.deliveryTextureSize>0||options.deliveryCompression=="normal")warnings.Add("Explicit delivery texture size/compression was applied only to Unity import settings; source image bytes remain unchanged.");
   }
  }
 }

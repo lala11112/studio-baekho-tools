@@ -58,7 +58,56 @@ async function blenderMock(_executable: string, command: string[], _signal?: Abo
 }
 
 test("Astra routes only the actual catalog operation IDs", () => {
-  assert.deepEqual(graphicsAstraOperations, ["M05", "R01", "R02", "R03", "N04", "N05", "N06"]);
+  assert.deepEqual(graphicsAstraOperations, ["M05", "M06", "M07", "M08", "M15", "R01", "R02", "R03", "N04", "N05", "N06"]);
+});
+
+test("new model contracts reject ambiguous parts, unknown edit IDs, multi-candidate dispatch and impossible locks before any worker", async t => {
+  for (const variant of ["parts", "duplicate", "edit", "count", "lock"] as const) await t.test(variant, async child => {
+    const f = fixture(child, variant === "edit" ? "M06" : variant === "lock" ? "M15" : "M07");
+    f.input(variant === "lock" ? "design" : "model", variant === "lock" ? ".png" : ".blend");
+    f.args.task.settings.requestedParts = JSON.stringify([{ id: "a", label: "A" }, { id: "b", label: "B" }]);
+    if (variant === "parts") f.args.task.settings.requestedParts = "not json";
+    if (variant === "duplicate") f.args.task.settings.requestedParts = JSON.stringify([{ id: "a", label: "A" }, { id: "a", label: "A2" }]);
+    if (variant === "edit") f.args.task.settings.editMeshIds = '["unknown-id"]';
+    if (variant === "count") f.args.task.settings.count = 2;
+    if (variant === "lock") f.args.task.settings["lock.topology"] = true;
+    let workers = 0;
+    const execute = createGraphicsAstraExecutor({ runBlender: blenderMock, workerFactory: () => { workers++; return f.worker(f.authored); } });
+    await assert.rejects(execute(f.args), /JSON|중복|메시 ID|독립 작업|원본 3D/);
+    assert.equal(workers, 0);
+    assert(!fs.existsSync(path.join(f.root, "graphics/jobs/task-1/astra/dispatch.json")));
+  });
+});
+
+test("enabled appendage and explicit structural lock require positive host evidence", async t => {
+  for (const setting of ["rigWings", "rigClothing", "rigCloth", "rigAccessories", "lock.rig"] as const) await t.test(setting, async child => {
+    const f = fixture(child); f.input(); f.args.task.settings[setting] = true;
+    const execute = createGraphicsAstraExecutor({ workerFactory: () => f.worker(task => {
+      assert.match(task.prompt, /partsmith_feature/); return f.authored(task);
+    }), runBlender: async (...args) => {
+      await blenderMock(...args); const q = read(args[1].at(-1)!);
+      if (q.mode === "validate") {
+        const expected: Record<string, string> = { rigWings: "wings", rigClothing: "cloth", rigCloth: "cloth", rigAccessories: "accessories" };
+        if (expected[setting]) assert.deepEqual(q.rigFeatures, [expected[setting]]);
+        const report = read(q.report); report.checks.skeleton = false; write(q.report, report);
+      }
+    } });
+    await assert.rejects(execute(f.args), /부속 관절|구조 잠금/);
+  });
+});
+
+test("M15 explicit adopted part source takes priority over an adopted whole-image reference", async t => {
+  const f = fixture(t, "M15"), part = f.input("design", ".png", "part-head");
+  f.input("design", ".png", "main"); f.args.task.settings.sourceVersionId = part.version.id;
+  let workers = 0;
+  const execute = createGraphicsAstraExecutor({ runBlender: async (...args) => {
+    const q = read(args[1].at(-1)!); assert.equal(q.sourceSha256, part.version.files[0].sha256);
+    await blenderMock(...args);
+    if (q.mode === "validate") { const report = read(q.report); report.checks.newGeometry = true; write(q.report, report); }
+  }, workerFactory: () => f.worker(task => {
+    workers++; assert(task.prompt.includes(`Source version: ${part.version.id}.`)); assert.equal(task.imagePaths.length, 2); return f.authored(task);
+  }) });
+  assert.equal((await execute(f.args)).role, "model"); assert.equal(workers, 1);
 });
 
 test("explicit recovery without a durable Astra dispatch cannot start preparation or a worker", async t => {
