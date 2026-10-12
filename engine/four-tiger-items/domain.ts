@@ -6,7 +6,7 @@ export const gradePrice=(grade:Grade):number=>confirmedRules.gradePrices[grade-1
 export function describeEffects(effects:EffectDraft[]):string {
   return effects.map(e=>`${e.trigger==='formSwitchSucceeded'?`전환 성공 후 ${e.durationSeconds}초 동안`:'보유 중'} ${e.targetForms==='all'?'모든 폼':e.targetForms.join('/')} ${statNames[e.stat]} ${e.amount>=0?'+':''}${Number((e.amount*(e.unit==='ratio'?100:1)).toFixed(4))}${e.unit==='ratio'?'%':e.unit==='SPPerSecond'?' SP/초':' SP'}`).join(', ');
 }
-export const blankReview=(now:string):ItemReview=>({state:'draft',dataRevision:null,iconVersion:null,policyRevision:null,note:'',updatedAt:now});
+export const blankReview=(now:string):ItemReview=>({state:'draft',dataRevision:null,iconVersion:null,iconContentRevision:null,policyRevision:null,note:'',updatedAt:now});
 export function createInitialProject(input:{projectId:string;name:string;now:string}):SainGeomItemProject {
   const items:ItemDraft[]=itemSeeds.map(seed=>({candidateKey:randomUUID(),itemId:seed.itemId,name:seed.name,description:describeEffects(seed.effects),descriptionStale:false,element:seed.element,grade:seed.grade,purchasePrice:gradePrice(seed.grade),effects:structuredClone(seed.effects),unsupportedEffectNotes:'',synergyTags:[`ITEM_${seed.element.toUpperCase()}`],iconPrompt:seed.motif,iconKey:`icon.${seed.itemId}`,icons:[],selectedIconVersion:null,contentRevision:1,review:blankReview(input.now)}));
   return projectSchema.parse({schemaVersion:1,projectId:input.projectId,name:input.name,revision:0,createdAt:input.now,updatedAt:input.now,
@@ -36,8 +36,8 @@ export function validateProject(p:SainGeomItemProject,mode:ExportKind):Validatio
     if(item.descriptionStale)issue('DESCRIPTION_STALE','수정된 효과에 맞게 설명을 재생성하거나 확인하세요.','description',key);
     const icon=item.icons.find(i=>i.versionId===item.selectedIconVersion);
     if(!icon)issue('ICON_MISSING','아이콘을 생성하고 선택하세요.','selectedIconVersion',key);
-    else if(icon.contentRevision!==item.contentRevision)issue('ICON_STALE','수정 전 내용으로 만든 아이콘입니다. 재생성 후 검토하세요.','selectedIconVersion',key);
-    if(item.review.state!=='adopted'||item.review.dataRevision!==item.contentRevision||item.review.iconVersion!==item.selectedIconVersion||item.review.policyRevision!==p.ruleProfile.revision)issue('ITEM_REVIEW_REQUIRED','현재 데이터와 아이콘을 검토·채택하세요.','review',key);
+    else if(icon.contentRevision!==item.contentRevision&&(item.review.iconVersion!==icon.versionId||item.review.iconContentRevision!==item.contentRevision))issue('ICON_STALE','수정 전 내용으로 만든 아이콘입니다. 현재 내용에 적합한지 다시 검토하세요.','selectedIconVersion',key);
+    if(item.review.state!=='adopted'||item.review.dataRevision!==item.contentRevision||item.review.iconVersion!==item.selectedIconVersion||item.review.iconContentRevision!==item.contentRevision||item.review.policyRevision!==p.ruleProfile.revision)issue('ITEM_REVIEW_REQUIRED','현재 데이터와 아이콘을 검토·채택하세요.','review',key);
   }
   for(const ref of p.synergyReferences)for(const target of ref.items)if(p.items.find(i=>i.candidateKey===target.candidateKey)?.itemId!==target.itemId)issue('REFERENCE_STALE','변경된 ID의 시너지 참조를 명시적으로 갱신하세요.','itemId',target.candidateKey);
   if(!allPoliciesAdopted(p))issue('POLICY_REVIEW_REQUIRED','제안 정책을 검토·채택하세요.','ruleProfile');
@@ -71,11 +71,11 @@ export function reviewItem(project:SainGeomItemProject,key:string,action:ReviewA
       item.review.dataRevision=item.contentRevision;
     }
     if(action==='reviewIcon') {
-      if(!icon||icon.contentRevision!==item.contentRevision)throw new FourTigerError('REVIEW_REQUIRED','현재 내용의 아이콘을 생성하고 선택하세요.');
-      item.review.iconVersion=icon.versionId;
+      if(!icon)throw new FourTigerError('REVIEW_REQUIRED','아이콘을 생성하고 선택하세요.');
+      item.review.iconVersion=icon.versionId;item.review.iconContentRevision=item.contentRevision;
       const job=p.jobs.find(j=>j.jobId===icon.jobId);if(job)job.status='reviewed';
     }
-    const reviewed=item.review.dataRevision===item.contentRevision&&!!icon&&item.review.iconVersion===item.selectedIconVersion;
+    const reviewed=item.review.dataRevision===item.contentRevision&&!!icon&&item.review.iconVersion===item.selectedIconVersion&&item.review.iconContentRevision===item.contentRevision;
     item.review.state=reviewed?'reviewed':'draft';
     if(action==='adopt') {
       if(!reviewed)throw new FourTigerError('REVIEW_REQUIRED','데이터와 아이콘을 먼저 검토하세요.');

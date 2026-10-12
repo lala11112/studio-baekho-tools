@@ -101,3 +101,12 @@ test('unsupported notes and unconfirmed policies cannot become release content',
   const changed=updatePolicies(p,{regenCap:25,minDodgeCost:18},now);
   assert.equal(previewSp(changed,'wood',true).regenPerSecond,25);assert.equal(previewSp(changed,'wood',true).dodgeCost,18);
 });
+test('an existing icon can be explicitly reviewed for edited data without paying for regeneration',()=>{
+  let p=initial();const item=p.items[0],key=item.candidateKey;
+  item.icons.push({versionId:'old',jobId:'j',contentRevision:1,promptHash:'a'.repeat(64),sourcePath:'icons/old.png',thumbnailPath:'icons/old256.png',sourceSha256:'b'.repeat(64),thumbnailSha256:'c'.repeat(64),width:1024,height:1024,hasAlpha:true,prompt:'proposal',tool:'imagegen',observedModel:null,createdAt:now});item.selectedIconVersion='old';
+  p=patchItem(p,key,{name:'수정한 이름'},now);assert.equal(p.items[0].review.state,'draft');
+  assert.ok(validateProject(p,'release').issues.some(i=>i.code==='ICON_STALE'));
+  p=reviewItem(p,key,'reviewIcon','현재 내용에도 적합',now);
+  assert.equal(p.items[0].icons[0].contentRevision,1);
+  assert.ok(!validateProject(p,'release').issues.some(i=>i.candidateKey===key&&i.code==='ICON_STALE'));
+});
