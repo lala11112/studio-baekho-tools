@@ -160,6 +160,12 @@ export class GraphicsEngine {
     } else if (taskId === "M03") values = [];
     else if (["T01", "T02", "T03", 'T05', "M10"].includes(taskId)) {
       if (!mesh) throw Error("채택한 모델이 필요합니다."); values = [mesh];
+      if (taskId === "T03") {
+        const mode = o.settings.textureReference ?? "auto";
+        if (mode !== "auto" && mode !== "text") throw Error("텍스처 참조는 채택 디자인 또는 설명만 사용 중 선택하세요.");
+        // Match the model's selected slot; a part must not silently inherit the whole design.
+        if (mode === "auto" && design) values.push(design);
+      }
     } else if (taskId === 'M08') {
       const parts = o.creation?.parts.filter(part => part.enabled) ?? [];
       if (parts.length < 2) throw Error('조립할 파츠를 두 개 이상 설정하세요.');
@@ -359,6 +365,7 @@ export class GraphicsEngine {
       snapshot.settings.actionName = inputs[0].slot;
     }
     if (["M01", "M02", "M03"].includes(taskId)) snapshot.settings.model ??= "P2-20260801";
+    if (taskId === "T03") snapshot.settings.textureReference ??= "auto";
     if (!["I01", "I02", "I03", "I05", "I06", "I07", 'I08', "M01", "M02", "M03", 'M04', 'M15', 'T03', 'N02', 'N04', 'N05', 'N06'].includes(taskId)) snapshot.settings.count = 1;
     if (taskId === "N02") snapshot.settings.motionSourceView ??= "left";
     const t: GraphicsTask = { ...snapshot, id: uid(), createdAt: now(), updatedAt: now(), status: "awaiting_approval", requestHash: hash(JSON.stringify(snapshot)), outputVersionIds: [], backendJobIds: [], localOnly: definition.executor === "local", message: "요청을 저장했습니다. 실행 전까지 작업자·유료 서비스 호출은 없습니다." };
@@ -381,6 +388,7 @@ export class GraphicsEngine {
       if (!f) throw Error(isImage ? "원본 이미지가 필요합니다." : "API 입력에는 FBX/GLB/OBJ/STL 원본이 필요합니다. 먼저 형식 내보내기를 실행하세요.");
       this.verified(w.projectId, f);
       let a = p.assets.find(a => a.id === `graphics-${v.id}`);
+      if (a && (a.file !== f.path || (a.nativeFile ?? a.file) !== f.path || a.kind !== (isImage ? "image" : "model"))) throw Error("API 입력 별칭이 고정한 원본과 다릅니다.");
       if (!a) a = this.engine.asset(p, f.path, isImage ? "image" : "model", v.label, "import", { id: `graphics-${v.id}` });
       return a.id;
     };
@@ -399,7 +407,12 @@ export class GraphicsEngine {
     } else {
       const resolution = Number(t.settings.textureSize ?? 4096);
       if (![2048, 4096, 8192].includes(resolution)) throw Error("텍스처 해상도는 2048/4096/8192 중 선택하세요.");
-      request = { kind: "texture", model: "v3.5-20260815", prompt: t.instruction, count: Number(t.settings.count ?? 1), sourceId: alias(inputs[0], false), textureQuality: resolution === 8192 ? "extreme" : resolution === 4096 ? "detailed" : "standard", pbr: true }; unit = resolution === 8192 ? 30 : resolution === 4096 ? 20 : 10;
+      // Use frozen inputs only, including when refreshing an older quote. Never
+      // bind a newly accepted design to an already prepared text-only request.
+      const references = inputs.slice(1);
+      if (references.length > 1 || references.some(version => version.role !== "design") || t.settings.textureReference === "text" && references.length)
+        throw Error("고정된 텍스처 모델·디자인 입력을 확인하세요.");
+      request = { kind: "texture", model: "v3.5-20260815", prompt: references.length ? "" : t.instruction, count: Number(t.settings.count ?? 1), sourceId: alias(inputs[0], false), ...(references.length ? { sourceIds: references.map(version => alias(version, true)) } : {}), textureQuality: resolution === 8192 ? "extreme" : resolution === 4096 ? "detailed" : "standard", pbr: true }; unit = resolution === 8192 ? 30 : resolution === 4096 ? 20 : 10;
     }
     this.store.save(p);
     const q = this.engine.quote(w.projectId, request);
@@ -620,13 +633,27 @@ export class GraphicsEngine {
                 throw Error("API 결과의 입력 연결이 고정한 버전과 다릅니다.");
               for (const [index, sourceId] of sourceIds.entries()) {
                 const alias = p.assets.find(asset => asset.id === sourceId);
-                const original = inputs[index]!.files.find(file => (["M01", "M02"].includes(t.taskId) ? image : /\.(fbx|glb|obj|stl)$/i).test(file.path));
+                const original = inputs[index]!.files.find(file => (["M01", "M02"].includes(t.taskId) || t.taskId === "T03" && index > 0 ? image : /\.(fbx|glb|obj|stl)$/i).test(file.path));
                 if (!alias || !original || alias.file !== original.path || (alias.nativeFile ?? alias.file) !== original.path)
                   throw Error("API 업로드 원본과 고정한 입력 파일이 다릅니다.");
               }
               for (const a of this.engine.verifiedTripoAssets(w.projectId, j.id)) {
                 const rels = [...new Set([a.nativeFile, a.file, ...(j.nativeFiles ?? [])].filter((r): r is string => typeof r === "string"))];
                 const files = rels.map(rel => this.file(w.projectId, rel, a.kind));
+                // Optional native FBX statistics. Legacy previews remain unmeasured;
+                // never rebuild them or infer original polygon counts from a GLB.
+                if (a.nativeFile && /\.fbx$/i.test(a.nativeFile) && /\.glb$/i.test(a.file)) {
+                  const reportPath = a.file.replace(/\.glb$/i, ".report.json"), reportFile = this.store.file(w.projectId, reportPath);
+                  if (fs.existsSync(reportFile) && fs.statSync(reportFile).size <= 1024 * 1024) {
+                    try {
+                      const reportAsset = this.file(w.projectId, reportPath, "report"), report = JSON.parse(fs.readFileSync(reportFile, "utf8"));
+                      const native = files.find(file => file.path === a.nativeFile!.replaceAll("\\", "/"));
+                      if (report.schemaVersion === 1 && report.mode === "convert" && report.previewOnly === true &&
+                          report.nativeSourceSha256 === native?.sha256 && [report.faces, report.triangles].every(value => Number.isSafeInteger(value) && value > 0) && report.triangles >= report.faces)
+                        files.push(reportAsset);
+                    } catch { /* Missing/invalid statistics must not alter an otherwise verified native result. */ }
+                  }
+                }
                 const label = (findGraphicsTask(t.taskId)?.name ?? a.label) + (batchAssets.length > 1 ? ` · ${batchAssets.indexOf(a) + 1}` : "");
                 const v: AssetVersion = { id: uid(), objectId: t.objectId, role: "model", slot: t.settings.partId ? `part-${t.settings.partId}` : "main", label, files, createdAt: now(), sourceVersionIds: t.inputVersionIds, provenance: { type: "tripo", jobId: j.id, remoteId: j.remoteId }, warnings: j.message ? [j.message] : [] };
                 newVersions.push(v);

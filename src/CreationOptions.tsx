@@ -469,6 +469,12 @@ export function CreationOptions({
                 ["tripo", "AI 텍스처"],
                 ["local", "로컬 기본 재질"],
               ])}
+          {settings.surfaceOperation !== "uv" &&
+            settings.textureMode !== "local" &&
+            choice("텍스처 참조", "textureReference", "auto", [
+              ["auto", "채택 이미지 사용"],
+              ["text", "설명만 사용"],
+            ])}
           <p className="gs-fine">
             {settings.textureMode === "local"
               ? "로컬 기본 재질은 선택한 수치 그대로 1개를 만듭니다. 동일한 설정의 복제 후보는 만들지 않습니다."

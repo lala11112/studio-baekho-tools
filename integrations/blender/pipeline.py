@@ -1,7 +1,7 @@
 """Partsmith v1. Object assembly preserves surfaces; it does not weld or retopologize.
 Run: blender --background --factory-startup --python pipeline.py -- input.json
 """
-import bpy, sys, json, os, math, traceback
+import bpy, sys, json, os, math, traceback, hashlib
 from mathutils import Matrix, Vector, Euler
 
 def material(name, color):
@@ -105,6 +105,10 @@ def main(config):
     bpy.context.view_layer.update()
     meshes=[o for o in bpy.context.scene.objects if o.type=='MESH']
     if not meshes:raise ValueError('No mesh to export')
+    # Tessellation fills a read-only cache; it does not triangulate source polygons.
+    for obj in meshes:obj.data.calc_loop_triangles()
+    faces=sum(len(o.data.polygons) for o in meshes)
+    triangles=sum(len(o.data.loop_triangles) for o in meshes)
     points=[o.matrix_world @ Vector(c) for o in meshes for c in o.bound_box]
     min_z=min(p.z for p in points); max_z=max(p.z for p in points)
     original_height=max_z-min_z
@@ -139,7 +143,9 @@ def main(config):
     bpy.ops.export_scene.gltf(filepath=out+'.glb',export_format='GLB',export_animations=True,export_animation_mode=animation_mode)
     if not preview_only:
         bpy.ops.export_scene.fbx(filepath=out+'.fbx',use_selection=False,object_types={'MESH','ARMATURE','EMPTY'},axis_forward='-Z',axis_up='Y',add_leaf_bones=False,bake_anim=True,bake_anim_use_all_actions=animation_mode=='ACTIONS',bake_anim_use_nla_strips=True,path_mode='COPY',embed_textures=True)
-    report={'schemaVersion':1,'mode':mode,'previewOnly':preview_only,'meshes':len(meshes),'vertices':sum(len(o.data.vertices) for o in meshes),'hasRig':has_rig,'clips':clips,'warnings':warnings,'surfaceWelded':False,'textureRebuildRequired':False,'sourceHeight':original_height,'normalizationScale':normalization_scale}
+    report={'schemaVersion':1,'mode':mode,'previewOnly':preview_only,'meshes':len(meshes),'vertices':sum(len(o.data.vertices) for o in meshes),'faces':faces,'triangles':triangles,'hasRig':has_rig,'clips':clips,'warnings':warnings,'surfaceWelded':False,'textureRebuildRequired':False,'sourceHeight':original_height,'normalizationScale':normalization_scale}
+    if mode=='convert':
+        with open(config['source'],'rb') as source:report['nativeSourceSha256']=hashlib.file_digest(source,'sha256').hexdigest()
     with open(out+'.report.json','w',encoding='utf8') as f:json.dump(report,f,ensure_ascii=False,indent=2)
     print('PARTSMITH_OK '+json.dumps(report))
 

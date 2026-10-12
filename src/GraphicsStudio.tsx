@@ -118,6 +118,158 @@ const stamp = (value: string) => new Date(value).toLocaleString("ko-KR");
 const acceptedVersion = (object: GraphicsObject, version: AssetVersion) =>
   Object.values(object.accepted).includes(version.id);
 
+function modelFaceTarget(
+  version: AssetVersion,
+  versions: AssetVersion[],
+  tasks: GraphicsTask[],
+): { label: string; inherited: boolean } {
+  const seen = new Set<string>();
+  let frontier = [version],
+    inherited = false;
+  while (frontier.length) {
+    const values = new Set<number>();
+    const next: AssetVersion[] = [];
+    for (const item of frontier) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      for (const task of tasks) {
+        const limit = task.settings.faceLimit;
+        if (
+          task.objectId === version.objectId &&
+          task.outputVersionIds.includes(item.id) &&
+          typeof limit === "number" &&
+          Number.isSafeInteger(limit) &&
+          limit > 0
+        )
+          values.add(limit);
+      }
+      for (const id of item.sourceVersionIds) {
+        const source = versions.find(
+          (candidate) =>
+            candidate.id === id && candidate.objectId === version.objectId,
+        );
+        if (source && !seen.has(id)) next.push(source);
+      }
+    }
+    if (values.size)
+      return {
+        label:
+          values.size === 1
+            ? [...values][0].toLocaleString("ko-KR")
+            : "원본별 상이",
+        inherited,
+      };
+    frontier = next;
+    inherited = true;
+  }
+  return { label: "미설정", inherited: false };
+}
+
+function ModelStatistics({
+  projectId,
+  version,
+  versions,
+  tasks,
+}: {
+  projectId: string;
+  version: AssetVersion;
+  versions: AssetVersion[];
+  tasks: GraphicsTask[];
+}) {
+  const report = version.files.find(
+    (file) => file.kind === "report" && /\.report\.json$/i.test(file.path),
+  );
+  const nativeHash = version.files.find((file) =>
+    /\.fbx$/i.test(file.path),
+  )?.sha256;
+  const reportPath = report?.path,
+    reportHash = report?.sha256;
+  const requestKey = [
+    projectId,
+    version.id,
+    reportPath,
+    reportHash,
+    nativeHash,
+  ].join("\n");
+  const [measurement, setMeasurement] = useState<{
+    key: string;
+    faces?: number;
+    triangles?: number;
+    complete: boolean;
+  }>();
+  useEffect(() => {
+    if (!reportPath || !nativeHash) return;
+    const controller = new AbortController();
+    let active = true;
+    setMeasurement({ key: requestKey, complete: false });
+    void fetch(window.desktop.assetUrl(projectId, reportPath), {
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Model statistics unavailable");
+        const value: unknown = await response.json();
+        const data = value as Record<string, unknown> | null;
+        if (
+          !data ||
+          data.nativeSourceSha256 !== nativeHash ||
+          typeof data.faces !== "number" ||
+          !Number.isSafeInteger(data.faces) ||
+          data.faces <= 0 ||
+          typeof data.triangles !== "number" ||
+          !Number.isSafeInteger(data.triangles) ||
+          data.triangles < data.faces
+        )
+          throw new Error("Model statistics do not match the original");
+        if (active)
+          setMeasurement({
+            key: requestKey,
+            complete: true,
+            faces: data.faces,
+            triangles: data.triangles,
+          });
+      })
+      .catch(() => {
+        if (active) setMeasurement({ key: requestKey, complete: true });
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [projectId, reportPath, reportHash, nativeHash, requestKey]);
+  const current = measurement?.key === requestKey ? measurement : undefined;
+  const loading = !!reportPath && !!nativeHash && !current?.complete;
+  const target = modelFaceTarget(version, versions, tasks);
+  const measured = (value?: number) =>
+    value?.toLocaleString("ko-KR") ?? (loading ? "확인 중" : "미측정");
+  return (
+    <section
+      className="gs-model-statistics"
+      aria-label="모델 면수"
+      data-testid="graphics-model-statistics"
+    >
+      <dl>
+        <div>
+          <dt>목표 면수{target.inherited ? " (원본)" : ""}</dt>
+          <dd data-testid="graphics-target-faces">{target.label}</dd>
+        </div>
+        <div>
+          <dt>실제 면수</dt>
+          <dd data-testid="graphics-measured-faces">
+            {measured(current?.faces)}
+          </dd>
+        </div>
+        <div>
+          <dt>삼각형 환산수</dt>
+          <dd data-testid="graphics-measured-triangles">
+            {measured(current?.triangles)}
+          </dd>
+        </div>
+      </dl>
+      <p>원본 FBX 기준 · Unity 임포트 후 실측값과 다를 수 있습니다.</p>
+    </section>
+  );
+}
+
 function VersionPreview({
   project,
   version,
@@ -205,6 +357,76 @@ function VersionPreview({
   );
 }
 
+type CandidateMedia = { path: string; kind: "image" | "video" };
+type CandidateGroup = {
+  id: string;
+  createdAt: string;
+  label: string;
+  kind: CandidateMedia["kind"];
+  candidates: { version: AssetVersion; media: CandidateMedia }[];
+};
+function candidateMedia(version: AssetVersion): CandidateMedia | undefined {
+  const kind =
+    version.role === "design"
+      ? "image"
+      : version.role === "motion-reference"
+        ? "video"
+        : undefined;
+  const file =
+    kind &&
+    version.files.find((file) =>
+      kind === "image"
+        ? isImagePath(file.path)
+        : /\.(mp4|webm)$/i.test(file.path),
+    );
+  return file && kind ? { path: file.path, kind } : undefined;
+}
+function candidateGroups(
+  versions: AssetVersion[],
+  tasks: GraphicsTask[],
+): CandidateGroup[] {
+  const groups: CandidateGroup[] = [],
+    grouped = new Set<string>();
+  for (const task of tasks) {
+    const candidates = task.outputVersionIds.flatMap((id) => {
+      const version = versions.find((version) => version.id === id),
+        media = version && candidateMedia(version);
+      return version && media && !grouped.has(id) ? [{ version, media }] : [];
+    });
+    for (const kind of ["image", "video"] as const) {
+      const matching = candidates.filter(
+        (candidate) => candidate.media.kind === kind,
+      );
+      if (!matching.length) continue;
+      matching.forEach((candidate) => grouped.add(candidate.version.id));
+      groups.push({
+        id: `task:${task.id}:${kind}`,
+        createdAt: task.createdAt,
+        label: `${task.taskId} · ${stamp(task.createdAt)} · 작업 ${task.id.slice(0, 8)}`,
+        kind,
+        candidates: matching,
+      });
+    }
+  }
+  for (const version of versions) {
+    const media = candidateMedia(version);
+    if (!media || grouped.has(version.id)) continue;
+    const jobId = version.provenance.jobId,
+      id = jobId ? `job:${jobId}:${media.kind}` : `version:${version.id}`;
+    const group = groups.find((group) => group.id === id);
+    if (group) group.candidates.push({ version, media });
+    else
+      groups.push({
+        id,
+        createdAt: version.createdAt,
+        label: `${jobId ? "이전 작업 " + jobId.slice(0, 8) : "가져온 원본 " + version.id.slice(0, 8)} · ${stamp(version.createdAt)}`,
+        kind: media.kind,
+        candidates: [{ version, media }],
+      });
+  }
+  return groups.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
 export function GraphicsStudio({
   project,
   workspace,
@@ -254,12 +476,30 @@ export function GraphicsStudio({
   const versions =
     workspace?.versions.filter((version) => version.objectId === objectId) ??
     [];
-  const shownVersion =
-    versions.find((version) => version.id === shownVersionId) ??
-    versions.find((version) => object && acceptedVersion(object, version)) ??
-    versions.at(-1);
   const objectTasks =
     workspace?.tasks.filter((task) => task.objectId === objectId) ?? [];
+  const mediaGroups = candidateGroups(versions, objectTasks);
+  const latestMediaGroup = ["design", "animation"].includes(stage)
+    ? mediaGroups
+        .filter(
+          (group) => group.kind === (stage === "animation" ? "video" : "image"),
+        )
+        .at(-1)
+    : undefined;
+  const shownVersion =
+    versions.find((version) => version.id === shownVersionId) ??
+    latestMediaGroup?.candidates[0].version ??
+    versions.find((version) => object && acceptedVersion(object, version)) ??
+    versions.at(-1);
+  const comparisonGroup = shownVersionId
+    ? mediaGroups.find((group) =>
+        group.candidates.some(
+          (candidate) => candidate.version.id === shownVersionId,
+        ),
+      )
+    : latestMediaGroup;
+  const comparisonLabel =
+    comparisonGroup?.kind === "video" ? "동작 영상" : "이미지";
   const activeTask = findGraphicsTask(taskId) ?? {
     id: taskId,
     name: "제작 연결 확인 필요",
@@ -293,6 +533,22 @@ export function GraphicsStudio({
     workspace?.versions.filter((version) =>
       version.files.some((file) => /\.(png|jpe?g|webp)$/i.test(file.path)),
     ) ?? [];
+  const texturePart =
+    creation.attributes.composition === "parts"
+      ? creation.parts.find(
+          (part) => part.id === creation.activePartId && part.enabled,
+        )
+      : undefined;
+  const textureDesignId =
+    object?.accepted[
+      texturePart ? `design:part-${texturePart.id}` : "design:main"
+    ];
+  const textureDesign = versions.find(
+    (version) => version.id === textureDesignId && version.role === "design",
+  );
+  const textureReferenceImage = textureDesign?.files.find((file) =>
+    /\.(png|jpe?g|webp)$/i.test(file.path),
+  );
   const videoSources = imageVersions.filter(
     (version) =>
       version.objectId === objectId &&
@@ -1003,6 +1259,116 @@ export function GraphicsStudio({
                   <h2>자료와 결과</h2>
                   <span>{versions.length}개 버전</span>
                 </div>
+                {comparisonGroup && (
+                  <section
+                    className="gs-candidate-comparison"
+                    aria-label={`${comparisonLabel} 후보 비교`}
+                    data-testid="graphics-candidate-comparison"
+                    data-batch-id={comparisonGroup.id}
+                  >
+                    <div className="gs-candidate-heading">
+                      <h3>
+                        {comparisonLabel} 후보{" "}
+                        {comparisonGroup.candidates.length}개 함께 보기
+                      </h3>
+                      <small>같은 제작 작업의 결과</small>
+                    </div>
+                    <label>
+                      제작 작업
+                      <select
+                        aria-label="비교할 제작 작업"
+                        value={comparisonGroup.id}
+                        onChange={(event) => {
+                          const group = mediaGroups.find(
+                            (group) => group.id === event.target.value,
+                          );
+                          if (group)
+                            setShownVersionId(group.candidates[0].version.id);
+                        }}
+                      >
+                        {mediaGroups
+                          .filter(
+                            (group) => group.kind === comparisonGroup.kind,
+                          )
+                          .map((group) => (
+                            <option value={group.id} key={group.id}>
+                              {group.label} · {group.candidates.length}개
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    <p className="gs-fine">
+                      눌러서 미리보기를 고른 뒤 아래 채택 버튼으로 확정하세요.
+                      다른 제작 작업의 결과는 섞이지 않습니다.
+                    </p>
+                    <div
+                      className={`gs-candidate-grid${comparisonGroup.candidates.length === 1 ? " is-single" : ""}`}
+                    >
+                      {comparisonGroup.candidates.map(
+                        ({ version, media }, index) => {
+                          const selected = shownVersion?.id === version.id,
+                            accepted = acceptedVersion(object, version);
+                          const label = `후보 ${index + 1} · ${version.label}`;
+                          return (
+                            <article
+                              className={`gs-candidate-card${selected ? " is-selected" : ""}`}
+                              key={version.id}
+                              data-testid={`graphics-candidate-${version.id}`}
+                            >
+                              {media.kind === "image" ? (
+                                <button
+                                  className="gs-candidate-image"
+                                  aria-label={`${label} 미리보기 선택`}
+                                  aria-pressed={selected}
+                                  onClick={() => setShownVersionId(version.id)}
+                                >
+                                  <img
+                                    alt={label}
+                                    src={window.desktop.assetUrl(
+                                      project.id,
+                                      media.path,
+                                    )}
+                                    loading="lazy"
+                                    decoding="async"
+                                  />
+                                </button>
+                              ) : (
+                                <video
+                                  className="gs-candidate-video"
+                                  aria-label={`${label} 원본 영상`}
+                                  controls
+                                  playsInline
+                                  preload="metadata"
+                                  src={window.desktop.assetUrl(
+                                    project.id,
+                                    media.path,
+                                  )}
+                                />
+                              )}
+                              <button
+                                className="gs-candidate-select"
+                                aria-label={`${label} 상세 미리보기`}
+                                aria-pressed={selected}
+                                onClick={() => setShownVersionId(version.id)}
+                              >
+                                <strong>{label}</strong>
+                                <span>
+                                  {selected ? "미리보기 선택됨" : "미리보기"}
+                                  {accepted && (
+                                    <>
+                                      <Check size={12} aria-hidden="true" />
+                                      채택됨
+                                    </>
+                                  )}
+                                </span>
+                              </button>
+                            </article>
+                          );
+                        },
+                      )}
+                    </div>
+                  </section>
+                )}
                 <div className="gs-preview" data-testid="graphics-preview">
                   <VersionPreview project={project} version={shownVersion} />
                 </div>
@@ -1024,6 +1390,14 @@ export function GraphicsStudio({
                       {provenanceLabels[shownVersion.provenance.type]} · 저장
                       파일 {shownVersion.files.length}개
                     </p>
+                    {shownVersion.role === "model" && (
+                      <ModelStatistics
+                        projectId={project.id}
+                        version={shownVersion}
+                        versions={versions}
+                        tasks={objectTasks}
+                      />
+                    )}
                     {shownVersion.warnings.map((warning, index) => (
                       <p className="gs-warning" key={index}>
                         {warning}
@@ -1165,6 +1539,55 @@ export function GraphicsStudio({
                   onChange={changeCreation}
                   onSetting={setting}
                 />
+                {taskId === "T03" && (
+                  <div
+                    className="gs-reference-strip"
+                    data-testid="graphics-texture-reference"
+                  >
+                    {settings.textureReference !== "text" &&
+                      textureReferenceImage && (
+                        <img
+                          className="gs-reference-thumb"
+                          src={window.desktop.assetUrl(
+                            project.id,
+                            textureReferenceImage.path,
+                          )}
+                          alt={`텍스처 참조 · ${textureDesign!.label}`}
+                          data-version-id={textureDesign!.id}
+                        />
+                      )}
+                    <div>
+                      <strong>다음 텍스처 요청의 참조</strong>
+                      {settings.textureReference === "text" ? (
+                        <span className="gs-fine">
+                          설명만 전송합니다. 채택 이미지는 텍스처 생성에
+                          사용하지 않습니다.
+                        </span>
+                      ) : textureReferenceImage ? (
+                        <>
+                          <span>
+                            {textureDesign!.label}
+                            {texturePart ? ` · ${texturePart.label}` : ""}
+                          </span>
+                          <span className="gs-fine">
+                            이 이미지의 색과 무늬를 참고합니다. Tripo API는
+                            이미지와 설명 중 하나만 받으므로 이미지만 전송하며,
+                            추가 지시는 작업 기록에 보존합니다.
+                          </span>
+                        </>
+                      ) : (
+                        <span className="gs-fine">
+                          {texturePart
+                            ? `${texturePart.label} 파츠에`
+                            : "현재 오브젝트에"}{" "}
+                          채택한 디자인 이미지가 없어 설명만 전송합니다.
+                          이미지의 색과 무늬를 참고하려면 해당 디자인을 먼저
+                          채택하세요.
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div className="gs-section-title">
                   <h3>이번 단계 설정</h3>
                   <span className={`gs-tag gs-${activeTask.status}`}>
