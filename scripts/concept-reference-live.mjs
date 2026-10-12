@@ -1,0 +1,25 @@
+// User-authorized continuation: app buttons only; exactly one new reference request.
+import {_electron as electron,chromium} from 'playwright';import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
+const data=path.join(process.env.APPDATA,'partsmith'),project='81ac0f31-8c0a-411c-8f95-b53a518fe766',bench='7b77f0ac-591c-4459-89a8-ebd1dbe3529c';
+const browser=await chromium.connectOverCDP('http://127.0.0.1:'+fs.readFileSync(path.join(data,'DevToolsActivePort'),'utf8').split('\n')[0]);
+const old=browser.contexts()[0].pages().find(p=>p.url().includes('index.html'));
+const state=await old.evaluate(()=>window.desktop.call({type:'state'}));assert(!state.workbenches.some(w=>w.activeJobId||w.jobs.some(j=>j.status==='running')));
+const before=state.workbenches.find(w=>w.id===bench);assert(before.selections.concept);
+await old.close();await browser.close();
+const app=await electron.launch({executablePath:path.resolve('release/0.6.37/win-unpacked/Partsmith.exe')}),page=await app.firstWindow(),errors=[];
+page.on('pageerror',e=>errors.push(e.message));assert.equal(await app.evaluate(({app})=>app.getVersion()),'0.6.37');
+await page.locator(`[data-project-id="${project}"]`).getByTestId('project-open').click();
+await page.getByTestId('workbench-concept-reference').waitFor();
+await page.getByTestId('workbench-close-empty-concept').click();await page.getByTestId('workbench-close-empty-concept').waitFor({state:'detached'});
+await page.getByTestId('workbench-concept-mode').selectOption('reference');
+await page.getByTestId('workbench-concept-prompt').fill('이 친구가 사용할 만한 양손 대검을 만들어줘');
+await page.getByTestId('workbench-concept-count').fill('2');
+if(await page.getByTestId('workbench-approve').count())await page.getByTestId('workbench-approve').check();
+await page.getByTestId('workbench-execute-concept').click();
+const after=(await page.evaluate(()=>window.desktop.call({type:'state'}))).workbenches.find(w=>w.id===bench),job=after.jobs[0];
+assert(!before.jobs.some(j=>j.id===job.id));assert.equal(job.request.conceptMode,'reference');assert.equal(job.request.generationCount,2);assert.equal(job.request.baseJobId,before.selections.concept.jobId);
+assert.deepEqual(after.selections,before.selections);
+const packet=JSON.parse(fs.readFileSync(path.join(data,'projects',project,'workbench',bench,'jobs',job.id,'external-request.json'),'utf8'));assert.equal(packet.inputs.length,1);
+fs.writeFileSync('artifacts/runtime/0.6.37-live-reference-start.json',JSON.stringify({version:'0.6.37',jobId:job.id,referenceSha256:packet.inputs[0].sha256,status:job.status,errors},null,2));
+console.log(JSON.stringify({jobId:job.id,status:job.status,referenceSha256:packet.inputs[0].sha256}));
+await new Promise(resolve=>app.on('close',resolve));

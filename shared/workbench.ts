@@ -47,7 +47,7 @@ export type WorkbenchCandidate = {
 };
 export type WorkbenchRequest = {
   /** Independent whole-character views, reviewed as one set after design selection. */
-  conceptMode?: "design" | "turnaround";
+  conceptMode?: "design" | "reference" | "turnaround";
   executionMode?: "worker" | "codex-session" | "codex-app";
   /** Observed Studio settings for a manually executed whole-model submission. */
   externalModel?: { model: "P2.0"; topology: "quad" | "triangle"; observedCreditCost: number;
@@ -142,6 +142,7 @@ export type WorkbenchJob = {
     state: "prepared" | "reserved" | "received";
     requestHash: string;
     reservedAt?: string;
+    closedBeforeSubmissionAt?: string;
     conversationUrl?: string;
     studioModels?: { candidateId: string; modelId: string; url: string }[];
     surface?: WorkbenchSurfaceReceipt;
@@ -249,6 +250,7 @@ export interface ExternalWorkbenchRunner {
   }>;
   verifyReceipt(context: WorkbenchExecutionContext): void;
   repairApproval?(context:WorkbenchExecutionContext):void;
+  verifyUnsubmittedConcept?(context:WorkbenchExecutionContext):void;
   shutdown?(): void;
 }
 export type WorkbenchRuntimeApproval = {
@@ -267,6 +269,7 @@ export type WorkbenchAction =
   | { kind: "external-reserve"; jobId: string; requestHash: string }
   | { kind: "external-receive"; jobId: string }
   | { kind: "external-cancel"; jobId: string }
+  | { kind: "external-close-empty-concept"; jobId: string }
   | { kind: "execute"; request: WorkbenchRequest; approval?: WorkbenchApproval }
   | { kind: "select"; jobId: string; candidateId: string }
   | { kind: "accept"; jobId: string }

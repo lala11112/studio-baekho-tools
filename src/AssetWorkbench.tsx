@@ -307,6 +307,7 @@ export function AssetWorkbench({
   const [studioTopology, setStudioTopology] = useState<"quad" | "triangle">("quad");
   const [modelImageMode, setModelImageMode] = useState<"single" | "multiview">("single");
   const [turnaround, setTurnaround] = useState(w?.jobs[0]?.request.conceptMode === "turnaround");
+  const [conceptReference, setConceptReference] = useState(true);
   const [turnaroundPrompt, setTurnaroundPrompt] = useState("채택한 캐릭터를 그대로 유지한 정면·후면·캐릭터의 왼쪽 측면·오른쪽 측면 독립 원본 4장을 한 요청으로 생성하세요. 시트·콜라주·크롭·복제·좌우 반전은 금지합니다. 동일한 중립 자세, 체형·귀·꼬리·색상, 같은 캔버스·확대 비율·중심·발 높이, 전체 몸이 잘리지 않는 직교 시점, 단색 배경을 사용하세요. 각 이미지의 방향은 이미지 밖에서 명시하세요.");
   const [chatGptStatus, setChatGptStatus] = useState<ChatGptStatus>();
   const [chatGptConnecting, setChatGptConnecting] = useState(false);
@@ -379,7 +380,7 @@ export function AssetWorkbench({
     };
   }, [watchChatGpt, chatGptWatch, chatGptConnecting]);
   const [prompt, setPrompt] = useState(
-    w?.jobs.find((j) => j.step === "concept")?.request.prompt ?? "",
+    w?.jobs.find((j) => j.step === "concept" && j.request.provider)?.request.prompt ?? "",
   );
   const [separationPrompt, setSeparationPrompt] = useState(
     "원본 캐릭터의 외형을 유지하고 머리, 머리카락, 몸통으로 분리해 주세요. 몸통에는 의상을 포함해 주세요.",
@@ -1604,7 +1605,7 @@ export function AssetWorkbench({
                   "workbench-concept-count",
                 )}
                 {!turnaround && <label className="field">
-                  <span>캐릭터 이미지 프롬프트</span>
+                  <span>이미지 생성 프롬프트</span>
                   <textarea
                     data-testid="workbench-concept-prompt"
                     rows={7}
@@ -1615,12 +1616,21 @@ export function AssetWorkbench({
                 </label>}
                 {concept && externalConcept && provider === "gpt" && <label className="field">
                   <span>이미지 작업</span>
-                  <select data-testid="workbench-concept-mode" value={turnaround ? "turnaround" : "design"}
-                    onChange={e => { setTurnaround(e.target.value === "turnaround"); setApproved(false); setViewJobId(""); }}>
-                    <option value="design">초기 디자인 후보</option>
+                  <select data-testid="workbench-concept-mode" value={turnaround ? "turnaround" : conceptReference ? "reference" : "design"}
+                    onChange={e => { setTurnaround(e.target.value === "turnaround"); setConceptReference(e.target.value === "reference"); setApproved(false); setViewJobId(""); }}>
+                    <option value="reference">선택한 이미지를 참고해 생성</option>
+                    <option value="design">참조 없이 새 이미지 생성</option>
                     <option value="turnaround">채택한 디자인의 전체 4방향 · 분리 안 함</option>
                   </select>
                 </label>}
+                {concept && externalConcept && provider === "gpt" && conceptReference && !turnaround && <div className="wb-note" data-testid="workbench-concept-reference">
+                  <img src={url(concept.candidate.artifacts.find(a => a.kind === "image")!)} alt="생성에 첨부할 참조 이미지" style={{width:96,height:96,objectFit:"contain"}} />
+                  <p>참조: {concept.candidate.label}. 원본을 ChatGPT에 첨부합니다. 어울리는 무기·소품 제작이나 이미지 수정 등 원하는 내용을 프롬프트에 적으세요. 기존 이미지는 보존되며 새 결과는 직접 채택합니다.</p>
+                </div>}
+                {concept && conceptReference && !turnaround && jobs.filter(j => j.step === "concept" && j.status === "needs_input" && j.request.executionMode === "codex-app" && j.externalExecution && !j.request.baseJobId && j.request.conceptMode !== "turnaround").map(j => <div className="wb-note" key={j.id}>
+                  <p>이전에 참조 없이 시작한 작업이 대기 중입니다. 실제 생성에 제출되지 않은 경우만 종료하고, 선택한 이미지를 첨부해 새로 요청할 수 있습니다.</p>
+                  <button data-testid="workbench-close-empty-concept" disabled={locked} onClick={() => action({kind:"external-close-empty-concept",jobId:j.id})}>미제출 확인 후 참조 없는 작업 종료</button>
+                </div>)}
                 {turnaround && <label className="field"><span>전체 4방향 지시문 · 정면/후면/좌/우 1세트</span>
                   <textarea data-testid="workbench-turnaround-prompt" value={turnaroundPrompt} onChange={e => setTurnaroundPrompt(e.target.value)} />
                 </label>}
@@ -1632,7 +1642,8 @@ export function AssetWorkbench({
                     provider,
                     prompt: turnaround ? turnaroundPrompt : prompt,
                     generationCount: turnaround ? 1 : conceptCount,
-                    conceptMode: turnaround ? "turnaround" : "design",
+                    conceptMode: turnaround ? "turnaround" : concept && externalConcept && provider === "gpt" && conceptReference ? "reference" : "design",
+                    ...(!turnaround && concept && externalConcept && provider === "gpt" && conceptReference ? {baseJobId:concept.job.id,baseCandidateId:concept.candidate.id} : {}),
                   },
                   turnaround ? !turnaroundPrompt.trim() || !concept || !externalConcept || provider !== "gpt" : !prompt.trim(),
                 )}

@@ -237,6 +237,22 @@ export class WorkbenchEngine {
         return this.reserveExternal(w, action.jobId, action.requestHash);
       case "external-receive":
         return this.receiveExternal(w, action.jobId);
+      case "external-close-empty-concept": {
+        this.idle(w);
+        const j = this.job(w, action.jobId), external = j.externalExecution;
+        if (j.step !== "concept" || j.status !== "needs_input" || j.request.executionMode !== "codex-app" ||
+            !external || j.request.baseJobId || j.request.conceptMode === "turnaround" || !this.externalRunner?.verifyUnsubmittedConcept)
+          throw Error("참조 없이 멈춘 미제출 이미지 작업만 정리할 수 있습니다.");
+        const workspace = this.workspace(w,j), file = path.join(workspace,"external-request.json");
+        if (hash(file) !== external.requestHash || json<{inputs:unknown[]}>(file).inputs.length !== 0)
+          throw Error("기존 이미지 명세가 변경됐거나 이미 참조가 있습니다.");
+        this.externalRunner.verifyUnsubmittedConcept({workbench:w,job:j,workspace,inputs:[],signal:new AbortController().signal});
+        external.closedBeforeSubmissionAt = now();
+        j.status = "cancelled";
+        j.summary = "참조 없는 작업이 실제 생성에 제출되지 않았음을 호스트 기록으로 확인했습니다. 기존 명세·시도 기록을 보존하고 종료했습니다.";
+        j.updatedAt = now();
+        return this.save(w);
+      }
       case "external-cancel": {
         this.idle(w);
         const j = this.job(w, action.jobId);
@@ -517,8 +533,10 @@ export class WorkbenchEngine {
           (s.costApproval !== undefined && (s.costApproval !== "in-app" || r.executionMode !== "codex-app" || s.observedUvCost !== 0 || s.observedTextureCost !== 0)))
         throw new Error("외부 UV·텍스처는 채택한 전체 모델의 최초 작업과 확인한 설정·비용만 지원합니다.");
     }
-    if (r.conceptMode !== undefined && (r.step !== "concept" || !["design", "turnaround"].includes(r.conceptMode)))
+    if (r.conceptMode !== undefined && (r.step !== "concept" || !["design", "reference", "turnaround"].includes(r.conceptMode)))
       throw new Error("잘못된 전체 이미지 생성 모드입니다.");
+    if (r.conceptMode === "reference" && (!externalMode(r.executionMode) || r.provider !== "gpt" || !r.baseJobId || !r.baseCandidateId))
+      throw new Error("참고할 이미지 후보를 선택하고 GPT 이미지 연결로 실행하세요.");
     if (r.conceptMode === "turnaround") {
       if (!externalMode(r.executionMode) || r.provider !== "gpt" || r.generationCount !== 1)
         throw new Error("전체 4방향은 현재 대화에서 GPT 독립 원본 1세트로 실행하세요.");
@@ -780,7 +798,7 @@ export class WorkbenchEngine {
     const slot = workbenchSlot(r);
     if (r.executionMode === "codex-app" && !this.externalRunner)
       throw new Error("앱 Codex 실행 연결을 사용할 수 없습니다. 아직 제출하지 않았습니다.");
-    if (w.jobs.some(j => j.slot === slot && j.externalExecution &&
+    if (w.jobs.some(j => j.slot === slot && j.externalExecution && !(j.status === "cancelled" && j.externalExecution.closedBeforeSubmissionAt) &&
         (j.externalExecution.state === "reserved" ||
           (j.externalExecution.state === "prepared" && j.status !== "cancelled"))))
       throw new Error("이 단계의 외부 실행이 대기 중입니다. 기존 작업의 결과를 먼저 회수하세요.");
@@ -902,7 +920,11 @@ export class WorkbenchEngine {
     if (r.baseJobId) {
       const base = this.baseCandidate(w, r);
       r.baseCandidateId = base.id;
-      inputs.push(...base.artifacts);
+      if (r.conceptMode === "reference") {
+        const images = base.artifacts.filter(a => a.kind === "image");
+        if (images.length !== 1) throw Error("레퍼런스로 사용할 원본 이미지 한 장을 선택하세요.");
+        inputs.push(...images);
+      } else inputs.push(...base.artifacts);
     }
     if (r.motionVideo?.backend === "runway-mcp") {
       const slot = r.motionVideo.sourceSlot ?? "whole-reference";
