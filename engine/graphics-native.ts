@@ -6,6 +6,7 @@ import { PNG } from "pngjs";
 import { CodexWorker, type ProductionWorker } from "./codex-worker";
 import type { ProductionRun, ProductionStage } from "../shared/production";
 import type { AssetVersion, GraphicsObject, GraphicsRole, GraphicsTask } from "../shared/graphics";
+import type { WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from "../shared/workbench";
 
 export type GraphicsNativeArgs = {
   projectRoot: string;
@@ -18,6 +19,8 @@ export type GraphicsNativeArgs = {
   signal: AbortSignal;
   /** Explicit saved-output recovery: never start a first native/service dispatch. */
   recoveryOnly?: boolean;
+  /** Runtime tool permission is answered in the app; paid approval does not grant it. */
+  requestApproval?: (request: WorkbenchRuntimeApproval) => Promise<WorkbenchRuntimeAnswer>;
   onProgress: (message: string) => void;
 };
 export type GraphicsNativeResult = {

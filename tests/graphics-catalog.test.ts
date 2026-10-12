@@ -359,14 +359,15 @@ test(
       page.on("pageerror", (error) => errors.push(error.message));
       await page.getByTestId("graphics-studio").waitFor();
       await page.getByTestId("graphics-object-sword").click();
+      assert.equal(await page.locator("[data-task-id]").count(), 0);
+      await page.getByLabel("보조 메뉴", { exact: true }).click();
+      await page
+        .getByRole("button", { name: "기능 지원 현황", exact: true })
+        .click();
+      await page
+        .getByRole("dialog", { name: "기능 지원 현황", exact: true })
+        .waitFor();
       assert.equal(await page.locator("[data-task-id]").count(), 117);
-      assert.equal(
-        await page
-          .locator("details.gs-catalog")
-          .evaluate((node) => (node as HTMLDetailsElement).open),
-        false,
-      );
-      await page.locator("details.gs-catalog > summary").click();
       await page.getByRole("tab", { name: "추천", exact: true }).click();
       assert.equal(await page.locator('[data-task-id="M01"]').count(), 0);
       assert.equal(await page.locator('[data-task-id="X05"]').count(), 1);
@@ -387,7 +388,9 @@ test(
         await page.getByTestId("graphics-task-list").innerText(),
         /기존 이미지 수정/,
       );
-      await page.locator("details.gs-catalog > summary").click();
+      await page
+        .getByRole("button", { name: "보조 화면 닫기", exact: true })
+        .click();
       await page
         .getByRole("navigation", { name: "제작 단계" })
         .getByRole("button", { name: "7 Unity 전달", exact: true })
@@ -472,8 +475,8 @@ test(
       );
       assert(!actionsBefore.some((action) => action.kind === "approve"));
       await page.getByTestId("graphics-approve-quote").click();
-      await page.locator(".gs-history > details > summary").click();
       await page
+        .getByLabel("현재 작업 상태", { exact: true })
         .getByRole("button", { name: "추적 중지", exact: true })
         .click();
       await page

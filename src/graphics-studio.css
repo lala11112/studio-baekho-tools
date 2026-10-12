@@ -438,7 +438,179 @@
 .gs-main {
   padding: 8px 10px;
   min-width: 0;
+  min-height: 0;
   overflow: auto;
+}
+.gs-workspace {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.gs-command-area {
+  padding: 6px 10px 0;
+  border-bottom: 1px solid var(--gs-border);
+  background: var(--gs-bg);
+  flex: 0 0 auto;
+}
+.gs-workspace > .gs-main {
+  flex: 1;
+}
+.gs-current-jobs {
+  display: grid;
+  gap: 5px;
+  max-height: min(240px, 29vh);
+  overflow: auto;
+  margin-bottom: 7px;
+}
+.gs-current-job {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--gs-border);
+  background: #1c2822;
+  border-radius: 6px;
+  min-width: 0;
+}
+.gs-current-job-copy {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.gs-current-job p {
+  margin: 3px 0;
+  font-size: 12px;
+}
+.gs-current-job-copy > strong {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.gs-progress-spinner {
+  animation: gs-progress-spin 1s linear infinite;
+  flex: 0 0 auto;
+}
+@keyframes gs-progress-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gs-progress-spinner {
+    animation: none;
+  }
+}
+.gs-current-job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  max-width: 42%;
+}
+.gs-job-failed,
+.gs-job-submission_unknown {
+  border-color: #9a6d4e;
+  background: #34281f;
+}
+.gs-job-awaiting_approval,
+.gs-runtime-approval {
+  border-color: #a08658;
+  background: #342f21;
+}
+.gs-runtime-approval {
+  border: 1px solid #a08658;
+  border-radius: 6px;
+  margin-top: 6px;
+  padding: 8px;
+}
+.gs-runtime-approval > small {
+  display: block;
+  margin-bottom: 6px;
+}
+.gs-runtime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.gs-command-area > .gs-alert {
+  max-height: 20vh;
+  overflow: auto;
+  margin: 0 0 7px;
+}
+.graphics-studio .gs-aux-menu {
+  position: relative;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.gs-aux-menu > summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 7px;
+  border: 1px solid var(--gs-border);
+  border-radius: 6px;
+  min-height: 30px;
+  list-style: none;
+}
+.gs-aux-menu > div {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  min-width: 190px;
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--gs-border);
+  border-radius: 7px;
+  background: var(--gs-panel);
+  box-shadow: 0 6px 18px #0008;
+}
+.gs-aux-menu > div button {
+  justify-content: flex-start;
+}
+.graphics-studio .gs-aux-dialog {
+  width: min(900px, calc(100vw - 32px));
+  height: min(720px, calc(100vh - 32px));
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 1px solid var(--gs-border);
+  border-radius: 10px;
+  background: var(--gs-bg);
+  color: #e7eee8;
+  overflow: hidden;
+}
+.gs-aux-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.gs-aux-dialog::backdrop {
+  background: #0008;
+}
+.gs-aux-dialog > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--gs-border);
+  flex: 0 0 auto;
+}
+.gs-aux-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+}
+.gs-aux-body > .gs-history {
+  margin-top: 0;
 }
 .gs-empty {
   display: flex;

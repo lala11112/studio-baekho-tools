@@ -6,10 +6,11 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { PNG } from "pngjs";
-import { createGraphicsVideoExecutor, prepareGraphicsVideo, type GraphicsVideoApproval } from "../engine/graphics-video";
+import { createGraphicsVideoExecutor, prepareGraphicsVideo, prepareGraphicsVideoUploadRetry, type GraphicsVideoApproval } from "../engine/graphics-video";
 import type { GraphicsNativeArgs } from "../engine/graphics-native";
 import type { RunwayConnection, RunwayTool } from "../engine/runway-client";
 import type { AssetVersion } from "../shared/graphics";
+import type { WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from "../shared/workbench";
 
 const digest = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 function fixture(t: any) {
@@ -33,12 +34,14 @@ function fixture(t: any) {
   const calls: RunwayTool[] = [];
   let submissions = 0, uploads = 0, downloads = 0, balance: number | undefined = 200, kind = "task_failed", ambiguous = false, downloadFails = false;
   let onUpload: (() => void) | undefined;
-  const connection: RunwayConnection = { open: async () => {}, close: () => {}, call: async (tool, input) => {
+  let uploadPermission: WorkbenchRuntimeApproval | undefined, ask!: (request: WorkbenchRuntimeApproval) => Promise<WorkbenchRuntimeAnswer>;
+  const connection: RunwayConnection = { open: async (_cwd, _signal, callback) => { ask = callback; }, close: () => {}, call: async (tool, input) => {
     calls.push(tool);
     if (tool === "whoami") return { authenticated: true, team: { id: 7 }, credits: { total: balance }, availableVideoModels: ["gen-4.5"] };
     if (tool === "init_upload") {
       uploads++; const uploaded = PNG.sync.read(fs.readFileSync(String(input.file)));
       assert.equal(uploaded.width / uploaded.height, 16 / 9); onUpload?.();
+      if (uploadPermission && !(await ask(uploadPermission)).accepted) throw Error("Runway 원본 업로드 도구 실패: user rejected MCP tool call");
       return { kind: "upload_complete", assetUrl: "https://assets.example/source?secret=hidden", uploadModelTurns: 1, uploadUsage: { input: 30 } };
     }
     if (tool === "generate_video") {
@@ -58,8 +61,90 @@ function fixture(t: any) {
   };
   return { root, args, deps, approve, calls, controller, sourcePath, success, execute: createGraphicsVideoExecutor(deps),
     counts: () => ({ submissions, uploads, downloads }), setBalance: (value?: number) => { balance = value; }, ambiguous: () => { ambiguous = true; },
-    failDownload: (value: boolean) => { downloadFails = value; }, onUpload: (value: () => void) => { onUpload = value; } };
+    failDownload: (value: boolean) => { downloadFails = value; }, onUpload: (value: () => void) => { onUpload = value; },
+    permission: (value: WorkbenchRuntimeApproval) => { uploadPermission = value; } };
 }
+
+const permission: WorkbenchRuntimeApproval = { id: "connector-access", title: "codex_apps 접근 확인", detail: "Upload the selected Runway PNG", fields: [] };
+const uploadDenied = "Runway 원본 업로드 도구 실패: user rejected MCP tool call";
+
+test("Runway tool permission reaches the app and waits independently from saved paid approval", async t => {
+  const f = fixture(t); f.approve(); f.permission(permission);
+  let answer!: (value: WorkbenchRuntimeAnswer) => void, notified!: () => void;
+  const shown = new Promise<void>(resolve => { notified = resolve; });
+  f.args.requestApproval = async request => { assert.deepEqual(request, permission); notified(); return new Promise(resolve => { answer = resolve; }); };
+  const execution = f.execute(f.args);
+  await shown;
+  assert.equal(f.counts().submissions, 0);
+  assert(!fs.existsSync(path.join(f.root, "graphics/video-journal/object-1/task-idle.json")));
+  answer({ accepted: true, values: {} });
+  await assert.rejects(execution, /생성이 실패/);
+  assert.equal(f.counts().submissions, 1);
+});
+
+test("permission denial preserves the request and only explicit proven same-task retry can upload again", async t => {
+  const f = fixture(t); f.approve(); f.permission(permission);
+  f.args.requestApproval = async () => ({ accepted: false, values: {} });
+  await assert.rejects(f.execute(f.args), error => (error as Error).message === uploadDenied);
+  const packetFile = path.join(f.root, "graphics/jobs/task-idle/external-request.json"), packet = fs.readFileSync(packetFile);
+  assert.equal(f.counts().submissions, 0);
+  f.args.recoveryOnly = true;
+  await assert.rejects(createGraphicsVideoExecutor(f.deps)(f.args), /명시적인 업로드 재시도/);
+  assert.equal(f.counts().uploads, 1);
+  f.args.task.status = "failed"; f.args.task.message = uploadDenied;
+  prepareGraphicsVideoUploadRetry(f.args);
+  f.args.task.status = "running";
+  f.args.requestApproval = async () => ({ accepted: true, values: {} });
+  await assert.rejects(createGraphicsVideoExecutor(f.deps)(f.args), /생성이 실패/);
+  assert.deepEqual(fs.readFileSync(packetFile), packet);
+  assert.equal(f.counts().submissions, 1); assert.equal(f.counts().uploads, 2);
+  await assert.rejects(createGraphicsVideoExecutor(f.deps)(f.args), /생성이 실패/);
+  assert.equal(f.counts().submissions, 1); assert.equal(f.counts().uploads, 2);
+});
+
+test("retry proof is consumed once, another denied upload never retries automatically", async t => {
+  const f = fixture(t); f.approve(); f.permission(permission); f.args.requestApproval = async () => ({ accepted: false, values: {} });
+  await assert.rejects(f.execute(f.args), /user rejected/);
+  f.args.task.status = "failed"; f.args.task.message = uploadDenied;
+  prepareGraphicsVideoUploadRetry(f.args);
+  prepareGraphicsVideoUploadRetry(f.args);
+  assert.equal(fs.readdirSync(path.join(f.root, "graphics/jobs/task-idle/upload-retries")).length, 1);
+  f.args.recoveryOnly = true;
+  await assert.rejects(createGraphicsVideoExecutor(f.deps)(f.args), /user rejected/);
+  await assert.rejects(createGraphicsVideoExecutor(f.deps)(f.args), /정확히 한 번/);
+  assert.equal(f.counts().uploads, 2); assert.equal(f.counts().submissions, 0);
+});
+
+test("missing runtime bridge and cancellation grant no tool permission or paid submission", async t => {
+  const missing = fixture(t); missing.approve(); missing.permission(permission);
+  await assert.rejects(missing.execute(missing.args), /접근 확인 창/); assert.equal(missing.counts().submissions, 0);
+  const cancelled = fixture(t); cancelled.approve(); cancelled.permission(permission);
+  cancelled.args.requestApproval = async () => { cancelled.controller.abort(); return { accepted: true, values: {} }; };
+  await assert.rejects(cancelled.execute(cancelled.args), /취소|abort/i); assert.equal(cancelled.counts().submissions, 0);
+});
+
+test("upload retry rejects missing evidence, ambiguous failures, changed inputs, reservations and stale proofs", async t => {
+  const f = fixture(t); f.approve(); f.permission(permission); f.args.requestApproval = async () => ({ accepted: false, values: {} });
+  await assert.rejects(f.execute(f.args), /user rejected/);
+  f.args.task.status = "failed"; f.args.task.message = "connection lost";
+  assert.throws(() => prepareGraphicsVideoUploadRetry(f.args), /확인된 업로드/);
+  f.args.task.message = uploadDenied;
+  const base = path.join(f.root, "graphics/video-journal/object-1/task-idle"), state = fs.readFileSync(base + "-state.json");
+  for (const extra of [{ taskId: "remote-paid" }, { approved: {} }, { assetEncrypted: "cached" }, { status: "submitted" }]) {
+    fs.writeFileSync(base + "-state.json", JSON.stringify({ ...JSON.parse(state.toString()), ...extra }));
+    assert.throws(() => prepareGraphicsVideoUploadRetry(f.args), /거절 전용/);
+  }
+  fs.writeFileSync(base + "-state.json", state);
+  fs.writeFileSync(base + ".json.tmp", "uncertain reservation");
+  assert.throws(() => prepareGraphicsVideoUploadRetry(f.args), /미완료/); fs.unlinkSync(base + ".json.tmp");
+  const snapshot = path.join(f.root, "graphics/jobs/task-idle/inputs/runway-source.png"), bytes = fs.readFileSync(snapshot);
+  fs.appendFileSync(snapshot, "modified"); assert.throws(() => prepareGraphicsVideoUploadRetry(f.args), /업로드 입력/); fs.writeFileSync(snapshot, bytes);
+  prepareGraphicsVideoUploadRetry(f.args); f.args.recoveryOnly = true;
+  fs.writeFileSync(base + ".json", JSON.stringify({ jobId: "task-idle", requestHash: JSON.parse(state.toString()).requestHash, entries: [{ state: "reserved" }] }));
+  const calls = [...f.calls];
+  await assert.rejects(createGraphicsVideoExecutor(f.deps)(f.args), /유료 제출 기록/);
+  assert.deepEqual(f.calls, calls); assert.equal(f.counts().submissions, 0);
+});
 
 test("explicit recovery without a saved video packet cannot upload or submit", async t => {
   const f = fixture(t); f.approve(); f.args.recoveryOnly = true;

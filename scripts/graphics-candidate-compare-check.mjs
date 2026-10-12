@@ -59,7 +59,8 @@ window.compactFixture=()=>{const creation=defaultCreation('character');creation.
 window.textureFixture=kind=>{const id='texture-'+kind,creation=defaultCreation('prop'),accepted=kind==='missing'?{}:{'design:main':'old-a'};if(kind.includes('part')){creation.attributes.composition='parts';creation.parts=[{id:'head',label:'머리',enabled:true,instruction:'',faceLimit:5000,count:1}];creation.activePartId='head';if(kind==='part')accepted['design:part-head']='new-a';}setWorkspace({...initial,objects:[{...object,id,creation,accepted}],versions:versions.map(v=>({...v,objectId:id,...(kind==='part'&&v.id==='new-a'?{slot:'part-head'}:{})})),tasks:[]});};
 window.videoFixture=()=>setWorkspace({...initial,objects:[{...object,id:'video-object',accepted:{}}],versions:[version('video-a','동작 후보 1','2026-10-13','motion-reference','video-object'),version('video-b','동작 후보 2','2026-10-13','motion-reference','video-object')],tasks:[task('video-batch',['video-a','video-b'],'2026-10-13','N02','video-object')]});
 window.motionSourceFixture=()=>setWorkspace({...initial,objects:[{...object,id:'motion-source-object',accepted:{}}],versions:[{...version('motion-source','측면 원본 묶음','2026-10-13','design','motion-source-object'),slot:'motion-source',files:['left.png','right.png'].map(path=>({path,kind:'image',bytes:20,sha256:path}))}],tasks:[]});
-return <div className="app"><SidebarFixture/><div className="app-body"><header className="topbar">작업 공간 · 격리 UI 확인</header><GraphicsStudio project={project} workspace={workspace} busy={forcedBusy} onExportProject={()=>window.exportClicks++} onOpenSettings={()=>{}} onAction={async action=>{window.actions.push(action);if(action.kind!=='accept')throw Error('Service/production actions forbidden');setWorkspace(w=>({...w,objects:w.objects.map(o=>o.id===action.objectId?{...o,accepted:{...o.accepted,'design:main':action.versionId}}:o)}));}}/></div></div>}
+window.actionFixture=mode=>{const id='action-'+mode,creation=defaultCreation('character');creation.stageSettings.animation={instruction:'참고 동작을 유지합니다.',values:{animationMode:'video',clipName:'Idle',count:1,motionPreset:'idle',duration:2,fps:30}};const job=(id,clip,date,status)=>({...task(id,[],date,'N02','action-'+mode),settings:{clipName:clip,count:1},status,message:status==='failed'?'도구 연결 확인에 실패했습니다. 기존 입력과 비용 기록을 유지합니다.':'기존 원본을 확인하는 중입니다.',errorCode:status==='failed'?'CONNECTION_FAILED':undefined});const tasks=mode==='failed'?[job('old-idle','Idle','2026-10-12','failed'),job('latest-idle','Idle','2026-10-13','failed'),job('latest-jump','Jump','2026-10-13','failed')]:[{...job('current-native','Idle','2026-10-13',mode==='cost'?'awaiting_approval':'running'),...(mode==='permission'?{runtimeApproval:{id:'permission-1',title:'영상 도구 접근 확인',detail:'선택한 원본과 연결된 영상 도구에 접근합니다.',executionId:'exec-1',requestedAt:'2026-10-13',fields:[{id:'access',label:'접근 범위',required:true,options:[{value:'selected',label:'선택한 자료만'}]}]}}:mode==='cost'?{cost:{provider:'Runway',credits:24,basis:'fixture cost only'}}:{})}];setWorkspace({...initial,objects:[{...object,id,kind:'character',creation,accepted:{}}],versions:[],tasks});};
+return <div className="app"><SidebarFixture/><div className="app-body"><header className="topbar">작업 공간 · 격리 UI 확인</header><GraphicsStudio project={project} workspace={workspace} busy={forcedBusy} onExportProject={()=>window.exportClicks++} onOpenSettings={()=>{}} onAction={async action=>{window.actions.push(action);if(action.kind==='runtime-approval'){setWorkspace(w=>({...w,tasks:w.tasks.map(t=>t.id===action.taskId?{...t,runtimeApproval:undefined}:t)}));return;}if(action.kind==='recover')return;if(action.kind!=='accept')throw Error('Service/production actions forbidden');setWorkspace(w=>({...w,objects:w.objects.map(o=>o.id===action.objectId?{...o,accepted:{...o.accepted,'design:main':action.versionId}}:o)}));}}/></div></div>}
 createRoot(document.getElementById('root')).render(<Harness/>);
 `;
 await build({
@@ -86,29 +87,63 @@ try {
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(pathToFileURL(path.join(root, "index.html")).href);
     await page.getByTestId("graphics-object-object").waitFor();
-    const inspectShell = () => page.locator(".sidebar").evaluate((sidebar) => {
-      const bounds = sidebar.getBoundingClientRect(), failures = [];
-      const visible = (element) => {
-        const details = element.closest("details:not([open])");
-        if (details && !element.closest("summary")) return false;
-        const r = element.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
-      };
-      const elements = [...sidebar.querySelectorAll(".brand, .brand > span, .brand small, .workspace-label, .nav, .nav > span:not(.connection-dot), .nav small, .manual-tools summary, .local-note, .local-note > div, .version, .version span")].filter(visible);
-      for (const element of elements) {
-        const r = element.getBoundingClientRect();
-        if (element.scrollWidth > element.clientWidth + 1 || r.left < bounds.left - 1 || r.right > bounds.right + 1)
-          failures.push({kind:"element-overflow",text:element.textContent,client:element.clientWidth,scroll:element.scrollWidth});
-        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-        while (walker.nextNode()) {
-          if (!walker.currentNode.textContent.trim()) continue;
-          const range = document.createRange();range.selectNodeContents(walker.currentNode);
-          for (const t of range.getClientRects()) if(t.left < r.left - 1 || t.right > r.right + 1 || t.top < r.top - 1 || t.bottom > r.bottom + 1)
-            failures.push({kind:"text-overflow",text:walker.currentNode.textContent,container:element.className || element.tagName});
+    const inspectShell = () =>
+      page.locator(".sidebar").evaluate((sidebar) => {
+        const bounds = sidebar.getBoundingClientRect(),
+          failures = [];
+        const visible = (element) => {
+          const details = element.closest("details:not([open])");
+          if (details && !element.closest("summary")) return false;
+          const r = element.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        const elements = [
+          ...sidebar.querySelectorAll(
+            ".brand, .brand > span, .brand small, .workspace-label, .nav, .nav > span:not(.connection-dot), .nav small, .manual-tools summary, .local-note, .local-note > div, .version, .version span",
+          ),
+        ].filter(visible);
+        for (const element of elements) {
+          const r = element.getBoundingClientRect();
+          if (
+            element.scrollWidth > element.clientWidth + 1 ||
+            r.left < bounds.left - 1 ||
+            r.right > bounds.right + 1
+          )
+            failures.push({
+              kind: "element-overflow",
+              text: element.textContent,
+              client: element.clientWidth,
+              scroll: element.scrollWidth,
+            });
+          const walker = document.createTreeWalker(
+            element,
+            NodeFilter.SHOW_TEXT,
+          );
+          while (walker.nextNode()) {
+            if (!walker.currentNode.textContent.trim()) continue;
+            const range = document.createRange();
+            range.selectNodeContents(walker.currentNode);
+            for (const t of range.getClientRects())
+              if (
+                t.left < r.left - 1 ||
+                t.right > r.right + 1 ||
+                t.top < r.top - 1 ||
+                t.bottom > r.bottom + 1
+              )
+                failures.push({
+                  kind: "text-overflow",
+                  text: walker.currentNode.textContent,
+                  container: element.className || element.tagName,
+                });
+          }
         }
-      }
-      return {manualOpen:sidebar.querySelector("details").open,checkedElements:elements.length,navCount:elements.filter(e=>e.matches(".nav")).length,failures};
-    });
+        return {
+          manualOpen: sidebar.querySelector("details").open,
+          checkedElements: elements.length,
+          navCount: elements.filter((e) => e.matches(".nav")).length,
+          failures,
+        };
+      });
     const shellClosed = await inspectShell();
     assert.deepEqual(shellClosed.failures, []);
     assert.equal(shellClosed.manualOpen, false);
@@ -117,9 +152,11 @@ try {
     assert.deepEqual(shellOpen.failures, []);
     assert.equal(shellOpen.manualOpen, true);
     assert.equal(shellOpen.navCount, 10);
-    await page.screenshot({path:path.join(root,"shell-expanded-"+width+".png")});
+    await page.screenshot({
+      path: path.join(root, "shell-expanded-" + width + ".png"),
+    });
     await page.locator(".manual-tools summary").click();
-    const shell = {closed:shellClosed,expanded:shellOpen};
+    const shell = { closed: shellClosed, expanded: shellOpen };
     await page.evaluate(() => window.compactFixture());
     await page.getByTestId("graphics-object-compact-model").waitFor();
     await page
@@ -667,6 +704,181 @@ try {
         ],
       );
     }
+    for (const mode of ["failed", "permission", "cost", "running"]) {
+      await page.evaluate((value) => window.actionFixture(value), mode);
+      await page.getByTestId("graphics-object-action-" + mode).waitFor();
+      await page
+        .getByRole("navigation", { name: "제작 단계" })
+        .getByRole("button", { name: "6 애니메이션", exact: true })
+        .click();
+      assert.match(
+        await page.getByTestId("graphics-prepare").innerText(),
+        /동작 영상 생성/,
+      );
+      assert.equal(
+        await page
+          .locator(".gs-main .gs-history, .gs-main .gs-catalog")
+          .count(),
+        0,
+      );
+      const baselineActions = await page.evaluate(() => window.actions.length);
+      await page
+        .locator(".gs-main")
+        .evaluate((element) => (element.scrollTop = element.scrollHeight));
+      const visibleCommand = await page
+        .getByTestId("graphics-prepare")
+        .evaluate((button) => {
+          const r = button.getBoundingClientRect(),
+            content = document
+              .querySelector(".gs-main")
+              .getBoundingClientRect();
+          return {
+            visible:
+              r.y >= 0 &&
+              r.bottom <= window.innerHeight &&
+              document.elementFromPoint(
+                r.x + r.width / 2,
+                r.y + r.height / 2,
+              ) === button,
+            separate:
+              document.querySelector(".gs-command-area").getBoundingClientRect()
+                .bottom <=
+              content.top + 1,
+          };
+        });
+      assert.deepEqual(visibleCommand, { visible: true, separate: true });
+      if (mode === "failed") {
+        assert.equal(
+          await page.getByTestId("graphics-current-task-old-idle").count(),
+          0,
+        );
+        assert.equal(
+          await page
+            .getByLabel("현재 작업 상태", { exact: true })
+            .locator('[role="alert"]')
+            .count(),
+          2,
+        );
+        assert(await page.getByTestId("graphics-prepare").isEnabled());
+        await page.getByTestId("graphics-recover-latest-idle").click();
+        assert.deepEqual(await page.evaluate(() => window.actions.at(-1)), {
+          kind: "recover",
+          taskId: "latest-idle",
+        });
+        await page.getByLabel("보조 메뉴", { exact: true }).click();
+        await page
+          .getByRole("button", { name: "작업 기록 3개", exact: true })
+          .click();
+        assert.equal(
+          await page
+            .getByRole("dialog", { name: "작업 기록", exact: true })
+            .locator(".gs-history > details")
+            .count(),
+          3,
+        );
+        await page
+          .getByRole("button", { name: "보조 화면 닫기", exact: true })
+          .click();
+      } else if (mode === "permission") {
+        assert(await page.getByTestId("graphics-prepare").isDisabled());
+        const card = page.getByTestId(
+          "graphics-runtime-approval-current-native",
+        );
+        assert(await card.isVisible());
+        assert.equal(
+          await page
+            .getByTestId("graphics-current-task-current-native")
+            .getAttribute("aria-busy"),
+          "false",
+        );
+        assert.equal(await card.locator(".gs-progress-spinner").count(), 0);
+        await page.screenshot({
+          path: path.join(root, "permission-form-" + width + ".png"),
+        });
+        assert(
+          await card
+            .getByRole("button", { name: "확인하고 계속", exact: true })
+            .isDisabled(),
+        );
+        await card
+          .getByLabel("접근 범위", { exact: true })
+          .selectOption("selected");
+        assert.equal(
+          await page.evaluate(() => window.actions.length),
+          baselineActions,
+        );
+        await card
+          .getByRole("button", { name: "확인하고 계속", exact: true })
+          .click();
+        assert.deepEqual(await page.evaluate(() => window.actions.at(-1)), {
+          kind: "runtime-approval",
+          taskId: "current-native",
+          approvalId: "permission-1",
+          answer: { accepted: true, values: { access: "selected" } },
+        });
+        assert.equal(await card.count(), 0);
+      } else if (mode === "cost") {
+        assert(await page.getByTestId("graphics-prepare").isDisabled());
+        await page
+          .getByRole("button", { name: "비용·입력 확인", exact: true })
+          .click();
+        await page
+          .getByTestId("graphics-cost-current-native")
+          .scrollIntoViewIfNeeded();
+        assert(
+          await page.getByTestId("graphics-approve-current-native").isVisible(),
+        );
+        assert.equal(
+          await page.evaluate(() => window.actions.length),
+          baselineActions,
+        );
+      } else {
+        assert(await page.getByTestId("graphics-prepare").isDisabled());
+        assert.match(
+          await page
+            .getByTestId("graphics-current-task-current-native")
+            .innerText(),
+          /진행 중/,
+        );
+        const runningTask = page.getByTestId(
+          "graphics-current-task-current-native",
+        );
+        assert.equal(await runningTask.getAttribute("aria-busy"), "true");
+        assert.equal(
+          await runningTask.locator(".gs-progress-spinner").count(),
+          1,
+        );
+        await page.emulateMedia({ reducedMotion: "reduce" });
+        assert.equal(
+          await runningTask
+            .locator(".gs-progress-spinner")
+            .evaluate((icon) => getComputedStyle(icon).animationName),
+          "none",
+        );
+        await page.emulateMedia({ reducedMotion: "no-preference" });
+      }
+      await page.screenshot({
+        path: path.join(root, "action-" + mode + "-" + width + ".png"),
+      });
+    }
+    await page.getByLabel("보조 메뉴", { exact: true }).click();
+    await page
+      .getByRole("button", { name: "기능 지원 현황", exact: true })
+      .click();
+    assert.equal(
+      await page
+        .getByRole("dialog", { name: "기능 지원 현황", exact: true })
+        .locator("[data-task-id]")
+        .count(),
+      117,
+    );
+    await page.keyboard.press("Escape");
+    assert.equal(
+      await page
+        .getByRole("dialog", { name: "기능 지원 현황", exact: true })
+        .count(),
+      0,
+    );
     assert.deepEqual(errors, []);
     reports.push({
       width,
@@ -674,6 +886,14 @@ try {
       shell,
       compact,
       flow,
+      actionArea: {
+        visibleAfterScrolling: true,
+        noOverlap: true,
+        latestPerClipFailure: true,
+        explicitRuntimeAnswer: true,
+        separateCostApproval: true,
+        auxiliaryDialogs: true,
+      },
       motionSourceComparison: {
         directions: ["left", "right"],
         fullImages: true,

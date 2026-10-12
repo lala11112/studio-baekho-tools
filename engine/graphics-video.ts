@@ -1,13 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { PNG } from "pngjs";
 import type { GraphicsNativeArgs, GraphicsNativeResult } from "./graphics-native";
 import type { GraphicsFile, GraphicsTask } from "../shared/graphics";
 import { isGraphicsClipName } from "../shared/graphics";
 import type { Workbench, WorkbenchArtifact, WorkbenchExecutionContext, WorkbenchJob, WorkbenchRequest } from "../shared/workbench";
 import { RUNWAY_RATE, runwayEstimate } from "../shared/runway";
-import { runwayFrameLayout } from "../shared/runway-framing";
+import { renderRunwayFrame, runwayFrameLayout } from "../shared/runway-framing";
 import { RunwayWorkbenchRunner } from "./runway-workbench-runner";
 
 export type GraphicsVideoApproval = { requestHash: string; provider: string; credits: number; approvedAt: string };
@@ -96,6 +96,77 @@ function paidApproval(task: VideoTask, credits: number) {
   return approval;
 }
 
+const uploadDenied = "Runway 원본 업로드 도구 실패: user rejected MCP tool call";
+type UploadRetryProof = { schemaVersion: 1; taskId: string; requestHash: string; packetHash: string; stateHash: string; sourceHash: string; uploadHash: string; failure: string; authorizedAt: string };
+
+/** Prove the narrow pre-payment failure from host records, never from a model claim. */
+function uploadRetryEvidence(args: PrepareArgs): Omit<UploadRetryProof, "failure" | "authorizedAt"> {
+  const prepared = prepareGraphicsVideo(args);
+  paidApproval(args.task, prepared.cost.credits);
+  const root = fs.realpathSync(args.projectRoot), task = args.task;
+  if (!/^[\w-]{1,160}$/.test(task.id) || !/^[\w-]{1,160}$/.test(args.object.id)) throw Error("영상 재시도 식별자가 잘못됐습니다.");
+  const work = path.join(root, "graphics/jobs", task.id), base = path.join(root, "graphics/video-journal", args.object.id, task.id);
+  const regular = (file: string) => {
+    if (!contained(root, file) || !fs.statSync(file).isFile() || !contained(root, fs.realpathSync(file))) throw Error("영상 재시도 기록 경로가 다릅니다.");
+    return fs.readFileSync(file);
+  };
+  const packetBytes = regular(path.join(work, "external-request.json")), packet = JSON.parse(packetBytes.toString());
+  const stateBytes = regular(base + "-state.json"), state = JSON.parse(stateBytes.toString());
+  if (packet.jobId !== task.id || packet.graphics?.requestHash !== task.requestHash || packet.graphics?.objectId !== args.object.id ||
+      packet.graphics?.sourceVersionId !== prepared.source.id || JSON.stringify(packet.graphics.sourceFile) !== JSON.stringify(prepared.sourceFile) ||
+      JSON.stringify(packet.graphics.paidApproval) !== JSON.stringify(task.paidApproval) || state.requestHash !== digest(packetBytes) ||
+      state.sourceHash !== prepared.sourceFile.sha256 || !Number.isSafeInteger(state.teamId) || state.teamId <= 0 ||
+      Object.keys(state).some(key => !["requestHash", "sourceHash", "uploadHash", "teamId"].includes(key)))
+    throw Error("업로드 거절 전용 기록과 다릅니다. 새 제출을 허용하지 않습니다.");
+  // Even a temporary reservation or unknown additional journal content is ambiguous.
+  if (fs.existsSync(base + ".json.tmp") || fs.existsSync(base + "-state.json.tmp")) throw Error("미완료 영상 제출 기록이 있어 재시도하지 않습니다.");
+  if (fs.existsSync(base + ".json")) {
+    const ledger = JSON.parse(regular(base + ".json").toString());
+    if (ledger.jobId !== task.id || ledger.requestHash !== digest(packetBytes) || !Array.isArray(ledger.entries) || ledger.entries.length ||
+        Object.keys(ledger).some(key => !["jobId", "requestHash", "entries"].includes(key))) throw Error("유료 제출 기록이 있어 재시도하지 않습니다.");
+  }
+  if (["external-result.json", "graphics-video-result.json"].some(name => fs.existsSync(path.join(work, name))) ||
+      (fs.existsSync(path.join(work, "outputs/video-reference")) && fs.readdirSync(path.join(work, "outputs/video-reference")).length))
+    throw Error("기존 영상 결과가 있어 업로드를 다시 시작하지 않습니다.");
+  const png = PNG.sync.read(fs.readFileSync(prepared.sourcePath)), layout = runwayFrameLayout(png.width, png.height, prepared.loop);
+  const framed = new PNG({ width: layout.width, height: layout.height }); framed.data = Buffer.from(renderRunwayFrame(png.data, layout));
+  const uploadHash = digest(PNG.sync.write(framed)), framing = JSON.parse(regular(path.join(work, "inputs/runway-framing.json")).toString());
+  if (state.uploadHash !== uploadHash || framing.uploadSha256 !== uploadHash || framing.sourceSha256 !== prepared.sourceFile.sha256 ||
+      digest(regular(path.join(work, "inputs/runway-source.png"))) !== uploadHash)
+    throw Error("기존 업로드 입력과 현재 원본이 다릅니다. 재시도하지 않습니다.");
+  return { schemaVersion: 1, taskId: task.id, requestHash: task.requestHash, packetHash: digest(packetBytes), stateHash: digest(stateBytes), sourceHash: prepared.sourceFile.sha256, uploadHash };
+}
+
+/** Call only from an explicit same-task retry while its original host failure is still saved. */
+export function prepareGraphicsVideoUploadRetry(args: PrepareArgs) {
+  if (args.task.status !== "failed" || args.task.message !== uploadDenied) throw Error("확인된 업로드 권한 거절 작업만 같은 요청으로 다시 확인할 수 있습니다.");
+  const evidence = uploadRetryEvidence(args), root = fs.realpathSync(args.projectRoot);
+  const directory = path.join(root, "graphics/jobs", args.task.id, "upload-retries"); ownedDirectory(root, directory);
+  const proofs = fs.readdirSync(directory).filter(name => name.endsWith(".json") && !fs.existsSync(path.join(directory, name + ".consumed")));
+  if (proofs.length) {
+    const file = path.join(directory, proofs[0]);
+    if (proofs.length !== 1 || !contained(root, fs.realpathSync(file))) throw Error("업로드 재시도 기록이 모호합니다.");
+    const proof: UploadRetryProof = read(file);
+    if (Object.entries(evidence).some(([key, value]) => proof[key as keyof UploadRetryProof] !== value) || proof.failure !== uploadDenied || !Number.isFinite(Date.parse(proof.authorizedAt)))
+      throw Error("기존 업로드 재시도 증거가 현재 요청과 다릅니다.");
+    return; // Crash before dispatch may reuse the exact still-unconsumed authorization.
+  }
+  immutable(path.join(directory, randomUUID() + ".json"), { ...evidence, failure: uploadDenied, authorizedAt: new Date().toISOString() } satisfies UploadRetryProof);
+}
+
+function consumeUploadRetry(args: PrepareArgs) {
+  const evidence = uploadRetryEvidence(args), directory = path.join(args.projectRoot, "graphics/jobs", args.task.id, "upload-retries");
+  if (!fs.existsSync(directory)) throw Error("명시적인 업로드 재시도 기록이 없습니다.");
+  const proofs = fs.readdirSync(directory).filter(name => name.endsWith(".json") && !fs.existsSync(path.join(directory, name + ".consumed")));
+  if (proofs.length !== 1) throw Error("정확히 한 번 승인된 업로드 재시도 기록이 필요합니다.");
+  const file = path.join(directory, proofs[0]);
+  if (!contained(fs.realpathSync(args.projectRoot), fs.realpathSync(file))) throw Error("업로드 재시도 기록 경로가 다릅니다.");
+  const proof: UploadRetryProof = read(file);
+  if (Object.entries(evidence).some(([key, value]) => proof[key as keyof UploadRetryProof] !== value) || proof.failure !== uploadDenied || !Number.isFinite(Date.parse(proof.authorizedAt)))
+    throw Error("업로드 재시도 증거가 현재 고정 요청과 다릅니다.");
+  immutable(file + ".consumed", { consumedAt: new Date().toISOString() });
+}
+
 /** Adapter over the existing MotionVideoLedger: no browser, no second payment ledger. */
 export function createGraphicsVideoExecutor(dependencies: GraphicsVideoDependencies) {
   const active = new Set<string>();
@@ -154,11 +225,21 @@ export function createGraphicsVideoExecutor(dependencies: GraphicsVideoDependenc
       }
       // Existing dispatched packet never authorizes a fresh submit on a recovery click.
       const stateFile = path.join(journalRoot, args.object.id, task.id + "-state.json");
-      if (existed && !fs.existsSync(receiptFile) && (!fs.existsSync(stateFile) || !read(stateFile).taskId))
-        throw Error("기존 영상 요청의 제출 결과 ID를 확인하지 못했습니다. 복구에서 업로드·유료 제출을 반복하지 않습니다.");
+      if (existed && !fs.existsSync(receiptFile) && (!fs.existsSync(stateFile) || !read(stateFile).taskId)) {
+        if (!args.recoveryOnly) throw Error("기존 영상 요청의 제출 결과 ID를 확인하지 못했습니다. 복구에서 업로드·유료 제출을 반복하지 않습니다.");
+        consumeUploadRetry(args);
+      }
       const result = await runner.run({ ...ctx, requestApproval: async request => {
-        // The exact host cost callback consumes the already durable app approval. Other permission requests fail closed.
-        if (request.id !== `runway-cost-${task.id}` || request.fields.length) return { accepted: false, values: {} };
+        // Paid approval never grants a connector permission: surface it to the app separately.
+        if (request.id !== `runway-cost-${task.id}`) {
+          args.signal.throwIfAborted();
+          if (!args.requestApproval) throw Error("앱의 Runway 접근 확인 창을 사용할 수 없습니다. 자동 허용하지 않았습니다.");
+          const answer = await args.requestApproval(request);
+          args.signal.throwIfAborted();
+          prepareGraphicsVideo(args); paidApproval(args.task as VideoTask, prepared.cost.credits);
+          return answer;
+        }
+        if (request.fields.length) return { accepted: false, values: {} };
         prepareGraphicsVideo(args); paidApproval(args.task as VideoTask, prepared.cost.credits); args.signal.throwIfAborted();
         return { accepted: true, values: {} };
       } }, args.onProgress);

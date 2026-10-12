@@ -9,6 +9,26 @@ export interface RunwayConnection {
   call(tool: RunwayTool, args: Record<string, unknown>): Promise<any>;
   close(): void;
 }
+
+/** Only time spent awaiting an actual human permission answer is excluded. */
+export function createRunwayUploadDeadline(expired: () => void, milliseconds = 180000, clock = {
+  now: () => Date.now(),
+  set: (callback: () => void, delay: number): unknown => setTimeout(callback, delay),
+  clear: (timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+}) {
+  let remaining = milliseconds, started = clock.now(), timer: unknown, pauses = 0, stopped = false;
+  const start = () => { started = clock.now(); timer = clock.set(() => { stopped = true; timer = undefined; expired(); }, Math.max(0, remaining)); };
+  start();
+  return {
+    pause() {
+      if (stopped || pauses++ > 0) return;
+      remaining = Math.max(0, remaining - (clock.now() - started));
+      if (timer !== undefined) clock.clear(timer); timer = undefined;
+    },
+    resume() { if (!stopped && pauses > 0 && --pauses === 0) start(); },
+    stop() { stopped = true; if (timer !== undefined) clock.clear(timer); timer = undefined; },
+  };
+}
 /** Official connector calls. File parameters require Codex's normal tool-turn
  * upload adapter; other operations use direct RPC with no inference turn. */
 export class CodexRunwayConnection implements RunwayConnection {
@@ -23,6 +43,7 @@ export class CodexRunwayConnection implements RunwayConnection {
   private notification?: (message: any) => void;
   private onClose?: () => void;
   private uploadChild?: CodexRunwayConnection;
+  private uploadDeadline?: ReturnType<typeof createRunwayUploadDeadline>;
   async open(cwd: string, signal: AbortSignal, ask: (value: WorkbenchRuntimeApproval) => Promise<WorkbenchRuntimeAnswer>) {
     this.context = { cwd, signal, ask };
     if (signal.aborted) throw Error("취소되었습니다.");
@@ -44,7 +65,12 @@ export class CodexRunwayConnection implements RunwayConnection {
       for (const line of lines) {
         let m: any; try { m = JSON.parse(line); } catch { continue; }
         if (m.method && m.id !== undefined) {
-          void answerAppServerRequest(m, ask).then(result => this.write({ id: m.id, result }))
+          void answerAppServerRequest(m, async request => {
+            const deadline = this.uploadDeadline;
+            deadline?.pause();
+            try { return await ask(request); }
+            finally { deadline?.resume(); }
+          }).then(result => this.write({ id: m.id, result }))
             .catch(() => this.write({ id: m.id, error: { code: -32603, message: "사용자 확인이 완료되지 않았습니다." } }));
         } else if (this.pending.has(m.id)) {
           const pending = this.pending.get(m.id)!; this.pending.delete(m.id); clearTimeout(pending.timer);
@@ -100,8 +126,9 @@ export class CodexRunwayConnection implements RunwayConnection {
     const observed: string[] = [];
     return await new Promise((resolve, reject) => {
       let finished = false;
-      const timer = setTimeout(() => { reject(Error("원본 업로드 확인 시간이 초과되었습니다. 자동 재시도하지 않습니다.")); this.close(); }, 180000);
-      const finish = (error?: Error) => { if (finished) return; finished = true; clearTimeout(timer); this.notification = undefined; this.onClose = undefined;
+      const deadline = createRunwayUploadDeadline(() => { finish(Error("원본 업로드 확인 시간이 초과되었습니다. 자동 재시도하지 않습니다.")); this.close(); });
+      this.uploadDeadline = deadline;
+      const finish = (error?: Error) => { if (finished) return; finished = true; deadline.stop(); this.uploadDeadline = undefined; this.notification = undefined; this.onClose = undefined;
         if (error) reject(error); else if (result?.kind === "upload_complete" && result.assetUrl) resolve({ ...result, uploadModelTurns: 1, uploadUsage: usage });
         else reject(Error(`Codex 업로드 도구의 실제 완료 영수증을 받지 못했습니다. ${observed.join("; ")} ${approvalText(finalText).slice(0, 700)}`)); };
       this.onClose = () => finish(Error("원본 업로드 연결이 종료되었습니다."));

@@ -1,4 +1,5 @@
 import type { CreationSpec } from './graphics-creation';
+import type { WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from './workbench';
 /** App-owned Unity graphics tasks. Assets are immutable; acceptance never executes a task. */
 export type GraphicsKind = "character" | "weapon" | "prop" | "environment" | "sprite" | "ui" | "vfx";
 export type GraphicsRole = "design" | "model" | "material" | "rig" | "motion-reference" | "animation" | "unity";
@@ -51,6 +52,10 @@ export type GraphicsTask = {
   deliveryId?: string;
   unityClipSettings?: UnityClipSettings[];
   paidApproval?: { requestHash: string; provider: string; credits: number; approvedAt: string };
+  /** A live tool permission/question, distinct from the frozen service-cost approval. */
+  runtimeApproval?: WorkbenchRuntimeApproval & { requestedAt: string; executionId: string };
+  /** Keep decisions without storing the user's form values or authentication data. */
+  runtimeApprovalHistory?: { id: string; title: string; executionId: string; requestedAt: string; answeredAt: string; decision: "accepted" | "declined" | "cancelled" | "interrupted" }[];
 };
 export type GraphicsUsageAudit = {
   sampledJobs: number; measuredWorkers: number; missingWorkers: number; localExecutions: number;
@@ -77,5 +82,6 @@ export type GraphicsAction =
   | { kind: "accept"; objectId: string; versionId: string }
   | { kind: "prepare"; objectId: string; taskId: string }
   | { kind: "approve" | "cancel" | "recover"; taskId: string }
+  | { kind: "runtime-approval"; taskId: string; approvalId: string; answer: WorkbenchRuntimeAnswer }
   | { kind: "set-tripo-budget"; credits: number }
   | { kind: "inspect-target" | "audit-usage" | "import-legacy" | "probe-connections" };

@@ -12,6 +12,7 @@ import type { Tripo } from "../engine/tripo";
 import type { GraphicsNativeArgs, GraphicsNativeResult } from "../engine/graphics-native";
 import type { AssetVersion, GraphicsRole } from "../shared/graphics";
 import { graphicsApprovalState, graphicsTripoReserved } from "../shared/graphics-catalog";
+import type { WorkbenchRuntimeAnswer } from "../shared/workbench";
 
 async function fixture(t: any) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ps-graphics-pipeline-"));
@@ -219,4 +220,118 @@ test("nonanimation import grouping, main slots and preexisting animation records
   const w=f.graphics.importFiles(f.p.id,f.objectId,"design",[texture,image2],"Ignored_Clip");
   assert.equal(w.versions.length,4);assert(w.versions.slice(-2).every(v=>v.slot==="main"&&v.files.length===1));
   assert.deepEqual(w.versions.find(v=>v.id===existing.id),before);assert.deepEqual(w.objects[0].accepted,{});
+});
+
+async function videoApprovalFixture(t: any, count = 1) {
+  const f = await fixture(t), source = f.seed("design");
+  await f.action({ kind: "accept", objectId: f.objectId, versionId: source.id });
+  await f.action({ kind: "update-object", objectId: f.objectId, patch: { settings: {
+    motionSourceVersionId: source.id, motionSourcePath: source.files[0].path, motionSourceView: "left", duration: 2, fps: 30, loop: true, count,
+  } } });
+  const task = (await f.action({ kind: "prepare", objectId: f.objectId, taskId: "N02" })).tasks.at(-1)!;
+  const current = () => f.graphics.get(f.p.id).tasks.find(value => value.id === task.id)!;
+  const question = async (previousId?: string) => {
+    for (let i = 0; i < 200; i++) { if (current().runtimeApproval && current().runtimeApproval!.id !== previousId) return current().runtimeApproval!; await new Promise(resolve => setTimeout(resolve, 5)); }
+    throw Error("Expected app runtime question was not exposed");
+  };
+  return { ...f, task, current, question };
+}
+
+test("Runway runtime permission waits in the app independently of the durable 24-credit approval and accepts only the exact response", async t => {
+  const f = await videoApprovalFixture(t); let continued = 0, received: WorkbenchRuntimeAnswer | undefined;
+  f.setVideo(async args => {
+    received = await args.requestApproval!({ id: "upload-1", title: "Runway 원본 업로드 접근 확인", detail: "Only the selected source", fields: [
+      { id: "scope", label: "Upload selected original", required: true, options: [{ value: "once", label: "이번 원본만" }] },
+    ] });
+    if (!received.accepted) throw Error("user rejected MCP tool call");
+    continued++; return f.output(args, "motion-reference", "Idle");
+  });
+  await f.action({ kind: "approve", taskId: f.task.id });
+  const request = await f.question(), paidApproval = structuredClone(f.current().paidApproval);
+  assert.notEqual(request.id, "upload-1");
+  assert.equal(paidApproval?.credits, 24); assert.equal(continued, 0); assert.equal(f.videoDispatches.length, 1);
+  assert.equal(request.executionId, f.task.id); assert.equal(f.current().status, "running");
+  f.videoDispatches[0].onProgress("Provider background event must not hide the pending question");
+  assert.match(f.current().message, /도구 접근 확인/);
+  const stored = JSON.parse(fs.readFileSync(f.store.file(f.p.id, "graphics/workspace.json"), "utf8"));
+  assert.equal(stored.tasks[0].runtimeApproval.id, request.id);
+  await assert.rejects(f.action({ kind: "runtime-approval", taskId: f.task.id, approvalId: "another-request", answer: { accepted: true, values: { scope: "once" } } }), /이미 끝났거나/);
+  for (const values of [{}, { scope: "all" }, { scope: "once", unseen: "anything" }] as Record<string, string>[])
+    await assert.rejects(f.action({ kind: "runtime-approval", taskId: f.task.id, approvalId: request.id, answer: { accepted: true, values } }), /필수 답변/);
+  assert.equal(continued, 0);
+  await f.action({ kind: "runtime-approval", taskId: f.task.id, approvalId: request.id, answer: { accepted: true, values: { scope: "once" } } });
+  await f.idle();
+  assert.deepEqual(received, { accepted: true, values: { scope: "once" } }); assert.equal(continued, 1);
+  assert.equal(f.current().status, "review"); assert.equal(f.current().runtimeApproval, undefined);
+  assert.equal(f.current().runtimeApprovalHistory?.[0].decision, "accepted");
+  assert.equal("values" in f.current().runtimeApprovalHistory![0], false);
+  assert.deepEqual(f.current().paidApproval, paidApproval); assert.equal(f.paid, 0);
+  await assert.rejects(f.action({ kind: "runtime-approval", taskId: f.task.id, approvalId: request.id, answer: { accepted: true, values: { scope: "once" } } }), /이미 끝났거나/);
+});
+
+test("declining a Runway tool request is delivered as a decline, without consuming the saved cost approval again", async t => {
+  const f = await videoApprovalFixture(t); let continued = 0;
+  f.setVideo(async args => {
+    const answer = await args.requestApproval!({ id: "deny-upload", title: "Runway 접근", detail: "Selected original", fields: [] });
+    if (!answer.accepted) throw Error("Runway 원본 업로드 도구 실패: user rejected MCP tool call");
+    continued++; return f.output(args, "motion-reference", "Idle");
+  });
+  await f.action({ kind: "approve", taskId: f.task.id }); const request = await f.question();
+  const approval = structuredClone(f.current().paidApproval);
+  await f.action({ kind: "runtime-approval", taskId: f.task.id, approvalId: request.id, answer: { accepted: false, values: {} } });
+  await f.idle();
+  assert.equal(continued, 0); assert.equal(f.current().status, "failed");
+  assert.equal(f.current().runtimeApprovalHistory?.[0].decision, "declined");
+  assert.deepEqual(f.current().paidApproval, approval); assert.deepEqual(f.current().outputVersionIds, []);
+});
+
+test("concurrent questions receive unique host IDs even when worker IDs repeat; stale answers cannot approve a sibling", async t => {
+  const f = await videoApprovalFixture(t, 2); const answers: WorkbenchRuntimeAnswer[] = [];
+  f.setVideo(async args => {
+    const answer = await args.requestApproval!({ id: "appserver17", title: args.task.id, detail: "selected source", fields: [] }); answers.push(answer);
+    if (!answer.accepted) throw Error("No generation in permission test");
+    return f.output(args, "motion-reference", "Idle");
+  });
+  await f.action({ kind: "approve", taskId: f.task.id }); const first = await f.question();
+  assert.equal(first.executionId, f.task.id + "-c1"); assert.notEqual(first.id, "appserver17");
+  assert.equal(answers.length, 0);
+  await f.action({ kind: "runtime-approval", taskId: f.task.id, approvalId: first.id, answer: { accepted: true, values: {} } });
+  const second = await f.question(first.id); assert.equal(answers.length, 1);
+  assert.equal(second.executionId, f.task.id + "-c2"); assert.notEqual(second.id, first.id); assert.notEqual(second.id, "appserver17");
+  await assert.rejects(f.action({ kind: "runtime-approval", taskId: f.task.id, approvalId: first.id, answer: { accepted: true, values: {} } }), /이미 끝났거나/);
+  await assert.rejects(f.action({ kind: "runtime-approval", taskId: f.task.id, approvalId: "appserver17", answer: { accepted: true, values: {} } }), /이미 끝났거나/);
+  assert.equal(answers.length, 1); assert.equal(f.current().runtimeApproval?.id, second.id);
+  await f.action({ kind: "cancel", taskId: f.task.id }); await f.idle();
+  assert.deepEqual(answers, [{ accepted: true, values: {} }, { accepted: false, values: {} }]);
+  assert.equal(f.current().status, "cancelled"); assert.equal(f.current().runtimeApproval, undefined);
+  assert.deepEqual(f.current().runtimeApprovalHistory?.map(value => value.decision), ["accepted", "cancelled"]);
+  await assert.rejects(f.action({ kind: "runtime-approval", taskId: f.task.id, approvalId: second.id, answer: { accepted: true, values: {} } }), /이미 끝났거나/);
+});
+
+test("executor transport failure settles an outstanding approval and cannot be answered after work stopped", async t => {
+  const f = await videoApprovalFixture(t); let permissionAnswer: Promise<WorkbenchRuntimeAnswer> | undefined;
+  f.setVideo(async args => {
+    permissionAnswer = args.requestApproval!({ id: "disconnected", title: "Runway 접근", detail: "Selected source", fields: [] });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    throw Error("Upload transport closed while waiting");
+  });
+  await f.action({ kind: "approve", taskId: f.task.id }); await f.idle();
+  assert.deepEqual(await permissionAnswer, { accepted: false, values: {} });
+  assert.equal(f.current().status, "failed"); assert.equal(f.current().runtimeApproval, undefined);
+  assert.equal(f.current().runtimeApprovalHistory?.[0].decision, "interrupted");
+  await assert.rejects(f.action({ kind: "runtime-approval", taskId: f.task.id, approvalId: "disconnected", answer: { accepted: true, values: {} } }), /이미 끝났거나/);
+});
+
+test("restart preserves a pending tool question as interrupted history and never reconnects or approves it", async t => {
+  const f = await videoApprovalFixture(t), workspace = f.graphics.get(f.p.id), task = workspace.tasks[0];
+  task.status = "running";
+  task.runtimeApproval = { id: "before-restart", title: "Runway 접근", detail: "Selected source", fields: [], requestedAt: new Date().toISOString(), executionId: task.id };
+  task.paidApproval = { requestHash: task.requestHash, provider: "Runway", credits: 24, approvedAt: new Date().toISOString() };
+  const approval = structuredClone(task.paidApproval);
+  f.store.put("graphics", f.p.id, workspace); f.restart();
+  const reopened = f.graphics.get(f.p.id).tasks[0];
+  assert.equal(reopened.status, "submission_unknown"); assert.equal(reopened.runtimeApproval, undefined);
+  assert.equal(reopened.runtimeApprovalHistory?.[0].decision, "interrupted");
+  assert.deepEqual(reopened.paidApproval, approval); assert.equal(f.videoDispatches.length, 0);
+  await assert.rejects(f.action({ kind: "runtime-approval", taskId: task.id, approvalId: "before-restart", answer: { accepted: true, values: {} } }), /이미 끝났거나/);
 });

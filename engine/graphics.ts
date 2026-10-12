@@ -6,7 +6,7 @@ import { Engine } from "./engine";
 import { findGraphicsTask, graphicsAstraTasks, graphicsVideoTasks, graphicsProceduralTasks, graphicsTripoReserved } from "../shared/graphics-catalog";
 import { getGraphicsCompatibility } from "../shared/graphics-lineage";
 import { workbenchUsage } from "../shared/workbench-usage";
-import type { Workbench } from "../shared/workbench";
+import type { Workbench, WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from "../shared/workbench";
 import type { Generation, Quote } from "../shared/types";
 import type { AssetVersion, GraphicsAction, GraphicsFile, GraphicsObject, GraphicsRole, GraphicsTask, GraphicsWorkspace, UnityClipSettings } from "../shared/graphics";
 import { isGraphicsClipName } from "../shared/graphics";
@@ -14,7 +14,7 @@ import { compileCreation, validateCreation } from "../shared/graphics-creation";
 import { executeGraphicsProcedural, proceduralProblem } from "./graphics-procedural";
 import { executeGraphicsNative } from "./graphics-native";
 import { executeGraphicsAstra } from "./graphics-astra";
-import { prepareGraphicsVideo } from "./graphics-video";
+import { prepareGraphicsVideo, prepareGraphicsVideoUploadRetry } from "./graphics-video";
 import { executeGraphicsMotionSource } from "./graphics-motion-source";
 import { prepareGraphicsMotionImport } from "./graphics-motion-import";
 import { readUnityTarget, prepareUnityDelivery, inspectUnityDelivery, cancelUnityDelivery } from "./graphics-unity";
@@ -65,6 +65,8 @@ type Options = {
 /** Object workspace is an adapter over the existing submission journal, not another paid-job engine. */
 export class GraphicsEngine {
   private active = new Map<string, { projectId: string; controller: AbortController }>();
+  private pendingApprovals = new Map<string, { projectId: string; approvalId: string; resolve: (answer: WorkbenchRuntimeAnswer) => void }>();
+  private approvalQueues = new Map<string, Promise<void>>();
   private native: typeof executeGraphicsNative;
   private astra: typeof executeGraphicsNative;
   private unity: typeof prepareUnityDelivery;
@@ -76,6 +78,7 @@ export class GraphicsEngine {
     for (const w of this.list()) {
       let changed = false;
       for (const t of w.tasks.filter(t => t.status === "running")) {
+        this.closeRuntimeApproval(t, "interrupted");
         if (t.taskId === "X05" && t.deliveryId && w.deliveries.some(d => d.id === t.deliveryId && d.status === "queued")) continue;
         const jobs = store.project(w.projectId).jobs.filter(j => j.quoteId === t.quoteId);
         if (jobs.length) t.backendJobIds = jobs.map(j => j.id);
@@ -103,6 +106,58 @@ export class GraphicsEngine {
   }
   isActive(id: string) { return [...this.active.values()].some(a => a.projectId === id) || this.get(id).tasks.some(t => t.status === "running" && t.taskId === "X05"); }
   shutdown() { for (const a of this.active.values()) a.controller.abort(); }
+  private closeRuntimeApproval(task: GraphicsTask, decision: NonNullable<GraphicsTask["runtimeApprovalHistory"]>[number]["decision"]) {
+    const request = task.runtimeApproval;
+    if (!request) return;
+    task.runtimeApprovalHistory = [...(task.runtimeApprovalHistory ?? []), {
+      id: request.id, title: request.title, executionId: request.executionId, requestedAt: request.requestedAt, answeredAt: now(), decision,
+    }].slice(-100);
+    delete task.runtimeApproval;
+  }
+  private async requestRuntimeApproval(projectId: string, taskId: string, executionId: string, signal: AbortSignal, request: WorkbenchRuntimeApproval): Promise<WorkbenchRuntimeAnswer> {
+    const text = (value: unknown, max: number): value is string => typeof value === "string" && value.length <= max;
+    if (!request || !text(request.id, 200) || !request.id || !text(request.title, 500) || !text(request.detail, 20000) ||
+      !Array.isArray(request.fields) || request.fields.length > 40 || request.fields.some(field => !field || !text(field.id, 200) || !field.id || !text(field.label, 6000) || typeof field.required !== "boolean" ||
+        field.options !== undefined && (!Array.isArray(field.options) || field.options.length > 100 || field.options.some(option => !option || !text(option.value, 6000) || !text(option.label, 6000)))) ||
+      new Set(request.fields.map(field => field.id)).size !== request.fields.length)
+      throw Error("지원하지 않는 도구 확인 요청입니다. 자동 허용하지 않았습니다.");
+    // Candidates can upload concurrently, but only one actionable question is shown.
+    // Waiting here performs no inference, upload, or paid submission.
+    const previous = this.approvalQueues.get(taskId) ?? Promise.resolve();
+    let release!: () => void;
+    const queued = new Promise<void>(resolve => { release = resolve; });
+    this.approvalQueues.set(taskId, queued);
+    try {
+      await previous;
+      signal.throwIfAborted();
+      return await new Promise<WorkbenchRuntimeAnswer>((resolve, reject) => {
+        const workspace = this.get(projectId), task = workspace.tasks.find(value => value.id === taskId);
+        if (!task || task.status !== "running" || this.active.get(taskId)?.projectId !== projectId || this.pendingApprovals.has(taskId)) {
+          reject(Error("이 확인 요청의 실행이 끝났습니다. 자동 허용하지 않았습니다.")); return;
+        }
+        // Worker-local request IDs can repeat across candidate connections. The
+        // app answer is bound to a unique host ID, never that reusable source ID.
+        const approvalId = uid();
+        task.runtimeApproval = { ...structuredClone(request), id: approvalId, requestedAt: now(), executionId };
+        task.message = "도구 접근 확인이 필요합니다. 앱에 표시된 요청 범위를 확인하고 답변하세요.";
+        task.updatedAt = now();
+        const abort = () => {
+          this.pendingApprovals.delete(taskId);
+          const latest = this.get(projectId), current = latest.tasks.find(value => value.id === taskId);
+          if (current?.runtimeApproval?.id === approvalId) { this.closeRuntimeApproval(current, "cancelled"); this.save(latest); }
+          resolve({ accepted: false, values: {} });
+        };
+        signal.addEventListener("abort", abort, { once: true });
+        this.pendingApprovals.set(taskId, { projectId, approvalId, resolve: answer => {
+          signal.removeEventListener("abort", abort); resolve(answer);
+        } });
+        this.save(workspace);
+      });
+    } finally {
+      release();
+      if (this.approvalQueues.get(taskId) === queued) this.approvalQueues.delete(taskId);
+    }
+  }
   private object(w: GraphicsWorkspace, id: string) {
     const o = w.objects.find(o => o.id === id);
     if (!o) throw Error("오브젝트를 찾을 수 없습니다.");
@@ -310,9 +365,29 @@ export class GraphicsEngine {
       case "prepare": return this.prepare(id, action.objectId, action.taskId);
       case "approve": return this.approve(id, action.taskId);
       case "recover": return this.recover(id, action.taskId);
+      case "runtime-approval": {
+        const task = w.tasks.find(value => value.id === action.taskId), pending = this.pendingApprovals.get(action.taskId);
+        const request = task?.runtimeApproval;
+        if (!task || task.status !== "running" || !request || request.id !== action.approvalId || !pending || pending.projectId !== id || pending.approvalId !== action.approvalId || this.active.get(task.id)?.projectId !== id)
+          throw Error("이 도구 확인은 이미 끝났거나 현재 실행의 요청이 아닙니다.");
+        const answer = action.answer;
+        if (!answer || typeof answer.accepted !== "boolean" || !answer.values || typeof answer.values !== "object" || Array.isArray(answer.values) ||
+          Object.entries(answer.values).some(([key, value]) => !request.fields.some(field => field.id === key) || typeof value !== "string" || value.length > 6000) ||
+          answer.accepted && request.fields.some(field => (field.required && !answer.values[field.id]?.trim()) ||
+            answer.values[field.id] !== undefined && field.options && !field.options.some(option => option.value === answer.values[field.id])))
+          throw Error("도구 확인 답변을 확인하세요. 필수 답변과 표시된 선택지만 사용할 수 있습니다.");
+        this.pendingApprovals.delete(task.id);
+        this.closeRuntimeApproval(task, answer.accepted ? "accepted" : "declined");
+        task.updatedAt = now();
+        task.message = answer.accepted ? "확인한 도구 요청을 이어서 실행합니다." : "도구 요청을 허용하지 않았습니다. 현재 작업을 정리하고 있습니다.";
+        this.save(w);
+        pending.resolve(structuredClone(answer));
+        return w;
+      }
       case "cancel": {
         const t = w.tasks.find(t => t.id === action.taskId); if (!t) throw Error("작업 없음");
         if (t.status === "review") throw Error("완료한 결과는 취소하지 않습니다. 다른 버전을 채택할 수 있습니다.");
+        this.closeRuntimeApproval(t, "cancelled");
         this.active.get(t.id)?.controller.abort();
         for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
         if (t.deliveryId && t.targetProfile) {
@@ -486,8 +561,19 @@ export class GraphicsEngine {
         t.errorCode = code;
         t.message = error instanceof Error ? error.message : String(error); t.updatedAt = now();
       }
+      this.closeRuntimeApproval(t, "interrupted");
       this.save(w);
-    }).finally(() => this.active.delete(taskId));
+    }).finally(() => {
+      // A transport can finish while its independently delivered question still
+      // awaits an answer. Settle that promise too; stale UI must never authorize
+      // work after the executor stopped or leave queued candidates hanging.
+      const pending = this.pendingApprovals.get(taskId);
+      this.pendingApprovals.delete(taskId);
+      const latest = this.get(id), current = latest.tasks.find(task => task.id === taskId);
+      if (current?.runtimeApproval) { this.closeRuntimeApproval(current, "interrupted"); this.save(latest); }
+      this.active.delete(taskId);
+      pending?.resolve({ accepted: false, values: {} });
+    });
   }
   private savedNativeUsage(id: string, taskId: string): unknown {
     const task = this.get(id).tasks.find(t => t.id === taskId);
@@ -529,7 +615,8 @@ export class GraphicsEngine {
         return;
       }
       const result = await executor({ projectRoot: this.store.directory(id), workspacePath: this.store.file(id, "graphics/workspace.json"), object: { ...o, settings: child.settings, instruction: t.instruction }, task: child, inputs, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal, recoveryOnly,
-        onProgress: message => { const latest = this.get(id), task = latest.tasks.find(x => x.id === taskId)!; if (task.status === "running") { task.message = `${executions.length > 1 ? `후보 ${candidateIndex + 1}/${executions.length} · ` : ''}${message}`; task.updatedAt = now(); this.save(latest); } } });
+        requestApproval: request => this.requestRuntimeApproval(id, taskId, child.id, signal, request),
+        onProgress: message => { const latest = this.get(id), task = latest.tasks.find(x => x.id === taskId)!; if (task.status === "running" && !task.runtimeApproval) { task.message = `${executions.length > 1 ? `후보 ${candidateIndex + 1}/${executions.length} · ` : ''}${message}`; task.updatedAt = now(); this.save(latest); } } });
       if (signal.aborted) return;
       w = this.get(id); const current = w.tasks.find(x => x.id === taskId)!;
       const files = result.files.map(f => this.file(id, f.path, f.kind));
@@ -546,7 +633,7 @@ export class GraphicsEngine {
       });
       w.versions.push(...versions); current.outputVersionIds.push(...versions.map(v => v.id));
       current.completedExecutions = [...(current.completedExecutions ?? []), child.id];
-      current.message = `후보 ${candidateIndex + 1}/${executions.length} 원본 저장 완료. 나머지 후보 실패 시에도 이 결과는 유지됩니다.`;
+      if (!current.runtimeApproval) current.message = `후보 ${candidateIndex + 1}/${executions.length} 원본 저장 완료. 나머지 후보 실패 시에도 이 결과는 유지됩니다.`;
       current.updatedAt = now(); current.usage = executions.length === 1 ? result.usage : this.savedNativeUsage(id, taskId);
       this.save(w);
     };
@@ -581,6 +668,7 @@ export class GraphicsEngine {
       for (const j of jobs) await this.engine.poll(id, j.id);
       this.sync(); return this.get(id);
     }
+    let uploadRetry = false;
     if (!t.localOnly) {
       const readProof = (relative: string) => {
         try {
@@ -598,17 +686,30 @@ export class GraphicsEngine {
           const packet = readProof(`graphics/jobs/${child.id}/external-request.json`);
           const state = readProof(`graphics/video-journal/${t.objectId}/${child.id}-state.json`);
           const receipt = readProof(`graphics/jobs/${child.id}/external-result.json`);
-          if (packet?.jobId !== child.id || (!receipt && (typeof state?.taskId !== "string" || !/^[\w-]{1,200}$/.test(state.taskId))))
+          if (packet?.jobId !== child.id)
             throw Error("기존 영상의 원격 작업 ID 또는 저장 결과가 없습니다. 완료 후보는 유지하며 복구에서 첫 업로드·유료 제출을 시작하지 않습니다.");
+          if (!receipt && (typeof state?.taskId !== "string" || !/^[\w-]{1,200}$/.test(state.taskId))) {
+            if (child.status !== "failed" || child.message !== "Runway 원본 업로드 도구 실패: user rejected MCP tool call")
+              throw Error("기존 영상의 원격 작업 ID 또는 저장 결과가 없습니다. 완료 후보는 유지하며 복구에서 첫 업로드·유료 제출을 시작하지 않습니다.");
+            // The only exception is a proven pre-submission upload-permission rejection.
+            // The explicit app recovery preserves the exact saved cost approval and
+            // asks for the tool permission again; it is never an automatic retry.
+            const object = { ...this.object(w, t.objectId), ...t.objectSnapshot };
+            const inputs = t.inputVersionIds.map(versionId => w.versions.find(version => version.id === versionId)!);
+            if (inputs.some(version => !version)) throw Error("고정 입력 버전이 없습니다.");
+            prepareGraphicsVideoUploadRetry({ projectRoot: this.store.directory(id), object, task: child, inputs });
+            uploadRetry = true;
+          }
         }
       } else if (first) {
         const relative = graphicsAstraTasks.has(t.taskId) ? `graphics/jobs/${first.id}/astra/dispatch.json` : `graphics/jobs/${first.id}/dispatch.json`;
         if (readProof(relative)?.taskId !== first.id) throw Error("저장된 원본 생성 실행 기록이 없습니다. 완료 후보는 유지하며 복구에서 새 GPT 요청을 시작하지 않습니다.");
       }
     }
-    // Recovery explicitly forbids first dispatch even when failure happened before
-    // a durable record. Executors recheck this independently at their boundary.
-    t.status = "running"; t.message = "기존 저장 결과와 로컬 완료 지점만 복구합니다."; this.save(w); this.launch(id, t.id, true); return this.get(id);
+    // Executors independently verify saved results or the narrow one-use upload proof.
+    t.status = "running"; t.updatedAt = now(); delete t.errorCode;
+    t.message = uploadRetry ? "제출 전 업로드 거절을 확인했습니다. 도구 권한을 다시 확인하고 기존 승인 비용 범위에서 영상 1회를 진행합니다." : "기존 저장 결과와 로컬 완료 지점만 복구합니다.";
+    this.save(w); this.launch(id, t.id, true); return this.get(id);
   }
   sync() {
     for (const w of this.list()) {

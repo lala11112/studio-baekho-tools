@@ -1639,7 +1639,7 @@ export function App() {
                 </div>
               </main>
             )}
-            {tab !== "workbench" && (
+            {tab !== "workbench" && tab !== "graphics" && (
               <JobPanel
                 p={p}
                 run={run}
@@ -1650,7 +1650,7 @@ export function App() {
           </>
         )}
         {tab === "settings" && <SettingsPanel state={state} run={run} />}
-        <footer className="statusbar">
+        {tab !== "graphics" && <footer className="statusbar">
           <span>
             <span className="status-dot" /> 로컬 엔진 준비됨
           </span>
@@ -1665,7 +1665,7 @@ export function App() {
               ? `${p.parts.length} PARTS · REV ${p.revision}`
               : "개인용 제작 도구"}
           </span>
-        </footer>
+        </footer>}
       </div>
       {create && (
         <div className="modal-backdrop">
