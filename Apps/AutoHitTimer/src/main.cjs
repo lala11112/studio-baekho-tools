@@ -58,7 +58,7 @@ async function start() {
     if (!selected.canceled) await controller.connectProject(selected.filePaths[0]);
     return publicState();
   });
-  for (const name of ['connectProject', 'installIntegration', 'refreshCatalog', 'searchAnimations', 'importFiles', 'addJobs', 'selectJob', 'updateJob', 'updateSettings', 'analyzeJobs', 'cancelAnalysis', 'removeJob', 'previewChange', 'applyChange']) {
+  for (const name of ['connectProject', 'installIntegration', 'refreshCatalog', 'searchAnimations', 'cancelAnimationSearch', 'importFiles', 'addJobs', 'selectJob', 'updateJob', 'updateSettings', 'analyzeJobs', 'cancelAnalysis', 'removeJob', 'previewChange', 'applyChange']) {
     handle(name, async (...args) => { const result = await controller[name](...args); return result === controller.state ? publicState() : result; });
   }
   handle('revealAsset', filename => {
@@ -87,9 +87,9 @@ else {
     clearInterval(timer);
     // Only analysis is cancellable. Apply has a persisted request identity to
     // reconcile on the next launch and does not belong to the capture lifecycle.
-    if (!quitting && controller?.abortController) {
+    if (!quitting && (controller?.abortController || controller?.searchAbortController)) {
       event.preventDefault(); quitting = true;
-      controller.cancelAnalysis().then(() => controller.shutdown()).finally(() => app.quit());
+      (controller.abortController ? controller.cancelAnalysis() : Promise.resolve()).then(() => controller.shutdown()).finally(() => app.quit());
     }
   });
 }

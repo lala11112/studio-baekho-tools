@@ -13,6 +13,11 @@
   let searchSelection = new Set();
   let searchMessage = '';
   let searchGeneration = 0;
+  let searchPending = false;
+  let searchCancelPending = false;
+  let searchFailed = false;
+  let searchResultMode = '';
+  let searchDetails = '';
   let currentTab = 'hits';
   let selectedWindowId = null;
   let currentTime = 0;
@@ -39,7 +44,9 @@
   const statusLabel = item => item?.pendingSave ? '저장 결과 확인 중' : statusLabels[item?.status] || item?.status || '분석 대기';
   const analysisActive = () => (state.jobs || []).some(busyJob);
   const connectionReady = () => Boolean(state.connection?.ready);
-  const canAnalyze = () => connectionReady() && Boolean(state.ai?.available) && state.ai?.authenticated !== false && !analysisActive();
+  const searchActive = () => searchPending || Boolean(state.search?.busy);
+  const searchContext = () => JSON.stringify([state.projectPath, state.actorId || state.settings?.actorId || '']);
+  const canAnalyze = () => connectionReady() && Boolean(state.ai?.available) && state.ai?.authenticated !== false && !analysisActive() && !searchActive();
   const targetFor = item => (state.targets || []).find(target => target.sourceGuid === item?.sourceGuid && target.actionPath === (item?.mode === 'register' ? item?.templatePath : item?.actionPath));
   const targetIdentity = item => JSON.stringify([item?.sourceGuid, item?.mode === 'register' ? item?.templatePath : item?.actionPath]);
   const sameClip = (left, right) => left && right && left.guid === right.guid && String(left.localId) === String(right.localId);
@@ -63,7 +70,9 @@
   function acceptState(next) {
     if (!next || !Array.isArray(next.jobs)) return;
     const previous = job();
+    const previousSearchContext = searchContext();
     state = { ...state, ...next };
+    if (previousSearchContext !== searchContext()) resetSearch();
     const selected = job();
     if (previous?.pendingSave && selected?.id === previous.id && !selected.pendingSave && selected.status === 'saved') localNotice = { message: 'Unity 저장 결과를 확인했습니다. 저장된 에셋을 확인하세요.', kind: 'success' };
     if (selected?.pendingSave) preview = null;
@@ -110,6 +119,7 @@
     const selection = focused && typeof focused.selectionStart === 'number' ? [focused.selectionStart, focused.selectionEnd] : null;
     renderNotice();
     renderProject();
+    renderSearch();
     renderJobs();
     renderStage();
     renderHits();
@@ -132,7 +142,7 @@
     $('select-project').innerHTML = `<span aria-hidden="true">▱</span> ${state.projectPath ? '프로젝트 변경' : '프로젝트 열기'}`;
     const projectName = String(state.projectPath || '').replace(/[\\/]$/, '').split(/[\\/]/).pop();
     $('project-detail').innerHTML = state.projectPath
-      ? `<div class="project-title"><span aria-hidden="true">◇</span><span>${esc(projectName)}</span></div><div class="project-path" title="${esc(state.projectPath)}">${esc(state.projectPath)}</div>${!ready ? `<p class="project-issue">${esc(state.connection?.message || 'Unity에서 프로젝트를 열어 주세요.')}</p><div class="project-actions"><button id="install-integration" class="button">Unity 연동 설치 / 복구</button></div>` : ''}`
+      ? `<div class="project-title"><span aria-hidden="true">◇</span><span>${esc(projectName)}</span></div><div class="project-path" title="${esc(state.projectPath)}">${esc(state.projectPath)}</div>${!ready ? `<p class="project-issue">${esc(state.connection?.message || 'Unity에서 프로젝트를 열어 주세요.')}</p>` : ''}<div class="project-actions"><button id="install-integration" class="${ready ? 'text-button' : 'button'}">${ready ? 'Unity 연동 업데이트' : 'Unity 연동 설치 / 복구'}</button></div>`
       : '<p class="project-hint">열려 있는 Unity 프로젝트를 연결해<br>애니메이션과 공격 데이터를 불러옵니다.</p>';
     const actors = state.actors || [];
     const actorId = state.actorId || state.settings?.actorId || '';
@@ -142,20 +152,37 @@
     $('connection-detail').textContent = ready ? `Unity ${state.connection?.unityVersion || ''} · ${projectName}` : state.connection?.message || 'Unity 에디터 연결 대기';
   }
 
+  function resetSearch(message = '') {
+    searchGeneration++;
+    searchResults = [];
+    searchSelection.clear();
+    searchMessage = message;
+    searchDetails = '';
+    searchResultMode = '';
+    searchFailed = false;
+    searchPending = false;
+  }
+
   function renderSearch() {
+    const semantic = $('search-mode').value === 'semantic';
+    const active = searchActive();
+    $('animation-query-label').textContent = semantic ? '찾고 싶은 동작을 자연어로 설명하세요' : '애니메이션 이름, Animator 상태 또는 경로 검색';
+    $('animation-query').placeholder = semantic ? '예: 앞으로 돌진하며 검을 두 번 휘두르는 공격' : '클립 이름, 상태 또는 경로';
+    $('search-button').textContent = semantic ? '비슷한 동작 찾기' : '이름 검색';
+    $('search-help').textContent = semantic ? 'AI가 클립 이름·상태·경로를 바탕으로 후보를 추천합니다. 실제 동작은 추가 후 미리보기로 확인하세요.' : '클립 이름·Animator 상태·경로로 검색합니다. AI 연결 없이 사용할 수 있습니다.';
+    $('search-progress').hidden = !active;
+    $('search-progress').textContent = searchCancelPending ? '검색을 취소하고 있습니다…' : state.search?.progressText || '애니메이션 후보를 찾고 있습니다…';
+    $('search-form').setAttribute('aria-busy', String(active));
     const container = $('search-results');
     container.hidden = !searchMessage && !searchResults.length;
-    if (!searchResults.length) {
-      container.innerHTML = `<div class="empty-list">${esc(searchMessage)}</div>`;
-      return;
-    }
-    container.innerHTML = searchResults.map((clip, index) => `<label class="search-result"><input type="checkbox" data-result="${index}" ${searchSelection.has(index) ? 'checked' : ''}><span class="result-info"><span class="result-name">${esc(clip.name)}</span><span class="result-meta" style="display:block">${esc(clip.stateName ? `상태 ${clip.stateName} · ` : '')}${seconds(clip.length)} s<br>${esc(clip.path)}${clip.compatible === false ? `<br><span class="result-warning">${esc(clip.reason || '자동 적용 제한')}</span>` : ''}</span></span></label>`).join('') + `<button id="add-search-results" class="button full-width" ${!searchSelection.size ? 'disabled' : ''}>선택한 애니메이션 추가 (${searchSelection.size})</button>`;
+    const locked = active || pendingOperations > 0 || !connectionReady();
+    container.innerHTML = `${searchMessage ? `<p class="search-summary${searchFailed ? ' search-error' : ''}" role="status">${esc(searchMessage)}</p>` : ''}${searchDetails ? `<p class="search-details">${esc(searchDetails)}</p>` : ''}${searchFailed && semantic ? '<button id="use-name-search" type="button" class="text-button">이름으로 검색하기</button>' : ''}` + searchResults.map((clip, index) => `<label class="search-result"><input type="checkbox" data-result="${index}" ${searchSelection.has(index) ? 'checked' : ''} ${locked ? 'disabled' : ''}><span class="result-info"><span class="result-name">${searchResultMode === 'semantic' ? `<span class="result-rank">추천 ${index + 1}</span> ` : ''}${esc(clip.name)}</span>${clip.searchReason ? `<span class="result-reason">${esc(clip.searchReason)}</span>` : ''}<span class="result-meta">${esc(clip.stateName ? `상태 ${clip.stateName} · ` : '')}${seconds(clip.length)} s<br>${esc(clip.path)}${clip.compatible === false ? `<br><span class="result-warning">${esc(clip.reason || '자동 적용 제한')}</span>` : ''}</span></span></label>`).join('') + (searchResults.length ? `<button id="add-search-results" class="button full-width" ${!searchSelection.size || locked ? 'disabled' : ''}>선택한 애니메이션 추가 (${searchSelection.size})</button>` : '');
   }
 
   function renderJobs() {
     const jobs = state.jobs || [];
     $('job-count').textContent = jobs.length;
-    $('job-list').innerHTML = jobs.length ? jobs.map((item, index) => `<div class="job-card ${item.id === state.selectedJobId ? 'active' : ''}" data-job="${esc(item.id)}" role="listitem" tabindex="0" aria-label="${esc(item.clip?.name)} · ${esc(statusLabel(item))}"><div class="job-index">${String(index + 1).padStart(2, '0')}</div><div class="job-info"><div class="job-name" title="${esc(item.clip?.name)}">${esc(item.clip?.name || '애니메이션')}</div><div class="job-meta"><span class="job-status ${esc(item.status)}">${esc(statusLabel(item))}</span><span>·</span><span>${seconds(duration(item))} s</span>${windows(item).length ? `<span>· ${windows(item).length}타</span>` : ''}</div>${lockedJob(item) || item.error ? `<div class="job-progress">${esc(item.error || item.progressText || '작업을 준비하고 있습니다.')}</div>` : ''}</div><button class="icon-button job-remove" data-remove-job="${esc(item.id)}" title="작업 목록에서 제거" aria-label="${esc(item.clip?.name)} 작업 제거" ${lockedJob(item) || analysisActive() ? 'disabled' : ''}>×</button></div>`).join('') : '<div class="empty-list">분석할 애니메이션이 없습니다.<br>이름으로 검색하거나 파일을 놓아 주세요.</div>';
+    $('job-list').innerHTML = jobs.length ? jobs.map((item, index) => `<div class="job-card ${item.id === state.selectedJobId ? 'active' : ''}" data-job="${esc(item.id)}" role="listitem" tabindex="0" aria-label="${esc(item.clip?.name)} · ${esc(statusLabel(item))}"><div class="job-index">${String(index + 1).padStart(2, '0')}</div><div class="job-info"><div class="job-name" title="${esc(item.clip?.name)}">${esc(item.clip?.name || '애니메이션')}</div><div class="job-meta"><span class="job-status ${esc(item.status)}">${esc(statusLabel(item))}</span><span>·</span><span>${seconds(duration(item))} s</span>${windows(item).length ? `<span>· ${windows(item).length}타</span>` : ''}</div>${lockedJob(item) || item.error ? `<div class="job-progress">${esc(item.error || item.progressText || '작업을 준비하고 있습니다.')}</div>` : ''}</div><button class="icon-button job-remove" data-remove-job="${esc(item.id)}" title="작업 목록에서 제거" aria-label="${esc(item.clip?.name)} 작업 제거" ${lockedJob(item) || analysisActive() ? 'disabled' : ''}>×</button></div>`).join('') : '<div class="empty-list">분석할 애니메이션이 없습니다.<br>원하는 동작을 설명하거나 파일을 놓아 주세요.</div>';
   }
 
   function renderStage() {
@@ -353,8 +380,15 @@
     const locked = pendingOperations > 0;
     $('select-project').disabled = locked || analysisActive();
     $('refresh-catalog').disabled = !state.projectPath || locked || analysisActive();
-    $('search-button').disabled = !connectionReady() || locked;
-    $('drop-zone').disabled = !connectionReady() || locked;
+    $('search-button').disabled = !connectionReady() || locked || state.busy || analysisActive() || searchActive() || searchCancelPending;
+    $('cancel-search').hidden = !searchActive() && !searchCancelPending;
+    $('cancel-search').disabled = searchCancelPending;
+    $('search-mode').disabled = locked || searchCancelPending;
+    $('animation-query').disabled = locked || searchActive() || searchCancelPending;
+    $('drop-zone').disabled = !connectionReady() || locked || searchActive() || searchCancelPending;
+    if ($('actor-select')) $('actor-select').disabled = !connectionReady() || locked;
+    if ($('add-search-results')) $('add-search-results').disabled = !searchSelection.size || !connectionReady() || locked || searchActive();
+    for (const checkbox of document.querySelectorAll('[data-result]')) checkbox.disabled = !connectionReady() || locked || searchActive();
     $('analyze-all').disabled = !canAnalyze() || !state.actorId || locked || !(state.jobs || []).some(item => !item.pendingSave && ['draft', 'failed', 'cancelled'].includes(item.status));
     $('cancel-analysis').hidden = !analysisActive();
     $('cancel-analysis').disabled = locked;
@@ -368,7 +402,7 @@
     $('seek').disabled = !duration(selected);
     if ($('preview-change')) $('preview-change').disabled = locked || !connectionReady() || state.busy || !selected?.reviewed || !windows(selected).length || !selected?.sourceGuid || !(selected?.mode === 'register' ? selected.group && selected.templatePath : selected?.actionPath) || windows(selected).some(window => windowError(window, duration(selected)));
     if ($('apply-change')) $('apply-change').disabled = locked || !connectionReady() || state.busy || !selected?.reviewed;
-    if ($('install-integration')) $('install-integration').disabled = locked;
+    if ($('install-integration')) $('install-integration').disabled = locked || state.busy || analysisActive() || searchActive();
     if (lockedJob(selected)) for (const control of document.querySelectorAll('#hits-panel input, #hits-panel select, #hits-panel button, #save-panel input, #save-panel select, #save-panel button')) control.disabled = true;
   }
 
@@ -444,38 +478,84 @@
 
   async function searchAnimations() {
     if (!connectionReady()) { showNotice('먼저 Unity 프로젝트를 연결해 주세요.'); return; }
+    if (pendingOperations || state.busy || analysisActive() || searchActive() || searchCancelPending) return;
     const query = $('animation-query').value.trim();
-    const generation = ++searchGeneration;
-    searchMessage = '애니메이션을 찾고 있습니다…';
-    searchResults = [];
+    const mode = $('search-mode').value;
+    resetSearch();
+    if (!query) {
+      searchMessage = mode === 'semantic' ? '찾고 싶은 동작을 설명해 주세요. 예: 앞으로 돌진하며 검을 두 번 휘두르는 공격' : '클립 이름, Animator 상태 또는 경로를 입력해 주세요.';
+      renderSearch();
+      $('animation-query').focus();
+      return;
+    }
+    const generation = searchGeneration;
+    const context = searchContext();
+    searchPending = true;
     renderSearch();
-    const result = await run('애니메이션 검색 실패', () => api.searchAnimations(query), false);
-    if (generation !== searchGeneration) return;
-    searchResults = Array.isArray(result) ? result : result?.clips || result?.animations || result?.results || [];
-    searchSelection = new Set(searchResults.length === 1 ? [0] : []);
-    searchMessage = result === undefined ? '검색하지 못했습니다. Unity 연결을 확인하세요.' : searchResults.length ? '' : '일치하는 애니메이션이 없습니다.';
+    renderButtons();
+    try {
+      const result = await api.searchAnimations(query, { mode });
+      if (generation !== searchGeneration || context !== searchContext()) return;
+      searchResults = Array.isArray(result) ? result : result?.clips || result?.animations || result?.results || [];
+      searchResultMode = result?.mode || mode;
+      searchSelection = new Set();
+      searchMessage = result?.summary || (searchResults.length ? `${searchResults.length}개의 후보를 찾았습니다. 추가할 애니메이션을 선택하세요.` : '일치하는 애니메이션이 없습니다. 다른 동작이나 이름으로 검색해 보세요.');
+      searchDetails = `${Number.isFinite(result?.searchedCount) ? `${result.searchedCount}개 후보 검토 · ` : ''}${searchResults.length}개 결과${result?.truncated ? ' · 추가 후보가 있어 상위 결과만 표시합니다.' : ''}`;
+    } catch (error) {
+      if (generation !== searchGeneration || context !== searchContext()) return;
+      const cancelled = error?.code === 'CANCELLED' || error?.name === 'AbortError';
+      searchFailed = !cancelled;
+      searchMessage = cancelled ? '검색을 취소했습니다.' : `검색하지 못했습니다: ${error?.message || String(error)}${mode === 'semantic' ? ' 이름으로 찾기도 사용할 수 있습니다.' : ''}`;
+    } finally {
+      if (generation === searchGeneration) searchPending = false;
+      renderSearch();
+      renderButtons();
+    }
+  }
+
+  async function cancelSearch(message = '검색을 취소했습니다.') {
+    const active = searchActive();
+    resetSearch(message);
+    if (active && !searchCancelPending) {
+      searchCancelPending = true;
+      renderSearch();
+      renderButtons();
+      try { await api.cancelAnimationSearch(); }
+      catch (error) { showNotice(`검색 취소 실패: ${error?.message || String(error)}`, 'error'); }
+      finally { searchCancelPending = false; }
+    }
     renderSearch();
+    renderButtons();
   }
 
   async function importFiles(files) {
     if (!connectionReady()) { showNotice('먼저 Unity 프로젝트를 연결해 주세요.'); return; }
+    if (pendingOperations || searchActive() || searchCancelPending) return;
     const paths = Array.from(files).map(file => api.filePath(file)).filter(Boolean);
     if (!paths.length) return;
     if (paths.some(path => !/\.(fbx|anim)$/i.test(path))) { showNotice('FBX 또는 ANIM 파일만 추가할 수 있습니다.', 'error'); return; }
+    resetSearch();
+    const generation = searchGeneration;
+    const context = searchContext();
+    renderSearch();
     const result = await run('애니메이션 파일 가져오기 실패', () => api.importFiles(paths));
+    if (generation !== searchGeneration || context !== searchContext()) return;
     const clips = Array.isArray(result) ? result : result?.clips || result?.animations || [];
     if (clips.length === 1) await run('작업 추가 실패', () => api.addJobs(clips));
     else if (clips.length > 1) {
       searchResults = clips;
       searchSelection = new Set();
-      searchMessage = '';
+      searchMessage = `${clips.length}개의 클립을 가져왔습니다. 추가할 애니메이션을 선택하세요.`;
       renderSearch();
       showNotice(`${clips.length}개의 클립을 찾았습니다. 분석할 클립을 선택해 주세요.`);
     }
   }
 
   $('search-form').addEventListener('submit', event => { event.preventDefault(); searchAnimations(); });
-  $('select-project').addEventListener('click', () => run('프로젝트 선택 실패', () => api.selectProject()));
+  $('animation-query').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); searchAnimations(); } });
+  $('search-mode').addEventListener('change', () => cancelSearch(''));
+  $('cancel-search').addEventListener('click', () => cancelSearch());
+  $('select-project').addEventListener('click', async () => { await cancelSearch(''); await run('프로젝트 선택 실패', () => api.selectProject()); });
   $('refresh-catalog').addEventListener('click', () => run('목록 새로고침 실패', () => api.refreshCatalog()));
   $('drop-zone').addEventListener('click', () => $('file-input').click());
   $('file-input').addEventListener('change', event => { importFiles(event.target.files); event.target.value = ''; });
@@ -499,9 +579,11 @@
     if (button?.disabled) return;
     if (button?.id === 'dismiss-notice') { localNotice = null; state.notice = null; renderNotice(); }
     if (button?.id === 'install-integration') await run('Unity 연동 설치 실패', () => api.installIntegration());
+    if (button?.id === 'use-name-search') { $('search-mode').value = 'name'; await cancelSearch(''); $('animation-query').focus(); }
     if (button?.id === 'add-search-results') {
+      const generation = searchGeneration;
       const result = await run('작업 추가 실패', () => api.addJobs([...searchSelection].map(index => searchResults[index])));
-      if (result !== undefined) { searchResults = []; searchSelection.clear(); searchMessage = ''; renderSearch(); }
+      if (result !== undefined && generation === searchGeneration) { resetSearch(); renderSearch(); }
     }
     if (button?.dataset.removeJob) { await run('작업 제거 실패', () => api.removeJob(button.dataset.removeJob)); return; }
     const card = event.target.closest('[data-job]');
@@ -547,7 +629,7 @@
       if (input.checked) searchSelection.add(index); else searchSelection.delete(index);
       renderSearch();
     }
-    if (input.id === 'actor-select') await run('캐릭터 선택 실패', () => api.updateSettings({ actorId: input.value, weaponId: '', weaponBone: '' }));
+    if (input.id === 'actor-select') { const actorId = input.value; await cancelSearch(''); await run('캐릭터 선택 실패', () => api.updateSettings({ actorId, weaponId: '', weaponBone: '' })); }
     if (input.id === 'weapon-select') await run('무기 선택 실패', () => api.updateSettings({ weaponId: input.value }));
     if (input.id === 'weapon-bone') await run('무기 위치 변경 실패', () => api.updateSettings({ weaponBone: input.value.trim() }));
     if (input.dataset.hitInput) {

@@ -10,8 +10,9 @@ class Controller extends EventEmitter {
   constructor({ store, clientFactory = project => new ProjectClient(project), ai = new CodexAnalyzer(), install } = {}) {
     super(); this.store = store; this.clientFactory = clientFactory; this.ai = ai; this.install = install;
     this.state = { projectPath: '', connection: { ready: false, message: 'Unity 프로젝트를 선택하세요.' }, ai: { available: false, authenticated: false, label: 'Codex 확인 전' },
-      actors: [], actorId: '', sources: [], targets: [], groups: [], jobs: [], selectedJobId: '', settings: {}, busy: false, notice: '' };
+      actors: [], actorId: '', sources: [], targets: [], groups: [], jobs: [], selectedJobId: '', settings: {}, busy: false, notice: '', search: { busy: false, progressText: '' } };
     this.preview = null; this.previewRevision = 0; this.abortController = null; this.applying = false; this.queuePromise = null;
+    this.searchAbortController = null; this.searchPromise = null;
   }
   changed(persist = true) {
     if (persist && this.state.projectPath) this.store.save(this.state.projectPath, { settings: this.state.settings, jobs: this.state.jobs, selectedJobId: this.state.selectedJobId });
@@ -30,6 +31,7 @@ class Controller extends EventEmitter {
   contextKey() { return [this.state.actorId, this.state.settings.weaponId || '', this.state.settings.weaponBone || ''].join('|'); }
   async connectProject(projectPath) {
     this.idle(); const client = this.clientFactory(projectPath); const saved = this.store.load(client.projectPath);
+    this.cancelAnimationSearch();
     this.client = client; this.invalidatePreview();
     Object.assign(this.state, { projectPath: client.projectPath, settings: saved.settings || {}, jobs: saved.jobs || [], selectedJobId: saved.selectedJobId || '',
       actors: [], sources: [], targets: [], groups: [], actorId: saved.settings?.actorId || '', notice: saved.recoveryError || '', connection: client.heartbeat() });
@@ -44,6 +46,7 @@ class Controller extends EventEmitter {
       if (this.state.connection.ready) {
         const actorResult = await this.client.command('actors'); this.state.actors = actorResult.actors || [];
         if (!this.state.actors.some(actor => actor.id === this.state.actorId)) {
+          this.cancelAnimationSearch();
           this.invalidatePreview();
           this.state.actorId = this.state.actors.length === 1 ? this.state.actors[0].id : '';
           this.state.settings.actorId = this.state.actorId;
@@ -120,7 +123,7 @@ class Controller extends EventEmitter {
     const old = this.contextKey();
     for (const key of ['actorId', 'weaponId', 'weaponBone']) if (key in patch) this.state.settings[key] = String(patch[key] || '');
     this.state.actorId = this.state.settings.actorId || '';
-    if (old !== this.contextKey()) { this.invalidatePreview(); for (const job of this.state.jobs) job.reviewed = false; }
+    if (old !== this.contextKey()) { this.cancelAnimationSearch(); this.invalidatePreview(); for (const job of this.state.jobs) job.reviewed = false; }
     this.changed(); return this.refreshCatalog();
   }
   async installIntegration() {
@@ -128,7 +131,79 @@ class Controller extends EventEmitter {
     const result = await this.install(this.state.projectPath);
     this.state.notice = result.message; this.changed(); return result;
   }
-  async searchAnimations(query) { return this.connected().command('search', { query: String(query || '').slice(0, 300), actorId: this.state.actorId }); }
+  async searchAnimations(query, options = {}) {
+    this.idle(); const client = this.connected();
+    if (typeof query !== 'string' || !query.trim() || query.length > 600)
+      throw fault('찾고 싶은 동작이나 이름을 1~600자로 입력하세요.');
+    if (!options || typeof options !== 'object' || Array.isArray(options)) throw fault('검색 방식을 확인하세요.');
+    const mode = options.mode || 'semantic';
+    if (!['semantic', 'name'].includes(mode)) throw fault('검색 방식을 확인하세요.');
+    this.cancelAnimationSearch();
+    const abort = new AbortController(), actorId = this.state.actorId;
+    this.searchAbortController = abort;
+    const check = () => {
+      if (abort.signal.aborted || this.client !== client || this.state.actorId !== actorId)
+        throw fault('애니메이션 검색을 취소했습니다.', 'CANCELLED');
+    };
+    const progress = message => { check(); this.state.search = { busy: true, progressText: message }; this.changed(false); };
+    progress('Unity에서 애니메이션 목록을 불러오고 있습니다…');
+    const promise = this.findAnimations(query.trim(), mode, client, actorId, abort.signal, check, progress)
+      .finally(() => {
+        if (this.searchAbortController === abort) {
+          this.searchAbortController = null; this.searchPromise = null;
+          this.state.search = { busy: false, progressText: '' }; this.changed(false);
+        }
+      });
+    this.searchPromise = promise;
+    return promise;
+  }
+  async findAnimations(query, mode, client, actorId, signal, check, progress) {
+    const clips = [], seen = new Set(); let offset = 0;
+    for (;;) {
+      check();
+      const page = await client.command('search', { query: mode === 'name' ? query : '', actorId, offset, limit: 300 }, { signal, timeoutMs: 120000 });
+      check();
+      if (!page || !Array.isArray(page.clips) || typeof page.truncated !== 'boolean')
+        throw fault('Unity 애니메이션 목록을 읽지 못했습니다.', 'INVALID_RESPONSE');
+      for (const clip of page.clips) {
+        if (!clip || typeof clip.guid !== 'string' || !/^-?\d+$/.test(String(clip.localId)) || typeof clip.name !== 'string' || !Number.isFinite(clip.length))
+          throw fault('Unity 애니메이션 정보가 유효하지 않습니다.', 'INVALID_RESPONSE');
+        const key = JSON.stringify([clip.guid, String(clip.localId), clip.stateName || '']);
+        if (!seen.has(key)) { seen.add(key); clips.push(clip); }
+      }
+      if (!page.truncated) break;
+      if (!Number.isSafeInteger(page.nextOffset) || page.nextOffset !== offset + page.clips.length || page.nextOffset <= offset)
+        throw fault('전체 애니메이션 검색을 위해 Unity 연결 모듈을 설치 / 복구한 뒤 다시 검색하세요.', 'SEARCH_CATALOG_INCOMPLETE');
+      offset = page.nextOffset;
+      progress(`Unity 애니메이션 ${clips.length}개 확인 · 나머지 목록을 불러오고 있습니다…`);
+    }
+    if (mode === 'name') return { clips, mode, searchedCount: clips.length, truncated: false,
+      summary: clips.length ? `이름·상태·경로와 일치하는 후보 ${clips.length}개` : '일치하는 애니메이션이 없습니다.' };
+    if (!clips.length) return { clips: [], mode, searchedCount: 0, truncated: false, summary: '프로젝트에 검색할 애니메이션이 없습니다.' };
+    if (typeof this.ai.rankAnimations !== 'function') throw fault('Codex 자연어 검색을 사용할 수 없습니다. 이름 검색을 이용하세요.', 'AI_UNAVAILABLE');
+    let candidates = clips, ranked = [], model, pass = 0, narrowed = false;
+    for (;;) {
+      ranked = [];
+      for (let start = 0; start < candidates.length; start += 160) {
+        check();
+        const batch = candidates.slice(start, start + 160);
+        progress(`${pass ? 'AI가 추천 후보의 순서를 비교하고 있습니다' : 'AI가 동작 설명과 비교하고 있습니다'} · ${Math.floor(start / 160) + 1}/${Math.ceil(candidates.length / 160)} (${candidates.length}개 후보)`);
+        const result = await this.ai.rankAnimations({ query, clips: batch }, { signal });
+        check(); model = result.model;
+        for (const match of result.matches) ranked.push({ ...batch[match.index], searchScore: match.score, searchReason: match.reason });
+      }
+      narrowed ||= ranked.length > 20;
+      // Scores from independent batches are not calibrated. Compare their finalists
+      // together, recursively reducing very large catalogs, before presenting an order.
+      if (candidates.length <= 160 || ranked.length <= 1) break;
+      candidates = ranked; pass++;
+    }
+    const results = ranked.sort((a, b) => b.searchScore - a.searchScore).slice(0, 20);
+    return { clips: results, mode, model, searchedCount: clips.length, truncated: narrowed,
+      summary: results.length ? `${clips.length}개 후보 중 설명과 가까운 ${results.length}개를 추천합니다. 이름·상태·경로를 바탕으로 추정했으므로 실제 동작은 미리보기로 확인하세요.` :
+        `${clips.length}개 후보에서 설명과 가까운 동작을 찾지 못했습니다. 무기나 동작을 달리 설명하거나 이름 검색을 이용하세요.` };
+  }
+  cancelAnimationSearch() { this.searchAbortController?.abort(); return { cancelled: true }; }
   async importFiles(paths) {
     this.idle(); const client = this.connected();
     if (!Array.isArray(paths) || !paths.length || paths.length > 100) throw fault('애니메이션 파일을 1~100개 선택하세요.');
@@ -305,6 +380,9 @@ class Controller extends EventEmitter {
       throw error;
     } finally { this.preview = null; this.applying = false; this.state.busy = false; this.changed(); }
   }
-  async shutdown() { this.abortController?.abort(); if (this.queuePromise) await this.queuePromise; }
+  async shutdown() {
+    this.abortController?.abort(); this.cancelAnimationSearch();
+    await Promise.allSettled([this.queuePromise, this.searchPromise].filter(Boolean));
+  }
 }
 module.exports = { Controller };

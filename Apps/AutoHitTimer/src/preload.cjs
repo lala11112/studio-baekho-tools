@@ -1,7 +1,7 @@
 'use strict';
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 const api = {};
-for (const name of ['getState', 'selectProject', 'connectProject', 'installIntegration', 'refreshCatalog', 'searchAnimations', 'importFiles', 'addJobs', 'selectJob', 'updateJob', 'updateSettings', 'analyzeJobs', 'cancelAnalysis', 'removeJob', 'previewChange', 'applyChange', 'revealAsset']) {
+for (const name of ['getState', 'selectProject', 'connectProject', 'installIntegration', 'refreshCatalog', 'searchAnimations', 'cancelAnimationSearch', 'importFiles', 'addJobs', 'selectJob', 'updateJob', 'updateSettings', 'analyzeJobs', 'cancelAnalysis', 'removeJob', 'previewChange', 'applyChange', 'revealAsset']) {
   api[name] = async (...args) => {
     const result = await ipcRenderer.invoke('aht:' + name, ...args);
     if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code });
