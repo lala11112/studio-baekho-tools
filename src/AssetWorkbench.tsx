@@ -643,7 +643,11 @@ export function AssetWorkbench({
         : step;
   const stageJobs = jobs.filter((j) => j.slot === slot);
   const latestJob = stageJobs[0];
-  const viewing = stageJobs.find((j) => j.id === viewJobId) ?? latestJob;
+  const revisionOriginal = step === "animation" && latestJob?.request.baseJobId
+    ? stageJobs.find(j => j.id === latestJob.request.baseJobId && j.status === "review" && currentInputs(j))
+    : undefined;
+  const retainedOriginal = revisionOriginal && !latestJob?.candidates.length ? revisionOriginal : undefined;
+  const viewing = stageJobs.find((j) => j.id === viewJobId) ?? retainedOriginal ?? latestJob;
   const viewingCurrent = currentInputs(viewing);
   const editBase =
     viewing?.status === "review" && viewingCurrent ? viewing : undefined;
@@ -2564,13 +2568,13 @@ export function AssetWorkbench({
                   <small>원본 영상에서 추출할 시점입니다. 비워 두면 균등하게 추출합니다. 생성 AI가 이 시점의 자세를 정확히 지켰는지는 결과 검토가 필요합니다.</small>
                 </label>
                 <label className="field">
-                  <span>동작·수정 지시</span>
+                  <span>{motionMode === "animation" && editBase ? "기존 애니메이션 수정 지시" : "동작·수정 지시"}</span>
                   <textarea
                     data-testid="workbench-motion-prompt"
                     rows={5}
                     value={motionPrompt}
                     onChange={(e) => setMotionPrompt(e.target.value)}
-                    placeholder="오른손을 천천히 들고 두 번 흔든 뒤 원래 자세로 돌아오기…"
+                    placeholder={motionMode === "animation" && editBase ? "예: 기존 얼굴 움직임은 유지하고, 몸통의 호흡과 다리의 작은 움직임만 추가해 주세요." : "오른손을 천천히 들고 두 번 흔든 뒤 원래 자세로 돌아오기…"}
                   />
                 </label>
                 {motionMode === "reference" ? (
@@ -2581,7 +2585,7 @@ export function AssetWorkbench({
                   <>
                     {launch(
                       editBase
-                        ? "Astra로 3D 동작 수정 · 리롤"
+                        ? "기존 애니메이션에 수정 지시 적용"
                         : "채택한 동작을 보고 Astra로 3D 제작",
                       {
                         step: "animation",
@@ -2594,11 +2598,10 @@ export function AssetWorkbench({
                         loop: reference?.job.request.loop,
                         baseJobId: editBase?.id,
                       },
-                      !reference || !motion.trim(),
+                      !reference || !motion.trim() || (!!editBase && !motionPrompt.trim()),
                     )}
                     <div className="wb-note">
-                      채택한 원본 동작의 추출 프레임과 타이밍을 기준으로 Astra가
-                      Blender에서 포즈와 키프레임을 만듭니다.
+                      {editBase ? "기존 3D 애니메이션을 열어 입력한 부분만 수정합니다. 채택한 동작 영상과 참조 프레임은 계속 사용하며, 원본은 보존하고 수정본을 새 버전으로 저장합니다." : "채택한 원본 동작의 추출 프레임과 타이밍을 기준으로 Astra가 Blender에서 포즈와 키프레임을 만듭니다."}
                     </div>
                   </>
                 )}
@@ -2654,6 +2657,19 @@ export function AssetWorkbench({
             )}
           </aside>
           <section className="wb-results" data-testid="workbench-results">
+            {retainedOriginal && viewing?.id === retainedOriginal.id && (
+              <div className="wb-note" data-testid="workbench-animation-original">
+                기존 애니메이션을 표시하고 있습니다. 수정 작업의 상태는 위에 표시됩니다.
+                원본과 동작 참조는 그대로 보존됩니다.
+                {latestJob?.request.prompt && <>
+                  <p>요청한 수정: {latestJob.request.prompt}</p>
+                  <button data-testid="workbench-reuse-revision-prompt" disabled={locked}
+                    onClick={() => setMotionPrompt(latestJob.request.prompt)}>
+                    이 수정 지시 불러오기
+                  </button>
+                </>}
+              </div>
+            )}
             <div className="wb-result-title">
               <h2>
                 {page === "concept"

@@ -1894,6 +1894,19 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
       fs.copyFileSync(source, this.file(context.workspace, localPath));
       return { ...artifact, localPath };
     });
+    // A prior animation's frames artifact indexes its rendered output, not the
+    // accepted motion reference. Classify by frozen candidate provenance, never
+    // by a missing `frames` field (malformed reference manifests must still fail).
+    if (context.job.step === "animation" && context.job.request.baseJobId) {
+      const baseJob = context.workbench.jobs.find(j => j.id === context.job.request.baseJobId);
+      const base = this.baseInputs(context, copied);
+      if (baseJob?.step !== "animation" || !base.some(i => i.kind === "blend"))
+        throw Error("수정할 기존 3D 애니메이션 원본이 없습니다.");
+      for (const input of base.filter(i => i.kind === "frames")) {
+        input.kind = "report";
+        input.role = "prior-animation-render-index";
+      }
+    }
     for (const input of copied.filter((item) => item.kind === "frames")) {
       const file = this.file(context.workspace, input.localPath);
       const manifest = readJson(file);
@@ -2012,6 +2025,9 @@ export class CodexWorkbenchExecutor implements WorkbenchExecutor {
         ? `Approved Studio credit cap for this action: ${context.job.approval.studioCreditLimit}. Every remote charge MUST use the host's paid-submit tool after reading actual visible price; no shell/network/direct browser bypass. This phase permits at most ONE charge. Never retry uncertain submission. If any required UI/cost/model/count is missing, return needs_input. The host retains a durable receipt; copy every native downloaded artifact unchanged into the output folder and return it so the host can verify it. ${context.job.step === "concept" ? "Keep the native downloaded images unchanged." : "Keep unchanged native model downloads as artifact kind 'export'. For kind 'model', use a separate unchanged copy if the native GLB is already uncompressed and self-contained. Only convert incompatible formats to uncompressed self-contained geometry GLB with Blender. Capture review images directly from the actual Studio candidate previews using studio_snapshot; no local render is required."}`
         : "",
       instructions[context.job.step],
+      request.baseJobId && context.job.step === "animation"
+        ? `ANIMATION REVISION: Open the existing animated .blend at ${JSON.stringify(this.baseInputs(context, inputs).filter(i => i.kind === "blend").map(i => i.localPath))} as the editable starting scene. Do NOT start again from the unanimated rig. Apply ONLY the user's correction prompt to that existing action; preserve untargeted poses, keys, mesh, materials, rig, stable IDs and other actions. Continue inspecting the accepted original motion video and its decoded reference frames; the correction prompt controls the requested deviations from that reference. Files tagged prior-animation-render-index describe the previous 3D output, NOT AI motion references. Save a NEW version under the output folder; never overwrite the original. No image/video generation or paid service calls.`
+        : "",
       request.baseJobId && context.job.step === "separate"
         ? "Apply the requested image correction only. The host preserves untargeted images."
         : request.baseJobId

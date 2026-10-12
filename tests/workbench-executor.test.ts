@@ -527,6 +527,50 @@ for (const mode of ["side", "multiview"] as const) {
   });
 }
 
+test("animation revision uses the original blend and accepted video; render index is not a reference manifest", async t => {
+  const f = fixture("animation"), worker = new Worker();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const root = f.services.projectRoot("project");
+  const add = (job: string, name: string, kind: "blend" | "video" | "image" | "frames", content: string) => {
+    const relative = `workbench/bench/jobs/${job}/outputs/${name}`;
+    const file = path.join(root, relative);
+    fs.mkdirSync(path.dirname(file), {recursive:true}); fs.writeFileSync(file, content);
+    const artifact = {path:relative, kind, sha256:digest(file), bytes:fs.statSync(file).size};
+    f.context.inputs.push(artifact); return artifact;
+  };
+  add("reference", "side.mp4", "video", "native video fixture");
+  add("reference", "side.png", "image", "native reference frame fixture");
+  const reference = add("reference", "frames.json", "frames", JSON.stringify({source:"video-ai",mode:"side",videos:{side:{path:"outputs/side.mp4",startTime:0}},frames:[{time:0,side:"outputs/side.png"}]}));
+  const blend = add("original", "Rabbit_Idle.blend", "blend", "animated scene fixture");
+  const index = add("original", "frames.json", "frames", JSON.stringify({fps:30,duration:2,count:60,path:"outputs/animation/frames",pattern:"%03d.png",loop:true}));
+  f.context.job.request.baseJobId = "original";
+  f.context.job.request.baseCandidateId = "Rabbit_Idle";
+  f.context.job.request.prompt = "Preserve the face, add body breathing";
+  f.context.workbench.jobs.push({...structuredClone(f.context.job), id:"original", status:"review", candidates:[{id:"Rabbit_Idle",label:"Idle",artifacts:[blend,index],objects:[]}]});
+  const executor = new CodexWorkbenchExecutor(worker, f.services);
+  await executor.execute(f.context, () => {});
+  assert.equal(worker.calls.length, 1);
+  const prompt = worker.calls[0].prompt;
+  assert.match(prompt, /ANIMATION REVISION: Open the existing animated/);
+  assert(prompt.includes("inputs/3-Rabbit_Idle.blend"));
+  assert.match(prompt, /prior-animation-render-index/);
+  assert.match(prompt, /Preserve the face, add body breathing/);
+  const copied = JSON.parse(fs.readFileSync(path.join(f.context.workspace,"inputs/2-frames.json"),"utf8"));
+  assert.equal(copied.videos.side.path,"inputs/0-side.mp4");
+  assert.equal(copied.frames[0].side,"inputs/1-side.png");
+  for (const artifact of f.context.inputs) assert.equal(digest(path.join(root,artifact.path)),artifact.sha256);
+  assert.equal(digest(path.join(f.context.workspace,"inputs/4-frames.json")),index.sha256);
+  // The same malformed shape on an accepted reference remains an error.
+  fs.writeFileSync(path.join(root,reference.path),JSON.stringify({count:60,path:"frames"}));
+  reference.sha256 = digest(path.join(root,reference.path));
+  worker.calls.length = 0;
+  await assert.rejects(executor.execute(f.context, () => {}), /동작 이미지 명세/);
+  assert.equal(worker.calls.length,0);
+  f.context.inputs = f.context.inputs.filter(i => i !== blend);
+  await assert.rejects(executor.execute(f.context, () => {}), /기존 3D 애니메이션 원본/);
+  assert.equal(worker.calls.length,0);
+});
+
 test("GLB inspection rejects broken UV accessors, inflated weights and static animation", () => {
   const valid = buildWorkbenchGlb();
   assert(
