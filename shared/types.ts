@@ -45,6 +45,7 @@ export type JobKind =
   | "complete"
   | "retopology"
   | "uv-pack"
+  | "smart-uv"
   | "texture"
   | "convert";
 export type JobStatus =
@@ -184,6 +185,7 @@ export type Quote = {
 };
 export type AppState = {
   projects: Project[];
+  graphicsWorkspaces?: import("./graphics").GraphicsWorkspace[];
   productionRuns?: import("./production").ProductionRun[];
   workbenches?: import("./workbench").Workbench[];
   settings: Settings;
@@ -204,6 +206,7 @@ export type ChatGptStatus = {
 };
 export type Command =
   | { type: "state" }
+  | { type: "graphics.action"; id: string; action: import("./graphics").GraphicsAction }
   | {
       type: "workbench.action";
       id: string;

@@ -50,6 +50,7 @@ import type {
 import { Viewport } from "./Viewport";
 import { CropEditor } from "./CropEditor";
 import { AssetWorkbench } from "./AssetWorkbench";
+import { GraphicsStudio } from "./GraphicsStudio";
 import { catalog } from "../shared/catalog";
 import {
   TripoStudio,
@@ -58,6 +59,7 @@ import {
   canPreview,
 } from "./TripoStudio";
 const steps = [
+  ["graphics", "Unity 그래픽 제작", Boxes],
   ["workbench", "단계별 에셋 제작", Workflow],
   ["studio", "Tripo 작업실", Sparkles],
   ["image", "이미지 스튜디오", ImagePlus],
@@ -188,7 +190,7 @@ export function App() {
   function open(p: Project) {
     setId(p.id);
     setPartId(p.parts[0]?.id ?? "");
-    setTab(p.demo ? "assembly" : "workbench");
+    setTab(p.demo ? "assembly" : "graphics");
     setPreview("");
   }
   async function deleteProject(project: Project) {
@@ -288,18 +290,18 @@ export function App() {
         <div className="nav-label">에셋 제작</div>
         <button
           disabled={!p}
-          onClick={() => setTab("workbench")}
-          className={`nav ${tab === "workbench" ? "selected" : ""}`}
+          onClick={() => setTab("graphics")}
+          className={`nav ${tab === "graphics" ? "selected" : ""}`}
         >
           <Workflow size={18} />
-          <span>단계별 에셋 제작</span>
+          <span>Unity 그래픽 제작</span>
         </button>
         <details
           className="manual-tools"
           key={p?.id}
           open={p?.demo || undefined}
         >
-          <summary>수동 도구 · 문제 해결</summary>
+          <summary>기존 작업 · 수동 도구</summary>
           {steps.slice(1).map(([key, label, Icon], i) => (
             <button
               key={key}
@@ -591,6 +593,15 @@ export function App() {
                 )}
               </div>
             </div>
+            {tab === "graphics" && (
+              <GraphicsStudio project={p} workspace={state.graphicsWorkspaces?.find(w => w.projectId === p.id)} busy={busy}
+                onAction={async action => {
+                  const result = await run({ type: "graphics.action", id: p.id, action });
+                  if (!result) throw new Error("그래픽 요청을 완료하지 못했습니다. 표시된 오류를 확인하세요. 다음 작업은 시작하지 않았습니다.");
+                  return result;
+                }}
+                onOpenSettings={() => setTab("settings")} />
+            )}
             {tab === "workbench" && (
               <AssetWorkbench
                 key={p.id}

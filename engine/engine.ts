@@ -26,6 +26,7 @@ const generationSchema = z.object({
     "complete",
     "retopology",
     "uv-pack",
+    "smart-uv",
     "texture",
     "convert",
   ]),
@@ -62,6 +63,7 @@ const generationSchema = z.object({
   rigType: z.enum(["biped", "quadruped"]).optional(),
 });
 const processing = [
+  "smart-uv",
   "segment",
   "smartsegment",
   "complete",
@@ -74,6 +76,7 @@ const processing = [
   "animate",
 ];
 const modelInputs = [
+  "smart-uv",
   "segment",
   "retopology",
   "uv-pack",
@@ -303,6 +306,8 @@ export class Engine {
       )
         throw new Error("현재 조립 버전의 리깅 적합성 검사를 먼저 완료하세요.");
     }
+    if (r.kind === "smart-uv" && r.model !== "default")
+      throw new Error("Smart UV는 default 모델만 지원합니다.");
     if (r.kind === "segment") {
       if (!catalog.segment.some((m) => m.id === r.model))
         throw new Error("지원 목록의 분할 모델을 선택하세요.");
@@ -680,6 +685,7 @@ export class Engine {
         complete: "/mesh/complete",
         retopology: "/mesh/decimate",
         "uv-pack": "/models/convert",
+        "smart-uv": "/mesh/uv",
         texture: "/models/texture",
         convert: "/models/convert",
       };
@@ -762,6 +768,8 @@ export class Engine {
               }
             : {}),
         };
+      else if (r.kind === "smart-uv")
+        body = { input, model: "default", bake: r.bake ?? true };
       else if (r.kind === "uv-pack" || r.kind === "convert")
         body = {
           input,

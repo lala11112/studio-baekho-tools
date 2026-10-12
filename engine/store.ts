@@ -62,7 +62,7 @@ export class Store {
   put(kind: string, id: string, value: unknown) {
     if (kind === "project" || kind === "unity-request")
       this.assertProjectAvailable(id);
-    else if (["quote", "workbench", "production"].includes(kind)) {
+    else if (["quote", "workbench", "production", "graphics"].includes(kind)) {
       const projectId = (value as { projectId?: string } | null)?.projectId;
       if (projectId) this.assertProjectAvailable(projectId);
     }
@@ -168,7 +168,7 @@ export class Store {
   private removeProjectRecords(id: string) {
     const related: [string, string][] = [];
     const statement = this.db.prepare(
-      "SELECT kind,id,json FROM records WHERE kind IN ('quote','workbench','production')",
+      "SELECT kind,id,json FROM records WHERE kind IN ('quote','workbench','production','graphics')",
     );
     try {
       while (statement.step()) {

@@ -1,0 +1,1621 @@
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  Box,
+  ChevronRight,
+  Check,
+  FilePlus2,
+  FolderOpen,
+  FolderInput,
+  Layers3,
+  Search,
+  Settings2,
+} from "lucide-react";
+import type { Project } from "../shared/types";
+import type {
+  AssetVersion,
+  GraphicsAction,
+  GraphicsKind,
+  GraphicsObject,
+  GraphicsRole,
+  GraphicsTask,
+  GraphicsWorkspace,
+} from "../shared/graphics";
+import {
+  filterGraphicsTasks,
+  findGraphicsTask,
+  graphicsCatalog,
+  graphicsApprovalState,
+  graphicsMultiviewProblem,
+  recommendedGraphicsTasks,
+} from "../shared/graphics-catalog";
+import { catalog } from "../shared/catalog";
+import { Viewport } from "./Viewport";
+import "./graphics-studio.css";
+
+type Props = {
+  project: Project;
+  workspace: GraphicsWorkspace | undefined;
+  busy: boolean;
+  onAction: (action: GraphicsAction) => Promise<unknown>;
+  onOpenSettings?: () => void;
+};
+const kinds: Record<GraphicsKind, string> = {
+  character: "캐릭터",
+  weapon: "무기",
+  prop: "소품",
+  environment: "환경",
+  sprite: "2D 스프라이트",
+  ui: "UI",
+  vfx: "VFX",
+};
+const roles: Record<GraphicsRole, string> = {
+  design: "디자인",
+  model: "모델",
+  material: "재질",
+  rig: "리그",
+  "motion-reference": "동작 참고",
+  animation: "애니메이션",
+  unity: "Unity",
+};
+const referenceRoles: Record<
+  GraphicsObject["references"][number]["role"],
+  string
+> = { appearance: "외형", style: "스타일", motion: "동작", dimensions: "치수" };
+const statusLabels = {
+  ready: "사용 가능",
+  unverified: "실제 검증 전",
+  planned: "미구현",
+};
+const provenanceLabels: Record<AssetVersion["provenance"]["type"], string> = {
+  import: "가져온 원본",
+  legacy: "기존 프로젝트 자료",
+  local: "로컬 처리 결과",
+  codex: "네이티브 이미지 결과",
+  tripo: "Tripo API 결과",
+};
+const availabilityCounts = {
+  ready: graphicsCatalog.filter((task) => task.status === "ready").length,
+  unverified: graphicsCatalog.filter((task) => task.status === "unverified")
+    .length,
+  planned: graphicsCatalog.filter((task) => task.status === "planned").length,
+};
+const isImagePath = (file: string) => /\.(png|jpe?g|webp|gif)$/i.test(file);
+const directions = [
+  ["front", "정면"],
+  ["left", "왼쪽"],
+  ["back", "후면"],
+  ["right", "오른쪽"],
+] as const;
+const taskStatuses: Record<GraphicsTask["status"], string> = {
+  awaiting_approval: "실행 승인 대기",
+  running: "진행 중",
+  review: "결과 검토",
+  failed: "실패",
+  cancelled: "취소됨",
+  submission_unknown: "제출 상태 확인 필요",
+};
+const fileName = (file: string) => file.split(/[\\/]/).at(-1) ?? file;
+const stamp = (value: string) => new Date(value).toLocaleString("ko-KR");
+const acceptedVersion = (object: GraphicsObject, version: AssetVersion) =>
+  Object.values(object.accepted).includes(version.id);
+
+function VersionPreview({
+  project,
+  version,
+}: {
+  project: Project;
+  version?: AssetVersion;
+}) {
+  const [mediaError, setMediaError] = useState(false);
+  useEffect(() => setMediaError(false), [version?.id]);
+  if (!version)
+    return (
+      <div className="gs-preview-empty">
+        <Box size={48} strokeWidth={1} />
+        <h3>자료에서 시작하세요</h3>
+        <p>
+          이미지, 모델, 리그 또는 동작을 가져오고
+          <br />
+          필요한 작업만 골라 실행합니다.
+        </p>
+      </div>
+    );
+  const glb = version.files.find((file) => /\.glb$/i.test(file.path));
+  const media =
+    version.preview ??
+    version.files.find((file) =>
+      /\.(png|jpe?g|webp|gif|mp4|webm)$/i.test(file.path),
+    )?.path;
+  if (glb) {
+    const id = `graphics-${version.id}`;
+    const previewProject: Project = {
+      ...project,
+      assets: [
+        ...project.assets,
+        {
+          id,
+          file: glb.path,
+          kind: "model",
+          label: version.label,
+          origin: "import",
+          createdAt: version.createdAt,
+        },
+      ],
+      parts: [],
+    };
+    return (
+      <Viewport
+        project={previewProject}
+        previewId={id}
+        animation={version.role === "animation"}
+      />
+    );
+  }
+  if (media && !mediaError && /\.(mp4|webm)$/i.test(media))
+    return (
+      <video
+        className="gs-media"
+        aria-label={version.label}
+        controls
+        src={window.desktop.assetUrl(project.id, media)}
+        onError={() => setMediaError(true)}
+      />
+    );
+  if (media && !mediaError && /\.(png|jpe?g|webp|gif)$/i.test(media))
+    return (
+      <img
+        className="gs-media"
+        alt={version.label}
+        src={window.desktop.assetUrl(project.id, media)}
+        onError={() => setMediaError(true)}
+      />
+    );
+  return (
+    <div className="gs-preview-empty">
+      <Layers3 size={40} />
+      <h3>{version.label}</h3>
+      <p>
+        {mediaError
+          ? "미리보기를 불러오지 못했습니다. 저장된 원본은 유지됩니다."
+          : "이 형식은 화면 미리보기를 지원하지 않습니다."}
+      </p>
+      <span>
+        {version.files.map((file) => fileName(file.path)).join(" · ")}
+      </span>
+    </div>
+  );
+}
+
+export function GraphicsStudio({
+  project,
+  workspace,
+  busy,
+  onAction,
+  onOpenSettings,
+}: Props) {
+  const [objectId, setObjectId] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newKind, setNewKind] = useState<GraphicsKind>("prop");
+  const [query, setQuery] = useState("");
+  const [catalogTab, setCatalogTab] = useState<
+    "all" | "recommended" | "selected"
+  >("all");
+  const [taskId, setTaskId] = useState("A01");
+  const [shownVersionId, setShownVersionId] = useState("");
+  const [focusedImage, setFocusedImage] = useState<{
+    path: string;
+    label: string;
+  }>();
+  const imageDialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (focusedImage && !imageDialog.current?.open)
+      imageDialog.current?.showModal();
+  }, [focusedImage]);
+  const [instruction, setInstruction] = useState("");
+  const [settings, setSettings] = useState<GraphicsObject["settings"]>({});
+  const [importRole, setImportRole] = useState<GraphicsRole>("model");
+  const [referenceId, setReferenceId] = useState("");
+  const [referenceRole, setReferenceRole] =
+    useState<GraphicsObject["references"][number]["role"]>("appearance");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [clock, setClock] = useState(Date.now());
+  const disabled = busy || pending;
+  const object = workspace?.objects.find((item) => item.id === objectId);
+  const versions =
+    workspace?.versions.filter((version) => version.objectId === objectId) ??
+    [];
+  const shownVersion =
+    versions.find((version) => version.id === shownVersionId) ??
+    versions.find((version) => object && acceptedVersion(object, version)) ??
+    versions.at(-1);
+  const objectTasks =
+    workspace?.tasks.filter((task) => task.objectId === objectId) ?? [];
+  const activeTask = findGraphicsTask(taskId)!;
+  const multipleOutputs = ["I01", "I02", "I03", "M01", "M02", "M03"].includes(
+    taskId,
+  );
+  const imageVersions =
+    workspace?.versions.filter((version) =>
+      version.files.some((file) => /\.(png|jpe?g|webp)$/i.test(file.path)),
+    ) ?? [];
+  const multiviewProblem =
+    taskId === "M02"
+      ? graphicsMultiviewProblem(settings, imageVersions)
+      : undefined;
+  const recommended = object
+    ? recommendedGraphicsTasks(object.kind, versions)
+    : [];
+  const filteredTasks = filterGraphicsTasks(
+    query,
+    catalogTab === "recommended"
+      ? recommended
+      : catalogTab === "selected"
+        ? (object?.selectedTasks ?? [])
+        : undefined,
+  );
+  const waiting = objectTasks.filter(
+    (task) => task.status === "awaiting_approval",
+  );
+  const active = objectTasks.some(
+    (task) =>
+      task.status === "running" ||
+      task.status === "submission_unknown" ||
+      task.status === "awaiting_approval",
+  );
+
+  useEffect(() => {
+    if (!workspace?.objects.some((item) => item.id === objectId))
+      setObjectId(workspace?.objects.at(-1)?.id ?? "");
+  }, [workspace?.objects, objectId]);
+  useEffect(() => {
+    setInstruction(object?.instruction ?? "");
+    setSettings(object?.settings ?? {});
+    setShownVersionId("");
+    setFocusedImage(undefined);
+    setReferenceId("");
+    setError("");
+    setNotice("");
+    setImportRole(
+      object && ["sprite", "ui", "vfx"].includes(object.kind)
+        ? "design"
+        : "model",
+    );
+  }, [object?.id]);
+  useEffect(() => {
+    if (!waiting.length) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [waiting.length]);
+
+  async function run(action: GraphicsAction, success?: string) {
+    if (disabled) return false;
+    setPending(true);
+    setError("");
+    setNotice("");
+    try {
+      await onAction(action);
+      if (success) setNotice(success);
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      setPending(false);
+    }
+  }
+  function setting(key: string, value: string | number | boolean) {
+    setSettings((current) => ({ ...current, [key]: value }));
+  }
+  async function openProjectFolder() {
+    if (disabled) return;
+    setPending(true);
+    setError("");
+    setNotice("");
+    try {
+      const message = await window.desktop.call<string>({
+        type: "folder.open",
+        id: project.id,
+      });
+      if (message) throw Error(message);
+      setNotice(
+        "프로젝트 폴더를 열었습니다. 표시된 저장 경로에서 원본과 결과 파일을 찾을 수 있습니다.",
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  }
+  async function copyFileLocation(file: string) {
+    if (disabled) return;
+    setPending(true);
+    setError("");
+    setNotice("");
+    try {
+      const { dataDir } = await window.desktop.call<{ dataDir: string }>({
+        type: "state",
+      });
+      const separator = dataDir.includes("\\") ? "\\" : "/";
+      const location = [
+        dataDir.replace(/[\\/]+$/, ""),
+        "projects",
+        project.id,
+        ...file.split(/[\\/]/),
+      ].join(separator);
+      await navigator.clipboard.writeText(location);
+      setNotice("이 파일의 전체 저장 경로를 복사했습니다.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  }
+  async function prepare() {
+    if (
+      !object ||
+      disabled ||
+      (active && !["A01", "A02", "A03"].includes(activeTask.id)) ||
+      activeTask.status === "planned" ||
+      multiviewProblem
+    )
+      return;
+    if (activeTask.id === "A01")
+      return run({ kind: "import", objectId: object.id, role: importRole });
+    if (activeTask.id === "A02") {
+      document.getElementById("gs-object-name")?.focus();
+      return;
+    }
+    if (activeTask.id === "A03") {
+      document.getElementById("gs-reference-version")?.focus();
+      return;
+    }
+    setPending(true);
+    setError("");
+    setNotice("");
+    try {
+      await onAction({
+        kind: "update-object",
+        objectId: object.id,
+        patch: { instruction, settings },
+      });
+      await onAction({
+        kind: "prepare",
+        objectId: object.id,
+        taskId: activeTask.id,
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  }
+  async function createObject(event: FormEvent) {
+    event.preventDefault();
+    if (!newName.trim() || disabled) return;
+    if (
+      await run({
+        kind: "create-object",
+        name: newName.trim(),
+        objectKind: newKind,
+      })
+    ) {
+      setNewName("");
+      setObjectId("");
+    }
+  }
+
+  return (
+    <section className="graphics-studio" data-testid="graphics-studio">
+      <header className="gs-header">
+        <div>
+          <span className="gs-eyebrow">UNITY · PC GRAPHICS</span>
+          <h1>그래픽 작업실</h1>
+          <p>
+            {project.name} <ChevronRight size={13} />{" "}
+            {object?.name ?? "새 오브젝트"}
+          </p>
+        </div>
+        <div className="gs-header-actions">
+          <span className="gs-tag">{graphicsCatalog.length}개 작업</span>
+          {onOpenSettings && (
+            <button onClick={onOpenSettings}>
+              <Settings2 size={15} /> 연결 설정
+            </button>
+          )}
+        </div>
+      </header>
+      <aside className="gs-objects" aria-label="오브젝트 목록">
+        <div className="gs-section-title">
+          <h2>오브젝트</h2>
+          <span>{workspace?.objects.length ?? 0}</span>
+        </div>
+        <div className="gs-object-list">
+          {workspace?.objects.map((item) => (
+            <button
+              key={item.id}
+              className={`gs-object ${objectId === item.id ? "is-active" : ""}`}
+              aria-pressed={objectId === item.id}
+              data-testid={`graphics-object-${item.id}`}
+              onClick={() => setObjectId(item.id)}
+            >
+              <Box size={18} />
+              <span>
+                <strong>{item.name}</strong>
+                <small>
+                  {kinds[item.kind]} ·{" "}
+                  {
+                    workspace.versions.filter(
+                      (version) => version.objectId === item.id,
+                    ).length
+                  }
+                  개 버전
+                </small>
+              </span>
+              <ChevronRight size={14} />
+            </button>
+          ))}
+        </div>
+        <form className="gs-create" onSubmit={createObject}>
+          <h3>오브젝트 추가</h3>
+          <label htmlFor="gs-object-name">이름</label>
+          <input
+            id="gs-object-name"
+            placeholder="예: 기사 대검"
+            value={newName}
+            onChange={(event) => setNewName(event.target.value)}
+            maxLength={100}
+          />
+          <label htmlFor="gs-object-kind">종류</label>
+          <select
+            id="gs-object-kind"
+            value={newKind}
+            onChange={(event) => setNewKind(event.target.value as GraphicsKind)}
+          >
+            {Object.entries(kinds).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <button type="submit" disabled={disabled || !newName.trim()}>
+            <FilePlus2 size={15} /> 오브젝트 만들기
+          </button>
+          <p>파일과 작업은 생성 후 연결합니다.</p>
+        </form>
+        <button
+          className="gs-legacy"
+          disabled={disabled}
+          onClick={() =>
+            void run(
+              { kind: "import-legacy" },
+              "기존 작업의 자료를 확인했습니다.",
+            )
+          }
+        >
+          <FolderInput size={15} /> 기존 프로젝트 자료 연결
+        </button>
+      </aside>
+
+      <main className="gs-main">
+        {error && (
+          <div role="alert" className="gs-alert gs-alert-error">
+            <strong>작업을 완료하지 못했습니다.</strong>
+            <p>{error}</p>
+            <span>기존 원본과 채택 결과는 유지됩니다.</span>
+          </div>
+        )}
+        {notice && (
+          <div role="status" className="gs-notice">
+            {notice}
+          </div>
+        )}
+        {!object ? (
+          <div className="gs-empty">
+            <Box size={54} strokeWidth={1} />
+            <h2>무엇을 만들까요?</h2>
+            <p>
+              왼쪽에서 오브젝트를 만든 다음 파일을 가져오거나 작업을 선택하세요.
+              <br />
+              이미 모델이 있다면 이미지 생성 없이 바로 작업할 수 있습니다.
+            </p>
+          </div>
+        ) : (
+          <>
+            {waiting.map((task) => {
+              const approval = graphicsApprovalState(task, clock);
+              const nativeUsage =
+                task.cost?.provider === "Codex" &&
+                findGraphicsTask(task.taskId)?.executor === "codex-image";
+              const expired =
+                task.cost?.expiresAt !== undefined &&
+                task.cost.expiresAt <= clock;
+              return (
+                <div
+                  className="gs-cost"
+                  key={task.id}
+                  data-testid={`graphics-cost-${task.id}`}
+                >
+                  <div>
+                    <span className="gs-eyebrow">실행 전 요청 확인</span>
+                    <h3>
+                      {findGraphicsTask(task.taskId)?.name ?? task.taskId}
+                    </h3>
+                    <p>
+                      {task.cost?.provider ?? "제공자 확인 필요"} ·{" "}
+                      {task.cost?.credits == null
+                        ? nativeUsage
+                          ? "Codex 계정 사용량"
+                          : "비용 확인 필요"
+                        : `${task.cost.credits.toLocaleString()} 크레딧`}
+                    </p>
+                    <p>{task.cost?.basis ?? task.message}</p>
+                    {task.objectSnapshot && (
+                      <p className="gs-fine">
+                        고정 대상: {task.objectSnapshot.name} ·{" "}
+                        {kinds[task.objectSnapshot.kind]}
+                      </p>
+                    )}
+                    {task.targetProfile && (
+                      <p className="gs-fine">
+                        고정 Unity 대상: {task.targetProfile.projectPath} ·
+                        Unity {task.targetProfile.unityVersion} ·{" "}
+                        {task.targetProfile.pipeline.toUpperCase()}
+                      </p>
+                    )}
+                    <p className="gs-frozen-instruction">
+                      {task.instruction || "추가 지시 없음"}
+                    </p>
+                    <div
+                      className="gs-frozen-inputs"
+                      aria-label="고정된 입력 버전"
+                    >
+                      {task.inputVersionIds.map((versionId, inputIndex) => {
+                        const input = workspace?.versions.find(
+                          (version) => version.id === versionId,
+                        );
+                        const imagePath = input?.files.find((file) =>
+                          /\.(png|jpe?g|webp)$/i.test(file.path),
+                        )?.path;
+                        const direction =
+                          task.taskId === "M02"
+                            ? directions.find(
+                                ([value]) =>
+                                  task.settings[`${value}VersionId`] ===
+                                  versionId,
+                              )?.[1]
+                            : undefined;
+                        return (
+                          <div
+                            className="gs-frozen-input"
+                            key={`${versionId}-${inputIndex}`}
+                          >
+                            {imagePath ? (
+                              <img
+                                alt={`${direction ? direction + " · " : ""}${input?.label ?? "고정 입력"}`}
+                                src={window.desktop.assetUrl(
+                                  project.id,
+                                  imagePath,
+                                )}
+                              />
+                            ) : (
+                              <Box size={23} />
+                            )}
+                            <span>
+                              <strong>
+                                {direction ? `${direction} · ` : ""}
+                                {input?.label ??
+                                  "입력 버전을 찾을 수 없습니다."}
+                              </strong>
+                              <small>
+                                {input
+                                  ? `${roles[input.role]} / ${input.slot}`
+                                  : versionId}
+                              </small>
+                              {task.objectSnapshot?.references.some(
+                                (reference) =>
+                                  reference.versionId === versionId,
+                              ) && (
+                                <small>
+                                  참고 역할:{" "}
+                                  {task.objectSnapshot.references
+                                    .filter(
+                                      (reference) =>
+                                        reference.versionId === versionId,
+                                    )
+                                    .map(
+                                      (reference) =>
+                                        referenceRoles[reference.role],
+                                    )
+                                    .join(" · ")}
+                                </small>
+                              )}
+                              <code>{input?.files[0]?.sha256}</code>
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {task.cost?.expiresAt && (
+                      <small>
+                        {expired
+                          ? "견적 유효 시간이 지났습니다."
+                          : `유효 시간: ${new Date(task.cost.expiresAt).toLocaleString("ko-KR")}`}
+                      </small>
+                    )}
+                    <details>
+                      <summary>고정된 요청 확인</summary>
+                      <p>{task.instruction || "추가 지시 없음"}</p>
+                      <p>
+                        입력 {task.inputVersionIds.length}개 · 요청{" "}
+                        {task.requestHash}
+                      </p>
+                      <pre>{JSON.stringify(task.settings, null, 2)}</pre>
+                    </details>
+                  </div>
+                  <div className="gs-cost-actions">
+                    <button
+                      className="gs-primary"
+                      data-testid={`graphics-approve-${task.id}`}
+                      disabled={disabled || approval === "blocked"}
+                      onClick={() =>
+                        void run({ kind: "approve", taskId: task.id })
+                      }
+                    >
+                      {approval === "refresh"
+                        ? "견적 다시 확인"
+                        : nativeUsage
+                          ? "Codex 사용량으로 실행"
+                          : task.localOnly
+                            ? "로컬 작업 실행"
+                            : "이 비용으로 실행"}
+                    </button>
+                    <button
+                      disabled={disabled}
+                      onClick={() =>
+                        void run({ kind: "cancel", taskId: task.id })
+                      }
+                    >
+                      취소
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+
+            <div className="gs-work-layout">
+              <section className="gs-result">
+                <div className="gs-section-title">
+                  <h2>자료와 결과</h2>
+                  <span>{versions.length}개 버전</span>
+                </div>
+                <div className="gs-preview" data-testid="graphics-preview">
+                  <VersionPreview project={project} version={shownVersion} />
+                </div>
+                {shownVersion && (
+                  <div className="gs-version-detail">
+                    <div>
+                      <strong>{shownVersion.label}</strong>
+                      <span className="gs-tag">
+                        {roles[shownVersion.role]} / {shownVersion.slot}
+                      </span>
+                      {acceptedVersion(object, shownVersion) && (
+                        <span className="gs-tag gs-ready">
+                          <Check size={12} /> 채택됨
+                        </span>
+                      )}
+                    </div>
+                    <p>
+                      {stamp(shownVersion.createdAt)} ·{" "}
+                      {provenanceLabels[shownVersion.provenance.type]} · 저장
+                      파일 {shownVersion.files.length}개
+                    </p>
+                    {shownVersion.warnings.map((warning, index) => (
+                      <p className="gs-warning" key={index}>
+                        {warning}
+                      </p>
+                    ))}
+                    <div className="gs-file-actions">
+                      <button
+                        disabled={disabled}
+                        onClick={() => void openProjectFolder()}
+                      >
+                        <FolderOpen size={14} /> 프로젝트 폴더 열기
+                      </button>
+                      {shownVersion.files.some((file) =>
+                        isImagePath(file.path),
+                      ) && (
+                        <button
+                          onClick={() => {
+                            const file = shownVersion.files.find((item) =>
+                              isImagePath(item.path),
+                            )!;
+                            setFocusedImage({
+                              path: file.path,
+                              label: fileName(file.path),
+                            });
+                          }}
+                        >
+                          이미지 크게 보기
+                        </button>
+                      )}
+                    </div>
+                    <p className="gs-fine">
+                      원본과 결과는 이미 프로젝트 폴더에 저장되어 있습니다. 아래
+                      파일에서 위치를 확인하고 복사할 수 있습니다.
+                    </p>
+                    <details
+                      key={shownVersion.id}
+                      open={shownVersion.files.length <= 2}
+                    >
+                      <summary>
+                        원본·결과 파일과 저장 위치 ({shownVersion.files.length})
+                      </summary>
+                      {shownVersion.files.map((file) => (
+                        <div className="gs-file" key={file.path}>
+                          <strong>{fileName(file.path)}</strong>
+                          <code className="gs-file-path">{file.path}</code>
+                          <span>
+                            {file.bytes.toLocaleString()} bytes · {file.kind}
+                          </span>
+                          <div className="gs-file-actions">
+                            <button
+                              disabled={disabled}
+                              onClick={() => void copyFileLocation(file.path)}
+                            >
+                              저장 경로 복사
+                            </button>
+                            {isImagePath(file.path) && (
+                              <button
+                                onClick={() =>
+                                  setFocusedImage({
+                                    path: file.path,
+                                    label: fileName(file.path),
+                                  })
+                                }
+                              >
+                                이미지 보기
+                              </button>
+                            )}
+                          </div>
+                          <details className="gs-file-hash">
+                            <summary>SHA-256 확인</summary>
+                            <code>{file.sha256}</code>
+                          </details>
+                        </div>
+                      ))}
+                      <p>
+                        입력 버전:{" "}
+                        {shownVersion.sourceVersionIds.join(", ") ||
+                          "가져온 원본"}
+                      </p>
+                      {shownVersion.provenance.jobId && (
+                        <p>작업: {shownVersion.provenance.jobId}</p>
+                      )}
+                    </details>
+                    <button
+                      data-testid="graphics-accept-version"
+                      disabled={
+                        disabled || acceptedVersion(object, shownVersion)
+                      }
+                      onClick={() =>
+                        void run(
+                          {
+                            kind: "accept",
+                            objectId: object.id,
+                            versionId: shownVersion.id,
+                          },
+                          `${roles[shownVersion.role]} / ${shownVersion.slot}에 채택했습니다. 다음 작업은 직접 실행하세요.`,
+                        )
+                      }
+                    >
+                      {acceptedVersion(object, shownVersion)
+                        ? "현재 채택 버전"
+                        : `${roles[shownVersion.role]} / ${shownVersion.slot}에 채택`}
+                    </button>
+                  </div>
+                )}
+                <div className="gs-version-list" aria-label="전체 버전">
+                  {[...versions].reverse().map((version) => (
+                    <button
+                      key={version.id}
+                      aria-pressed={shownVersion?.id === version.id}
+                      data-testid={`graphics-version-${version.id}`}
+                      className={
+                        shownVersion?.id === version.id ? "is-active" : ""
+                      }
+                      onClick={() => setShownVersionId(version.id)}
+                    >
+                      <span>
+                        <strong>{version.label}</strong>
+                        <small>
+                          {roles[version.role]} / {version.slot} ·{" "}
+                          {stamp(version.createdAt)}
+                        </small>
+                      </span>
+                      {acceptedVersion(object, version) && (
+                        <Check size={15} aria-label="채택됨" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="gs-instruction">
+                <div className="gs-section-title">
+                  <h2>작업 설정</h2>
+                  <span className={`gs-tag gs-${activeTask.status}`}>
+                    {statusLabels[activeTask.status]}
+                  </span>
+                </div>
+                <div className="gs-task-heading">
+                  <span>{activeTask.id}</span>
+                  <h3>{activeTask.name}</h3>
+                </div>
+                <p className="gs-muted">입력: {activeTask.inputs}</p>
+                <p className="gs-muted">확인할 결과: {activeTask.output}</p>
+                {activeTask.reason && (
+                  <p className="gs-capability-reason">{activeTask.reason}</p>
+                )}
+                <label htmlFor="gs-import-role">가져올 자료의 역할</label>
+                <div className="gs-import-row">
+                  <select
+                    id="gs-import-role"
+                    value={importRole}
+                    onChange={(event) =>
+                      setImportRole(event.target.value as GraphicsRole)
+                    }
+                  >
+                    {Object.entries(roles).map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    data-testid="graphics-import"
+                    disabled={disabled}
+                    onClick={() =>
+                      void run({
+                        kind: "import",
+                        objectId: object.id,
+                        role: importRole,
+                      })
+                    }
+                  >
+                    <FolderInput size={14} /> 파일 가져오기
+                  </button>
+                </div>
+                <label htmlFor="gs-instruction">
+                  원하는 결과와 유지할 특징
+                </label>
+                <textarea
+                  id="gs-instruction"
+                  rows={4}
+                  placeholder={
+                    object.kind === "weapon"
+                      ? "예: 연결한 캐릭터의 문양과 색을 살린 대검. 캐릭터 원본은 유지."
+                      : "바꿀 부분과 유지할 부분을 적어 주세요."
+                  }
+                  value={instruction}
+                  onChange={(event) => setInstruction(event.target.value)}
+                  maxLength={12000}
+                />
+                {activeTask.id === "M02" && (
+                  <div className="gs-multiview">
+                    <h3>네 방향의 실제 입력</h3>
+                    <p className="gs-fine">
+                      각 이미지의 실제 방향을 직접 지정합니다. 좌우를 자동으로
+                      교환하지 않습니다.
+                    </p>
+                    <div className="gs-settings-grid">
+                      {directions.map(([value, label]) => (
+                        <label key={value}>
+                          {label} 원본
+                          <select
+                            aria-label={`${label} 원본`}
+                            value={String(settings[`${value}VersionId`] ?? "")}
+                            onChange={(event) =>
+                              setting(`${value}VersionId`, event.target.value)
+                            }
+                          >
+                            <option value="">이미지 선택</option>
+                            {imageVersions.map((version) => (
+                              <option value={version.id} key={version.id}>
+                                {
+                                  workspace?.objects.find(
+                                    (item) => item.id === version.objectId,
+                                  )?.name
+                                }{" "}
+                                / {version.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ))}
+                    </div>
+                    {multiviewProblem && (
+                      <p className="gs-warning">{multiviewProblem}</p>
+                    )}
+                  </div>
+                )}
+                <div className="gs-settings-grid">
+                  <label>
+                    후보 개수
+                    <input
+                      aria-label="후보 개수"
+                      type="number"
+                      min={1}
+                      max={4}
+                      disabled={!multipleOutputs}
+                      value={String(
+                        multipleOutputs ? (settings.count ?? 1) : 1,
+                      )}
+                      onChange={(event) =>
+                        setting("count", Number(event.target.value))
+                      }
+                    />
+                  </label>
+                  <label>
+                    목표 면 수
+                    <input
+                      aria-label="목표 면 수"
+                      type="number"
+                      min={100}
+                      max={1000000}
+                      step={100}
+                      value={String(settings.faceLimit ?? 10000)}
+                      onChange={(event) =>
+                        setting("faceLimit", Number(event.target.value))
+                      }
+                    />
+                  </label>
+                  <label>
+                    텍스처 해상도
+                    <select
+                      aria-label="텍스처 해상도"
+                      value={String(settings.textureSize ?? 4096)}
+                      onChange={(event) =>
+                        setting("textureSize", Number(event.target.value))
+                      }
+                    >
+                      {settings.textureSize !== undefined &&
+                        ![2048, 4096, 8192].includes(
+                          Number(settings.textureSize),
+                        ) && (
+                          <option value={String(settings.textureSize)}>
+                            {String(settings.textureSize)}px · 저장된 설정 (현재
+                            API 미지원)
+                          </option>
+                        )}
+                      {[2048, 4096, 8192].map((size) => (
+                        <option key={size} value={size}>
+                          {size}px
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    출력 배율
+                    <input
+                      aria-label="출력 배율"
+                      type="number"
+                      min={0.001}
+                      max={1000}
+                      step={0.01}
+                      value={String(settings.scale ?? 1)}
+                      onChange={(event) =>
+                        setting("scale", Number(event.target.value))
+                      }
+                    />
+                  </label>
+                  <label>
+                    피벗
+                    <select
+                      aria-label="피벗"
+                      value={String(settings.pivot ?? "keep")}
+                      onChange={(event) => setting("pivot", event.target.value)}
+                    >
+                      <option value="keep">기존 유지</option>
+                      <option value="center">중심</option>
+                      <option value="bottom">바닥 중심</option>
+                    </select>
+                  </label>
+                  <label>
+                    출력 형식
+                    <select
+                      aria-label="출력 형식"
+                      value={String(settings.exportFormat ?? "both")}
+                      onChange={(event) =>
+                        setting("exportFormat", event.target.value)
+                      }
+                    >
+                      <option value="both">FBX + GLB</option>
+                      <option value="fbx">FBX</option>
+                      <option value="glb">GLB</option>
+                    </select>
+                  </label>
+                </div>
+                <label htmlFor="gs-model">모델 제작 모델</label>
+                <select id="gs-model" value={catalog.model[0].id} disabled>
+                  {catalog.model.slice(0, 1).map((model) => (
+                    <option value={model.id} key={model.id}>
+                      {model.label}
+                    </option>
+                  ))}
+                </select>
+                {["M01", "M02", "M03"].includes(activeTask.id) && (
+                  <p className="gs-warning">
+                    현재 앱 견적: 후보당 100 API 크레딧 × 후보 개수. Studio
+                    구독과 별도이며 계정별 실제 요금은 확인되지 않았습니다.
+                  </p>
+                )}
+                <p className="gs-fine">
+                  모델 제작 API는 현재 P2.0을 사용합니다. 이미지 제작은 기존
+                  Codex 모델·추론 설정을 유지합니다. 요청 설정은 지원과 입력을
+                  확인한 후 고정됩니다. 가져온 원본의 해상도와 품질 설정은
+                  자동으로 낮추지 않습니다.
+                </p>
+                <div className="gs-execute-row">
+                  <button
+                    disabled={disabled}
+                    onClick={() =>
+                      void run(
+                        {
+                          kind: "update-object",
+                          objectId: object.id,
+                          patch: { instruction, settings },
+                        },
+                        "지시와 설정을 저장했습니다.",
+                      )
+                    }
+                  >
+                    설정 저장
+                  </button>
+                  <button
+                    className="gs-primary"
+                    data-testid="graphics-prepare"
+                    disabled={
+                      disabled ||
+                      Boolean(multiviewProblem) ||
+                      activeTask.status === "planned" ||
+                      (active && !["A01", "A02", "A03"].includes(activeTask.id))
+                    }
+                    onClick={() => void prepare()}
+                  >
+                    {activeTask.id === "A01"
+                      ? "자료 가져오기"
+                      : activeTask.id === "A02"
+                        ? "오브젝트 추가로 이동"
+                        : activeTask.id === "A03"
+                          ? "참고 자료 연결로 이동"
+                          : activeTask.status === "planned"
+                            ? "실행 연결 준비 중"
+                            : activeTask.executor === "local"
+                              ? "로컬 작업 준비"
+                              : activeTask.executor === "codex-image"
+                                ? "입력·사용량 확인"
+                                : "입력·비용 확인"}
+                  </button>
+                </div>
+                {active && (
+                  <p className="gs-warning">
+                    진행 중이거나 확인이 필요한 작업이 있습니다. 아래 이력을
+                    확인하세요.
+                  </p>
+                )}
+              </section>
+            </div>
+
+            <section className="gs-references">
+              <div className="gs-section-title">
+                <h2>참고 자료 연결</h2>
+                <span>대상 원본 유지</span>
+              </div>
+              <div className="gs-reference-form">
+                <label>
+                  참고 버전
+                  <select
+                    id="gs-reference-version"
+                    data-testid="graphics-reference-version"
+                    value={referenceId}
+                    onChange={(event) => setReferenceId(event.target.value)}
+                  >
+                    <option value="">버전을 선택하세요</option>
+                    {workspace?.versions.map((version) => (
+                      <option key={version.id} value={version.id}>
+                        {
+                          workspace.objects.find(
+                            (item) => item.id === version.objectId,
+                          )?.name
+                        }{" "}
+                        / {version.label} · {roles[version.role]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  참고 역할
+                  <select
+                    aria-label="참고 역할"
+                    value={referenceRole}
+                    onChange={(event) =>
+                      setReferenceRole(
+                        event.target
+                          .value as GraphicsObject["references"][number]["role"],
+                      )
+                    }
+                  >
+                    {Object.entries(referenceRoles).map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  disabled={
+                    disabled ||
+                    !referenceId ||
+                    object.references.some(
+                      (reference) =>
+                        reference.versionId === referenceId &&
+                        reference.role === referenceRole,
+                    )
+                  }
+                  onClick={() =>
+                    void run({
+                      kind: "update-object",
+                      objectId: object.id,
+                      patch: {
+                        references: [
+                          ...object.references,
+                          { versionId: referenceId, role: referenceRole },
+                        ],
+                      },
+                    })
+                  }
+                >
+                  참고 연결
+                </button>
+              </div>
+              {object.references.length === 0 && (
+                <p className="gs-muted">
+                  다른 오브젝트의 자료도 외형·스타일·동작·치수 참고로 연결할 수
+                  있습니다.
+                </p>
+              )}
+              <div className="gs-reference-list">
+                {object.references.map((reference) => {
+                  const version = workspace?.versions.find(
+                    (item) => item.id === reference.versionId,
+                  );
+                  return (
+                    <div key={`${reference.versionId}-${reference.role}`}>
+                      <span>
+                        <strong>{version?.label ?? "찾을 수 없는 버전"}</strong>
+                        <small>
+                          {referenceRoles[reference.role]} ·{" "}
+                          {
+                            workspace?.objects.find(
+                              (item) => item.id === version?.objectId,
+                            )?.name
+                          }
+                        </small>
+                      </span>
+                      <button
+                        disabled={disabled}
+                        aria-label={`${version?.label ?? reference.versionId} 참고 연결 해제`}
+                        onClick={() =>
+                          void run({
+                            kind: "update-object",
+                            objectId: object.id,
+                            patch: {
+                              references: object.references.filter(
+                                (item) => item !== reference,
+                              ),
+                            },
+                          })
+                        }
+                      >
+                        해제
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          </>
+        )}
+
+        <section className="gs-catalog">
+          <div className="gs-section-title">
+            <h2>전체 작업 선택표</h2>
+            <span>
+              {filteredTasks.length} / {graphicsCatalog.length}
+            </span>
+          </div>
+          <div className="gs-availability" aria-label="작업 지원 범위">
+            <span>
+              <b className="gs-tag gs-ready">
+                사용 가능 {availabilityCounts.ready}
+              </b>{" "}
+              표시된 로컬 지원 범위 검증
+            </span>
+            <span>
+              <b className="gs-tag gs-unverified">
+                실제 검증 전 {availabilityCounts.unverified}
+              </b>{" "}
+              실행 경로 연결 · 실제 생성 품질 미검증
+            </span>
+            <span>
+              <b className="gs-tag gs-planned">
+                미구현 {availabilityCounts.planned}
+              </b>{" "}
+              목록 검토·조합 저장만 가능
+            </span>
+          </div>
+          <div className="gs-catalog-tools">
+            <div className="gs-tabs" role="tablist" aria-label="작업 목록">
+              {(
+                [
+                  ["all", "전체"],
+                  ["recommended", "추천"],
+                  ["selected", "선택한 작업"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  role="tab"
+                  key={value}
+                  aria-selected={catalogTab === value}
+                  onClick={() => setCatalogTab(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <label className="gs-search">
+              <Search size={15} />
+              <input
+                aria-label="작업 검색"
+                placeholder="이름, ID, 필요한 입력 검색"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </label>
+          </div>
+          <p className="gs-fine">
+            체크는 작업 조합만 저장합니다. 실행과 결과 채택은 각각 직접
+            선택합니다.
+          </p>
+          <div className="gs-task-list" data-testid="graphics-task-list">
+            {filteredTasks.map((task) => (
+              <div
+                key={task.id}
+                className={`gs-task-row ${task.id === taskId ? "is-active" : ""}`}
+                data-task-id={task.id}
+              >
+                <input
+                  type="checkbox"
+                  aria-label={`${task.id} ${task.name} 작업 선택`}
+                  disabled={disabled || !object}
+                  checked={object?.selectedTasks.includes(task.id) ?? false}
+                  onChange={(event) => {
+                    if (object)
+                      void run({
+                        kind: "update-object",
+                        objectId: object.id,
+                        patch: {
+                          selectedTasks: event.target.checked
+                            ? [...new Set([...object.selectedTasks, task.id])]
+                            : object.selectedTasks.filter(
+                                (id) => id !== task.id,
+                              ),
+                        },
+                      });
+                  }}
+                />
+                <button
+                  className="gs-task-open"
+                  onClick={() => setTaskId(task.id)}
+                  aria-pressed={task.id === taskId}
+                >
+                  <span className="gs-task-id">{task.id}</span>
+                  <span>
+                    <strong>{task.name}</strong>
+                    <small>
+                      {task.group} · {task.inputs}
+                    </small>
+                  </span>
+                </button>
+                <span className={`gs-tag gs-${task.status}`}>
+                  {statusLabels[task.status]}
+                </span>
+              </div>
+            ))}
+          </div>
+          {filteredTasks.length === 0 && (
+            <p className="gs-muted">조건에 맞는 작업이 없습니다.</p>
+          )}
+        </section>
+
+        {object && (
+          <section className="gs-history">
+            <div className="gs-section-title">
+              <h2>작업 이력</h2>
+              <span>{objectTasks.length}</span>
+            </div>
+            {objectTasks.length === 0 && (
+              <p className="gs-muted">
+                아직 실행한 작업이 없습니다. 가져온 원본은 위 버전 목록에
+                보관됩니다.
+              </p>
+            )}
+            {[...objectTasks].reverse().map((task) => (
+              <details
+                key={task.id}
+                open={
+                  task.status === "failed" ||
+                  task.status === "submission_unknown"
+                }
+              >
+                <summary>
+                  <span>
+                    <strong>
+                      {task.taskId} {findGraphicsTask(task.taskId)?.name}
+                    </strong>
+                    <small>
+                      {stamp(task.createdAt)} ·{" "}
+                      {task.localOnly ? "로컬 실행" : "외부 실행"}
+                    </small>
+                  </span>
+                  <span
+                    className={`gs-tag ${task.status === "failed" || task.status === "submission_unknown" ? "gs-warning" : ""}`}
+                  >
+                    {taskStatuses[task.status]}
+                  </span>
+                </summary>
+                <p>{task.message}</p>
+                {task.errorCode && <code>{task.errorCode}</code>}
+                <p>
+                  입력 {task.inputVersionIds.length}개 · 결과{" "}
+                  {task.outputVersionIds.length}개 · 요청 {task.requestHash}
+                </p>
+                {task.instruction && <p>{task.instruction}</p>}
+                <p>실행 작업: {task.backendJobIds.join(", ") || "없음"}</p>
+                {task.cost && (
+                  <p>
+                    기록된 비용: {task.cost.credits ?? "미확인"} 크레딧 ·{" "}
+                    {task.cost.basis}
+                  </p>
+                )}
+                {["failed", "submission_unknown"].includes(task.status) && (
+                  <button
+                    disabled={disabled}
+                    onClick={() =>
+                      void run({ kind: "recover", taskId: task.id })
+                    }
+                  >
+                    기존 작업 상태 확인
+                  </button>
+                )}
+                {task.status === "running" && (
+                  <button
+                    disabled={disabled}
+                    onClick={() =>
+                      void run({ kind: "cancel", taskId: task.id })
+                    }
+                  >
+                    추적 중지
+                  </button>
+                )}
+              </details>
+            ))}
+          </section>
+        )}
+
+        <div className="gs-bottom-grid">
+          <section className="gs-target">
+            <div className="gs-section-title">
+              <h2>연결 상태</h2>
+              <button
+                disabled={disabled}
+                onClick={() => void run({ kind: "probe-connections" })}
+              >
+                연결 진단
+              </button>
+            </div>
+            <p className="gs-fine">
+              도구·경로·연결 메타데이터만 확인합니다. 진단은 GPT 또는 생성
+              요청을 만들지 않습니다.
+            </p>
+            <p className="gs-fine">
+              연결 확인은 생성 성공을 뜻하지 않습니다. Tripo API 크레딧과 Studio
+              구독 잔액은 별도이며, 새 모델 생성 검증은 아직 수행하지
+              않았습니다.
+            </p>
+            {workspace?.connections?.map((connection) => (
+              <div className="gs-connection" key={connection.name}>
+                <div>
+                  <strong>{connection.name}</strong>
+                  <span
+                    className={`gs-tag ${connection.available ? "gs-ready" : "gs-unverified"}`}
+                  >
+                    {connection.available ? "메타데이터 확인" : "확인 필요"}
+                  </span>
+                </div>
+                <p className="gs-muted">{connection.message}</p>
+                <small>{stamp(connection.checkedAt)}</small>
+              </div>
+            ))}
+            <div className="gs-section-title">
+              <h2>Unity 대상</h2>
+              <button
+                disabled={disabled}
+                onClick={() => void run({ kind: "inspect-target" })}
+              >
+                프로젝트 검사
+              </button>
+            </div>
+            {workspace?.target ? (
+              <>
+                <strong>{workspace.target.projectPath}</strong>
+                <p>
+                  Unity {workspace.target.unityVersion} ·{" "}
+                  {workspace.target.pipeline.toUpperCase()} · PC
+                </p>
+                <small>검사 {stamp(workspace.target.inspectedAt)}</small>
+                {workspace.target.warnings.map((warning, index) => (
+                  <p className="gs-warning" key={index}>
+                    {warning}
+                  </p>
+                ))}
+                <details>
+                  <summary>
+                    설치 패키지 {Object.keys(workspace.target.packages).length}
+                    개
+                  </summary>
+                  {Object.entries(workspace.target.packages).map(
+                    ([name, version]) => (
+                      <p key={name}>
+                        {name} · {version}
+                      </p>
+                    ),
+                  )}
+                </details>
+              </>
+            ) : (
+              <p className="gs-muted">
+                연결 설정의 Unity 프로젝트를 검사하면 버전·렌더
+                파이프라인·패키지를 확인합니다.
+              </p>
+            )}
+            {workspace?.deliveries
+              .filter((delivery) => delivery.objectId === objectId)
+              .map((delivery) => (
+                <div className="gs-delivery" key={delivery.id}>
+                  <strong>
+                    {delivery.status === "imported"
+                      ? "에셋 가져오기 완료"
+                      : delivery.status === "failed"
+                        ? "가져오기 실패"
+                        : delivery.status === "conflict"
+                          ? "파일 충돌 확인 필요"
+                          : "가져오기 대기"}
+                  </strong>
+                  <p>{delivery.destination}</p>
+                  <p>
+                    {delivery.playbackVerified
+                      ? "실제 재생 확인됨"
+                      : "실제 재생은 확인되지 않았습니다."}
+                  </p>
+                  {[...delivery.warnings, ...delivery.errors].map(
+                    (message, index) => (
+                      <p className="gs-warning" key={index}>
+                        {message}
+                      </p>
+                    ),
+                  )}
+                </div>
+              ))}
+          </section>
+          <section className="gs-usage">
+            <div className="gs-section-title">
+              <h2>실행 사용량</h2>
+              <button
+                disabled={disabled}
+                onClick={() => void run({ kind: "audit-usage" })}
+              >
+                사용량 확인
+              </button>
+            </div>
+            {workspace?.usage ? (
+              <>
+                <div className="gs-usage-values">
+                  <span>
+                    입력{" "}
+                    <strong>
+                      {workspace.usage.inputTokens.toLocaleString()}
+                    </strong>
+                  </span>
+                  <span>
+                    캐시 입력{" "}
+                    <strong>
+                      {workspace.usage.cachedInputTokens.toLocaleString()}
+                    </strong>
+                  </span>
+                  <span>
+                    비캐시 입력{" "}
+                    <strong>
+                      {workspace.usage.uncachedInputTokens.toLocaleString()}
+                    </strong>
+                  </span>
+                  <span>
+                    출력{" "}
+                    <strong>
+                      {workspace.usage.outputTokens.toLocaleString()}
+                    </strong>
+                  </span>
+                </div>
+                <p className="gs-fine">
+                  확인한 작업 {workspace.usage.sampledJobs}개 · 측정된 실행{" "}
+                  {workspace.usage.measuredWorkers}개 · 측정 누락{" "}
+                  {workspace.usage.missingWorkers}개 · 로컬 실행{" "}
+                  {workspace.usage.localExecutions}개
+                </p>
+                {workspace.usage.findings.map((finding, index) => (
+                  <p
+                    className={
+                      finding.severity === "warning" ? "gs-warning" : "gs-muted"
+                    }
+                    key={index}
+                  >
+                    {finding.message}
+                  </p>
+                ))}
+              </>
+            ) : (
+              <p className="gs-muted">
+                저장된 실제 실행 기록에서 토큰과 로컬 실행을 집계합니다. 계정
+                잔여 한도나 추정 절감률을 뜻하지 않습니다.
+              </p>
+            )}
+          </section>
+        </div>
+      </main>
+      {focusedImage && (
+        <dialog
+          ref={imageDialog}
+          className="gs-image-overlay"
+          aria-label={`${focusedImage.label} 원본 이미지`}
+          onClick={(event) => {
+            if (event.target === event.currentTarget)
+              setFocusedImage(undefined);
+          }}
+          onCancel={(event) => {
+            event.preventDefault();
+            setFocusedImage(undefined);
+          }}
+        >
+          <div className="gs-image-dialog">
+            <header>
+              <span>
+                <strong>{focusedImage.label}</strong>
+                <small>저장된 원본 이미지 · 화면에 맞춰 표시</small>
+              </span>
+              <button autoFocus onClick={() => setFocusedImage(undefined)}>
+                이미지 닫기
+              </button>
+            </header>
+            <img
+              alt={focusedImage.label}
+              src={window.desktop.assetUrl(project.id, focusedImage.path)}
+            />
+            <code>{focusedImage.path}</code>
+          </div>
+        </dialog>
+      )}
+    </section>
+  );
+}

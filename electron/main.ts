@@ -20,6 +20,8 @@ import { Engine } from "../engine/engine";
 import { ProductionEngine } from "../engine/production";
 import { restoreProductionArchives } from "../engine/production-backup";
 import { WorkbenchEngine } from "../engine/workbench";
+import { GraphicsEngine } from "../engine/graphics";
+import { probeGraphicsConnections } from "../engine/graphics-connections";
 import { CodexWorkbenchExecutor } from "../engine/workbench-executor";
 import { parseJsonText, readJsonFile } from "../engine/json";
 import { CodexWorker } from "../engine/codex-worker";
@@ -53,6 +55,7 @@ let store: Store;
 let engine: Engine;
 let production: ProductionEngine;
 let workbench: WorkbenchEngine;
+let graphics: GraphicsEngine;
 let studio: StudioBrowser;
 let chatgpt: ChatGptBrowser;
 let local: LocalPipeline;
@@ -71,6 +74,7 @@ function assertProjectIdle(id: string) {
     projectCommands.has(id) ||
     engine.isProjectActive(id) ||
     workbench.isProjectActive(id) ||
+    graphics.isActive(id) ||
     production.isProjectActive(id)
   )
     throw new Error(
@@ -131,7 +135,20 @@ async function dispatch(c: Command): Promise<unknown> {
         dataDir: store.root,
         productionRuns: production.list(),
         workbenches: workbench.list(),
+        graphicsWorkspaces: graphics.list(),
       };
+    case "graphics.action": {
+      if (c.action.kind === "import") {
+        const result = await dialog.showOpenDialog(win, {
+          title: "원본과 같은 폴더의 동반 파일 선택",
+          properties: ["openFile", "multiSelections"],
+          filters: [{ name: "그래픽 원본", extensions: ["png", "jpg", "jpeg", "webp", "fbx", "glb", "blend", "obj", "mtl", "stl", "mp4", "webm"] }],
+        });
+        if (result.canceled) return graphics.get(c.id);
+        return graphics.importFiles(c.id, c.action.objectId, c.action.role, result.filePaths);
+      }
+      return graphics.action(c.id, c.action);
+    }
     case "workbench.action":
       if (
         c.action.kind === "execute" &&
@@ -653,6 +670,11 @@ app.whenReady().then(async () => {
       decrypt: value => safeStorage.decryptString(Buffer.from(value, "base64")),
     })) },
   );
+  graphics = new GraphicsEngine(store, engine, {
+    resources: app.isPackaged ? path.join(process.resourcesPath, "integrations") : path.join(app.getAppPath(), "integrations"),
+    legacyActive: id => workbench.isProjectActive(id) || production.isProjectActive(id),
+    probe: () => probeGraphicsConnections(store.settings, engine.tripo, vault.info().configured),
+  });
   protocol.handle("asset", async (request) => {
     try {
       const u = new URL(request.url);
@@ -692,7 +714,8 @@ app.whenReady().then(async () => {
       if (
         !p.assets.some((a) => store.file(id, a.file) === file) &&
         !knownProductionArtifact &&
-        !knownWorkbenchArtifact
+        !knownWorkbenchArtifact &&
+        !graphics.get(id).versions.some(v => v.files.some(f => store.file(id, f.path) === file))
       )
         return new Response("", { status: 403 });
       if (
@@ -784,12 +807,15 @@ app.whenReady().then(async () => {
   });
   if (process.env.PARTSMITH_DEV) await win.loadURL("http://127.0.0.1:5173");
   else await win.loadFile(path.join(__dirname, "../dist/index.html"));
-  const timer = setInterval(() => void engine.pollActive(), 10000);
+  const timer = setInterval(() => {
+    void engine.pollActive().then(() => graphics.sync()).catch(error => console.error("작업 상태 확인 실패:", error instanceof Error ? error.message : "unknown"));
+  }, 10000);
   win.on("closed", () => app.quit());
   app.on("before-quit", () => {
     clearInterval(timer);
     production.shutdown();
     workbench.shutdown();
+    graphics.shutdown();
     studio.close();
     chatgpt.close();
   });
