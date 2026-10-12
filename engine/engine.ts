@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { Store, uid } from "./store";
 import { Tripo, TripoError } from "./tripo";
@@ -86,6 +87,65 @@ const modelInputs = [
   "rig",
 ];
 const modelFormats = ["glb", "gltf", "fbx", "obj", "stl", "usdz", "3mf", "zip"];
+const sha256 = (bytes: string | Uint8Array) =>
+  createHash("sha256").update(bytes).digest("hex");
+const resultCheckpointSchema = z.object({
+  schemaVersion: z.literal(1),
+  jobId: z.string(),
+  remoteId: z.string(),
+  requestSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  output: z.record(z.string(), z.unknown()),
+  credits: z.number().finite().nonnegative().optional(),
+  native: z.array(
+    z.object({
+      index: z.number().int().nonnegative(),
+      file: z.string(),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/),
+      bytes: z.number().int().positive(),
+    }),
+  ),
+  results: z.array(z.object({
+    file: z.string(), nativeFile: z.string(), kind: z.enum(["image", "model"]),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/), bytes: z.number().int().positive(),
+  })).optional(),
+});
+type ResultCheckpoint = z.infer<typeof resultCheckpointSchema>;
+type ResultDownload = { url: string; kind: Asset["kind"]; label: string };
+
+function resultDownloads(
+  job: Job,
+  output: Record<string, unknown>,
+): ResultDownload[] {
+  const image = job.kind === "image" || job.kind === "edit";
+  const mainUrl = image
+    ? output.generated_image_url
+    : job.kind === "smartsegment"
+      ? output.seg_model_url
+      : output.model_url;
+  if (job.kind === "rig-check") {
+    if (typeof output.riggable !== "boolean")
+      throw new Error("리깅 검사 응답에 riggable 값이 없습니다.");
+    return [];
+  }
+  if (typeof mainUrl !== "string" || !mainUrl)
+    throw new Error(
+      "완료 응답에 결과 파일 URL이 없습니다. 새 생성 없이 기존 작업을 다시 조회하세요.",
+    );
+  const downloads: ResultDownload[] = [
+    { url: mainUrl, kind: image ? "image" : "model", label: job.kind },
+  ];
+  if (
+    job.kind === "smartsegment" &&
+    typeof output.mask_url === "string" &&
+    output.mask_url
+  )
+    downloads.push({
+      url: output.mask_url,
+      kind: "image",
+      label: "smartsegment · mask",
+    });
+  return downloads;
+}
 
 /** Inspect content before URL suffix: Tripo P2 quad can return FBX despite a generic URL. */
 function outputExtension(
@@ -820,7 +880,11 @@ export class Engine {
       });
       submitted = true;
       const data = await this.tripo.submit(endpoint[r.kind], body);
-      if (!data?.task_id) throw new Error("작업 ID 없는 제출 응답");
+      if (
+        typeof data?.task_id !== "string" ||
+        !/^[A-Za-z0-9_-]+$/.test(data.task_id)
+      )
+        throw new Error("유효한 작업 ID 없는 제출 응답");
       this.updateJob(id, jid, {
         remoteId: data.task_id,
         status: "running",
@@ -836,6 +900,116 @@ export class Engine {
       });
     }
   }
+  private checkpointFile(job: Job) {
+    if (!/^[A-Za-z0-9_-]+$/.test(job.id)) throw new Error("잘못된 작업 ID");
+    return `checkpoints/tripo/${job.id}.json`;
+  }
+  private readCheckpoint(id: string, job: Job): ResultCheckpoint | undefined {
+    const file = this.store.file(id, this.checkpointFile(job));
+    if (!fs.existsSync(file)) return;
+    let checkpoint: ResultCheckpoint;
+    try {
+      checkpoint = resultCheckpointSchema.parse(
+        JSON.parse(fs.readFileSync(file, "utf8")),
+      );
+    } catch {
+      throw new Error(
+        "Tripo 원본 복구 기록이 손상되었습니다. 기존 파일은 보존합니다.",
+      );
+    }
+    if (
+      checkpoint.jobId !== job.id ||
+      checkpoint.remoteId !== job.remoteId ||
+      checkpoint.requestSha256 !== sha256(JSON.stringify(job.request))
+    )
+      throw new Error(
+        "Tripo 원본 복구 기록의 작업·요청이 다릅니다. 기존 파일은 보존합니다.",
+      );
+    const downloads = resultDownloads(job, checkpoint.output);
+    if (
+      new Set(checkpoint.native.map((entry) => entry.index)).size !==
+      checkpoint.native.length
+    )
+      throw new Error("Tripo 원본 복구 기록에 중복 파일이 있습니다.");
+    for (const entry of checkpoint.native) {
+      const ext = path.extname(entry.file).slice(1).toLowerCase();
+      if (
+        !downloads[entry.index] ||
+        entry.file !==
+          `assets/${job.id}${entry.index ? `-${entry.index}` : ""}.${ext}` ||
+        !(
+          downloads[entry.index].kind === "image"
+            ? ["png", "jpg", "jpeg", "webp"]
+            : modelFormats
+        ).includes(ext) ||
+        (job.nativeFiles?.[entry.index] &&
+          job.nativeFiles[entry.index] !== entry.file)
+      )
+        throw new Error("Tripo 원본 복구 기록의 파일 경로가 다릅니다.");
+      this.verifyCheckpointNative(id, entry);
+    }
+    return checkpoint;
+  }
+  private verifyCheckpointNative(
+    id: string,
+    entry: Pick<ResultCheckpoint["native"][number], "file" | "bytes" | "sha256">,
+  ) {
+    const file = this.store.file(id, entry.file);
+    if (!fs.existsSync(file)) return false;
+    const relative = path.relative(fs.realpathSync(this.store.directory(id)), fs.realpathSync(file));
+    if (!fs.statSync(file).isFile() || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative))
+      throw new Error("Tripo 결과 파일이 프로젝트 밖을 가리킵니다.");
+    const bytes = fs.readFileSync(file);
+    if (bytes.length !== entry.bytes || sha256(bytes) !== entry.sha256)
+      throw new Error(
+        "저장한 Tripo 원본 해시가 다릅니다. 자동 덮어쓰기나 재생성 없이 중지합니다.",
+      );
+    return true;
+  }
+  private saveCheckpoint(id: string, job: Job, checkpoint: ResultCheckpoint) {
+    this.store.write(
+      id,
+      this.checkpointFile(job),
+      JSON.stringify(checkpoint, null, 2),
+    );
+  }
+  /** Read-only registration gate. Never invents evidence, downloads, or changes completed jobs. */
+  verifiedTripoAssets(id: string, jid: string): Asset[] {
+    const project = this.store.project(id), job = project.jobs.find(item => item.id === jid);
+    if (!job || job.status !== "success" || !job.remoteId) throw new Error("완료한 Tripo 원격 작업 근거가 없습니다.");
+    const quote = this.store.get<Quote>("quote", job.quoteId);
+    if (!quote?.consumed || quote.projectId !== id || job.kind !== job.request.kind ||
+        JSON.stringify({ ...quote.request, count: 1 }) !== JSON.stringify(job.request))
+      throw new Error("Tripo 결과의 승인 견적·고정 요청 연결이 다릅니다.");
+    const checkpoint = this.readCheckpoint(id, job);
+    if (!checkpoint) throw new Error("Tripo 원본 해시 기록이 없어 새 결과로 등록하지 않습니다. 기존 파일은 보존합니다.");
+    const expected = resultDownloads(job, checkpoint.output), current = resultDownloads(job, job.output ?? {});
+    const objectUrl = (value: string) => { const url = new URL(value); return url.origin + url.pathname; };
+    if (expected.length !== current.length || expected.some((item, index) => item.kind !== current[index].kind || objectUrl(item.url) !== objectUrl(current[index].url)))
+      throw new Error("Tripo 완료 결과와 원본 기록의 원격 파일 연결이 다릅니다.");
+    if (checkpoint.native.length !== expected.length || job.nativeFiles?.length !== expected.length ||
+        expected.some((_, index) => {
+          const entry = checkpoint.native.find(item => item.index === index);
+          return !entry || job.nativeFiles![index] !== entry.file || !this.verifyCheckpointNative(id, entry);
+        })) throw new Error("Tripo 원본 파일 또는 완료 기록이 누락됐습니다.");
+    const assets = project.assets.filter(asset => asset.jobId === jid);
+    if (assets.length !== expected.length || new Set(assets.map(asset => asset.nativeFile ?? asset.file)).size !== assets.length ||
+        job.assetIds?.length !== assets.length || assets.some(asset => !job.assetIds!.includes(asset.id)) || !assets.some(asset => asset.id === job.assetId))
+      throw new Error("Tripo 결과 에셋과 원본 목록의 연결이 다릅니다.");
+    const parents = [...new Set([job.request.sourceId, ...(job.request.sourceIds ?? []), project.jobs.find(item => item.remoteId === job.request.sourceTaskId)?.assetId].filter((value): value is string => !!value))];
+    for (const asset of assets) {
+      const native = checkpoint.native.find(entry => entry.file === (asset.nativeFile ?? asset.file));
+      if (!native || asset.origin !== "tripo" || asset.kind !== expected[native.index].kind || asset.parentId !== parents[0] || JSON.stringify(asset.parentIds ?? []) !== JSON.stringify(parents))
+        throw new Error("Tripo 에셋의 원본·입력 계보가 다릅니다.");
+      // Native GLB/image receipts already prove their bytes. Older FBX receipts
+      // without derivative evidence cannot bless a current preview by rehashing it.
+      if (asset.file !== native.file) {
+        const result = checkpoint.results?.find(entry => entry.file === asset.file && entry.nativeFile === native.file && entry.kind === asset.kind);
+        if (!result || !this.verifyCheckpointNative(id, result)) throw new Error("Tripo 미리보기의 원본 연결·해시 근거가 없습니다.");
+      }
+    }
+    return assets;
+  }
   async poll(id: string, jid: string) {
     const lock = id + ":" + jid;
     if (this.busy.has(lock)) return;
@@ -845,44 +1019,66 @@ export class Engine {
     if (j.status === "success") return j;
     this.busy.add(lock);
     try {
-      const d = await this.tripo.task(j.remoteId);
+      let checkpoint = this.readCheckpoint(id, j);
+      // A completed download is independent of temporary API/CDN availability.
+      // This receipt records only local result provenance, never payment approval.
+      const localComplete =
+        checkpoint &&
+        resultDownloads(j, checkpoint.output).every((_, index) => {
+          const entry = checkpoint!.native.find((item) => item.index === index);
+          return !!entry && this.verifyCheckpointNative(id, entry);
+        });
+      const d = localComplete
+        ? {
+            status: "success",
+            output: checkpoint!.output,
+            credits_consumed: checkpoint!.credits,
+            task_id: j.remoteId,
+          }
+        : await this.tripo.task(j.remoteId);
+      if (d?.task_id !== undefined && d.task_id !== j.remoteId)
+        throw new Error(
+          "조회 응답의 원격 작업 ID가 다릅니다. 기존 작업 ID를 유지합니다.",
+        );
       const status = d.status;
       if (status === "success") {
         const output = d.output ?? {};
         // Persist billing and remote output before any download or local conversion can fail.
         this.updateJob(id, jid, { output, credits: d.credits_consumed });
-        const imageOutput = j.kind === "image" || j.kind === "edit";
-        const mainUrl = imageOutput
-          ? output.generated_image_url
-          : j.kind === "smartsegment"
-            ? output.seg_model_url
-            : output.model_url;
-        if (j.kind === "rig-check") {
-          if (typeof output.riggable !== "boolean")
-            throw new Error("리깅 검사 응답에 riggable 값이 없습니다.");
-        } else if (typeof mainUrl !== "string" || !mainUrl) {
-          throw new Error(
-            "완료 응답에 결과 파일 URL이 없습니다. 새 생성 없이 기존 작업을 다시 조회하세요.",
-          );
+        const downloads = resultDownloads(j, output);
+        if (checkpoint) {
+          const previous = resultDownloads(j, checkpoint.output);
+          // Signed query parameters may refresh; an already downloaded object cannot change.
+          const objectUrl = (value: string) => {
+            const u = new URL(value);
+            return u.origin + u.pathname;
+          };
+          for (const entry of checkpoint.native)
+            if (
+              !downloads[entry.index] ||
+              downloads[entry.index].kind !== previous[entry.index].kind ||
+              objectUrl(downloads[entry.index].url) !==
+                objectUrl(previous[entry.index].url)
+            )
+              throw new Error(
+                "같은 Tripo 작업의 원본 결과 경로가 변경되었습니다. 저장한 원본을 보존합니다.",
+              );
         }
-        const downloads: { url: string; kind: Asset["kind"]; label: string }[] =
-          [];
-        if (mainUrl)
-          downloads.push({
-            url: mainUrl,
-            kind: imageOutput ? "image" : "model",
-            label: j.kind,
-          });
-        if (
-          j.kind === "smartsegment" &&
-          typeof output.mask_url === "string" &&
-          output.mask_url
-        )
-          downloads.push({
-            url: output.mask_url,
-            kind: "image",
-            label: "smartsegment · mask",
-          });
+        checkpoint = {
+          schemaVersion: 1,
+          jobId: j.id,
+          remoteId: j.remoteId,
+          requestSha256: sha256(JSON.stringify(j.request)),
+          output,
+          ...(typeof d.credits_consumed === "number" &&
+          Number.isFinite(d.credits_consumed) &&
+          d.credits_consumed >= 0
+            ? { credits: d.credits_consumed }
+            : {}),
+          native: checkpoint?.native ?? [],
+          ...(checkpoint?.results ? { results: checkpoint.results } : {}),
+        };
+        this.saveCheckpoint(id, j, checkpoint);
         const prepared: {
           file: string;
           nativeFile: string;
@@ -895,8 +1091,9 @@ export class Engine {
             .nativeFiles ?? []),
         ];
         for (const [index, download] of downloads.entries()) {
-          let nativeFile = nativeFiles[index];
-          if (!nativeFile || !fs.existsSync(this.store.file(id, nativeFile))) {
+          let entry = checkpoint.native.find((item) => item.index === index);
+          let nativeFile = entry?.file;
+          if (!entry || !this.verifyCheckpointNative(id, entry)) {
             const bytes = await this.tripo.download(download.url);
             const ext = outputExtension(
               download.url,
@@ -914,10 +1111,43 @@ export class Engine {
                 "결과 파일의 실제 형식과 요청 유형이 다릅니다. 원격 결과를 확인하세요.",
               );
             nativeFile = `assets/${jid}${index ? `-${index}` : ""}.${ext}`;
-            this.store.write(id, nativeFile, bytes);
-            nativeFiles[index] = nativeFile;
-            this.updateJob(id, jid, { nativeFiles });
+            const digest = sha256(bytes);
+            if (
+              entry &&
+              (entry.file !== nativeFile ||
+                entry.sha256 !== digest ||
+                entry.bytes !== bytes.length)
+            )
+              throw new Error(
+                "다시 받은 Tripo 원본이 저장된 해시와 다릅니다. 기존 원본은 덮어쓰지 않습니다.",
+              );
+            const oldFile = nativeFiles[index];
+            if (oldFile && oldFile !== nativeFile)
+              throw new Error(
+                "기존 Tripo 원본의 파일 경로가 다릅니다. 원본을 보존합니다.",
+              );
+            const existing = this.store.file(id, nativeFile);
+            if (fs.existsSync(existing)) {
+              if (sha256(fs.readFileSync(existing)) !== digest)
+                throw new Error(
+                  "저장한 Tripo 원본 해시가 다릅니다. 원본을 덮어쓰지 않습니다.",
+                );
+            } else this.store.write(id, nativeFile, bytes);
+            entry = {
+              index,
+              file: nativeFile,
+              bytes: bytes.length,
+              sha256: digest,
+            };
+            checkpoint.native = [
+              ...checkpoint.native.filter((item) => item.index !== index),
+              entry,
+            ];
+            this.saveCheckpoint(id, j, checkpoint);
           }
+          nativeFile = entry.file;
+          nativeFiles[index] = nativeFile;
+          this.updateJob(id, jid, { nativeFiles });
           const format = path.extname(nativeFile).slice(1).toLowerCase();
           let file = nativeFile;
           if (download.kind === "model" && format === "fbx") {
@@ -928,11 +1158,16 @@ export class Engine {
             file = await this.modelPreview(id, nativeFile);
             if (
               path.extname(file).toLowerCase() !== ".glb" ||
-              !fs.existsSync(this.store.file(id, file))
+              !fs.existsSync(this.store.file(id, file)) ||
+              fs
+                .readFileSync(this.store.file(id, file))
+                .subarray(0, 4)
+                .toString("ascii") !== "glTF"
             )
               throw new Error(
                 "FBX 미리보기 변환 결과를 확인하지 못했습니다. 원본은 보존됐습니다.",
               );
+            this.verifyCheckpointNative(id, entry);
           }
           prepared.push({
             file,
@@ -942,6 +1177,14 @@ export class Engine {
             label: download.label,
           });
         }
+        const results = prepared.map(result => {
+          const bytes = fs.readFileSync(this.store.file(id, result.file));
+          return { file: result.file, nativeFile: result.nativeFile, kind: result.kind, sha256: sha256(bytes), bytes: bytes.length };
+        });
+        if (checkpoint.results && JSON.stringify(checkpoint.results) !== JSON.stringify(results))
+          throw new Error("Tripo 완료 결과의 저장 해시가 다릅니다. 기존 등록 근거를 변경하지 않습니다.");
+        checkpoint.results = results;
+        this.saveCheckpoint(id, j, checkpoint);
         const latest = this.store.project(id),
           live = latest.jobs.find((x) => x.id === jid)!;
         for (const result of prepared) {
@@ -1055,6 +1298,21 @@ export class Engine {
       )
     )
       throw new Error("Tripo 작업 ID를 확인하세요.");
+    const job = this.store.project(id).jobs.find((item) => item.id === jid);
+    if (!job) throw new Error("작업 없음");
+    if (job.remoteId === remoteId) return job;
+    if (
+      job.remoteId ||
+      job.status !== "submission_unknown" ||
+      job.output ||
+      job.assetId ||
+      job.assetIds?.length ||
+      job.nativeFiles?.length ||
+      fs.existsSync(this.store.file(id, this.checkpointFile(job)))
+    )
+      throw new Error(
+        "기존 원격 작업·결과는 다른 작업 ID로 교체할 수 없습니다.",
+      );
     return this.updateJob(id, jid, {
       remoteId,
       status: "running",

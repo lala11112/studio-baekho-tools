@@ -1,5 +1,6 @@
 """Deterministic Unity derivative; no authoring, online operations, or source writes."""
-import bpy, json, pathlib, sys, hashlib, shutil, re
+import bpy, json, pathlib, sys, hashlib, shutil, re, math, struct, zlib
+import numpy as np
 
 q = json.loads(pathlib.Path(sys.argv[sys.argv.index('--') + 1]).read_text(encoding='utf8'))
 source = pathlib.Path(q['source']).resolve()
@@ -69,6 +70,7 @@ if len(rigs) > 1:
 textures = out/'Textures'
 textures.mkdir()
 warnings = []
+image_files = {}
 for index, image in enumerate(bpy.data.images):
     if image.type == 'RENDER_RESULT' or image.source not in {'FILE', 'GENERATED'}:
         continue
@@ -92,6 +94,149 @@ for index, image in enumerate(bpy.data.images):
     texture = textures/(str(index)+'_'+name+extension)
     texture.write_bytes(raw)
     image.filepath = str(texture)
+    image_files[image.name] = {'path':texture.relative_to(out).as_posix(),
+        'sha256':hashlib.sha256(raw).hexdigest(),'width':image.size[0],'height':image.size[1]}
+
+# The FBX material representation cannot describe arbitrary Blender node graphs.
+# Bind only this explicit opaque Principled subset; never infer roles from filenames.
+class UnsupportedMaterial(Exception):
+    pass
+
+def linked(socket):
+    if len(socket.links) != 1:
+        raise UnsupportedMaterial('Expected exactly one direct node link: '+socket.name)
+    link = socket.links[0]
+    return link.from_node, link.from_socket.name
+
+def image_input(socket, color_space):
+    node, channel = linked(socket)
+    if node.type != 'TEX_IMAGE' or channel != 'Color' or not node.image:
+        raise UnsupportedMaterial('Only direct image Color nodes are supported: '+socket.name)
+    image = node.image
+    if node.inputs['Vector'].is_linked or node.projection != 'FLAT' or node.extension != 'REPEAT' or node.interpolation != 'Linear':
+        raise UnsupportedMaterial('Mapped UVs, projection, non-repeat or non-linear sampling need explicit material authoring')
+    if image.source != 'FILE' or image.is_dirty or image.name not in image_files or image.alpha_mode == 'PREMUL':
+        raise UnsupportedMaterial('Material image must be an unchanged packed or declared file')
+    if image.colorspace_settings.name != color_space:
+        raise UnsupportedMaterial('Unexpected color space for '+image.name+': '+image.colorspace_settings.name)
+    return image
+
+def scalar_input(socket):
+    if not socket.is_linked:
+        value = float(socket.default_value)
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            raise UnsupportedMaterial('Scalar outside supported 0..1 range: '+socket.name)
+        return {'value':value}
+    node, channel = linked(socket)
+    if node.type != 'SEPARATE_COLOR' or node.mode != 'RGB' or channel not in {'Red','Green','Blue'}:
+        raise UnsupportedMaterial('Scalar requires an RGB Separate Color channel: '+socket.name)
+    image = image_input(node.inputs['Color'], 'Non-Color')
+    return {'image':image,'channel':{'Red':0,'Green':1,'Blue':2}[channel]}
+
+def png_rgba(destination, pixels):
+    # Blender pixel arrays run bottom-to-top. PNG rows run top-to-bottom.
+    values = np.rint(np.clip(pixels,0,1)*255).astype(np.uint8)[::-1]
+    height,width,_ = values.shape
+    rows = np.zeros((height,width*4+1),dtype=np.uint8)
+    rows[:,1:] = values.reshape(height,width*4)
+    def chunk(kind, data):
+        return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data)&0xffffffff)
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    destination.write_bytes(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',width,height,8,6,0,0,0))+
+        chunk(b'IDAT',zlib.compress(rows.tobytes(),6))+chunk(b'IEND',b''))
+
+def metallic_gloss(material, metallic, roughness):
+    images = {v['image'].name:v['image'] for v in (metallic,roughness) if 'image' in v}
+    if not images:
+        return ''
+    sizes = {tuple(image.size) for image in images.values()}
+    if len(sizes) != 1 or any(v <= 0 for v in next(iter(sizes))):
+        raise UnsupportedMaterial('Metallic and roughness dimensions differ; no texture resizing is inferred')
+    width,height = next(iter(sizes))
+    rgba = np.zeros((height,width,4),dtype=np.float32)
+    for image in images.values():
+        pixels = np.empty(width*height*4,dtype=np.float32)
+        image.pixels.foreach_get(pixels)
+        pixels = pixels.reshape(height,width,4)
+        if metallic.get('image') == image:
+            rgba[:,:,0] = pixels[:,:,metallic['channel']]
+        if roughness.get('image') == image:
+            rgba[:,:,3] = 1-pixels[:,:,roughness['channel']]
+        del pixels
+    if 'value' in metallic:
+        rgba[:,:,0] = metallic['value']
+    if 'value' in roughness:
+        rgba[:,:,3] = 1-roughness['value']
+    target = out/'Textures'/'Derived'/('metallic-smoothness-'+hashlib.sha256(material.name.encode()).hexdigest()[:16]+'.png')
+    png_rgba(target,rgba)
+    return target.relative_to(out).as_posix()
+
+def material_binding(material):
+    record = {'name':material.name,'supported':False,'warning':''}
+    try:
+        if not material.use_nodes or not material.node_tree:
+            raise UnsupportedMaterial('Material has no Principled node graph')
+        outputs = [n for n in material.node_tree.nodes if n.type == 'OUTPUT_MATERIAL' and n.is_active_output]
+        if len(outputs) != 1 or outputs[0].inputs['Displacement'].is_linked:
+            raise UnsupportedMaterial('Material output or displacement requires explicit authoring')
+        principled, output = linked(outputs[0].inputs['Surface'])
+        if principled.type != 'BSDF_PRINCIPLED' or output != 'BSDF':
+            raise UnsupportedMaterial('Only a direct Principled surface is supported')
+        inputs = principled.inputs
+        if inputs['Alpha'].is_linked or abs(inputs['Alpha'].default_value-1) > 1e-6:
+            raise UnsupportedMaterial('Transparency requires explicit material authoring')
+        for name in ['Subsurface Weight','Transmission Weight','Coat Weight','Sheen Weight','Anisotropic','Thin Film Thickness']:
+            if name in inputs and (inputs[name].is_linked or abs(inputs[name].default_value) > 1e-6):
+                raise UnsupportedMaterial('Unsupported Principled property: '+name)
+        for name,value in [('IOR',1.5),('Specular IOR Level',0.5),('Diffuse Roughness',0.0)]:
+            if name in inputs and (inputs[name].is_linked or abs(inputs[name].default_value-value)>1e-6):
+                raise UnsupportedMaterial('Non-default specular/diffuse response requires explicit authoring: '+name)
+        if inputs['Specular Tint'].is_linked or any(abs(v-1)>1e-6 for v in inputs['Specular Tint'].default_value[:3]):
+            raise UnsupportedMaterial('Specular tint requires explicit material authoring')
+        if inputs['Emission Strength'].is_linked or (inputs['Emission Strength'].default_value > 0 and
+            (inputs['Emission Color'].is_linked or any(abs(v)>1e-6 for v in inputs['Emission Color'].default_value[:3]))):
+            raise UnsupportedMaterial('Emission requires explicit material authoring')
+        base = image_input(inputs['Base Color'],'sRGB') if inputs['Base Color'].is_linked else None
+        record['baseColor'] = [1,1,1,1] if base else list(inputs['Base Color'].default_value)
+        record['baseColorTexture'] = image_files[base.name]['path'] if base else ''
+        record['normalTexture'],record['normalScale'] = '',1.0
+        if inputs['Normal'].is_linked:
+            normal, output = linked(inputs['Normal'])
+            if normal.type != 'NORMAL_MAP' or output != 'Normal' or normal.space != 'TANGENT' or normal.inputs['Strength'].is_linked:
+                raise UnsupportedMaterial('Normal requires an unmodified tangent-space Normal Map node')
+            if normal.uv_map and any(len(o.data.uv_layers)!=1 or o.data.uv_layers[0].name!=normal.uv_map for o in meshes if material in o.data.materials[:]):
+                raise UnsupportedMaterial('Normal Map UV name does not match the single exported UV map')
+            normal_image = image_input(normal.inputs['Color'],'Non-Color')
+            record['normalTexture'] = image_files[normal_image.name]['path']
+            record['normalScale'] = float(normal.inputs['Strength'].default_value)
+            if not math.isfinite(record['normalScale']) or not 0<=record['normalScale']<=8:
+                raise UnsupportedMaterial('Normal strength is outside the supported 0..8 range')
+        metallic,roughness = scalar_input(inputs['Metallic']),scalar_input(inputs['Roughness'])
+        if record['normalTexture'] and any('image' in value and image_files[value['image'].name]['path']==record['normalTexture'] for value in (metallic,roughness)):
+            raise UnsupportedMaterial('One texture used as both normal and scalar data needs distinct Unity importer assets')
+        record['metallicGlossTexture'] = metallic_gloss(material,metallic,roughness)
+        if any(record.get(key) for key in ['baseColorTexture','normalTexture','metallicGlossTexture']) and any(len(o.data.uv_layers)!=1 for o in meshes if material in o.data.materials[:]):
+            raise UnsupportedMaterial('Textured materials require exactly one UV map; UV selection is not inferred')
+        record['metallic'] = metallic.get('value',1.0)
+        record['smoothness'] = 1-roughness['value'] if 'value' in roughness else 1.0
+        for name,value in [('metallicSource',metallic),('roughnessSource',roughness)]:
+            record[name] = {'path':image_files[value['image'].name]['path'],'channel':'RGB'[value['channel']]} if 'image' in value else {'value':value['value']}
+        record['supported'] = True
+    except UnsupportedMaterial as error:
+        record = {'name':material.name,'supported':False,'warning':str(error)}
+        warnings.append('Material '+material.name+' was not exactly converted: '+str(error))
+    return record
+
+bindings = [material_binding(material) for material in sorted({m for o in meshes for m in o.data.materials if m},key=lambda m:m.name)]
+derived_images = []
+for record in bindings:
+    if record.get('metallicGlossTexture'):
+        raw = (out/record['metallicGlossTexture']).read_bytes()
+        width,height = struct.unpack('>II',raw[16:24])
+        derived_images.append({'path':record['metallicGlossTexture'],'sha256':hashlib.sha256(raw).hexdigest(),'width':width,'height':height})
+(out/'materials.json').write_text(json.dumps({'schemaVersion':1,'materials':bindings,
+    'originalImages':list(image_files.values()),'derivedImages':derived_images,
+    'packing':'Unity metallic R, smoothness A = 1 - Blender roughness; unchanged source bytes retained'},ensure_ascii=False),encoding='utf8')
 
 def signature(o):
     return {'name': o.name, 'parent': o.parent.name if o.parent else None,

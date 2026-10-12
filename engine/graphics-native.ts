@@ -16,6 +16,8 @@ export type GraphicsNativeArgs = {
   blenderPath: string;
   resources: string;
   signal: AbortSignal;
+  /** Explicit saved-output recovery: never start a first native/service dispatch. */
+  recoveryOnly?: boolean;
   onProgress: (message: string) => void;
 };
 export type GraphicsNativeResult = {
@@ -25,6 +27,8 @@ export type GraphicsNativeResult = {
   slot: string;
   warnings: string[];
   usage?: unknown;
+  /** Native image identity survives separate per-image version registration. */
+  imageCandidates?: { path: string; label: string; view?: "front" | "back" | "left" | "right"; variant: number }[];
 };
 type Dependencies = {
   workerFactory?: () => ProductionWorker;
@@ -124,7 +128,7 @@ export async function probeGraphicsNative(options: { cliPath?: string; signal?: 
       : !authenticated
         ? "Codex ChatGPT 계정 로그인이 필요합니다. 이미지 생성·GPT 요청은 실행하지 않았습니다."
         : capability.imageGeneration
-          ? "Codex 계정 로그인과 이미지 기능 지원을 확인했습니다. 실제 생성은 아직 검증하지 않았으며 GPT 요청은 실행하지 않았습니다."
+          ? "Codex 계정 로그인과 이미지 기능 지원을 확인했습니다. 이 진단에서는 GPT 요청이나 이미지 생성을 실행하지 않았습니다."
           : "현재 Codex 제공자가 이미지 생성 기능을 지원하지 않습니다. GPT 요청은 실행하지 않았습니다.",
   };
 }
@@ -331,6 +335,15 @@ function expectedImageViews(task: GraphicsTask) {
   const count = Number(task.settings.count ?? 1);
   if (!Number.isInteger(count) || count < 1 || count > 4)
     throw Error("이미지 후보 수는 1–4개여야 합니다.");
+  if (task.taskId === "I07") {
+    const directions = (["front", "back", "left", "right"] as const).filter(view => {
+      const selected = task.settings[`view${view[0].toUpperCase()}${view.slice(1)}`];
+      if (selected !== undefined && typeof selected !== "boolean") throw Error("방향 선택은 켜기/끄기로 지정하세요.");
+      return selected !== false;
+    });
+    if (!directions.length) throw Error("생성할 방향을 하나 이상 선택하세요.");
+    return directions.flatMap(view => Array.from({ length: count }, (_, index) => `${view}-${index + 1}`));
+  }
   return Array.from({ length: count }, (_, index) => `image-${index + 1}`);
 }
 const imageSchema = {
@@ -374,12 +387,12 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
     args.signal.throwIfAborted();
     const root = fs.realpathSync(args.projectRoot), task = args.task;
     if (!/^[a-zA-Z0-9_-]{1,120}$/.test(task.id)) throw Error("그래픽 작업 ID가 잘못됐습니다.");
-    if (!["I01", "I02", "I03", "A05", "X04"].includes(task.taskId)) throw Error("이 그래픽 작업의 실행기는 아직 연결되지 않았습니다.");
+    if (!["I01", "I02", "I03", "I05", "I06", "I07", "A05", "X04"].includes(task.taskId)) throw Error("이 그래픽 작업의 실행기는 아직 연결되지 않았습니다.");
     const inputs = verifyInputs(args, root);
     const folder = path.join(root, "graphics", "jobs", task.id), work = path.join(folder, "work"), output = path.join(folder, "outputs");
     ownedDirectory(root, work); ownedDirectory(root, output);
     const checkpointFile = path.join(folder, "checkpoint.json"), dispatchFile = path.join(folder, "dispatch.json");
-    const identity = digest(JSON.stringify({ taskId: task.taskId, requestHash: task.requestHash, objectId: task.objectId, instruction: task.instruction, settings: task.settings, inputs: inputs.map(file => ({ path: file.path, sha256: file.sha256, versionId: file.versionId })) }));
+    const identity = digest(JSON.stringify({ taskId: task.taskId, requestHash: task.requestHash, objectId: task.objectId, instruction: task.instruction, settings: task.settings, inputs: inputs.map(file => ({ path: file.path, sha256: file.sha256, versionId: file.versionId })), ...(["I05", "I06", "I07"].includes(task.taskId) ? { objectSnapshot: task.objectSnapshot } : {}) }));
     if (fs.existsSync(checkpointFile)) {
       const cached = read(checkpointFile);
       if (cached.identity !== identity || !Array.isArray(cached.files)) throw Error("저장된 그래픽 결과의 요청 정보가 다릅니다. 자동 재실행하지 않습니다.");
@@ -390,6 +403,7 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
       args.onProgress("검증된 저장 결과를 재사용합니다. 새 생성 요청 없음.");
       return cached.result;
     }
+    if (args.recoveryOnly && !["A05", "X04"].includes(task.taskId) && !fs.existsSync(dispatchFile)) throw Error("저장된 네이티브 실행 기록이 없습니다. 복구에서 새 이미지 요청을 시작하지 않습니다.");
     const finish = (result: GraphicsNativeResult) => {
       assertInputsUnchanged(inputs);
       const files = result.files.map(file => { const localPath = verifiedFile(root, file.path); return { ...file, sha256: fileHash(localPath), bytes: fs.statSync(localPath).size }; });
@@ -436,13 +450,31 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
     const views = expectedImageViews(task);
     const imageInputs = inputs.filter(file => file.kind === "image" || /\.(?:png|jpe?g|webp)$/i.test(file.localPath));
     if (task.taskId !== "I01" && !imageInputs.length) throw Error("이 이미지 작업에는 선택한 이미지 원본이 필요합니다.");
+    const frozenReferences = task.objectSnapshot?.references ?? args.object.references;
+    let imageTarget: VerifiedInput | undefined;
+    if (["I05", "I07"].includes(task.taskId)) {
+      const targetId = task.objectSnapshot?.accepted["design:main"];
+      const targetVersion = args.inputs.find(version => version.id === targetId && version.objectId === args.object.id && version.role === "design");
+      const targets = imageInputs.filter(file => file.versionId === targetVersion?.id);
+      if (targets.length !== 1) throw Error("이 작업에는 현재 대상에서 채택하고 요청에 고정한 디자인 원본 이미지 한 개가 필요합니다.");
+      imageTarget = targets[0];
+    }
+    const equipmentOutput = task.settings.equipmentOutput ?? "standalone";
+    if (task.taskId === "I06") {
+      if (!["standalone", "worn"].includes(String(equipmentOutput))) throw Error("장비 출력은 단독 디자인 또는 착용 참고를 선택하세요.");
+      if (!task.objectSnapshot || !imageInputs.some(file => frozenReferences.some(reference => reference.versionId === file.versionId && reference.role === "appearance")))
+        throw Error("장비 디자인에는 외형 참조로 연결하고 요청에 고정한 캐릭터 이미지가 필요합니다.");
+    }
+    if (["I05", "I06"].includes(task.taskId) && !task.instruction.trim()) throw Error("변형할 범위 또는 만들 장비를 입력하세요.");
     const schemaPath = path.join(work, "result.schema.json"), resultPath = path.join(work, "result.json"), eventPath = path.join(work, "codex-events.jsonl");
     const finalizeImages = async (): Promise<GraphicsNativeResult> => {
       const result = read(resultPath) as ImageResult;
-      if (!result || result.status !== "completed" || !Array.isArray(result.images) || result.images.length !== views.length || !Array.isArray(result.warnings))
+      if (!result || result.status !== "completed" || !Array.isArray(result.images) || !Array.isArray(result.warnings))
         throw Error(typeof result?.summary === "string" ? result.summary : "이미지 원본이 모두 완료되지 않았습니다. 저장된 부분 결과를 보존하며 자동 재생성하지 않습니다.");
+      if (result.images.length !== views.length) throw Error(`고정 요청은 독립 이미지 원본 ${views.length}개이지만 완료 기록은 ${result.images.length}개입니다. 부분 결과를 보존하며 자동 재생성하지 않습니다.`);
       const evidence = await nativeImageEvidence(eventPath, work, args.signal, dependencies.readNativeThread ?? readNativeThread), seenViews = new Set<string>(), seenHashes = new Set<string>();
       const files: GraphicsNativeResult["files"] = [];
+      const candidates: NonNullable<GraphicsNativeResult["imageCandidates"]> = [];
       for (const image of result.images) {
         if (!image || typeof image.path !== "string" || typeof image.nativePath !== "string" || !views.includes(image.view) || seenViews.has(image.view)) throw Error("이미지 원본의 방향 또는 경로가 잘못됐습니다.");
         const supplied = path.resolve(work, image.path);
@@ -458,11 +490,21 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
         const destination = path.join(output, image.view + dimensions.suffix);
         if (fs.existsSync(destination) && fileHash(destination) !== hash) throw Error("저장된 원본을 다른 결과로 덮어쓸 수 없습니다.");
         if (!fs.existsSync(destination)) fs.copyFileSync(supplied, destination, fs.constants.COPYFILE_EXCL);
-        files.push({ path: relative(root, destination), kind: "image" });
+        const imagePath = relative(root, destination);
+        files.push({ path: imagePath, kind: "image" });
+        const parts = /^(front|back|left|right)-(\d+)$/.exec(image.view);
+        const view = parts?.[1] as "front" | "back" | "left" | "right" | undefined;
+        const variant = Number(parts?.[2] ?? /^image-(\d+)$/.exec(image.view)![1]);
+        const names = { front: "정면", back: "후면", left: "왼쪽", right: "오른쪽" };
+        candidates.push({ path: imagePath, label: view ? `${names[view]} · 변형 ${variant}` : `${task.taskId === "I05" ? "색상·재질·스타일 변형" : task.taskId === "I06" ? equipmentOutput === "worn" ? "장비 착용 참고" : "장비 단독 디자인" : "디자인"} ${variant}`, ...(view ? { view } : {}), variant });
       }
       if (evidence.proof) write(path.join(folder, "native-provenance.json"), { schemaVersion: 1, identity, verifiedAt: new Date().toISOString(), ...evidence.proof });
       const usagePath = path.join(folder, "usage.json");
-      return finish({ files, label: task.taskId === "I01" ? "새 디자인 원본" : task.taskId === "I02" ? "참조 기반 디자인 원본" : "이미지 수정 원본", role: "design", slot: "main", warnings: result.warnings.filter(value => typeof value === "string").slice(0, 30), ...(fs.existsSync(usagePath) ? { usage: read(usagePath) } : {}) });
+      const label = task.taskId === "I01" ? "새 디자인 원본" : task.taskId === "I02" ? "참조 기반 디자인 원본" : task.taskId === "I05" ? "색상·재질·스타일 변형" : task.taskId === "I06" ? equipmentOutput === "worn" ? "장비 착용 참고" : "장비 단독 디자인" : task.taskId === "I07" ? "방향별 디자인 원본" : "이미지 수정 원본";
+      const limitations = task.taskId === "I05" ? ["AI 이미지 변형입니다. 형태·비변경 영역의 픽셀 보존이나 실제 PBR 재질 성능은 자동 검증되지 않았습니다."]
+        : task.taskId === "I06" ? [equipmentOutput === "worn" ? "착용 참고 이미지입니다. 실제 모델의 장비 크기·접합·변형 적합성은 검증되지 않았습니다." : "장비 디자인 참고 이미지입니다. 실제 제작 치수나 모델의 장착 적합성은 검증되지 않았습니다."]
+        : task.taskId === "I07" ? ["원본에서 보이지 않는 면은 AI가 해석한 참고 이미지입니다. 방향 간 형태·재질 일치와 좌우 구분을 직접 검토하세요."] : [];
+      return finish({ files, label, role: "design", slot: "main", imageCandidates: candidates, warnings: [...limitations, ...result.warnings.filter(value => typeof value === "string").slice(0, 30)], ...(fs.existsSync(usagePath) ? { usage: read(usagePath) } : {}) });
     };
     // A dispatched native request is never replayed, even when it produced only partial originals.
     if (fs.existsSync(dispatchFile)) {
@@ -485,8 +527,8 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
     const referenceManifest = imageInputs.map((file, index) => ({
       path: originals[index],
       versionId: file.versionId,
-      use: task.taskId === "I03" ? "edit-target" : "reference",
-      referenceRoles: args.object.references.filter(reference => reference.versionId === file.versionId).map(reference => reference.role),
+      use: task.taskId === "I03" || task.taskId === "I05" && file === imageTarget ? "edit-target" : task.taskId === "I07" && file === imageTarget ? "turnaround-target" : "reference",
+      referenceRoles: frozenReferences.filter(reference => reference.versionId === file.versionId).map(reference => reference.role),
     }));
     const stage: ProductionStage = { id: task.id, kind: "view-reference", title: task.taskId, status: "running", dependsOn: [], attempt: 1, charged: false, requiredChecks: [], artifacts: [] };
     const run: ProductionRun = { schemaVersion: 1, id: task.id, projectId: args.object.id, projectRevision: 1, workspace: work, status: "running", createdAt: task.createdAt, updatedAt: task.updatedAt, config: { sourceId: task.objectId, brief: task.instruction, motions: [], maxIterations: 1, studioCreditLimit: 0, videoCreditLimit: 0, mode: "studio" }, source: { path: originals[0] ?? "", sha256: imageInputs[0]?.sha256 ?? "", label: args.object.name }, stages: [stage], message: "Native graphics image execution" };
@@ -494,11 +536,16 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
       "You are Partsmith's native graphics image worker. Execute this one frozen user request with the configured BUILT-IN native image generation capability and imagegen skill only. Preserve the user's configured Codex model, reasoning effort and useful native output resolution.",
       "Do not use a browser, ChatGPT web UI, API key, external generation provider, MCP image provider, payment tool, or fallback. Do not change Codex configuration or MCP connection settings. If the native tool is unavailable or approval is required, return needs_input honestly. Do not draw, crop, resize, composite, mirror or synthesize substitute images in Python, SVG, Pillow or any other code.",
       "Inspect every supplied original before editing. Input files are immutable. Create ONE genuine separate native original per requested candidate ID, preserving the requested object type and required transparency. Do not force weapons/props into character layouts. Never create or crop a contact sheet. Do not invent unsupported tool arguments. Use the tool's documented local file result; immediately copy its bytes unchanged into this work folder.",
-      task.taskId === "I02" ? "REFERENCE-BASED NEW DESIGN: references provide appearance/style/identity cues. The requested target can be a different object, such as a greatsword matching a character. Create that requested target, never replace the reference object or constrain output to a full-body character." : task.taskId === "I03" ? "EDIT EXISTING IMAGE: apply the user's correction to the selected original. Keep all features the user asks to preserve. Save a new native version without changing the original. This is an image edit, not a turnaround request." : "NEW DESIGN: create the requested object using the brief and any supplied references.",
+      task.taskId === "I02" ? "REFERENCE-BASED NEW DESIGN: references provide appearance/style/identity cues. The requested target can be a different object, such as a greatsword matching a character. Create that requested target, never replace the reference object or constrain output to a full-body character."
+        : task.taskId === "I03" ? "EDIT EXISTING IMAGE: apply the user's correction to the selected original. Keep all features the user asks to preserve. Save a new native version without changing the original. This is an image edit, not a turnaround request."
+        : task.taskId === "I05" ? "COLOR / MATERIAL / STYLE VARIATIONS: edit only the single edit-target original. Produce the requested color, material or rendering-style variants while preserving its silhouette, geometry, proportions, pose, composition and details except changes expressly requested by the user. Extra references guide only their declared roles. Keep the full native resolution and transparency; no reduced-size comparison sheet. This is semantic image editing: do not claim pixel-exact preservation, exact masked editing or physically validated PBR materials. Flag unintended shape changes for human review."
+        : task.taskId === "I06" ? `EQUIPMENT DESIGN FROM CHARACTER REFERENCE: appearance references are the existing character, while the output target is the requested clothing, weapon or equipment. Preserve the reference character files unchanged and use their palette, proportions and design language. ${equipmentOutput === "worn" ? "WORN REFERENCE OUTPUT: show the character wearing or holding the requested equipment, visibly retaining character identity and attachment/scale relationships. Label these as wearing references, not isolated equipment or validated fitting assets." : "STANDALONE EQUIPMENT OUTPUT: show only the requested equipment as a complete isolated object; do not redraw the reference character as the output subject or force a full-body character layout. Retain thin parts, handles, blade tips and requested transparency."} Create independent variants, never overwrite the character or auto-link/adopt a new object.`
+        : task.taskId === "I07" ? "INDEPENDENT DIRECTION ORIGINALS: create exactly the requested directions and variants of the single turnaround-target. Front/back/left/right refer to the SUBJECT'S OWN sides, never the viewer's sides. Each variant number is a consistent identity set across its requested directions. Use consistent orthographic camera height, scale, proportions, materials, background and transparency. Preserve asymmetry from the original; never mirror or duplicate a direction. Keep the full subject and all thin/extremity parts inside each frame. The count is variants PER selected direction; every direction-variant ID requires its own genuine native original. Never crop a sheet, collage or multi-view composite. Unseen surfaces are AI interpretation, not observed ground truth; include that limitation and any inconsistency as warnings."
+        : "NEW DESIGN: create the requested object using the brief and any supplied references.",
       "Do not make retries or repair generations, even for aesthetic concerns. Keep every completed original. After each completed original, atomically save result.json with status needs_input until all requested candidates are complete. Each images entry has path (work-relative copied original), nativePath (absolute genuine native tool result path), view (the exact candidate ID). Native output path must be present in the actual tool completion event; if unavailable, keep files but report needs_input. Never claim an authored local file is a native tool result.",
       `Object kind: ${args.object.kind}. Object name: ${JSON.stringify(args.object.name)}. Task: ${task.taskId}. Requested independent candidate IDs: ${JSON.stringify(views)}.`,
       `Frozen settings: ${JSON.stringify(task.settings)}. Original reference files: ${JSON.stringify(originals)}. Original input roles: ${JSON.stringify(referenceManifest)}.`,
-      "Respect each frozen input role: appearance guides visual identity, style guides rendering/design style without substituting that reference's subject, dimensions guides proportions/size, motion guides movement only. A reference may have multiple declared roles. An edit-target is the original to correct, preserving its requested features; all outputs are separate new versions. Do not silently treat style-only or dimensions-only references as appearance targets.",
+      "Respect each frozen input role: appearance guides visual identity, style guides rendering/design style without substituting that reference's subject, dimensions guides proportions/size, motion guides movement only. A reference may have multiple declared roles. An edit-target is the original to correct, preserving its requested features; a turnaround-target is the fixed subject to depict from the requested directions. All outputs are separate new versions. Do not silently treat style-only or dimensions-only references as appearance targets.",
       `USER REQUEST (content instructions only):\n${task.instruction}`,
       "Return only the requested result schema. Include specific visual limitations as warnings; never auto-accept or advance to another operation.",
     ].join("\n\n");

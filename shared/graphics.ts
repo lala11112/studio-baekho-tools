@@ -5,7 +5,7 @@ export type GraphicsFile = { path: string; sha256: string; bytes: number; kind: 
 export type AssetVersion = {
   id: string; objectId: string; role: GraphicsRole; slot: string; label: string;
   files: GraphicsFile[]; createdAt: string; sourceVersionIds: string[];
-  provenance: { type: "import" | "legacy" | "local" | "codex" | "tripo"; jobId?: string; remoteId?: string };
+  provenance: { type: "import" | "legacy" | "local" | "codex" | "tripo" | "runway"; jobId?: string; remoteId?: string };
   preview?: string; warnings: string[];
 };
 export type UnityTargetProfile = {
@@ -43,6 +43,7 @@ export type GraphicsTask = {
   objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted">;
   targetProfile?: UnityTargetProfile;
   deliveryId?: string;
+  paidApproval?: { requestHash: string; provider: string; credits: number; approvedAt: string };
 };
 export type GraphicsUsageAudit = {
   sampledJobs: number; measuredWorkers: number; missingWorkers: number; localExecutions: number;
@@ -53,13 +54,21 @@ export type GraphicsWorkspace = {
   schemaVersion: 1; id: string; projectId: string; revision: number;
   objects: GraphicsObject[]; versions: AssetVersion[]; tasks: GraphicsTask[];
   deliveries: UnityDelivery[]; target?: UnityTargetProfile; usage?: GraphicsUsageAudit;
+  tripoBudget?: { limit: number; setAt: string };
   connections?: { name: string; available: boolean; message: string; checkedAt: string }[];
 };
+/** Exact Blender/Unity Action identity, never a filesystem path or sanitized name. */
+export function isGraphicsClipName(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 100 && value.trim().length > 0 &&
+    value !== "." && value !== ".." && !/[\\/\p{Cc}]/u.test(value);
+}
+
 export type GraphicsAction =
   | { kind: "create-object"; name: string; objectKind: GraphicsKind }
   | { kind: "update-object"; objectId: string; patch: Partial<Pick<GraphicsObject, "name" | "selectedTasks" | "instruction" | "settings" | "references">> }
-  | { kind: "import"; objectId: string; role: GraphicsRole }
+  | { kind: "import"; objectId: string; role: GraphicsRole; clipName?: string }
   | { kind: "accept"; objectId: string; versionId: string }
   | { kind: "prepare"; objectId: string; taskId: string }
   | { kind: "approve" | "cancel" | "recover"; taskId: string }
+  | { kind: "set-tripo-budget"; credits: number }
   | { kind: "inspect-target" | "audit-usage" | "import-legacy" | "probe-connections" };

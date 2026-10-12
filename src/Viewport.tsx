@@ -3,7 +3,9 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { skeletonOverlay } from "./skeleton-overlay";
+import { loadedModelBounds, frameModelBounds } from "./viewport-framing";
 import {
   RotateCcw,
   Move,
@@ -88,6 +90,12 @@ export function Viewport({
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.25;
+    const room = new RoomEnvironment();
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const environment = pmrem.fromScene(room, 0.04);
+    scene.environment = environment.texture;
+    room.dispose();
+    pmrem.dispose();
     host.current.appendChild(renderer.domElement);
     const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
     camera.position.set(3, 2.2, 4.7);
@@ -116,6 +124,27 @@ export function Viewport({
     axes.position.set(-0.8, 0.01, 0.6);
     scene.add(axes);
     const objects = new Map<string, THREE.Group>();
+    const fitModels = (direction = camera.position.clone().sub(orbit.target)) => {
+      const bounds = loadedModelBounds(objects.values());
+      const framing = frameModelBounds(camera, bounds, direction);
+      if (!framing) return false;
+      if (previewId) {
+        // Imported origins may lie halfway through the asset. Move only the
+        // preview guides; keep all source transforms and coordinates intact.
+        platform.visible = false;
+        grid.position.y = bounds.min.y - Math.max(bounds.getSize(new THREE.Vector3()).length() * 0.003, 1e-6);
+        axes.position.y = grid.position.y;
+      }
+      orbit.target.copy(framing.center);
+      orbit.minDistance = framing.minDistance;
+      orbit.maxDistance = framing.maxDistance;
+      if (scene.fog instanceof THREE.Fog) {
+        scene.fog.near = framing.fogNear;
+        scene.fog.far = framing.fogFar;
+      }
+      orbit.update();
+      return true;
+    };
     const controls = new TransformControls(camera, renderer.domElement);
     scene.add(controls.getHelper());
     controls.addEventListener("dragging-changed", (e) => {
@@ -165,6 +194,7 @@ export function Viewport({
           if (explode && !previewId) group.position.x += (i - 1) * 0.65;
           group.traverse((o) => (o.userData.partId = s.id));
           objects.set(s.id, group);
+          fitModels();
           const skeleton = skeletonOverlay(gltf.scene);
           if (skeleton) {
             skeleton.overlay.visible = skeletonVisible.current;
@@ -251,13 +281,15 @@ export function Viewport({
     const resize = new ResizeObserver(() => {
       if (!host.current) return;
       const { clientWidth: w, clientHeight: h } = host.current;
+      if (w <= 0 || h <= 0) return;
       renderer.setSize(w, h);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
+      fitModels();
     });
     resize.observe(host.current);
     const clock = new THREE.Clock();
-    api.current = { camera, orbit, controls, actions, mixers, objects, scene, skeletons };
+    api.current = { camera, orbit, controls, actions, mixers, objects, scene, skeletons, fitModels };
     controls.setMode(mode);
     const tick = () => {
       frame = requestAnimationFrame(tick);
@@ -284,6 +316,7 @@ export function Viewport({
             m.dispose();
           }
       });
+      environment.dispose();
       renderer.dispose();
       renderer.domElement.remove();
     };
@@ -307,9 +340,11 @@ export function Viewport({
     }
   }, [clip]);
   function view(x: number, y: number, z: number) {
-    api.current?.camera.position.set(x, y, z);
-    api.current?.orbit.target.set(0, 0.85, 0);
-    api.current?.orbit.update();
+    const current = api.current;
+    if (!current || current.fitModels(new THREE.Vector3(x, y, z))) return;
+    current.orbit.target.set(0, 0.85, 0);
+    current.camera.position.copy(current.orbit.target).add(new THREE.Vector3(x, y, z).normalize().multiplyScalar(5.7));
+    current.orbit.update();
   }
   return (
     <div className="viewport" data-bone-count={boneCount} data-skeleton-visible={boneCount > 0 && showSkeleton}>
@@ -322,10 +357,10 @@ export function Viewport({
         </span>
         <div className="segmented">
           {boneCount > 0 && <button data-testid="viewport-skeleton-toggle" aria-pressed={showSkeleton} onClick={() => setShowSkeleton(!showSkeleton)} title="실제 리그의 뼈와 관절 표시">뼈대 {showSkeleton ? "ON" : "OFF"} · {boneCount}</button>}
-          <button onClick={() => view(0, 1, 4.6)}>정면</button>
-          <button onClick={() => view(4.6, 1, 0)}>측면</button>
-          <button onClick={() => view(0, 1, -4.6)}>후면</button>
-          <button title="시점 초기화" onClick={() => view(3, 2.2, 4.7)}>
+          <button onClick={() => view(0, 0, 1)}>정면</button>
+          <button onClick={() => view(1, 0, 0)}>측면</button>
+          <button onClick={() => view(0, 0, -1)}>후면</button>
+          <button title="시점 초기화" onClick={() => view(3, 1.35, 4.7)}>
             <RotateCcw size={14} />
           </button>
         </div>

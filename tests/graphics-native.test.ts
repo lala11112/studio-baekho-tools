@@ -47,6 +47,12 @@ function generated(task: WorkerTask, views = ["image-1"], options: { event?: boo
   return { status: "completed", summary: "Done", images, warnings: [] };
 }
 
+test("explicit saved-image recovery without dispatch never starts a first generation", async t => {
+  const f = fixture(t); f.args.recoveryOnly = true; let calls = 0;
+  const execute = createGraphicsNativeExecutor({ workerFactory: () => workerMock(task => { calls++; return generated(task); }) });
+  await assert.rejects(execute(f.args), /복구에서 새 이미지 요청/); assert.equal(calls, 0);
+});
+
 test("native image uses original bytes, inherited model/effort, native events and project-owned originals", async t => {
   const f = fixture(t, "I02"), original = f.addInput();
   let calls = 0;
@@ -273,6 +279,139 @@ test("multiple image candidates require unique original files without implying a
   }) });
   await assert.rejects(execute(f.args), /복제한 결과/);
   assert(fs.existsSync(path.join(f.root, "graphics/jobs/task-1/work/image-1.png")), "keep partial genuine originals for inspection");
+});
+
+function freezeImageTarget(f: ReturnType<typeof fixture>) {
+  f.args.object.accepted["design:main"] = f.args.inputs[0].id;
+  f.args.task.objectSnapshot = { name: f.args.object.name, kind: f.args.object.kind,
+    accepted: structuredClone(f.args.object.accepted), references: structuredClone(f.args.object.references) };
+}
+
+test("I05 edits only the frozen accepted original, preserves separate style reference and native quality", async t => {
+  const f = fixture(t, "I05"), original = f.addInput(), before = hash(original);
+  const style = path.join(f.root, "style.png"); png(style, 43);
+  const reference: AssetVersion = { ...f.args.inputs[0], id: "style-v1", objectId: "style-object", files: [{ path: "style.png", kind: "image", bytes: fs.statSync(style).size, sha256: hash(style) }] };
+  f.args.inputs.push(reference); f.args.task.inputVersionIds.push(reference.id);
+  f.args.object.references = [{ versionId: reference.id, role: "style" }]; freezeImageTarget(f);
+  f.args.task.settings.count = 2;
+  let calls = 0;
+  const execute = createGraphicsNativeExecutor({ workerFactory: () => workerMock(task => {
+    calls++; assert.match(task.prompt, /COLOR \/ MATERIAL \/ STYLE VARIATIONS/);
+    assert.match(task.prompt, /preserving its silhouette, geometry, proportions/);
+    assert.match(task.prompt, /full native resolution and transparency/);
+    assert.match(task.prompt, /do not claim pixel-exact preservation/);
+    assert.equal((task.prompt.match(/"use":"edit-target"/g) ?? []).length, 1);
+    assert.match(task.prompt, /"versionId":"style-v1","use":"reference","referenceRoles":\["style"\]/);
+    assert.equal(task.imagePaths.length, 2); assert.equal(hash(task.imagePaths[0]), before);
+    return generated(task, ["image-1", "image-2"]);
+  }) });
+  const result = await execute(f.args);
+  assert.equal(hash(original), before); assert.equal(result.imageCandidates?.length, 2);
+  assert.deepEqual(result.imageCandidates?.map(candidate => candidate.variant), [1, 2]);
+  assert(result.imageCandidates?.every(candidate => candidate.label.startsWith("색상·재질·스타일 변형")));
+  assert.deepEqual(await execute(f.args), result); assert.equal(calls, 1);
+});
+
+test("I06 character appearance reference is distinct from standalone equipment or wearing outputs", async t => {
+  for (const mode of ["standalone", "worn"] as const) await t.test(mode, async subtest => {
+    const f = fixture(subtest, "I06"), source = f.addInput(), original = hash(source);
+    f.args.inputs[0].objectId = "character-object";
+    f.args.object.references = [{ versionId: f.args.inputs[0].id, role: "appearance" }];
+    f.args.task.objectSnapshot = { name: f.args.object.name, kind: f.args.object.kind, accepted: {}, references: structuredClone(f.args.object.references) };
+    f.args.task.settings.equipmentOutput = mode;
+    const execute = createGraphicsNativeExecutor({ workerFactory: () => workerMock(task => {
+      assert.match(task.prompt, /EQUIPMENT DESIGN FROM CHARACTER REFERENCE/);
+      assert.match(task.prompt, mode === "worn" ? /WORN REFERENCE OUTPUT/ : /STANDALONE EQUIPMENT OUTPUT/);
+      assert.match(task.prompt, /never overwrite the character or auto-link\/adopt/);
+      assert.match(task.prompt, /"use":"reference","referenceRoles":\["appearance"\]/);
+      assert.equal(task.imagePaths.length, 1);
+      return generated(task);
+    }) });
+    const result = await execute(f.args);
+    assert.equal(hash(source), original); assert.equal(result.label, mode === "worn" ? "장비 착용 참고" : "장비 단독 디자인");
+    assert.deepEqual(f.args.object.accepted, {});
+  });
+});
+
+test("I05 and I07 require an accepted same-object target; I06 requires an appearance role before dispatch", async t => {
+  for (const id of ["I05", "I06", "I07"]) await t.test(id, async subtest => {
+    const f = fixture(subtest, id); f.addInput(); let calls = 0;
+    const execute = createGraphicsNativeExecutor({ workerFactory: () => { calls++; throw Error("must not dispatch"); } });
+    await assert.rejects(execute(f.args), /채택|외형 참조/); assert.equal(calls, 0);
+  });
+});
+
+test("I07 defaults to four independent subject-side originals and keeps each view identity", async t => {
+  const f = fixture(t, "I07"), source = f.addInput(), original = hash(source); freezeImageTarget(f);
+  let calls = 0;
+  const views = ["front-1", "back-1", "left-1", "right-1"];
+  const execute = createGraphicsNativeExecutor({ workerFactory: () => workerMock(task => {
+    calls++; assert.match(task.prompt, /INDEPENDENT DIRECTION ORIGINALS/);
+    assert.match(task.prompt, /SUBJECT'S OWN sides, never the viewer's sides/);
+    assert.match(task.prompt, /Unseen surfaces are AI interpretation/);
+    assert.match(task.prompt, /never mirror or duplicate a direction/);
+    assert.match(task.prompt, /"use":"turnaround-target"/);
+    assert(task.prompt.includes(JSON.stringify(views)));
+    return generated(task, views);
+  }) });
+  const result = await execute(f.args);
+  assert.equal(hash(source), original);
+  assert.deepEqual(result.files.map(file => path.basename(file.path)), views.map(view => view + ".png"));
+  assert.deepEqual(result.imageCandidates?.map(candidate => candidate.view), ["front", "back", "left", "right"]);
+  assert(result.imageCandidates?.every(candidate => candidate.variant === 1));
+  assert.deepEqual(await execute(f.args), result); assert.equal(calls, 1);
+});
+
+test("I07 count means variants per frozen selected direction, regardless of completion order", async t => {
+  const f = fixture(t, "I07"); f.addInput(); freezeImageTarget(f);
+  f.args.task.settings = { count: 2, viewFront: true, viewBack: false, viewLeft: false, viewRight: true };
+  const requested = ["front-1", "front-2", "right-1", "right-2"];
+  let calls = 0;
+  const execute = createGraphicsNativeExecutor({ workerFactory: () => workerMock(task => {
+    calls++; assert(task.prompt.includes(JSON.stringify(requested))); assert.match(task.prompt, /variants PER selected direction/);
+    return generated(task, [...requested].reverse());
+  }) });
+  const result = await execute(f.args);
+  assert.deepEqual(result.imageCandidates?.map(candidate => [candidate.view, candidate.variant]), [["right", 2], ["right", 1], ["front", 2], ["front", 1]]);
+  f.args.task.settings.viewRight = false;
+  await assert.rejects(execute(f.args), /요청 정보가 다릅니다/); assert.equal(calls, 1);
+});
+
+test("I07 refuses invalid or empty direction selection and out-of-range variants before native dispatch", async t => {
+  const variants: GraphicsNativeArgs["task"]["settings"][] = [
+    { viewFront: false, viewBack: false, viewLeft: false, viewRight: false },
+    { viewFront: "false" }, { count: 5 },
+  ];
+  for (const settings of variants) await t.test(JSON.stringify(settings), async subtest => {
+    const f = fixture(subtest, "I07"); f.addInput(); freezeImageTarget(f); f.args.task.settings = settings;
+    let calls = 0;
+    const execute = createGraphicsNativeExecutor({ workerFactory: () => { calls++; throw Error("must not dispatch"); } });
+    await assert.rejects(execute(f.args), /방향|후보 수/); assert.equal(calls, 0);
+  });
+});
+
+test("I07 partial native direction results preserve originals but never regenerate missing views", async t => {
+  const f = fixture(t, "I07"); f.addInput(); freezeImageTarget(f); let calls = 0;
+  const execute = createGraphicsNativeExecutor({ workerFactory: () => workerMock(task => { calls++; return generated(task, ["front-1", "back-1", "left-1"]); }) });
+  await assert.rejects(execute(f.args), /원본 4개.*기록은 3개/);
+  await assert.rejects(execute(f.args), /원본 4개.*기록은 3개/);
+  assert.equal(calls, 1); assert(fs.existsSync(path.join(f.root, "graphics/jobs/task-1/work/front-1.png")));
+  assert(!fs.existsSync(path.join(f.root, "graphics/jobs/task-1/checkpoint.json")));
+});
+
+test("I07 rejects substituted view IDs and duplicated native images", async t => {
+  for (const variant of ["wrong-view", "duplicate-native"] as const) await t.test(variant, async subtest => {
+    const f = fixture(subtest, "I07"); f.addInput(); freezeImageTarget(f);
+    const execute = createGraphicsNativeExecutor({ workerFactory: () => workerMock(task => generated(task,
+      variant === "wrong-view" ? ["front-1", "back-1", "left-1", "image-1"] : ["front-1", "back-1", "left-1", "right-1"], { duplicate: variant === "duplicate-native" })) });
+    await assert.rejects(execute(f.args), /방향|복제/);
+  });
+});
+
+test("I04 exact masked editing remains unavailable and never dispatches", async t => {
+  const f = fixture(t, "I04"); f.addInput();
+  const execute = createGraphicsNativeExecutor({ workerFactory: () => { throw Error("must not dispatch"); } });
+  await assert.rejects(execute(f.args), /아직 연결되지 않았습니다/);
 });
 
 test("abort after native output preserves files without marking a successful review", async t => {

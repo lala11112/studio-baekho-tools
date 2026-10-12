@@ -102,9 +102,10 @@ type QueueRequest = {
   destination: string; resultPath: string; profileFingerprint: string; unityVersion: string;
   pipeline: string; converterVersion: string; structure: string; rigType: string;
   mode: string; files: Output[]; expectedClips: string[]; sources: { path: string; sha256: string }[];
-  profileFiles: { path: string; sha256: string }[]; spritePixelsPerUnit: number;
+  profileFiles: { path: string; sha256: string }[]; spritePixelsPerUnit: number; materialManifest?: string;
 };
 function assertRequestBinding(root:string, delivery:UnityDelivery, q:QueueRequest) {
+  if(q.files?.some(file=>file.destination===delivery.destination+"/Generated/materials.json") && q.materialManifest!==delivery.destination+"/Generated/materials.json")throw Error("Unity 재질 역할 manifest 연결이 고정 요청과 다릅니다.");
   const expectedResult=safePath(root,`Library/PartsmithGraphicsResults/${delivery.id}.json`);
   const samePath=(a:string,b:string)=>process.platform==="win32"?path.resolve(a).toLowerCase()===path.resolve(b).toLowerCase():path.resolve(a)===path.resolve(b);
   if(q.requestId!==delivery.id||q.objectId!==delivery.objectId||q.profileFingerprint!==delivery.profileFingerprint||q.converterVersion!==delivery.converterVersion||q.destination!==delivery.destination||typeof q.resultPath!=="string"||!samePath(q.resultPath,expectedResult))throw Error("Unity 요청과 고정한 전달·대상 프로젝트 정보가 다릅니다.");
@@ -171,16 +172,25 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
     return ranked[0];
   }).filter(Boolean);
   const images = inputs.filter(i=>/\.(png|jpe?g|tga)$/i.test(i.path));
-  const source = sprite ? images[0] : preferred[0];
-  if (!source || (sprite ? images.length !== 1 : preferred.length !== 1)) throw Error(sprite ? "현재 Unity 스프라이트 출력은 PNG/JPEG/TGA 이미지 한 개를 지원합니다." : "현재 Unity 출력은 정적 모델 또는 클립이 포함된 모델 버전 한 개를 지원합니다. 서로 다른 리그·클립 묶음은 아직 연결 검증이 필요합니다.");
-  if(a.versions.length!==1)throw Error("현재 Unity 전달은 자체 텍스처·클립을 포함한 버전 한 개를 지원합니다. 별도 재질·리그·동작 버전 합성은 아직 지원하지 않습니다.");
+  const combine = !sprite && a.versions.length > 1;
+  const rigs = a.versions.filter(v=>v.role==="rig" && v.slot==="main");
+  const clips = a.versions.filter(v=>v.role==="animation");
+  if(combine && (rigs.length!==1 || !clips.length || rigs.length+clips.length!==a.versions.length || preferred.length!==a.versions.length))
+    throw Error("여러 버전의 Unity 전달은 채택한 리그 한 개와 이름을 지정한 동작 클립을 지원합니다. 별도 재질은 리그 원본에 포함해야 합니다.");
+  if(combine && (a.versions.some(v=>a.object.accepted[`${v.role}:${v.slot}`]!==v.id) || new Set(clips.map(v=>v.slot)).size!==clips.length))
+    throw Error("Unity로 보낼 리그와 각 동작 클립의 정확한 버전을 먼저 채택하세요.");
+  if(combine && (preferred.some(input=>path.extname(input.path).toLowerCase()!==".blend") || clips.some(v=>!v.slot.trim() || v.slot==="main")))
+    throw Error("리그·클립 합성은 원본 BLEND와 정확한 Action 이름의 클립 슬롯이 필요합니다.");
+  const source = sprite ? images[0] : combine ? preferred.find(input=>input.versionId===rigs[0].id) : preferred[0];
+  if (!source || (sprite ? images.length !== 1 || a.versions.length!==1 : !combine && preferred.length !== 1)) throw Error(sprite ? "현재 Unity 스프라이트 출력은 PNG/JPEG/TGA 이미지 한 개를 지원합니다." : "Unity에 보낼 원본 모델 버전 한 개를 지정하세요.");
   const rigType = a.object.settings.unityRigType === "humanoid" ? "humanoid" : "generic";
   const spritePixelsPerUnit = Number(a.object.settings.spritePixelsPerUnit ?? 100);
   if (!Number.isFinite(spritePixelsPerUnit) || spritePixelsPerUnit < 1 || spritePixelsPerUnit > 10000) throw Error("스프라이트 단위를 확인하세요.");
   const bridgeSource = path.join(a.resources,"unity/Editor/PartsmithGraphicsBridge.cs");
   const converterSource = path.join(a.resources,"blender/graphics_prepare.py");
-  const converterVersion = GRAPHICS_UNITY_CONVERTER + "-" + digest(fs.readFileSync(bridgeSource)).slice(0,12) + "-" + digest(fs.readFileSync(converterSource)).slice(0,12);
-  const identity = digest(JSON.stringify({ objectId:a.object.id, versionIds:a.versions.map(v=>v.id), inputs:inputs.map(i=>({path:i.path,sha256:i.sha256})), profile:target.fingerprint, converterVersion, rigType, sprite, spritePixelsPerUnit }));
+  const combineSource = path.join(a.resources,"blender/graphics_combine.py");
+  const converterVersion = GRAPHICS_UNITY_CONVERTER + "-" + digest(fs.readFileSync(bridgeSource)).slice(0,12) + "-" + digest(fs.readFileSync(converterSource)).slice(0,12) + (combine ? "-" + digest(fs.readFileSync(combineSource)).slice(0,12) : "");
+  const identity = digest(JSON.stringify({ objectId:a.object.id, versionIds:a.versions.map(v=>v.id), inputs:inputs.map(i=>({path:i.path,sha256:i.sha256})), ...(combine?{clips:clips.map(v=>({versionId:v.id,action:v.slot})),rigVersion:rigs[0].id}:{}), profile:target.fingerprint, converterVersion, rigType, sprite, spritePixelsPerUnit }));
   const id = identity.slice(0,32), dest = `Assets/PartsmithGraphics/${objectFolder(a.object.id)}`;
   const staging = safePath(root,`Library/PartsmithGraphicsStaging/${id}`);
   const deliveryFile = safePath(root,`Library/PartsmithGraphicsStaging/${id}/delivery.json`);
@@ -228,7 +238,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
       if(!a.blenderPath || !fs.existsSync(a.blenderPath)) throw Error("모델과 텍스처를 검사할 Blender 실행 파일이 필요합니다.");
       const temp=fs.mkdtempSync(path.join(os.tmpdir(),"ps-gfx-"));
       try {
-        const declared=inputs.filter(i=>i.versionId===source.versionId);
+        const declared=combine ? inputs : inputs.filter(i=>i.versionId===source.versionId);
         let common=path.dirname(source.absolute);
         for(const input of declared)while(input.absolute!==common&&!contained(common,input.absolute))common=path.dirname(common);
         const inputRoot=path.join(temp,"input");fs.mkdirSync(inputRoot);
@@ -236,12 +246,35 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
           const local=safePath(inputRoot,path.relative(common,i.absolute));fs.mkdirSync(path.dirname(local),{recursive:true});fs.copyFileSync(i.absolute,local);return {original:i.absolute,local,sha256:i.sha256};
         });
         const spec=path.join(temp,"request.json");
-        write(spec,{source:copied.find(c=>c.original===source.absolute)!.local,inputRoot,files:copied,output:path.join(temp,"export")});
+        let nativeSource=copied.find(c=>c.original===source.absolute)!.local;
+        let merge:unknown;
+        if(combine){
+          const combineSpec=path.join(temp,"combine.json"), combined=path.join(inputRoot,"combined-derivative.blend"), report=path.join(temp,"combine-report.json");
+          if(fs.existsSync(combined))throw Error("Unity 합성 결과 경로가 입력 원본과 충돌합니다.");
+          write(combineSpec,{source:nativeSource,inputRoot,files:copied,output:combined,report,clips:clips.map(v=>({name:v.slot,path:copied.find(c=>c.original===preferred.find(p=>p.versionId===v.id)!.absolute)!.local}))});
+          a.signal?.throwIfAborted();
+          await runProcess(a.blenderPath,["--background","--factory-startup","--disable-autoexec","--python-exit-code","1","--python",combineSource,"--",combineSpec]);
+          a.signal?.throwIfAborted();
+          const combinedReport=json(report);
+          if(combinedReport.sourceChanged!==false || combinedReport.animationAuthored!==false || combinedReport.outputSha256!==sha(combined) || JSON.stringify(combinedReport.selectedClips)!==JSON.stringify(clips.map(v=>v.slot)))throw Error("리그·동작 합성의 원본·클립 검증 기록이 없습니다.");
+          merge=combinedReport; nativeSource=combined;
+          copied.push({original:combined,local:combined,sha256:sha(combined)});
+        }
+        write(spec,{source:nativeSource,inputRoot,files:copied,output:path.join(temp,"export")});
         a.signal?.throwIfAborted();
         await runProcess(a.blenderPath,["--background","--factory-startup","--disable-autoexec","--python-exit-code","1","--python",converterSource,"--",spec]);
         a.signal?.throwIfAborted();
         const converted=json(path.join(temp,"export/inspection.json"));
         if(!converted.structure || !Array.isArray(converted.clips)) throw Error("Blender 구조 검사 결과가 없습니다.");
+        const materialManifest=json(path.join(temp,"export/materials.json"));
+        if(materialManifest.schemaVersion!==1 || !Array.isArray(materialManifest.materials) || !Array.isArray(materialManifest.originalImages) || !Array.isArray(materialManifest.derivedImages))throw Error("Blender 재질 역할 검사 결과가 없습니다.");
+        if(new Set(materialManifest.materials.map((m:{name:string})=>m.name)).size!==materialManifest.materials.length)throw Error("Blender 재질 이름이 중복됩니다.");
+        for(const image of [...materialManifest.originalImages,...materialManifest.derivedImages]){
+          const file=safePath(path.join(temp,"export"),image.path);
+          if(!image.path.startsWith("Textures/") || sha(file)!==image.sha256 || !Number.isInteger(image.width) || !Number.isInteger(image.height) || image.width<1 || image.height<1)throw Error("Blender 재질 텍스처 근거가 고정 파일과 다릅니다.");
+        }
+        if(combine && clips.some(v=>!converted.clips.includes(v.slot)))throw Error("Unity 변환에서 채택한 동작 클립이 누락됐습니다.");
+        if(merge)write(path.join(temp,"export/inspection.json"),{...converted,merge});
         structure=digest(JSON.stringify(converted.structure)); expectedClips=converted.clips;
         delivery.warnings.push(...(converted.warnings??[]));
         if(fs.existsSync(previous) && json(previous).structure!==structure) { delivery.status="conflict";delivery.errors.push("모델의 메시·재질 슬롯·뼈 구조가 달라 기존 프리팹과 참조를 보존했습니다.");return delivery; }
@@ -260,7 +293,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
     validateSources(a.projectRoot,a.object,a.versions);
     if(readUnityTarget(root).fingerprint!==target.fingerprint)throw Error("처리 중 Unity 대상 설정이 변경됐습니다.");
     a.signal?.throwIfAborted();
-    const request: QueueRequest={schemaVersion:1,requestId:id,objectId:a.object.id,objectName:a.object.name,destination:dest,resultPath,profileFingerprint:target.fingerprint,unityVersion:target.unityVersion,pipeline:target.pipeline,converterVersion,structure,rigType,mode:sprite?"sprite":"model",files:outputs,expectedClips,sources:inputs.map(i=>({path:i.absolute,sha256:i.sha256})),profileFiles:profileFiles(root),spritePixelsPerUnit};
+    const request: QueueRequest={schemaVersion:1,requestId:id,objectId:a.object.id,objectName:a.object.name,destination:dest,resultPath,profileFingerprint:target.fingerprint,unityVersion:target.unityVersion,pipeline:target.pipeline,converterVersion,structure,rigType,mode:sprite?"sprite":"model",files:outputs,expectedClips,sources:inputs.map(i=>({path:i.absolute,sha256:i.sha256})),profileFiles:profileFiles(root),spritePixelsPerUnit,...(!sprite?{materialManifest:dest+"/Generated/materials.json"}:{})};
     // User code is not overwritten. Existing .meta files are deliberately never replaced.
     if(!fs.existsSync(bridgeDest)||sha(bridgeDest)!==bridgeHash){fs.mkdirSync(path.dirname(bridgeDest),{recursive:true});fs.copyFileSync(bridgeSource,bridgeDest);}
     write(bridgeRecord,{sha256:bridgeHash,converterVersion});

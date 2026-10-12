@@ -21,6 +21,7 @@ import { ProductionEngine } from "../engine/production";
 import { restoreProductionArchives } from "../engine/production-backup";
 import { WorkbenchEngine } from "../engine/workbench";
 import { GraphicsEngine } from "../engine/graphics";
+import { createGraphicsVideoExecutor } from "../engine/graphics-video";
 import { probeGraphicsConnections } from "../engine/graphics-connections";
 import { CodexWorkbenchExecutor } from "../engine/workbench-executor";
 import { parseJsonText, readJsonFile } from "../engine/json";
@@ -139,13 +140,14 @@ async function dispatch(c: Command): Promise<unknown> {
       };
     case "graphics.action": {
       if (c.action.kind === "import") {
+        const animation = c.action.role === "animation";
         const result = await dialog.showOpenDialog(win, {
-          title: "원본과 같은 폴더의 동반 파일 선택",
-          properties: ["openFile", "multiSelections"],
-          filters: [{ name: "그래픽 원본", extensions: ["png", "jpg", "jpeg", "webp", "fbx", "glb", "blend", "obj", "mtl", "stl", "mp4", "webm"] }],
+          title: animation ? "원래 액션과 리그가 담긴 Blender 애니메이션 원본 선택" : "원본과 같은 폴더의 동반 파일 선택",
+          properties: animation ? ["openFile"] : ["openFile", "multiSelections"],
+          filters: animation ? [{ name: "Blender 애니메이션 원본", extensions: ["blend"] }] : [{ name: "그래픽 원본", extensions: ["png", "jpg", "jpeg", "webp", "fbx", "glb", "blend", "obj", "mtl", "stl", "mp4", "webm"] }],
         });
         if (result.canceled) return graphics.get(c.id);
-        return graphics.importFiles(c.id, c.action.objectId, c.action.role, result.filePaths);
+        return graphics.importFiles(c.id, c.action.objectId, c.action.role, result.filePaths, c.action.clipName);
       }
       return graphics.action(c.id, c.action);
     }
@@ -671,6 +673,11 @@ app.whenReady().then(async () => {
     })) },
   );
   graphics = new GraphicsEngine(store, engine, {
+    video: createGraphicsVideoExecutor({
+      ffmpegPath: app.isPackaged ? path.join(process.resourcesPath, "media", "ffmpeg.exe") : path.join(app.getAppPath(), "node_modules", "ffmpeg-static", "ffmpeg.exe"),
+      encrypt: value => { if (!safeStorage.isEncryptionAvailable()) throw Error("Windows 보안 저장을 사용할 수 없습니다."); return safeStorage.encryptString(value).toString("base64"); },
+      decrypt: value => safeStorage.decryptString(Buffer.from(value, "base64")),
+    }),
     resources: app.isPackaged ? path.join(process.resourcesPath, "integrations") : path.join(app.getAppPath(), "integrations"),
     legacyActive: id => workbench.isProjectActive(id) || production.isProjectActive(id),
     probe: () => probeGraphicsConnections(store.settings, engine.tripo, vault.info().configured),

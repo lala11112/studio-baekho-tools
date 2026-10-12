@@ -40,6 +40,8 @@ export class Tripo {
         },
         body: form ?? (body ? JSON.stringify(body) : undefined),
         signal: AbortSignal.timeout(60000),
+        // A redirect must not replay a paid POST, even to another provider URL.
+        redirect: "error",
       });
     } catch {
       throw new TripoError(
@@ -73,11 +75,20 @@ export class Tripo {
     const form = new FormData();
     form.append("file", new Blob([bytes]), path.basename(file));
     const data = await this.request("/files", undefined, form);
-    if (!data?.file_token) throw new Error("파일 토큰이 없습니다.");
+    if (typeof data?.file_token !== "string" || !data.file_token.trim())
+      throw new Error("유효한 파일 토큰이 없습니다.");
     return data.file_token as string;
   }
-  submit(endpoint: string, payload: unknown) {
-    return this.request(endpoint, payload);
+  async submit(endpoint: string, payload: unknown) {
+    const data = await this.request(endpoint, payload);
+    if (
+      typeof data?.task_id !== "string" ||
+      !/^[A-Za-z0-9_-]+$/.test(data.task_id)
+    )
+      throw new TripoError(
+        "유효한 작업 ID 없는 제출 응답 · 자동 재제출하지 않습니다.",
+      );
+    return data;
   }
   async download(url: string): Promise<Uint8Array> {
     // Only HTTPS public provider storage, no credentials and no redirects to arbitrary destinations.

@@ -6,6 +6,8 @@ import math
 import pathlib
 import sys
 from mathutils import Matrix, Vector
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from graphics_glb import export_packed_glb
 
 spec_path = pathlib.Path(sys.argv[sys.argv.index('--') + 1]).resolve()
 q = json.loads(spec_path.read_text(encoding='utf8'))
@@ -67,6 +69,7 @@ if operation == 'A05' and (scale != 1 or pivot != 'keep'):
     bpy.context.view_layer.update()
 
 files = []
+glb_images = []
 texture_folder = out / 'textures'
 warnings = []
 for index, image in enumerate(bpy.data.images):
@@ -94,8 +97,7 @@ bpy.context.view_layer.objects.active = meshes[0]
 bpy.ops.wm.save_as_mainfile(filepath=str(out / 'asset.blend'), compress=False)
 files.append('asset.blend')
 if q['format'] in ('glb', 'both'):
-    bpy.ops.export_scene.gltf(filepath=str(out / 'asset.glb'), export_format='GLB', use_selection=True,
-        export_animations=True, export_image_format='AUTO', export_keep_originals=True)
+    glb_images = export_packed_glb(out / 'asset.glb', use_selection=True, export_animations=True)
     files.append('asset.glb')
 if q['format'] in ('fbx', 'both'):
     bpy.ops.export_scene.fbx(filepath=str(out / 'asset.fbx'), use_selection=True,
@@ -111,7 +113,7 @@ report = {'schemaVersion': 1, 'identity': q['identity'], 'operation': operation,
     'scale': scale, 'pivot': pivot, 'boundsBefore': {'min': list(low), 'max': list(high)},
     'meshCount': len(meshes), 'vertexCount': sum(len(obj.data.vertices) for obj in meshes),
     'geometryAuthored': False, 'motionAuthored': False, 'unityPlaybackVerified': False,
-    'warnings': warnings}
+    'warnings': warnings, 'glbImages': glb_images}
 temporary = out / 'report.json.tmp'
 temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf8')
 temporary.replace(out / 'report.json')

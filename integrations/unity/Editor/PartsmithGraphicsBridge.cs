@@ -13,7 +13,7 @@ using UnityEditor.SceneManagement;
 namespace Partsmith.Graphics {
  [Serializable] public class FileEntry { public string source,destination,path,sha256,kind; public long bytes; }
  [Serializable] public class DeliveryRequest {
-  public int schemaVersion; public string requestId,objectId,objectName,destination,resultPath,profileFingerprint,unityVersion,pipeline,converterVersion,structure,rigType,mode;
+  public int schemaVersion; public string requestId,objectId,objectName,destination,resultPath,profileFingerprint,unityVersion,pipeline,converterVersion,structure,rigType,mode,materialManifest;
   public FileEntry[] files,sources,profileFiles; public string[] expectedClips; public float spritePixelsPerUnit;
  }
  [Serializable] public class DeliveryReport {
@@ -21,6 +21,14 @@ namespace Partsmith.Graphics {
   public bool playbackVerified; public string[] clips,warnings,errors;
  }
  [Serializable] public class ManagedManifest { public string objectId,profileFingerprint,converterVersion,structure,requestId,pipeline,unityVersion; public FileEntry[] files; }
+ [Serializable] public class MaterialTexture { public string path,sha256; public int width,height; }
+ [Serializable] public class MaterialChannelSource { public string path,channel; public float value; }
+ [Serializable] public class MaterialBinding {
+  public string name,warning,baseColorTexture,normalTexture,metallicGlossTexture; public bool supported;
+  public float[] baseColor; public float normalScale,metallic,smoothness;
+  public MaterialChannelSource metallicSource,roughnessSource;
+ }
+ [Serializable] public class MaterialBindings { public int schemaVersion; public MaterialBinding[] materials; public MaterialTexture[] originalImages,derivedImages; }
  internal class Conflict : Exception { public Conflict(string message):base(message){} }
  [InitializeOnLoad] public static class PartsmithGraphicsBridge {
   static string Root => Path.GetFullPath(Path.GetDirectoryName(Application.dataPath));
@@ -109,13 +117,57 @@ namespace Partsmith.Graphics {
     if(File.Exists(requestFile)){string archive=requestFile+".processed";if(!File.Exists(archive))File.Move(requestFile,archive);else File.Move(requestFile,requestFile+"."+DateTime.UtcNow.Ticks+".processed");}
    }
   }
-  static void Texture(string asset,bool sprite,float ppu){
+  static void Texture(string asset,bool sprite,float ppu,string role="color"){
    var importer=AssetImporter.GetAtPath(asset) as TextureImporter;if(!importer)throw new Exception("Texture importer missing: "+asset);
    importer.maxTextureSize=16384;importer.textureCompression=TextureImporterCompression.Uncompressed;
    importer.npotScale=TextureImporterNPOTScale.None;importer.mipmapEnabled=!sprite;
+   if(!sprite){importer.textureType=role=="normal"?TextureImporterType.NormalMap:TextureImporterType.Default;importer.sRGBTexture=role=="color";importer.convertToNormalmap=false;importer.alphaSource=TextureImporterAlphaSource.FromInput;importer.alphaIsTransparency=false;}
+   var defaults=importer.GetDefaultPlatformTextureSettings();defaults.maxTextureSize=16384;defaults.textureCompression=TextureImporterCompression.Uncompressed;importer.SetPlatformTextureSettings(defaults);
    importer.ClearPlatformTextureSettings("Standalone");
    if(sprite){importer.textureType=TextureImporterType.Sprite;importer.spriteImportMode=SpriteImportMode.Single;importer.spritePixelsPerUnit=ppu;importer.alphaIsTransparency=true;}
    importer.SaveAndReimport();
+  }
+  static MaterialBindings ReadMaterialBindings(DeliveryRequest q){
+   if(string.IsNullOrEmpty(q.materialManifest)){
+    if(q.files.Any(f=>f.destination==q.destination+"/Generated/materials.json"))throw new Exception("Frozen material manifest binding was removed");
+    return null;
+   }
+   if(q.materialManifest!=q.destination+"/Generated/materials.json"||!q.files.Any(f=>f.destination==q.materialManifest))throw new Exception("Material manifest is not a frozen delivery file");
+   var manifest=JsonUtility.FromJson<MaterialBindings>(File.ReadAllText(Safe(q.materialManifest)));
+   if(manifest==null||manifest.schemaVersion!=1||manifest.materials==null||manifest.originalImages==null||manifest.derivedImages==null||manifest.materials.Select(m=>m.name).Distinct().Count()!=manifest.materials.Length)throw new Exception("Invalid material role manifest");
+   return manifest;
+  }
+  static Texture2D BoundTexture(DeliveryRequest q,MaterialBindings bindings,string relative,string role){
+   if(string.IsNullOrEmpty(relative))return null;
+   if(!relative.StartsWith("Textures/",StringComparison.Ordinal)||relative.Contains("..")||relative.Contains("\\"))throw new Exception("Unsafe material texture path");
+   var evidence=bindings.originalImages.Concat(bindings.derivedImages).Single(t=>t.path==relative);
+   string asset=q.destination+"/Generated/"+relative;
+   if(!q.files.Any(f=>f.destination==asset&&f.sha256==evidence.sha256))throw new Exception("Material texture has no immutable file evidence");
+   ValidateFile(Safe(asset),evidence.sha256);Texture(asset,false,100,role);
+   var texture=AssetDatabase.LoadAssetAtPath<Texture2D>(asset);
+   if(!texture||texture.width!=evidence.width||texture.height!=evidence.height)throw new Exception("Material texture dimensions changed during import: "+asset);
+   return texture;
+  }
+  static void ApplyMaterialBinding(DeliveryRequest q,MaterialBindings bindings,MaterialBinding binding,Material mat){
+   if(binding.baseColor==null||binding.baseColor.Length!=4)throw new Exception("Missing source base color factor");
+   var color=new Color(binding.baseColor[0],binding.baseColor[1],binding.baseColor[2],binding.baseColor[3]);
+   var baseMap=BoundTexture(q,bindings,binding.baseColorTexture,"color");
+   var normal=BoundTexture(q,bindings,binding.normalTexture,"normal");
+   var metallic=BoundTexture(q,bindings,binding.metallicGlossTexture,"linear");
+   // Retained source channel maps remain linear assets too; only the derived map is shader-bound.
+   if(binding.metallicSource!=null&&!string.IsNullOrEmpty(binding.metallicSource.path))BoundTexture(q,bindings,binding.metallicSource.path,"linear");
+   if(binding.roughnessSource!=null&&!string.IsNullOrEmpty(binding.roughnessSource.path)&&binding.roughnessSource.path!=binding.metallicSource?.path)BoundTexture(q,bindings,binding.roughnessSource.path,"linear");
+   foreach(var key in new[]{"_BaseColor","_Color"})if(mat.HasProperty(key))mat.SetColor(key,color);
+   foreach(var key in new[]{"_BaseMap","_MainTex"})if(mat.HasProperty(key))mat.SetTexture(key,baseMap);
+   mat.SetTexture("_BumpMap",normal);mat.SetFloat("_BumpScale",binding.normalScale);
+   mat.SetTexture("_MetallicGlossMap",metallic);mat.SetFloat("_Metallic",binding.metallic);
+   foreach(var key in new[]{"_Smoothness","_Glossiness","_GlossMapScale"})if(mat.HasProperty(key))mat.SetFloat(key,metallic?1:binding.smoothness);
+   if(mat.HasProperty("_SmoothnessTextureChannel"))mat.SetFloat("_SmoothnessTextureChannel",0);
+   if(mat.HasProperty("_WorkflowMode"))mat.SetFloat("_WorkflowMode",1);
+   mat.DisableKeyword("_SPECULAR_SETUP");mat.DisableKeyword("_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A");
+   foreach(var keyword in new[]{"_NORMALMAP","_METALLICSPECGLOSSMAP","_METALLICGLOSSMAP"})mat.DisableKeyword(keyword);
+   if(normal)mat.EnableKeyword("_NORMALMAP");
+   if(metallic)mat.EnableKeyword(q.pipeline=="urp"?"_METALLICSPECGLOSSMAP":"_METALLICGLOSSMAP");
   }
   static void SavePrefab(GameObject instance,DeliveryReport r){
    PrefabUtility.SaveAsPrefabAsset(instance,r.prefabPath);
@@ -132,6 +184,7 @@ namespace Partsmith.Graphics {
    warnings.Add("Single sprite prefab created. Canvas layout, UI Image, nine-slice, and sprite sheet animation are not inferred.");
   }
   static void ImportModel(DeliveryRequest q,DeliveryReport r,List<string> warnings){
+   var bindings=ReadMaterialBindings(q);
    string modelPath=q.destination+"/Generated/Asset.fbx",texturePath=q.destination+"/Generated/Textures";
    var importer=AssetImporter.GetAtPath(modelPath) as ModelImporter;if(!importer)throw new Exception("FBX importer missing");
    importer.globalScale=1;importer.useFileScale=true;importer.bakeAxisConversion=true;importer.importAnimation=true;importer.animationCompression=ModelImporterAnimationCompression.Off;
@@ -155,8 +208,12 @@ namespace Partsmith.Graphics {
     var texture=original.HasProperty("_BaseMap")?original.GetTexture("_BaseMap"):original.mainTexture;
     foreach(var key in new[]{"_BaseColor","_Color"})if(mat.HasProperty(key))mat.SetColor(key,color);
     foreach(var key in new[]{"_BaseMap","_BaseColorMap","_MainTex"})if(mat.HasProperty(key))mat.SetTexture(key,texture);
-    foreach(var key in new[]{"_BumpMap","_MetallicGlossMap","_OcclusionMap","_EmissionMap"})if(mat.HasProperty(key)&&original.HasProperty(key))mat.SetTexture(key,original.GetTexture(key));
-    if(mat.HasProperty("_BumpMap")&&mat.GetTexture("_BumpMap"))mat.EnableKeyword("_NORMALMAP");
+    // FBX Standard keys do not establish channel semantics for metallic or normal maps.
+    foreach(var key in new[]{"_BumpMap","_MetallicGlossMap","_OcclusionMap","_EmissionMap"})if(mat.HasProperty(key))mat.SetTexture(key,null);
+    foreach(var keyword in new[]{"_NORMALMAP","_METALLICSPECGLOSSMAP","_METALLICGLOSSMAP"})mat.DisableKeyword(keyword);
+    var binding=bindings?.materials.SingleOrDefault(b=>b.name==original.name);
+    if(binding!=null&&binding.supported&&(q.pipeline=="urp"||q.pipeline=="builtin"))ApplyMaterialBinding(q,bindings,binding,mat);
+    else warnings.Add("Material "+original.name+" has only an approximate FBX base-color fallback; no normal/metallic channel mapping was inferred. "+(binding?.warning??"No supported source-node evidence or target shader mapping."));
     EditorUtility.SetDirty(mat);importer.AddRemap(new AssetImporter.SourceAssetIdentifier(original),mat);
    }
    importer.SaveAndReimport();model=AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);
@@ -178,7 +235,7 @@ namespace Partsmith.Graphics {
     if(controller||skinned){var animator=obj.GetComponent<Animator>();if(!animator)animator=obj.AddComponent<Animator>();animator.avatar=avatar;animator.runtimeAnimatorController=controller;animator.applyRootMotion=false;}
     SavePrefab(obj,r);UnityEngine.Object.DestroyImmediate(obj);
    }finally{EditorSceneManager.ClosePreviewScene(scene);}
-   warnings.Add("Base color and supported texture bindings were adapted to the selected renderer. Transparency, custom shaders, channel packing, and appearance require visual review.");
+   warnings.Add("Supported opaque Principled materials use source-node base color, tangent normal and explicit metallic R / smoothness A packing. Unsupported graphs use a warned base-color fallback. Appearance still requires visual review.");
   }
  }
 }

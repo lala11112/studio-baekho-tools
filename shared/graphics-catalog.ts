@@ -4,7 +4,13 @@ import type {
   GraphicsObject,
   GraphicsTask,
   GraphicsTaskDefinition,
+  GraphicsWorkspace,
 } from "./graphics";
+
+/** Reserved approvals stay counted even after a cancellation or an ambiguous submission. */
+export function graphicsTripoReserved(workspace: GraphicsWorkspace): number {
+  return workspace.tasks.reduce((sum, task) => sum + (task.paidApproval?.provider === "Tripo API" ? task.paidApproval.credits : 0), 0);
+}
 
 export function graphicsApprovalState(
   task: GraphicsTask,
@@ -25,7 +31,7 @@ export function graphicsApprovalState(
   // Native images consume the configured Codex account; a missing paid-service quote is different.
   if (
     task.cost?.provider === "Codex" &&
-    findGraphicsTask(task.taskId)?.executor === "codex-image"
+    ["codex-image", "astra"].includes(findGraphicsTask(task.taskId)?.executor ?? "")
   )
     return "execute";
   return "blocked";
@@ -58,13 +64,24 @@ export function graphicsMultiviewProblem(
   return undefined;
 }
 
-const ready = new Set(["A01", "A02", "A03", "A05", "X04", "X05"]);
-const image = new Set(["I01", "I02", "I03"]);
+const ready = new Set(["A01", "A02", "A03", "A05", "N01", "X04", "X05"]);
+const verified = new Set([...ready, "I01", "M01", "M05", "T01", "T03"]);
+const verifiedScope: Record<string, string> = {
+  I01: "대검 이미지 1장의 실제 앱 생성·원본 수집·재시작 보존을 확인했습니다. 다른 개수와 대상의 외형은 직접 검토하세요.",
+  M01: "실제 대검 이미지로 P2 모델 1개 생성·FBX 수집·앱 등록을 확인했습니다. 후보당 100 API 크레딧이며 원본별 외형과 실제 면 수를 검토하세요.",
+  M05: "앱 버튼으로 Astra의 대검 칼날 폭 보정과 원본·UV·4K 맵 보존을 확인했습니다. 현재 연결은 토폴로지를 유지하는 형태·비율 보정입니다.",
+  T01: "실제 P2 대검의 Smart UV 처리·FBX 수집과 최종 UV 존재를 확인했습니다. 예상 20 API 크레딧이며 UV 품질은 모델별 검토가 필요합니다.",
+  T03: "실제 대검에 텍스처를 생성해 4096px PBR 맵 3개와 Unity 가져오기를 확인했습니다. 출력 해상도와 외형은 결과별로 검토하세요.",
+};
+const image = new Set(["I01", "I02", "I03", "I05", "I06", "I07"]);
 const tripo = new Set(["M01", "M02", "M03", "M10", "T01", "T03"]);
+export const graphicsAstraTasks = new Set(["M05", "R01", "R02", "R03", "N04", "N05", "N06"]);
+export const graphicsVideoTasks = new Set(["N02"]);
 const localScope: Record<string, string> = {
+  N01: "채택한 모델·리그에서 두 측면을 2048px로 로컬 렌더합니다. 전신 여백을 계산하며 원본과 기존 디자인을 유지합니다. GPT·유료 생성 없음.",
   A05: "현재 구현: BLEND·FBX·GLB 모델의 배율·피벗 정리. 이미지 크기·여백 정리는 아직 지원하지 않습니다.",
   X04: "현재 구현: BLEND·FBX·GLB 모델에서 FBX·GLB 작업 사본 내보내기. 이미지 내보내기와 기타 형식 변환은 아직 지원하지 않습니다.",
-  X05: "현재 구현: 정적 모델 또는 단일 이미지의 Unity 관리 폴더 가져오기. 별도 리그와 클립 버전의 합성은 준비 중이며 실제 재생 검증은 포함하지 않습니다.",
+  X05: "정적 모델·이미지 또는 호환되는 채택 리그와 클립을 Unity 관리 폴더로 가져옵니다. 원본과 사용자 프리팹 설정을 보존합니다. 실제 Play Mode는 실행하지 않습니다.",
 };
 const pendingReasons: Record<string, string> = {
   A: "이 작업의 자동 실행과 결과 검증은 아직 연결되지 않았습니다.",
@@ -905,21 +922,26 @@ export const graphicsCatalog: GraphicsTaskDefinition[] = definitions.map(
         ? "codex-image"
         : tripo.has(entry.id)
           ? "tripo"
-          : "none",
-    status: ready.has(entry.id)
+          : graphicsAstraTasks.has(entry.id) ? "astra"
+          : graphicsVideoTasks.has(entry.id) ? "runway" : "none",
+    status: verified.has(entry.id)
       ? "ready"
-      : image.has(entry.id) || tripo.has(entry.id)
+      : image.has(entry.id) || tripo.has(entry.id) || graphicsAstraTasks.has(entry.id) || graphicsVideoTasks.has(entry.id)
         ? "unverified"
         : "planned",
     reason: ready.has(entry.id)
       ? localScope[entry.id]
-      : image.has(entry.id)
+      : verifiedScope[entry.id] ?? (image.has(entry.id)
         ? entry.id === "I01"
           ? "새 디자인 1장: 실제 앱 생성·원본 수집·재시작 보존 확인. CLI 기록 누락 시 저장 실행 기록만 조회해 복구했습니다. 다른 개수·대상의 품질은 개별 검토가 필요합니다."
           : "앱의 참조/수정 이미지 실행 경로가 연결되었습니다. 이 작업 공간에서 해당 작업의 실제 생성·수집·품질 검증은 아직 완료되지 않았습니다."
         : tripo.has(entry.id)
           ? "API 실행 경로가 연결되었습니다. 계정 지원·실제 생성 품질은 아직 검증되지 않았으며 제출 전 비용 승인이 필요합니다."
-          : pendingReasons[entry.id[0]],
+          : graphicsAstraTasks.has(entry.id)
+            ? "Blender + Astra가 고정한 원본을 새 버전으로 작업합니다. 뼈·웨이트·클립의 로컬 검사를 거쳐 등록하며 외형과 동작은 직접 검토하세요. 실제 제작 품질은 개별 검증이 필요합니다."
+            : graphicsVideoTasks.has(entry.id)
+              ? "선택한 측면 원본으로 Runway 720p 영상을 만듭니다. 비용은 실행 전에 표시하고 원본·프레임을 수집합니다. 새 작업 공간의 실제 생성 검증 전입니다."
+              : pendingReasons[entry.id[0]]),
   }),
 );
 

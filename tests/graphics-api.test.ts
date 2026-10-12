@@ -26,11 +26,11 @@ async function settled(store: Store, id: string) {
   }
   throw Error("Fake API boundary did not settle");
 }
-async function fixture(t: any) {
+async function fixture(t: any, fbx = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "graphics-api-")), store = new Store(root);
   await store.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));
   const calls = { uploads: [] as string[], submits: [] as { endpoint: string; body: Record<string, unknown> }[], polls: [] as string[], downloads: [] as string[], native: 0 };
-  const nativeOutput = glb();
+  const nativeOutput = fbx ? Buffer.from("Kaydara FBX Binary  \x00\x1a\x00original") : glb();
   let final = false;
   let balance: () => Promise<{ balance: number }> = async () => ({ balance: 1000 });
   const api = {
@@ -45,7 +45,9 @@ async function fixture(t: any) {
     task: async (id: string) => { calls.polls.push(id); return final ? { status: "success", credits_consumed: 20, output: { model_url: `https://cdn.tripo3d.ai/${id}.glb` } } : { status: "running", progress: 50 }; },
     download: async (url: string) => { calls.downloads.push(url); return nativeOutput; },
   } as unknown as Tripo;
-  const engine = new Engine(store, api), project = engine.create("API boundary test");
+  const engine = new Engine(store, api, async (id, native) => {
+    const preview = native.replace(/\.fbx$/, "-preview.glb"); store.write(id, preview, glb()); return preview;
+  }), project = engine.create("API boundary test");
   const graphics = new GraphicsEngine(store, engine, { resources: path.resolve("integrations"), native: async () => { calls.native++; throw Error("API upload/poll/download must never dispatch GPT"); } });
   let w = await graphics.action(project.id, { kind: "create-object", name: "Static prop", objectKind: "prop" });
   const objectId = w.objects[0].id;
@@ -162,4 +164,89 @@ test("cancellation and a second click during balance lookup cannot submit a paid
   assert.equal(f.graphics.get(f.project.id).tasks[0].status, "cancelled");
   assert.equal(f.store.get<Quote>("quote", task.quoteId!)!.consumed, false);
   assert.equal(f.calls.uploads.length, 0); assert.equal(f.calls.submits.length, 0);
+});
+
+test("new API result registration rejects altered provenance or bytes and recovery never rehashes them into success", async t => {
+  for (const scenario of ["native-hash", "missing-native", "missing-checkpoint", "remote-id", "remote-output", "source-hash", "source-alias", "asset-native", "asset-parent", "quote-request", "preview-hash", "legacy-preview"]) {
+    await t.test(scenario, async t => {
+      const f = await fixture(t, scenario === "preview-hash" || scenario === "legacy-preview"), task = await f.prepare("T01");
+      await f.graphics.action(f.project.id, { kind: "approve", taskId: task.id });
+      const [submitted] = await settled(f.store, f.project.id); f.complete(); await f.engine.poll(f.project.id, submitted.id);
+      const project = f.store.project(f.project.id), job = project.jobs[0], asset = project.assets.find(a => a.jobId === job.id)!;
+      const checkpointFile = f.store.file(project.id, `checkpoints/tripo/${job.id}.json`), beforeCalls = structuredClone(f.calls);
+      const native = f.store.file(project.id, job.nativeFiles![0]), preview = f.store.file(project.id, asset.file);
+      if (scenario === "native-hash") fs.appendFileSync(native, "changed after backend completion");
+      if (scenario === "missing-native") fs.unlinkSync(native);
+      if (scenario === "missing-checkpoint") fs.unlinkSync(checkpointFile);
+      if (scenario === "remote-id") job.remoteId = "remote-other";
+      if (scenario === "remote-output") job.output = { model_url: "https://cdn.tripo3d.ai/other.glb" };
+      if (scenario === "source-hash") fs.appendFileSync(f.store.file(project.id, f.original.files[0].path), "changed source");
+      if (scenario === "source-alias") project.assets.find(a => a.id === job.request.sourceId)!.file = asset.file;
+      if (scenario === "asset-native") asset.nativeFile = f.original.files[0].path;
+      if (scenario === "asset-parent") asset.parentIds = ["unrelated-source"];
+      if (scenario === "quote-request") {
+        const quote = f.store.get<Quote>("quote", job.quoteId)!; quote.request.bake = false; f.store.quote(quote);
+      }
+      if (scenario === "preview-hash") fs.appendFileSync(preview, "changed preview");
+      if (scenario === "legacy-preview") {
+        const checkpoint = JSON.parse(fs.readFileSync(checkpointFile, "utf8")); delete checkpoint.results;
+        fs.writeFileSync(checkpointFile, JSON.stringify(checkpoint));
+      }
+      f.store.save(project);
+      const preserved = fs.existsSync(native) ? fs.readFileSync(native) : undefined;
+      // Exercise the app-restart boundary: successful backend work has not yet
+      // been registered as a Graphics version and must retain its original proof.
+      const restarted = new GraphicsEngine(f.store, f.engine, { resources: path.resolve("integrations") });
+      restarted.sync();
+      let state = restarted.get(project.id);
+      assert.equal(state.tasks[0].status, "failed"); assert.match(state.tasks[0].message, /등록 보류/);
+      assert.equal(state.versions.length, 1); assert.deepEqual(state.tasks[0].outputVersionIds, []);
+      await restarted.recover(project.id, task.id); state = restarted.get(project.id);
+      assert.equal(state.tasks[0].status, "failed"); assert.equal(state.versions.length, 1);
+      assert.deepEqual(f.calls, beforeCalls, "Registration/recovery must not GET, download, upload or submit");
+      assert.equal(f.store.project(project.id).jobs[0].remoteId, job.remoteId);
+      assert.equal(f.store.project(project.id).jobs[0].status, "success", "The backend journal stays truthful and untouched");
+      if (preserved) assert.deepEqual(fs.readFileSync(native), preserved); else assert.equal(fs.existsSync(native), false);
+    });
+  }
+});
+
+test("original-only receipts remain usable and previously registered versions never get new hashes on recovery", async t => {
+  const f = await fixture(t), task = await f.prepare("T01");
+  await f.graphics.action(f.project.id, { kind: "approve", taskId: task.id });
+  const [job] = await settled(f.store, f.project.id); f.complete(); await f.engine.poll(f.project.id, job.id);
+  const checkpointFile = f.store.file(f.project.id, `checkpoints/tripo/${job.id}.json`), checkpoint = JSON.parse(fs.readFileSync(checkpointFile, "utf8"));
+  delete checkpoint.results; fs.writeFileSync(checkpointFile, JSON.stringify(checkpoint));
+  f.graphics.sync(); const state = f.graphics.get(f.project.id);
+  assert.equal(state.tasks[0].status, "review"); const versions = structuredClone(state.versions);
+  fs.appendFileSync(f.store.file(f.project.id, checkpoint.native[0].file), "changed after registration");
+  state.tasks[0].status = "failed"; f.store.put("graphics", f.project.id, state);
+  await f.graphics.recover(f.project.id, task.id);
+  assert.deepEqual(f.graphics.get(f.project.id).versions, versions);
+  assert.equal(f.calls.submits.length, 1); assert.equal(f.calls.downloads.length, 1);
+});
+
+test("valid FBX and its hash-bound local preview register together after restart", async t => {
+  const f = await fixture(t, true), task = await f.prepare("T01");
+  await f.graphics.action(f.project.id, { kind: "approve", taskId: task.id });
+  const [job] = await settled(f.store, f.project.id); f.complete(); await f.engine.poll(f.project.id, job.id);
+  const restarted = new GraphicsEngine(f.store, f.engine, { resources: path.resolve("integrations") }); restarted.sync();
+  const state = restarted.get(f.project.id), version = state.versions.find(item => item.provenance.jobId === job.id)!;
+  assert.equal(state.tasks[0].status, "review"); assert.equal(version.files.length, 2);
+  assert.deepEqual(version.files.map(file => path.extname(file.path)), [".fbx", ".glb"]);
+  assert.equal(version.files[0].sha256, sha(f.nativeOutput)); assert.equal(version.files[1].sha256, sha(glb()));
+  assert.equal(f.calls.submits.length, 1); assert.equal(f.calls.downloads.length, 1);
+});
+
+test("one corrupted candidate holds the entire new batch without partially registering valid siblings", async t => {
+  const f = await fixture(t);
+  await f.graphics.action(f.project.id, { kind: "update-object", objectId: f.objectId, patch: { settings: { count: 2 } } });
+  const task = await f.prepare("M03"); await f.graphics.action(f.project.id, { kind: "approve", taskId: task.id });
+  const jobs = await settled(f.store, f.project.id); f.complete();
+  for (const job of jobs) await f.engine.poll(f.project.id, job.id);
+  const second = f.store.project(f.project.id).jobs[1]; fs.appendFileSync(f.store.file(f.project.id, second.nativeFiles![0]), "changed");
+  f.graphics.sync(); const state = f.graphics.get(f.project.id);
+  assert.equal(state.tasks[0].status, "failed"); assert.equal(state.versions.length, 1); assert.deepEqual(state.tasks[0].outputVersionIds, []);
+  assert.deepEqual(f.store.project(f.project.id).jobs.map(job => job.status), ["success", "success"]);
+  assert.equal(f.calls.submits.length, 2); assert.equal(f.calls.downloads.length, 2);
 });

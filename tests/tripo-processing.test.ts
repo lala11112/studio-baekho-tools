@@ -599,11 +599,16 @@ test("native export formats are retained as native assets, not renamed to GLB", 
   assert.equal(a.format, "obj");
   assert.match(a.file, /\.obj$/);
   assert.equal(a.nativeFile, a.file);
-  s.engine.reconcile(s.p.id, job.id, "f78371bc-abcd-4321-8123-123456789abc");
-  assert.equal(
-    s.store.project(s.p.id).jobs[0].remoteId,
-    "f78371bc-abcd-4321-8123-123456789abc",
+  assert.throws(
+    () =>
+      s.engine.reconcile(
+        s.p.id,
+        job.id,
+        "f78371bc-abcd-4321-8123-123456789abc",
+      ),
+    /교체/,
   );
+  assert.equal(s.store.project(s.p.id).jobs[0].remoteId, job.remoteId);
 });
 
 test("approval quotes expose effective processing defaults and every multiview or texture reference", async () => {
