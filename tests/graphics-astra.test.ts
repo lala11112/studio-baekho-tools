@@ -127,6 +127,11 @@ test("Astra uses requested model, inherited effort and copied original; verified
     assert.equal(command[command.indexOf("--model") + 1], "gpt-6-astra");
     assert(!command.some(value => /reasoning_effort|mcp_servers.*enabled=false/.test(value)));
     assert.match(task.prompt, /Generic skeleton/); assert.match(task.prompt, /No browser production, paid\/cloud service/);
+    assert.match(task.prompt, /exact existing MESH object set/);
+    assert.match(task.prompt, /control-widget, ground or helper meshes, even hidden/);
+    assert.match(task.prompt, /armature\.data\.bones\[name\]\["partsmith_feature"\] \(not PoseBone properties\)/);
+    assert.match(task.prompt, /measurable FK pose response/);
+    assert.match(task.prompt, /IK\/CopyTransforms must not completely override/);
     assert.match(task.prompt, /source\.blend/); assert.match(task.prompt, /sourcePath-to-localPath/);
     assert.equal(hash(source.file), source.version.files[0].sha256);
     assert(task.referencePaths?.every(file => file !== source.file));
@@ -228,6 +233,8 @@ test("N06 uses exact accepted animated clip, preserves prior scene and never sta
     calls++; assert.match(task.prompt, /ANIMATION REVISION/); assert.match(task.prompt, /Do NOT start from a static rig/);
     assert.match(task.prompt, new RegExp("Source version: " + original.version.id));
     assert.match(task.prompt, /exact action name: "Idle"/); assert.match(task.prompt, /frames 1\.\.31/);
+    assert.match(task.prompt, /both action and scene ranges must match these exact endpoints/);
+    assert.match(task.prompt, /No F-curve modifiers, including CYCLES/);
     return f.authored(task);
   }) });
   const result = await execute(f.args); assert.equal(result.role, "animation"); assert.equal(result.slot, "Idle");

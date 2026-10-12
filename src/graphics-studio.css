@@ -5,27 +5,27 @@
   --gs-muted: #a5b5ac;
   --gs-accent: #c5e4ac;
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-columns: 176px minmax(0, 1fr);
   grid-template-rows: auto 1fr;
   min-height: 100%;
   color: #e7eee8;
   background: var(--gs-bg);
-  font-size: 16px;
-  line-height: 1.55;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 /* Creation choices describe the object; execution details remain secondary. */
 .gs-creation-stages {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 7px;
-  margin-bottom: 16px;
+  gap: 5px;
+  margin-bottom: 10px;
 }
 .graphics-studio .gs-creation-stages button {
-  flex-direction: column;
-  min-height: 68px;
-  padding: 9px 5px;
-  font-size: 14px;
+  flex-direction: row;
+  min-height: 40px;
+  padding: 6px;
+  font-size: 13px;
 }
 .gs-creation-stages button > span {
   display: inline-flex;
@@ -33,9 +33,10 @@
   justify-content: center;
   border: 1px solid var(--gs-border);
   border-radius: 50%;
-  width: 24px;
-  height: 24px;
-  font-size: 14px;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  font-size: 12px;
 }
 .graphics-studio .gs-creation-stages button[aria-current="step"] {
   background: #354b37;
@@ -46,15 +47,17 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 18px;
-  padding: 16px 20px;
+  gap: 12px;
+  padding: 10px 12px;
   border: 1px solid #476147;
   border-radius: 10px;
   background: #213126;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 .gs-current-options p {
   color: #d8e6d2;
+  margin: 4px 0;
+  line-height: 1.45;
 }
 .gs-current-options button {
   flex: 0 0 auto;
@@ -64,15 +67,15 @@
   top: 0;
   z-index: 4;
   display: flex;
-  gap: 18px;
+  gap: 12px;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px;
+  padding: 10px 12px;
   background: #17251f;
   border: 1px solid #597055;
   box-shadow: 0 8px 20px #08120c50;
   border-radius: 10px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
 .gs-creation-execute > div {
   display: flex;
@@ -80,13 +83,13 @@
   gap: 4px;
 }
 .gs-creation-execute > button {
-  min-height: 48px;
+  min-height: 38px;
   flex: 0 0 auto;
 }
 .gs-creation-options {
   display: grid;
-  gap: 17px;
-  margin-bottom: 22px;
+  gap: 12px;
+  margin-bottom: 14px;
 }
 .gs-choice {
   border: 0;
@@ -96,8 +99,8 @@
 }
 .gs-choice legend {
   color: #c8d9c7;
-  margin-bottom: 8px;
-  font-size: 16px;
+  margin-bottom: 6px;
+  font-size: 14px;
 }
 .gs-choice > div {
   display: flex;
@@ -105,7 +108,7 @@
   flex-wrap: wrap;
 }
 .gs-choice button {
-  min-height: 42px;
+  min-height: 36px;
 }
 .graphics-studio .gs-choice button[aria-pressed="true"],
 .graphics-studio .gs-part button[aria-pressed="true"] {
@@ -114,7 +117,7 @@
   border-color: #a8c58e;
 }
 .gs-creation-options details .gs-choice {
-  margin-top: 17px;
+  margin-top: 12px;
 }
 .gs-lock-options {
   display: grid;
@@ -145,8 +148,8 @@
   grid-column: 1 / -1;
 }
 .gs-reference-thumb {
-  width: 80px;
-  height: 80px;
+  width: 56px;
+  height: 56px;
   object-fit: contain;
   background: #111916;
   border-radius: 5px;
@@ -156,11 +159,11 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   border: 1px solid var(--gs-border);
   border-radius: 9px;
-  padding: 12px 16px;
-  margin-bottom: 14px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
 }
 .gs-reference-strip > div {
   display: flex;
@@ -186,7 +189,8 @@
   background: #25312e;
   color: #e7eee8;
   border-radius: 7px;
-  padding: 8px 11px;
+  padding: 6px 9px;
+  min-height: 36px;
   cursor: pointer;
   line-height: 1.4;
 }
@@ -214,7 +218,8 @@
   color: #eef4ed;
   border: 1px solid var(--gs-border);
   border-radius: 6px;
-  padding: 9px 10px;
+  padding: 7px 9px;
+  min-height: 36px;
 }
 .graphics-studio input[type="checkbox"] {
   accent-color: #b9db9f;
@@ -228,14 +233,15 @@
 .graphics-studio label {
   display: block;
   color: #bccbc0;
-  font-size: 14px;
+  font-size: 13px;
 }
 .graphics-studio label > input,
 .graphics-studio label > select {
   margin-top: 5px;
 }
 .graphics-studio p {
-  margin: 7px 0;
+  margin: 5px 0;
+  line-height: 1.5;
 }
 .graphics-studio h1,
 .graphics-studio h2,
@@ -244,21 +250,21 @@
   font-weight: 600;
 }
 .graphics-studio h1 {
-  font-size: 25px;
+  font-size: 20px;
   letter-spacing: -0.7px;
 }
 .graphics-studio h2 {
-  font-size: 20px;
+  font-size: 17px;
 }
 .graphics-studio h3 {
-  font-size: 17px;
+  font-size: 15px;
 }
 .graphics-studio strong {
   font-weight: 600;
 }
 .graphics-studio small {
   color: var(--gs-muted);
-  font-size: 14px;
+  font-size: 13px;
 }
 .graphics-studio details {
   border-top: 1px solid var(--gs-border);
@@ -281,9 +287,19 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 22px 28px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--gs-border);
   background: #19221f;
+}
+.gs-header > div:first-child {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  min-width: 0;
+}
+.gs-header h1 {
+  white-space: nowrap;
 }
 .gs-eyebrow {
   font-size: 10px;
@@ -296,7 +312,9 @@
   align-items: center;
   gap: 8px;
   color: var(--gs-muted);
-  margin: 3px 0 0;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
 }
 .gs-header-actions {
   display: flex;
@@ -304,7 +322,7 @@
   gap: 12px;
 }
 .gs-objects {
-  padding: 20px 12px;
+  padding: 12px 8px;
   border-right: 1px solid var(--gs-border);
   background: #18201e;
   min-width: 0;
@@ -314,7 +332,7 @@
   justify-content: space-between;
   align-items: center;
   gap: 10px;
-  margin-bottom: 15px;
+  margin-bottom: 10px;
 }
 .gs-section-title > span {
   font-size: 11px;
@@ -332,7 +350,7 @@
   justify-content: flex-start;
   text-align: left;
   border-color: transparent;
-  padding: 11px 9px;
+  padding: 8px;
   background: transparent;
   width: 100%;
 }
@@ -358,8 +376,8 @@
   display: flex;
   flex-direction: column;
   gap: 7px;
-  padding: 19px 8px;
-  margin-top: 18px;
+  padding: 12px 4px;
+  margin-top: 12px;
   border-top: 1px solid var(--gs-border);
 }
 .gs-create h3 {
@@ -377,9 +395,11 @@
   text-align: left;
   width: 100%;
   background: transparent;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .gs-main {
-  padding: 24px;
+  padding: 14px;
   min-width: 0;
   overflow: auto;
 }
@@ -399,7 +419,7 @@
 .gs-work-layout {
   display: grid;
   grid-template-columns: minmax(320px, 1.1fr) minmax(320px, 1fr);
-  gap: 20px;
+  gap: 12px;
   align-items: start;
 }
 .gs-result,
@@ -409,7 +429,7 @@
 .gs-history,
 .gs-target,
 .gs-usage {
-  padding: 18px;
+  padding: 12px;
   border: 1px solid var(--gs-border);
   border-radius: 10px;
   background: var(--gs-panel);
@@ -996,10 +1016,10 @@
 }
 @media (max-width: 1200px) {
   .graphics-studio {
-    grid-template-columns: 185px minmax(0, 1fr);
+    grid-template-columns: 158px minmax(0, 1fr);
   }
   .gs-main {
-    padding: 16px;
+    padding: 12px;
   }
   .gs-work-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -1091,7 +1111,7 @@
 }
 
 .graphics-studio .gs-work-layout {
-  grid-template-columns: minmax(310px, 0.85fr) minmax(440px, 1.25fr);
+  grid-template-columns: minmax(270px, 0.9fr) minmax(340px, 1.25fr);
 }
 .graphics-studio .gs-instruction {
   order: 0;
@@ -1099,11 +1119,11 @@
 .graphics-studio .gs-result {
   order: 1;
   position: sticky;
-  top: 100px;
+  top: 80px;
 }
 .graphics-studio .gs-preview {
-  height: min(58vh, 650px);
-  min-height: 420px;
+  height: min(50vh, 520px);
+  min-height: 300px;
 }
 .graphics-studio
   :is(
@@ -1124,19 +1144,19 @@
     .gs-cost small,
     .gs-legacy
   ) {
-  font-size: 14px;
+  font-size: 13px;
 }
 .graphics-studio :is(input, textarea, select, button) {
-  font-size: 16px;
+  font-size: 14px;
 }
 .graphics-studio .gs-history > summary,
 .graphics-studio .gs-catalog > summary {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
 }
 .graphics-studio .gs-catalog > .gs-section-title,
 .graphics-studio .gs-history > .gs-section-title {
-  margin-top: 18px;
+  margin-top: 12px;
 }
 .graphics-studio .gs-task-row {
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1145,13 +1165,13 @@
   margin-top: 0;
 }
 .graphics-studio .gs-instruction > .gs-import-details {
-  margin-bottom: 20px;
+  margin-bottom: 12px;
 }
 .graphics-studio .gs-current-options small,
 .graphics-studio .gs-creation-execute small {
-  font-size: 14px;
+  font-size: 13px;
 }
-@media (max-width: 1180px) {
+@media (max-width: 1020px) {
   .graphics-studio .gs-work-layout {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1163,11 +1183,16 @@
     order: 1;
   }
   .graphics-studio .gs-preview {
-    height: 48vh;
-    min-height: 320px;
+    height: 38vh;
+    min-height: 240px;
   }
   .gs-creation-stages {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    display: flex;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  .graphics-studio .gs-creation-stages button {
+    flex: 1 0 88px;
   }
 }
 @media (max-width: 740px) {

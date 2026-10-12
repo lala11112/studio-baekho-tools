@@ -8,7 +8,7 @@ import { getGraphicsCompatibility } from "../shared/graphics-lineage";
 import { workbenchUsage } from "../shared/workbench-usage";
 import type { Workbench } from "../shared/workbench";
 import type { Generation, Quote } from "../shared/types";
-import type { AssetVersion, GraphicsAction, GraphicsFile, GraphicsObject, GraphicsRole, GraphicsTask, GraphicsWorkspace } from "../shared/graphics";
+import type { AssetVersion, GraphicsAction, GraphicsFile, GraphicsObject, GraphicsRole, GraphicsTask, GraphicsWorkspace, UnityClipSettings } from "../shared/graphics";
 import { isGraphicsClipName } from "../shared/graphics";
 import { compileCreation, validateCreation } from "../shared/graphics-creation";
 import { executeGraphicsProcedural, proceduralProblem } from "./graphics-procedural";
@@ -25,6 +25,20 @@ const image = /\.(png|jpe?g|webp)$/i;
 const model = /\.(blend|fbx|glb|obj|stl)$/i;
 const API = new Set(["M01", "M02", "M03", "M10", "T01", "T03"]);
 const BATCH = new Set(['M04', 'M15', 'N02', 'N04', 'N05', 'N06']);
+/** Bind delivery to the adopted version's producer, never the currently edited clip form. */
+export function freezeUnityClipSettings(workspace: GraphicsWorkspace, versions: AssetVersion[]): UnityClipSettings[] {
+  return versions.filter(version => version.role === 'animation').flatMap(version => {
+    const producer = workspace.tasks.find(task => task.objectId === version.objectId && task.outputVersionIds.includes(version.id));
+    if (!producer) {
+      if (version.provenance.type === 'codex') throw Error('채택한 동작의 생성 설정이 없습니다. 반복·이동·FPS를 확인해야 합니다.');
+      return [];
+    }
+    const fps = Number(producer.settings.fps ?? 30);
+    if (!['N04','N05','N06'].includes(producer.taskId) || producer.settings.clipName !== version.slot || !Number.isFinite(fps) || fps < 1 || fps > 120)
+      throw Error('채택한 동작과 원래 클립 이름·FPS 설정이 다릅니다.');
+    return [{ versionId: version.id, name: version.slot, loop: producer.settings.loop === true, rootMotion: producer.settings.rootMotion === true, fps }];
+  });
+}
 function candidateTasks(task: GraphicsTask): GraphicsTask[] {
   const count = Number(task.settings.count ?? 1);
   if (!BATCH.has(task.taskId) || count <= 1) return [task];
@@ -349,8 +363,8 @@ export class GraphicsEngine {
     if (taskId === "N02") snapshot.settings.motionSourceView ??= "left";
     const t: GraphicsTask = { ...snapshot, id: uid(), createdAt: now(), updatedAt: now(), status: "awaiting_approval", requestHash: hash(JSON.stringify(snapshot)), outputVersionIds: [], backendJobIds: [], localOnly: definition.executor === "local", message: "요청을 저장했습니다. 실행 전까지 작업자·유료 서비스 호출은 없습니다." };
     t.objectSnapshot = { name: o.name, kind: o.kind, references: structuredClone(o.references), accepted: structuredClone(o.accepted), ...(o.creation ? { creation: structuredClone(o.creation) } : {}) };
-    if (taskId === "X05") t.targetProfile = structuredClone(w.target);
-    t.requestHash = hash(JSON.stringify({ ...snapshot, object: t.objectSnapshot, target: t.targetProfile }));
+    if (taskId === "X05") { t.targetProfile = structuredClone(w.target); t.unityClipSettings = freezeUnityClipSettings(w, inputs); }
+    t.requestHash = hash(JSON.stringify({ ...snapshot, object: t.objectSnapshot, target: t.targetProfile, ...(t.unityClipSettings ? { unityClipSettings: t.unityClipSettings } : {}) }));
     if (API.has(taskId)) {
       const q = this.apiQuote(w, o, t, inputs); t.quoteId = q.id;
       t.cost = { provider: "Tripo API", credits: q.estimatedCredits, basis: q.costSource, expiresAt: q.expiresAt };
@@ -481,7 +495,7 @@ export class GraphicsEngine {
     const o = { ...this.object(w, t.objectId), ...t.objectSnapshot }, inputs = t.inputVersionIds.map(vid => w.versions.find(v => v.id === vid)!);
     if (t.taskId === "X05") {
       if (!t.targetProfile) throw Error("고정된 Unity 프로젝트 설정이 없습니다.");
-      const delivery = await this.unity({ projectRoot: this.store.directory(id), object: { ...o, settings: t.settings }, versions: inputs, profile: t.targetProfile, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal });
+      const delivery = await this.unity({ projectRoot: this.store.directory(id), object: { ...o, settings: t.settings }, versions: inputs, clipSettings: t.unityClipSettings, profile: t.targetProfile, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal });
       w = this.get(id); if (signal.aborted) return;
       const priorIndex = w.deliveries.findIndex(d => d.id === delivery.id);
       if (priorIndex < 0) w.deliveries.push(delivery); else w.deliveries[priorIndex] = delivery;

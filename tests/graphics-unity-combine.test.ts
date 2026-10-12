@@ -8,6 +8,8 @@ import { spawnSync } from "node:child_process";
 import {
   prepareUnityDelivery,
   readUnityTarget,
+  validateUnityClipSettings,
+  inspectUnityDelivery,
 } from "../engine/graphics-unity";
 import type { AssetVersion, GraphicsObject } from "../shared/graphics";
 
@@ -102,6 +104,17 @@ function fixture(t: TestContext) {
   };
   return { root, project, object, version, args };
 }
+
+test('Unity clip contracts bind exact versions/names and never infer loop from Idle naming', t=>{
+ const f=fixture(t),rig=f.version('rig','rig','main','rig.blend'),idle=f.version('idle','animation','Idle','idle.blend');
+ idle.provenance={type:'codex',jobId:'author-task'};
+ assert.throws(()=>validateUnityClipSettings([rig,idle]),/저장된/);
+ const value={versionId:'idle',name:'Idle',loop:false,rootMotion:true,fps:24};
+ assert.deepEqual(validateUnityClipSettings([rig,idle],[value]),[value]);
+ for(const changed of [{...value,versionId:'another'},{...value,name:'idle'},{...value,fps:0},{...value,fps:NaN},{...value,loop:'true' as unknown as boolean}])assert.throws(()=>validateUnityClipSettings([rig,idle],[changed]));
+ assert.throws(()=>validateUnityClipSettings([rig,idle],[value,value]),/중복/);
+ idle.provenance={type:'import'};assert.deepEqual(validateUnityClipSettings([rig,idle]),[]);
+});
 
 test("separate Unity clips require exact accepted rig and clip identities before local processing", async (t) => {
   const f = fixture(t),
@@ -208,7 +221,7 @@ for filename,name,amplitude,change in [('idle','Idle',0.25,''),('jump','Jump',0.
       idle = f.version("idle", "animation", "Idle", "idle.blend"),
       jump = f.version("jump", "animation", "Jump", "jump.blend");
     const originalHashes = [rig, idle, jump].map((v) => v.files[0].sha256);
-    const args = f.args([rig, idle, jump], blender),
+    const args = {...f.args([rig, idle, jump], blender),clipSettings:[{versionId:idle.id,name:'Idle',loop:true,rootMotion:false,fps:30},{versionId:jump.id,name:'Jump',loop:false,rootMotion:true,fps:30}]},
       delivery = await prepareUnityDelivery(args);
     assert.equal(delivery.status, "queued", delivery.errors.join("\n"));
     const staging = path.join(
@@ -240,12 +253,21 @@ for filename,name,amplitude,change in [('idle','Idle',0.25,''),('jump','Jump',0.
       fs.readFileSync(path.join(staging, "request.json"), "utf8"),
     );
     assert.deepEqual(request.expectedClips, ["Idle", "Jump", "Keep"]);
+    assert.deepEqual(request.clipSettings,args.clipSettings);
+    const animation=JSON.parse(fs.readFileSync(path.join(staging,'animation.json'),'utf8'));
+    assert.deepEqual(animation.clipSettings,args.clipSettings);assert.equal(animation.clips.length,2);assert.equal(animation.clips[0].sourceFps,30);
+    const requestFile=path.join(staging,'request.json');
+    fs.writeFileSync(requestFile,JSON.stringify({...request,clipSettings:request.clipSettings.map((clip:any)=>({...clip,loop:!clip.loop}))}));
+    assert.equal(inspectUnityDelivery(args.profile.projectPath,delivery).status,'failed','Changed contract must not reuse immutable source evidence');
+    fs.writeFileSync(requestFile,JSON.stringify(request));
     const reused = await prepareUnityDelivery(args);
     assert.equal(reused.id, delivery.id);
     assert.deepEqual(
       [rig, idle, jump].map((v) => hash(path.join(f.project, v.files[0].path))),
       originalHashes,
     );
+    const wrongContract=await prepareUnityDelivery({...f.args([rig,idle],blender),clipSettings:[{versionId:idle.id,name:'Idle',loop:true,rootMotion:false,fps:24}]});
+    assert.equal(wrongContract.status,'failed');assert.ok(wrongContract.errors.some(error=>error.includes('FPS differs from the frozen clip contract')));
 
     const inspect = put(
       f.root,

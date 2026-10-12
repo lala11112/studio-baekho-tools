@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import { runProcess } from "./local";
-import type { AssetVersion, GraphicsFile, GraphicsObject, UnityDelivery, UnityTargetProfile } from "../shared/graphics";
+import { isGraphicsClipName, type AssetVersion, type GraphicsFile, type GraphicsObject, type UnityClipSettings, type UnityDelivery, type UnityTargetProfile } from "../shared/graphics";
 
 export const GRAPHICS_UNITY_CONVERTER = "graphics-unity-1";
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -107,12 +107,22 @@ export function graphicsUnityOptimization(settings:GraphicsObject["settings"]):G
   if(!["none","normal"].includes(deliveryCompression))throw Error("지원하는 Unity 전달 압축은 none/normal입니다.");
   return {lodEnabled:settings.lodEnabled===true,lodRatio,collider:collider as GraphicsUnityOptimization["collider"],deliveryTextureSize,deliveryCompression:deliveryCompression as "none"|"normal"};
 }
+export function validateUnityClipSettings(versions:AssetVersion[], supplied:UnityClipSettings[] = []):UnityClipSettings[] {
+  if(!Array.isArray(supplied)||new Set(supplied.map(v=>v.versionId)).size!==supplied.length||new Set(supplied.map(v=>v.name)).size!==supplied.length)throw Error("Unity 클립 설정의 버전·이름이 중복되거나 잘못됐습니다.");
+  const animations=versions.filter(v=>v.role==="animation");
+  for(const clip of supplied){
+    const version=animations.find(v=>v.id===clip.versionId);
+    if(!version||clip.name!==version.slot||!isGraphicsClipName(clip.name)||typeof clip.loop!=="boolean"||typeof clip.rootMotion!=="boolean"||typeof clip.fps!=="number"||!Number.isFinite(clip.fps)||clip.fps<1||clip.fps>120)throw Error("Unity 클립 설정은 선택한 정확한 버전·이름·반복·루트 모션·FPS와 일치해야 합니다.");
+  }
+  if(animations.some(v=>v.provenance.type==="codex"&&!supplied.some(clip=>clip.versionId===v.id)))throw Error("앱에서 생성한 동작의 저장된 반복·루트 모션·FPS 계약이 없습니다. 현재 설정으로 추정하지 않습니다.");
+  return supplied.map(clip=>({versionId:clip.versionId,name:clip.name,loop:clip.loop,rootMotion:clip.rootMotion,fps:clip.fps})).sort((a,b)=>a.name.localeCompare(b.name));
+}
 type QueueRequest = {
   schemaVersion: number; requestId: string; objectId: string; objectName: string;
   destination: string; resultPath: string; profileFingerprint: string; unityVersion: string;
   pipeline: string; converterVersion: string; structure: string; rigType: string;
   mode: string; files: Output[]; expectedClips: string[]; sources: { path: string; sha256: string }[];
-  profileFiles: { path: string; sha256: string }[]; spritePixelsPerUnit: number; materialManifest?: string; optimization?:GraphicsUnityOptimization;
+  profileFiles: { path: string; sha256: string }[]; spritePixelsPerUnit: number; materialManifest?: string; optimization?:GraphicsUnityOptimization; clipSettings?:UnityClipSettings[];
 };
 function assertRequestBinding(root:string, delivery:UnityDelivery, q:QueueRequest) {
   if(q.files?.some(file=>file.destination===delivery.destination+"/Generated/materials.json") && q.materialManifest!==delivery.destination+"/Generated/materials.json")throw Error("Unity 재질 역할 manifest 연결이 고정 요청과 다릅니다.");
@@ -129,8 +139,13 @@ function assertRequestBinding(root:string, delivery:UnityDelivery, q:QueueReques
     const file=safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/optimization.json`);
     if(sha(file)!==optimizationFile.sha256||JSON.stringify(graphicsUnityOptimization(json(file).settings??{}))!==JSON.stringify(graphicsUnityOptimization(q.optimization??{})))throw Error("Unity 최적화 옵션이 고정된 파생 결과와 다릅니다.");
   }
+  const animationFile=q.files.find(file=>file.destination===delivery.destination+"/Generated/animation.json");
+  if(animationFile){
+    const file=safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/animation.json`);
+    if(sha(file)!==animationFile.sha256||JSON.stringify(json(file).clipSettings??[])!==JSON.stringify(q.clipSettings??[]))throw Error("Unity 동작 설정이 고정된 원본 검사 기록과 다릅니다.");
+  }else if(q.clipSettings?.length)throw Error("Unity 동작 설정에 대응하는 원본 검사 기록이 없습니다.");
 }
-export type PrepareUnityDeliveryArgs = { projectRoot: string; object: GraphicsObject; versions: AssetVersion[]; profile: UnityTargetProfile; blenderPath: string; resources: string; signal?: AbortSignal };
+export type PrepareUnityDeliveryArgs = { projectRoot: string; object: GraphicsObject; versions: AssetVersion[]; profile: UnityTargetProfile; blenderPath: string; resources: string; signal?: AbortSignal; clipSettings?:UnityClipSettings[] };
 const busy = new Set<string>();
 const objectFolder = (id: string) => /^[a-zA-Z0-9_-]{1,64}$/.test(id) ? id : "object-" + digest(id).slice(0,24);
 function validateSources(projectRoot: string, object: GraphicsObject, versions: AssetVersion[]): Input[] {
@@ -198,6 +213,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
     throw Error("Unity로 보낼 리그와 각 동작 클립의 정확한 버전을 먼저 채택하세요.");
   if(combine && (preferred.some(input=>path.extname(input.path).toLowerCase()!==".blend") || clips.some(v=>!v.slot.trim() || v.slot==="main")))
     throw Error("리그·클립 합성은 원본 BLEND와 정확한 Action 이름의 클립 슬롯이 필요합니다.");
+  const clipSettings=validateUnityClipSettings(a.versions,a.clipSettings);
   const source = sprite ? images[0] : combine ? preferred.find(input=>input.versionId===rigs[0].id) : preferred[0];
   if (!source || (sprite ? images.length !== 1 || a.versions.length!==1 : !combine && preferred.length !== 1)) throw Error(sprite ? "현재 Unity 스프라이트 출력은 PNG/JPEG/TGA 이미지 한 개를 지원합니다." : "Unity에 보낼 원본 모델 버전 한 개를 지정하세요.");
   const rigType = a.object.settings.unityRigType === "humanoid" ? "humanoid" : "generic";
@@ -207,7 +223,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
   const converterSource = path.join(a.resources,"blender/graphics_prepare.py");
   const combineSource = path.join(a.resources,"blender/graphics_combine.py");
   const converterVersion = GRAPHICS_UNITY_CONVERTER + "-" + digest(fs.readFileSync(bridgeSource)).slice(0,12) + "-" + digest(fs.readFileSync(converterSource)).slice(0,12) + (combine ? "-" + digest(fs.readFileSync(combineSource)).slice(0,12) : "");
-  const identity = digest(JSON.stringify({ objectId:a.object.id, versionIds:a.versions.map(v=>v.id), inputs:inputs.map(i=>({path:i.path,sha256:i.sha256})), ...(combine?{clips:clips.map(v=>({versionId:v.id,action:v.slot})),rigVersion:rigs[0].id}:{}), profile:target.fingerprint, converterVersion, rigType, sprite, spritePixelsPerUnit,optimization }));
+  const identity = digest(JSON.stringify({ objectId:a.object.id, versionIds:a.versions.map(v=>v.id), inputs:inputs.map(i=>({path:i.path,sha256:i.sha256})), ...(combine?{clips:clips.map(v=>({versionId:v.id,action:v.slot})),rigVersion:rigs[0].id}:{}), profile:target.fingerprint, converterVersion, rigType, sprite, spritePixelsPerUnit,optimization,clipSettings }));
   const id = identity.slice(0,32), dest = `Assets/PartsmithGraphics/${objectFolder(a.object.id)}`;
   const staging = safePath(root,`Library/PartsmithGraphicsStaging/${id}`);
   const deliveryFile = safePath(root,`Library/PartsmithGraphicsStaging/${id}/delivery.json`);
@@ -221,6 +237,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
   if (busy.has(root)) throw Error("이 Unity 프로젝트의 다른 전달 작업을 처리 중입니다.");
   busy.add(root);
   const delivery: UnityDelivery = { id,objectId:a.object.id,versionIds:a.versions.map(v=>v.id),profileFingerprint:target.fingerprint,converterVersion,createdAt:new Date().toISOString(),destination:dest,status:"queued",files:[],warnings:["가져오기만 요청했습니다. Play Mode·외형·변형 품질은 검증하지 않았습니다."],errors:[],playbackVerified:false };
+  for(const clip of clips.filter(v=>!clipSettings.some(setting=>setting.versionId===v.id)))delivery.warnings.push(`동작 ${clip.slot}은 저장된 반복·루트 모션·FPS 계약이 없어 기존 importer 동작을 유지합니다. 이름으로 반복 설정을 추정하지 않습니다.`);
   let lock: number | undefined;
   const lockPath = safePath(root,"Library/PartsmithGraphicsPreparation.lock");
   try {
@@ -277,12 +294,15 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
           merge=combinedReport; nativeSource=combined;
           copied.push({original:combined,local:combined,sha256:sha(combined)});
         }
-        write(spec,{source:nativeSource,inputRoot,files:copied,output:path.join(temp,"export"),optimization});
+        write(spec,{source:nativeSource,inputRoot,files:copied,output:path.join(temp,"export"),optimization,clipSettings});
         a.signal?.throwIfAborted();
         await runProcess(a.blenderPath,["--background","--factory-startup","--disable-autoexec","--python-exit-code","1","--python",converterSource,"--",spec]);
         a.signal?.throwIfAborted();
         const converted=json(path.join(temp,"export/inspection.json"));
         if(!converted.structure || !Array.isArray(converted.clips)) throw Error("Blender 구조 검사 결과가 없습니다.");
+        const animationManifest=json(path.join(temp,"export/animation.json"));
+        if(animationManifest.schemaVersion!==1||JSON.stringify(animationManifest.clipSettings)!==JSON.stringify(clipSettings)||!Array.isArray(animationManifest.clips)||animationManifest.clips.length!==clipSettings.length)throw Error("Blender 동작 설정의 검사 근거가 고정 요청과 다릅니다.");
+        for(const setting of clipSettings){const evidence=animationManifest.clips.find((clip:{name:string})=>clip.name===setting.name);if(!evidence||Math.abs(evidence.sourceFps-setting.fps)>.0001||!Number.isFinite(evidence.firstFrame)||!Number.isFinite(evidence.lastFrame)||evidence.lastFrame<=evidence.firstFrame)throw Error("Blender 동작 이름·FPS·프레임 범위 검사에 실패했습니다.");}
         const optimizationManifest=json(path.join(temp,"export/optimization.json"));
         if(optimizationManifest.schemaVersion!==1||JSON.stringify(graphicsUnityOptimization(optimizationManifest.settings??{}))!==JSON.stringify(optimization)||!Array.isArray(optimizationManifest.lods))throw Error("Blender 최적화 옵션 검사 결과가 고정 요청과 다릅니다.");
         if(optimization.lodEnabled&&(optimizationManifest.lods.length!==converted.structure.meshes.length||optimizationManifest.lods.some((lod:{source:string;derived:string;sourceTriangles:number;derivedTriangles:number})=>!converted.structure.meshes.some((mesh:{name:string})=>mesh.name===lod.source)||lod.derived!==lod.source+"__PS_LOD1"||!Number.isInteger(lod.derivedTriangles)||lod.derivedTriangles<1||lod.derivedTriangles>=lod.sourceTriangles)))throw Error("Blender LOD 감소·메시 연결 검증 결과가 없습니다.");
@@ -313,7 +333,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
     validateSources(a.projectRoot,a.object,a.versions);
     if(readUnityTarget(root).fingerprint!==target.fingerprint)throw Error("처리 중 Unity 대상 설정이 변경됐습니다.");
     a.signal?.throwIfAborted();
-    const request: QueueRequest={schemaVersion:1,requestId:id,objectId:a.object.id,objectName:a.object.name,destination:dest,resultPath,profileFingerprint:target.fingerprint,unityVersion:target.unityVersion,pipeline:target.pipeline,converterVersion,structure,rigType,mode:sprite?"sprite":"model",files:outputs,expectedClips,sources:inputs.map(i=>({path:i.absolute,sha256:i.sha256})),profileFiles:profileFiles(root),spritePixelsPerUnit,optimization,...(!sprite?{materialManifest:dest+"/Generated/materials.json"}:{})};
+    const request: QueueRequest={schemaVersion:1,requestId:id,objectId:a.object.id,objectName:a.object.name,destination:dest,resultPath,profileFingerprint:target.fingerprint,unityVersion:target.unityVersion,pipeline:target.pipeline,converterVersion,structure,rigType,mode:sprite?"sprite":"model",files:outputs,expectedClips,sources:inputs.map(i=>({path:i.absolute,sha256:i.sha256})),profileFiles:profileFiles(root),spritePixelsPerUnit,optimization,clipSettings,...(!sprite?{materialManifest:dest+"/Generated/materials.json"}:{})};
     // User code is not overwritten. Existing .meta files are deliberately never replaced.
     if(!fs.existsSync(bridgeDest)||sha(bridgeDest)!==bridgeHash){fs.mkdirSync(path.dirname(bridgeDest),{recursive:true});fs.copyFileSync(bridgeSource,bridgeDest);}
     write(bridgeRecord,{sha256:bridgeHash,converterVersion});
@@ -369,13 +389,18 @@ export function inspectUnityDelivery(projectPath: string, delivery: UnityDeliver
     }
     const requestPath=safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/request.json`);
     if(!fs.existsSync(requestPath))throw Error("Unity 결과에 대응하는 고정 요청이 없습니다.");
-    assertRequestBinding(root,delivery,json(requestPath));
+    const request:QueueRequest=json(requestPath);assertRequestBinding(root,delivery,request);
     // Completion still resolves GUIDs and computes the full target fingerprint before accepting evidence.
     if(readUnityTarget(root).fingerprint!==delivery.profileFingerprint){result.status="conflict";result.errors.push("Unity 대상 프로필이 바뀌어 이전 검증을 재사용하지 않습니다.");return result;}
     const r=json(reportFile);
     if(r.requestId!==delivery.id || r.objectId!==delivery.objectId || r.profileFingerprint!==delivery.profileFingerprint || r.converterVersion!==delivery.converterVersion || !["imported","failed","conflict"].includes(r.status))throw Error("Unity 결과와 고정한 전달 요청이 다릅니다.");
     result.status=r.status;result.warnings=[...new Set([...result.warnings,...(r.warnings??[])])];result.errors=[...new Set([...result.errors,...(r.errors??[])])];
     if(r.status==="imported") {
+      const contracted=request.clipSettings??[];
+      if(contracted.length){
+        if(!Array.isArray(r.clipSettings)||r.clipSettings.length!==contracted.length)throw Error("Unity 결과에 고정 클립 설정 검증이 없습니다.");
+        for(const clip of contracted){const actual=r.clipSettings.find((value:UnityClipSettings)=>value.versionId===clip.versionId&&value.name===clip.name);if(!actual||actual.loop!==clip.loop||actual.rootMotion!==clip.rootMotion||actual.lockRootRotation!==!clip.rootMotion||actual.lockRootHeightY!==!clip.rootMotion||actual.lockRootPositionXZ!==!clip.rootMotion||!Number.isFinite(actual.sourceFps)||!Number.isFinite(actual.importedFps)||Math.abs(actual.sourceFps-clip.fps)>.0001||Math.abs(actual.importedFps-clip.fps)>.0001)throw Error("Unity 결과의 반복·루트 모션·FPS가 고정 클립 계약과 다릅니다.");}
+      }
       if(result.errors.length || !/^[a-f\d]{32}$/.test(r.guid??"") || r.prefabPath!==delivery.destination+"/Generated/Asset.prefab" || r.userPrefabPath!==delivery.destination+"/User/Asset.prefab")throw Error("Unity 프리팹 검증 정보가 없습니다.");
       for(const f of delivery.files)if(sha(safePath(root,f.path))!==f.sha256)throw Error("Unity에 전달한 원본 파일이 변경됐습니다: "+f.path);
       const prefab=safePath(root,r.prefabPath), userPrefab=safePath(root,r.userPrefabPath);

@@ -16,13 +16,19 @@ namespace Partsmith.Graphics {
   public int schemaVersion; public string requestId,objectId,objectName,destination,resultPath,profileFingerprint,unityVersion,pipeline,converterVersion,structure,rigType,mode,materialManifest;
   public FileEntry[] files,sources,profileFiles; public string[] expectedClips; public float spritePixelsPerUnit;
   public DeliveryOptimization optimization;
+  public ClipSettings[] clipSettings;
  }
+ [Serializable] public class ClipSettings { public string versionId,name; public bool loop,rootMotion; public float fps; }
+ [Serializable] public class SourceClip { public string name,armatureName,rootBoneName; public float sourceFps,firstFrame,lastFrame; }
+ [Serializable] public class AnimationManifest { public int schemaVersion; public ClipSettings[] clipSettings; public SourceClip[] clips; }
+ [Serializable] public class ImportedClip { public string versionId,name; public bool loop,rootMotion,lockRootRotation,lockRootHeightY,lockRootPositionXZ; public float sourceFps,importedFps,duration; }
  [Serializable] public class DeliveryOptimization { public bool lodEnabled; public float lodRatio=.5f; public string collider="none",deliveryCompression="none"; public int deliveryTextureSize; }
  [Serializable] public class DeliveryLod { public string source,derived; public int sourceTriangles,derivedTriangles; }
  [Serializable] public class OptimizationManifest { public int schemaVersion; public DeliveryOptimization settings; public DeliveryLod[] lods; }
  [Serializable] public class DeliveryReport {
   public string requestId,objectId,profileFingerprint,converterVersion,status,guid,prefabPath,userPrefabPath,unityVersion,pipeline;
   public bool playbackVerified; public string[] clips,warnings,errors;
+  public ImportedClip[] clipSettings;
  }
  [Serializable] public class ManagedManifest { public string objectId,profileFingerprint,converterVersion,structure,requestId,pipeline,unityVersion; public FileEntry[] files; }
  [Serializable] public class MaterialTexture { public string path,sha256; public int width,height; }
@@ -95,6 +101,9 @@ namespace Partsmith.Graphics {
      var optimizationEvidence=JsonUtility.FromJson<OptimizationManifest>(File.ReadAllText(optimizationFile.source));
      if(optimizationEvidence?.schemaVersion!=1||optimizationEvidence.settings==null||JsonUtility.ToJson(optimizationEvidence.settings)!=JsonUtility.ToJson(q.optimization))throw new Conflict("Optimization settings differ from the immutable derivative manifest");
     }else if(q.optimization.lodEnabled)throw new Conflict("LOD has no immutable derivative manifest");
+    var animationFile=q.files.SingleOrDefault(f=>f.destination==generated+"/animation.json");
+    if(animationFile!=null)ValidateAnimationManifest(q,JsonUtility.FromJson<AnimationManifest>(File.ReadAllText(animationFile.source)));
+    else if(q.clipSettings!=null&&q.clipSettings.Length>0)throw new Conflict("Frozen animation settings have no source manifest");
     foreach(var f in q.sources??Array.Empty<FileEntry>())ValidateFile(f.path,f.sha256);
     if(File.Exists(Safe("Library/PartsmithGraphicsStaging/"+q.requestId+"/cancelled.json")))throw new Exception("Delivery cancelled before import");
     if(File.Exists(manifestPath)){
@@ -202,6 +211,9 @@ namespace Partsmith.Graphics {
   }
   static void ImportModel(DeliveryRequest q,DeliveryReport r,List<string> warnings){
    var bindings=ReadMaterialBindings(q);
+   var animationFile=q.files.SingleOrDefault(f=>f.destination==q.destination+"/Generated/animation.json");
+   var animation=animationFile==null?null:JsonUtility.FromJson<AnimationManifest>(File.ReadAllText(Safe(animationFile.destination)));
+   if(animation!=null)ValidateAnimationManifest(q,animation);
    string modelPath=q.destination+"/Generated/Asset.fbx",texturePath=q.destination+"/Generated/Textures";
    var importer=AssetImporter.GetAtPath(modelPath) as ModelImporter;if(!importer)throw new Exception("FBX importer missing");
    importer.globalScale=1;importer.useFileScale=true;importer.bakeAxisConversion=true;importer.importAnimation=true;importer.animationCompression=ModelImporterAnimationCompression.Off;
@@ -212,6 +224,7 @@ namespace Partsmith.Graphics {
    var initial=AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);bool skinned=initial&&initial.GetComponentsInChildren<SkinnedMeshRenderer>(true).Any(s=>s.bones.Length>0);
    importer.animationType=skinned?(q.rigType=="humanoid"?ModelImporterAnimationType.Human:ModelImporterAnimationType.Generic):ModelImporterAnimationType.Generic;
    importer.avatarSetup=skinned?ModelImporterAvatarSetup.CreateFromThisModel:ModelImporterAvatarSetup.NoAvatar;
+   ApplyClipSettings(importer,initial,q,animation);
    importer.SaveAndReimport();Folder(texturePath);importer.ExtractTextures(texturePath);AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
    foreach(var file in Directory.GetFiles(Safe(texturePath)).Where(f=>new[]{".png",".jpg",".jpeg",".tga"}.Contains(Path.GetExtension(f).ToLowerInvariant())))Texture(Relative(file),false,100,"color",q.optimization);
    var model=AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);if(!model||model.GetComponentsInChildren<Renderer>(true).Length==0)throw new Exception("Imported model has no renderer");
@@ -236,6 +249,7 @@ namespace Partsmith.Graphics {
    importer.SaveAndReimport();model=AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);
    var clips=AssetDatabase.LoadAllAssetsAtPath(modelPath).OfType<AnimationClip>().Where(c=>!c.name.StartsWith("__preview__")).ToArray();r.clips=clips.Select(c=>c.name).ToArray();
    if(q.expectedClips!=null&&q.expectedClips.Any(expected=>!clips.Any(c=>c.name==expected||c.name.EndsWith("|"+expected))))throw new Exception("An exact source action is missing after Unity import");
+   r.clipSettings=VerifyClipSettings(importer,clips,animation);
    var avatar=AssetDatabase.LoadAllAssetsAtPath(modelPath).OfType<Avatar>().FirstOrDefault();
    if(skinned&&(!avatar||!avatar.isValid||q.rigType=="humanoid"&&!avatar.isHuman))throw new Exception("Requested rig Avatar failed validation");
    AnimatorController controller=null;
@@ -250,10 +264,62 @@ namespace Partsmith.Graphics {
    try{
     var obj=(GameObject)PrefabUtility.InstantiatePrefab(model,scene);obj.name="Asset";
     ApplyOptimization(q,obj,warnings);
-    if(controller||skinned){var animator=obj.GetComponent<Animator>();if(!animator)animator=obj.AddComponent<Animator>();animator.avatar=avatar;animator.runtimeAnimatorController=controller;animator.applyRootMotion=false;}
+    if(controller||skinned){var animator=obj.GetComponent<Animator>();if(!animator)animator=obj.AddComponent<Animator>();animator.avatar=avatar;animator.runtimeAnimatorController=controller;animator.applyRootMotion=q.clipSettings?.Any(clip=>clip.rootMotion)??false;}
     SavePrefab(obj,r);UnityEngine.Object.DestroyImmediate(obj);
    }finally{EditorSceneManager.ClosePreviewScene(scene);}
    warnings.Add("Supported opaque Principled materials use source-node base color, tangent normal and explicit metallic R / smoothness A packing. Unsupported graphs use a warned base-color fallback. Appearance still requires visual review.");
+   if(q.clipSettings?.Length>0)warnings.Add("Frozen clip loop/root-motion import settings and source FPS were checked. No Play Mode, loop-seam or runtime movement quality was verified.");
+  }
+  static void ValidateAnimationManifest(DeliveryRequest q,AnimationManifest evidence){
+   var settings=q.clipSettings??Array.Empty<ClipSettings>();
+   if(evidence?.schemaVersion!=1||evidence.clips==null||evidence.clipSettings==null||evidence.clips.Length!=settings.Length||evidence.clipSettings.Length!=settings.Length||settings.Select(c=>c.name).Distinct().Count()!=settings.Length||settings.Select(c=>c.versionId).Distinct().Count()!=settings.Length)throw new Conflict("Animation contract inventory differs from the immutable source");
+   for(int i=0;i<settings.Length;i++){
+    var c=settings[i];var source=evidence.clips.SingleOrDefault(s=>s.name==c.name);
+    if(string.IsNullOrWhiteSpace(c.versionId)||string.IsNullOrWhiteSpace(c.name)||!float.IsFinite(c.fps)||c.fps<1||c.fps>120||JsonUtility.ToJson(c)!=JsonUtility.ToJson(evidence.clipSettings[i])||source==null||Math.Abs(source.sourceFps-c.fps)>.0001f||!float.IsFinite(source.firstFrame)||!float.IsFinite(source.lastFrame)||source.lastFrame<=source.firstFrame)throw new Conflict("Animation name/FPS/settings differ from frozen source evidence");
+   }
+  }
+  static bool MatchesTake(ModelImporterClipAnimation clip,SourceClip source){
+   string take=string.IsNullOrEmpty(clip.takeName)?clip.name:clip.takeName;
+   return take==source.name||take==source.armatureName+"|"+source.name;
+  }
+  static void ApplyClipSettings(ModelImporter importer,GameObject model,DeliveryRequest q,AnimationManifest evidence){
+   if(evidence==null||evidence.clipSettings.Length==0)return;
+   var defaults=importer.defaultClipAnimations;
+   var previous=importer.clipAnimations;
+   var selected=new HashSet<int>();
+   foreach(var setting in evidence.clipSettings){
+    var source=evidence.clips.Single(s=>s.name==setting.name);
+    var matches=Enumerable.Range(0,defaults.Length).Where(index=>MatchesTake(defaults[index],source)).ToArray();
+    if(matches.Length!=1||!selected.Add(matches[0]))throw new Exception("Animation contract does not match one exact source take: "+setting.name);
+    var clip=defaults[matches[0]];clip.name=setting.name;clip.loopTime=setting.loop;clip.loopPose=false;clip.cycleOffset=0;
+    clip.lockRootRotation=!setting.rootMotion;clip.lockRootHeightY=!setting.rootMotion;clip.lockRootPositionXZ=!setting.rootMotion;
+    clip.keepOriginalOrientation=true;clip.keepOriginalPositionY=true;clip.keepOriginalPositionXZ=true;
+   }
+   // Uncontracted legacy takes retain their existing settings; no name-based loop guesses.
+   for(int i=0;i<defaults.Length;i++)if(!selected.Contains(i)){
+    var old=previous.SingleOrDefault(c=>c.takeName==defaults[i].takeName);
+    if(old!=null)defaults[i]=old;
+   }
+   importer.clipAnimations=defaults;
+   // A Motion-tab override ignores per-clip bake flags. Use the Generic Rig root designation instead.
+   importer.motionNodeName="";
+   if(importer.animationType==ModelImporterAnimationType.Generic){
+    var roots=evidence.clips.Select(c=>c.rootBoneName).Where(name=>!string.IsNullOrEmpty(name)).Distinct().ToArray();
+    if(roots.Length==1){
+     if(!model||model.GetComponentsInChildren<Transform>(true).Count(t=>t.name==roots[0])!=1)throw new Exception("Source root bone does not identify one imported transform");
+     var serialized=new SerializedObject(importer);var root=serialized.FindProperty("m_HumanDescription.m_RootMotionBoneName");
+     if(root==null)throw new Exception("This Unity version does not expose the Generic root bone contract");
+     root.stringValue=roots[0];serialized.ApplyModifiedPropertiesWithoutUndo();
+    }else if(evidence.clipSettings.Any(c=>c.rootMotion))throw new Exception("Root motion requires one unambiguous source root bone");
+   }
+  }
+  static ImportedClip[] VerifyClipSettings(ModelImporter importer,AnimationClip[] clips,AnimationManifest evidence){
+   if(evidence==null)return Array.Empty<ImportedClip>();
+   return evidence.clipSettings.Select(setting=>{
+    var clip=clips.SingleOrDefault(c=>c.name==setting.name);var config=importer.clipAnimations.SingleOrDefault(c=>c.name==setting.name);var source=evidence.clips.Single(c=>c.name==setting.name);
+    if(!clip||config==null||clip.isLooping!=setting.loop||config.loopTime!=setting.loop||config.loopPose||config.lockRootRotation==setting.rootMotion||config.lockRootHeightY==setting.rootMotion||config.lockRootPositionXZ==setting.rootMotion||Math.Abs(clip.frameRate-setting.fps)>.0001f||Math.Abs(clip.length-(source.lastFrame-source.firstFrame)/source.sourceFps)>1/setting.fps+.0001f)throw new Exception("Imported clip loop/root-motion/FPS/duration differs from frozen source: "+setting.name);
+    return new ImportedClip{versionId=setting.versionId,name=setting.name,loop=config.loopTime,rootMotion=setting.rootMotion,lockRootRotation=config.lockRootRotation,lockRootHeightY=config.lockRootHeightY,lockRootPositionXZ=config.lockRootPositionXZ,sourceFps=source.sourceFps,importedFps=clip.frameRate,duration=clip.length};
+   }).ToArray();
   }
   static void ApplyOptimization(DeliveryRequest q,GameObject obj,List<string> warnings){
    var options=q.optimization??new DeliveryOptimization();

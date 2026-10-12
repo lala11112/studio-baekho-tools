@@ -249,6 +249,23 @@ structure = {'meshes': sorted([signature(o) for o in meshes], key=lambda m:m['na
                         'bind':[round(v,6) for row in b.matrix_local for v in row]}
                        for rig in rigs for b in rig.data.bones]}
 clips = sorted(a.name for a in bpy.data.actions if a.frame_range[1] > a.frame_range[0])
+clip_settings=q.get('clipSettings',[])
+clip_evidence=[]
+source_fps=bpy.context.scene.render.fps/bpy.context.scene.render.fps_base
+for setting in clip_settings:
+    action=bpy.data.actions.get(setting['name'])
+    if not action or action.name not in clips:
+        raise RuntimeError('Exact selected animation contract Action is missing: '+setting['name'])
+    if not math.isfinite(source_fps) or abs(source_fps-setting['fps'])>.0001:
+        raise RuntimeError('Animation FPS differs from the frozen clip contract; timing is not resampled: '+setting['name'])
+    if len(rigs)!=1:
+        raise RuntimeError('Managed animation contracts require exactly one armature')
+    roots=[bone.name for bone in rigs[0].data.bones if bone.parent is None]
+    if setting['rootMotion'] and len(roots)!=1:
+        raise RuntimeError('Root motion needs one unambiguous source skeleton root bone')
+    clip_evidence.append({'name':setting['name'],'sourceFps':source_fps,'firstFrame':float(action.frame_range[0]),'lastFrame':float(action.frame_range[1]),
+        'armatureName':rigs[0].name,'rootBoneName':roots[0] if len(roots)==1 else ''})
+(out/'animation.json').write_text(json.dumps({'schemaVersion':1,'clipSettings':clip_settings,'clips':clip_evidence},ensure_ascii=False),encoding='utf8')
 if clips and not rigs:
     warnings.append('Transform animation is retained; skeletal deformation was not verified.')
 if any(o.modifiers for o in meshes):

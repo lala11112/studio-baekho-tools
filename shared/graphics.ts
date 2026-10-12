@@ -14,6 +14,8 @@ export type UnityTargetProfile = {
   pipeline: "urp" | "hdrp" | "builtin" | "unknown"; platform: "pc";
   packages: Record<string, string>; inspectedAt: string; fingerprint: string; warnings: string[];
 };
+/** Frozen settings from the exact accepted animation's producing task, never current object controls. */
+export type UnityClipSettings = { versionId: string; name: string; loop: boolean; rootMotion: boolean; fps: number };
 export type UnityDelivery = {
   id: string; objectId: string; versionIds: string[]; profileFingerprint: string;
   converterVersion: string; createdAt: string; destination: string;
@@ -47,6 +49,7 @@ export type GraphicsTask = {
   objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted" | "creation">;
   targetProfile?: UnityTargetProfile;
   deliveryId?: string;
+  unityClipSettings?: UnityClipSettings[];
   paidApproval?: { requestHash: string; provider: string; credits: number; approvedAt: string };
 };
 export type GraphicsUsageAudit = {

@@ -2469,3 +2469,86 @@ svg {
     display: none;
   }
 }
+
+/* Compact shell for the graphics workspace; legacy editors keep their layout. */
+.app:has(.graphics-studio) > .sidebar {
+  width: 164px;
+  padding: 16px 9px 10px;
+}
+.app:has(.graphics-studio) .brand {
+  gap: 6px;
+  padding: 0 2px 20px;
+}
+.app:has(.graphics-studio) .brand > span {
+  font-size: 20px;
+}
+.app:has(.graphics-studio) .brand-mark {
+  width: 26px;
+  height: 30px;
+}
+.app:has(.graphics-studio) .workspace-label {
+  padding: 0 5px 10px;
+}
+.app:has(.graphics-studio) .nav {
+  min-height: 36px;
+  padding: 8px 7px;
+  gap: 7px;
+  font-size: 12.5px;
+}
+.app:has(.graphics-studio) .nav-label {
+  margin: 18px 7px 8px;
+}
+.app:has(.graphics-studio) .manual-tools summary {
+  padding: 10px 6px;
+}
+.app:has(.graphics-studio) .local-note {
+  padding: 12px 5px;
+  margin-bottom: 10px;
+}
+.app:has(.graphics-studio) .version {
+  padding: 10px 6px 0;
+}
+.app-body:has(> .graphics-studio) > .topbar {
+  height: 46px;
+  padding: 0 16px;
+}
+.app-body:has(> .graphics-studio) > .stage-heading {
+  min-height: 48px;
+  padding: 8px 16px;
+}
+.app-body:has(> .graphics-studio) > .stage-heading > div:first-child {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.app-body:has(> .graphics-studio) > .stage-heading h1 {
+  font-size: 18px;
+  margin: 0;
+}
+.app-body > .graphics-studio {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.app-body > .graphics-studio > .gs-objects {
+  overflow-y: auto;
+}
+@media (max-width: 1050px) {
+  .app:has(.graphics-studio) > .sidebar {
+    width: 148px;
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+  .app:has(.graphics-studio) .nav {
+    gap: 5px;
+    font-size: 12px;
+    padding-right: 4px;
+    padding-left: 4px;
+  }
+  .app-body:has(> .graphics-studio) > .stage-heading .eyebrow {
+    font-size: 9px;
+    letter-spacing: 1px;
+  }
+}
