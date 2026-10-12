@@ -140,7 +140,7 @@ export type WorkbenchJob = {
     /** Explicit user continuations after the bounded attempts; never reset history. */
     continuations?: { afterAttempt:number; at:string; reason:string }[];
     workerHistory?: NonNullable<WorkbenchJob["externalExecution"]>["worker"][];
-    worker?: { attempt: number; startedAt?:string; threadId?: string; question?: string; lastReply?: string; usage?: unknown; approval?: WorkbenchRuntimeApproval };
+    worker?: { attempt: number; startedAt?:string; threadId?: string; question?: string; lastReply?: string; usage?: unknown; localOnly?:boolean; approval?: WorkbenchRuntimeApproval };
   };
   id: string;
   step: WorkbenchStep;
@@ -230,12 +230,13 @@ export interface WorkbenchExecutor {
   shutdown?(): void;
 }
 export interface ExternalWorkbenchRunner {
-  run(context: WorkbenchExecutionContext & { reply?: string; requestApproval?: (approval: WorkbenchRuntimeApproval) => Promise<WorkbenchRuntimeAnswer> }, onProgress: (message: string) => void): Promise<{
+  run(context: WorkbenchExecutionContext & { reply?: string; onUsage?: (usage:unknown)=>void; requestApproval?: (approval: WorkbenchRuntimeApproval) => Promise<WorkbenchRuntimeAnswer> }, onProgress: (message: string) => void): Promise<{
     status: "completed" | "needs_input" | "submission_unknown";
     summary: string;
     question?: string;
     threadId?: string;
     usage?: unknown;
+    localOnly?: boolean;
   }>;
   verifyReceipt(context: WorkbenchExecutionContext): void;
   shutdown?(): void;

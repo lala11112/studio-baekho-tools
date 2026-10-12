@@ -15,6 +15,7 @@ test("transport loss collects completed receipts locally; otherwise bounded retr
   let calls=0;const recoveries:any[]=[];
   const runner:ExternalWorkbenchRunner={async run(ctx){
     calls++;recoveries.push(ctx.recovery);
+    ctx.onUsage?.({total:{inputTokens:100,cachedInputTokens:80,outputTokens:5,totalTokens:105}});
     if(mode==="saved"){
       const bytes=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==","base64");
       fs.writeFileSync(path.join(ctx.workspace,"image.png"),bytes);
@@ -35,6 +36,8 @@ test("transport loss collects completed receipts locally; otherwise bounded retr
   assert.equal(got.jobs[0].status,mode==="saved"?"review":mode==="cancelled"?"submission_unknown":"needs_input",got.jobs[0].summary);
   if(mode==="transient"){assert(recoveries.slice(1).every(r=>r.mode==="retry"));assert.equal(got.jobs[0].externalExecution!.workerHistory!.length,2);}
   assert.deepEqual(got.selections,{});
+  assert.equal((got.jobs[0].externalExecution!.worker!.usage as any).total.totalTokens,105);
+  for(const old of got.jobs[0].externalExecution!.workerHistory??[])assert.equal((old!.usage as any).total.totalTokens,105);
  }
 });
 

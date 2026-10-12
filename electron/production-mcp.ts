@@ -26,7 +26,7 @@ const bridge = async (body: unknown) => {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(humanDecision ? 15 * 60 * 1000 : 45000),
+    signal: AbortSignal.timeout(humanDecision || call.name === 'studio_models_finish' ? 15 * 60 * 1000 : 45000),
   });
   if (!response.ok)
     throw Error("Production browser bridge rejected the request");

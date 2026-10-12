@@ -965,6 +965,12 @@ export class WorkbenchEngine {
     const controller = new AbortController();
     const context: Parameters<ExternalWorkbenchRunner["run"]>[0] = {workbench:structuredClone(w),job:structuredClone(job),workspace,
       inputs:packet.inputs,signal:controller.signal,reply,
+      onUsage:usage=>{
+        if(controller.signal.aborted)return;
+        const latest=this.get(w.id),current=this.job(latest,jobId);
+        if(current.status!=='running')return;
+        current.externalExecution!.worker!.usage=usage;this.save(latest);
+      },
       ...(collectOnly ? {recovery:{attempt:1,mode:"retry" as const,error:"사용자가 요청한 기존 결과 수집·등록 복구"}} : {}),
       requestApproval:(approval:WorkbenchRuntimeApproval)=>new Promise<WorkbenchRuntimeAnswer>((resolve,reject)=>{
         if(controller.signal.aborted || this.pendingApprovals.has(w.id)) {reject(Error("권한 요청이 취소되었거나 중복됐습니다."));return;}
@@ -997,7 +1003,7 @@ export class WorkbenchEngine {
         if (current.status !== "running") return;
         delete current.externalExecution!.worker!.approval;
         this.verifyArtifacts(latest, packet.inputs);
-        Object.assign(current.externalExecution!.worker!, {threadId:result.threadId,usage:result.usage,question:result.question});
+        Object.assign(current.externalExecution!.worker!, {threadId:result.threadId,...(result.usage?{usage:result.usage}:{}),localOnly:result.localOnly,question:result.question});
         current.status = result.status === "submission_unknown" ? "submission_unknown" : "needs_input";
         current.summary = result.summary.slice(0,4000);
         current.updatedAt = now(); delete latest.activeJobId;

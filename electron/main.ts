@@ -643,6 +643,7 @@ app.whenReady().then(async () => {
       bridgePath:path.join(__dirname,"production-mcp.cjs"),
       projectRoot:id=>store.directory(id),blenderPath:()=>store.settings.blenderPath,
       downloadsPath:app.getPath("downloads"),
+      resourcesPath:app.isPackaged ? path.join(process.resourcesPath,"integrations") : path.join(app.getAppPath(),"integrations"),
       ffmpegPath:app.isPackaged ? path.join(process.resourcesPath,"media","ffmpeg.exe") : path.join(app.getAppPath(),"node_modules","ffmpeg-static","ffmpeg.exe"),
     }), new RunwayWorkbenchRunner({
       journalRoot: path.join(root, "workbench-runway-journals"),

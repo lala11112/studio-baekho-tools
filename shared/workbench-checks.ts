@@ -10,6 +10,7 @@ const surfaceReviewChecks: Record<string,string> = {
 // Provider targets describe desired density/topology, not file validity. Keep
 // these measured deviations false and visible; never accept arbitrary warnings.
 const modelTargetChecks: Record<string,string> = {
+  model_visual_review: "생성된 모델의 외형 관찰을 확인해 주세요.",
   model_polygon_target: "목표와 실제 면 수를 확인해 주세요.",
   model_quad_ratio: "쿼드와 삼각형의 실제 구성을 확인해 주세요.",
   "정확한 목표 면 수": "목표와 실제 면 수를 확인해 주세요.",

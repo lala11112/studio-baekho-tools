@@ -31,7 +31,7 @@ export type ModelPlan = {
   topology: "quad" | "triangle"; generationCount: number; polygonCount: number;
   inputMode: "single" | "multiview";
 };
-type Journal = { jobId: string; requestHash: string; entries: Entry[] };
+type Journal = { jobId: string; requestHash: string; entries: Entry[]; modelResults?: {modelId:string;url:string;observations?:string[]}[] };
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const validUrl = (
   value: string,
@@ -197,6 +197,21 @@ export class ChromeJobLedger {
     this.persist();
     return structuredClone(entry);
   }
+  recordModelResult(modelId:string,url:string,observations?:string[]) {
+    if(observations!==undefined && (!Array.isArray(observations)||observations.length>8||observations.some(o=>typeof o!=="string"||!o.trim()||o.length>500)))throw Error("외형 관찰은 500자 이내 최대 8개로 기록하세요.");
+    const entry=this.journal.entries.find(e=>e.phase==='model' && e.state==='completed');
+    if(!this.packet.request.externalModel || !entry || !uuid.test(modelId) || !validUrl(url,'tripo',modelId) || !/^\/(?:[a-z]{2}\/)?workspace\/generate\//.test(new URL(url).pathname))
+      throw Error('완료된 모델 배치의 실제 모델 ID와 주소가 필요합니다.');
+    const results=this.journal.modelResults ?? [{modelId:entry.resultId!,url:entry.resultUrl!}];
+    const old=results.find(r=>r.modelId===modelId);
+    if(old && old.url!==url)throw Error('기록한 모델 주소를 변경할 수 없습니다.');
+    if(!old){
+      if(results.length >= (this.packet.request.generationCount ?? 4))throw Error('승인한 모델 개수를 초과했습니다.');
+      results.push({modelId,url});
+    }
+    if(observations?.length){const item=results.find(r=>r.modelId===modelId)!;item.observations=[...new Set([...(item.observations??[]),...observations])];}
+    this.journal.modelResults=results;this.persist();return structuredClone(results);
+  }
   verify(receipt: {
     surface?: WorkbenchSurfaceReceipt;
     conversationUrl?: string;
@@ -230,6 +245,8 @@ export class ChromeJobLedger {
           throw Error("UV·텍스처 결과가 호스트 제출 기록과 다릅니다.");
       }
     } else if (r.externalModel) {
+      const recorded=this.journal.modelResults;
+      if(recorded && (recorded.length!==(r.generationCount??4)||receipt.studioModels?.length!==recorded.length||recorded.some(m=>!receipt.studioModels?.some(s=>s.modelId===m.modelId&&s.url===m.url))))throw Error("모델 배치 결과가 호스트 기록과 다릅니다.");
       if (
         !receipt.studioModels?.some(
           (s) =>

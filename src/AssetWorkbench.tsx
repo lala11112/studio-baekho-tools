@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { RUNWAY_RATE } from "../shared/runway";
 import { RunwayFramePreview } from "./RunwayFramePreview";
+import { workbenchUsage } from "../shared/workbench-usage";
 import {
   ArrowRight,
   Check,
@@ -2977,6 +2978,13 @@ export function AssetWorkbench({
                         {selectedHere?.job.id === j.id ? " · 채택됨" : ""}
                       </strong>
                       <p>{j.request.prompt || j.summary}</p>
+                      {j.externalExecution?.worker && (()=>{
+                        const u=workbenchUsage(j),n=(v:number)=>v.toLocaleString('ko-KR');
+                        return <details data-testid="workbench-usage"><summary>GPT 사용량 · 기록된 실행 {u.measured}회{u.missing ? ` · 미집계 ${u.missing}회` : ''}{u.local ? ` · 로컬 처리 ${u.local}회` : ''}</summary>
+                          <p>누적 처리 {n(u.total)} 토큰 · 캐시 입력 {n(u.cached)} · 일반 입력 {n(u.uncached)} · 출력 {n(u.output)}</p>
+                          <p>현재 작업의 앱 작업자 기록입니다. 이 개발 채팅의 사용량은 제외하며, 계정 한도 %나 청구액으로 환산한 값이 아닙니다. 미집계는 0 사용을 뜻하지 않습니다.</p>
+                        </details>;
+                      })()}
                     </div>
                     <div className="wb-history-actions">
                       <button
