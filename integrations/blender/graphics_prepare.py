@@ -128,6 +128,11 @@ def scalar_input(socket):
             raise UnsupportedMaterial('Scalar outside supported 0..1 range: '+socket.name)
         return {'value':value}
     node, channel = linked(socket)
+    if node.type == 'TEX_IMAGE' and channel == 'Color':
+        # A Non-Color image with exactly equal RGB components is already scalar
+        # data. Prove that below for every pixel; never choose a channel from a
+        # colored image or guess color-to-value/luminance conversion weights.
+        return {'image':image_input(socket, 'Non-Color'),'channel':'GRAYSCALE'}
     if node.type != 'SEPARATE_COLOR' or node.mode != 'RGB' or channel not in {'Red','Green','Blue'}:
         raise UnsupportedMaterial('Scalar requires an RGB Separate Color channel: '+socket.name)
     image = image_input(node.inputs['Color'], 'Non-Color')
@@ -158,10 +163,13 @@ def metallic_gloss(material, metallic, roughness):
         pixels = np.empty(width*height*4,dtype=np.float32)
         image.pixels.foreach_get(pixels)
         pixels = pixels.reshape(height,width,4)
+        if any(value.get('image') == image and value.get('channel') == 'GRAYSCALE' for value in (metallic,roughness)):
+            if not np.array_equal(pixels[:,:,0],pixels[:,:,1]) or not np.array_equal(pixels[:,:,0],pixels[:,:,2]):
+                raise UnsupportedMaterial('Direct scalar image requires exactly equal RGB values; colored luminance conversion is not inferred: '+image.name)
         if metallic.get('image') == image:
-            rgba[:,:,0] = pixels[:,:,metallic['channel']]
+            rgba[:,:,0] = pixels[:,:,0 if metallic['channel'] == 'GRAYSCALE' else metallic['channel']]
         if roughness.get('image') == image:
-            rgba[:,:,3] = 1-pixels[:,:,roughness['channel']]
+            rgba[:,:,3] = 1-pixels[:,:,0 if roughness['channel'] == 'GRAYSCALE' else roughness['channel']]
         del pixels
     if 'value' in metallic:
         rgba[:,:,0] = metallic['value']
@@ -220,7 +228,7 @@ def material_binding(material):
         record['metallic'] = metallic.get('value',1.0)
         record['smoothness'] = 1-roughness['value'] if 'value' in roughness else 1.0
         for name,value in [('metallicSource',metallic),('roughnessSource',roughness)]:
-            record[name] = {'path':image_files[value['image'].name]['path'],'channel':'RGB'[value['channel']]} if 'image' in value else {'value':value['value']}
+            record[name] = {'path':image_files[value['image'].name]['path'],'channel':'GRAYSCALE' if value['channel'] == 'GRAYSCALE' else 'RGB'[value['channel']]} if 'image' in value else {'value':value['value']}
         record['supported'] = True
     except UnsupportedMaterial as error:
         record = {'name':material.name,'supported':False,'warning':str(error)}

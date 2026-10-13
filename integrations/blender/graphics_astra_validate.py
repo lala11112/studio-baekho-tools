@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import pathlib
+import re
 import sys
 from mathutils import Vector, Quaternion
 
@@ -123,6 +124,74 @@ def surface_evidence():
     return {'surfaceSha256': digest(sorted(faces)), 'surfaceFaces': len(faces)}
 
 
+def animation_contract():
+    """Action-only Unity combination cannot transport new skin or dependencies."""
+    rigs = [obj for obj in bpy.context.scene.objects if obj.type == 'ARMATURE']
+    if bpy.data.libraries or len(rigs) != 1:
+        raise RuntimeError('Animation requires one local armature for compatible Action-only export')
+    rig = rigs[0]
+    if rig.parent or any(obj.constraints for obj in bpy.context.scene.objects) or any(bone.constraints for bone in rig.pose.bones):
+        raise RuntimeError('Animation constraints or a parented rig require an explicit baked compatible export before authoring')
+    # Include data/shape-key/material node drivers, which do not travel with an Action.
+    for owner in bpy.data.user_map():
+        for data in (owner, getattr(owner, 'node_tree', None)):
+            animation = getattr(data, 'animation_data', None)
+            if animation and animation.drivers:
+                raise RuntimeError('Animation drivers require an explicit baked compatible export before authoring: ' + data.name)
+    for obj in bpy.context.scene.objects:
+        if obj.animation_data and any(track.strips for track in obj.animation_data.nla_tracks):
+            raise RuntimeError('Animation NLA mixing requires explicit baked Actions before authoring')
+    for action in bpy.data.actions:
+        slots = list(getattr(action, 'slots', []))
+        if len(slots) > 1 or slots and slots[0].target_id_type != 'OBJECT':
+            raise RuntimeError('Animation Action must use one object slot: ' + action.name)
+        for curve in curves(action):
+            if curve.modifiers or curve.sampled_points:
+                raise RuntimeError('Animation Action modifiers or sampled curves require explicit baked keyframes: ' + action.name)
+            bone = re.fullmatch(r'pose\.bones\[("(?:[^"\\]|\\.)*")\]\.(location|rotation_euler|rotation_quaternion|rotation_axis_angle|scale)', curve.data_path)
+            if bone:
+                if json.loads(bone.group(1)) not in rig.pose.bones:
+                    raise RuntimeError('Animation Action references a missing bone: ' + action.name)
+            elif curve.data_path not in {'location', 'rotation_euler', 'rotation_quaternion', 'rotation_axis_angle', 'scale'}:
+                raise RuntimeError('Animation Action contains a non-transform dependency: ' + action.name)
+    skin, modifiers = {}, {}
+    for obj in bpy.context.scene.objects:
+        if obj.type != 'MESH':
+            continue
+        weights = [[(group.group, float(group.weight)) for group in vertex.groups] for vertex in obj.data.vertices]
+        if any(not math.isfinite(weight) for vertex in weights for _, weight in vertex):
+            raise RuntimeError('Non-finite animation skin weight')
+        skin[obj['partsmith_id']] = digest({'groups': [group.name for group in obj.vertex_groups], 'weights': weights})
+        values = []
+        for index, modifier in enumerate(obj.modifiers):
+            if modifier.type != 'ARMATURE':
+                continue
+            # Capture every writable ArmatureModifier property, including envelope,
+            # mask inversion, multi-modifier and visibility flags; retain stack order.
+            settings = {}
+            for prop in modifier.bl_rna.properties:
+                if prop.is_readonly:
+                    continue
+                value = getattr(modifier, prop.identifier)
+                settings[prop.identifier] = value.name if prop.type == 'POINTER' and value else value
+            values.append({'index': index, 'settings': settings})
+        modifiers[obj['partsmith_id']] = digest(values)
+    def exact_numbers(values):
+        result = [float(value) for value in values]
+        if not all(math.isfinite(value) for value in result):
+            raise RuntimeError('Non-finite animation skeleton value')
+        return result
+    # Match graphics_combine.skeleton without the display snapshot's rounding.
+    skeleton = {'transform': [exact_numbers(row) for row in rig.matrix_world], 'rotationMode': rig.rotation_mode,
+        'bones': sorted([{'name': bone.name, 'parent': bone.parent.name if bone.parent else None,
+            'bind': [exact_numbers(row) for row in bone.matrix_local], 'length': exact_numbers([bone.length])[0],
+            'deform': bone.use_deform, 'connected': bone.use_connect, 'inheritScale': bone.inherit_scale,
+            'inheritRotation': bone.use_inherit_rotation, 'localLocation': bone.use_local_location,
+            'rotationMode': rig.pose.bones[bone.name].rotation_mode}
+            for bone in rig.data.bones], key=lambda item: item['name'])}
+    return {'skin': skin, 'armatureModifiers': modifiers, 'skeleton': digest(skeleton)}
+
+
 def snapshot(allow_empty=False):
     if any(obj.library or obj.data and obj.data.library for obj in bpy.context.scene.objects):
         raise RuntimeError('External linked scene data is not a self-contained editable scene')
@@ -220,6 +289,8 @@ def prepare(q):
         raise RuntimeError('Accepted editable source has no actual rig')
     if q['operation'] == 'N06' and not any(action['name'] == q['actionName'] for action in evidence['actions']):
         raise RuntimeError('Original animated scene does not contain the exact action to revise')
+    if q['operation'] in ('N04', 'N05', 'N06'):
+        evidence['animationContract'] = animation_contract()
     bpy.ops.wm.save_as_mainfile(filepath=q['outputBlend'], compress=False)
     if file_hash(source) != q['sourceSha256']:
         raise RuntimeError('Original source changed')
@@ -620,6 +691,19 @@ def validate(q):
         checks['weights'] = all(mesh['armatures'] and mesh['weightedVertices'] == mesh['vertices'] and mesh['invalidWeightVertices'] == 0 for mesh in current['meshes'])
         if not checks['weights']:
             raise RuntimeError('Missing armature, unweighted vertices or invalid/non-normalized deform weights')
+        if q['operation'] in ('N04', 'N05', 'N06'):
+            current['animationContract'] = animation_contract()
+            previous = baseline.get('animationContract')
+            if not previous:
+                raise RuntimeError('Animation baseline lacks the exact skin/dependency contract; prepare a new explicit request')
+            checks['animationDependencies'] = True
+            checks['skinPreserved'] = previous['skin'] == current['animationContract']['skin']
+            checks['armatureModifiersPreserved'] = previous['armatureModifiers'] == current['animationContract']['armatureModifiers']
+            checks['animationSkeletonPreserved'] = previous['skeleton'] == current['animationContract']['skeleton']
+            if not checks['skinPreserved'] or not checks['armatureModifiersPreserved']:
+                raise RuntimeError('Animation changed original skin weights/groups or Armature modifier settings/order; Action-only export cannot preserve these edits')
+            if not checks['animationSkeletonPreserved']:
+                raise RuntimeError('Animation changed original skeleton transform, bind pose or bone inheritance settings; Action-only export requires an exact compatible skeleton')
         evidence['deformingMeshIds'] = pose_test()
         checks['deformation'] = True
         if q['operation'] in ('R01', 'R02') and q.get('rigFeatures'):

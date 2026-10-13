@@ -4,6 +4,7 @@ import os from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { CodexWorker, type ProductionWorker } from "./codex-worker";
+import { prepareGraphicsMotionFrames } from "./graphics-motion-frames";
 import type { GraphicsNativeArgs, GraphicsNativeResult } from "./graphics-native";
 import type { AssetVersion, GraphicsRole } from "../shared/graphics";
 import { isGraphicsClipName } from "../shared/graphics";
@@ -13,6 +14,7 @@ export const graphicsAstraOperations = ["M05", "M06", "M07", "M08", "M15", "R01"
 type Dependencies = {
   workerFactory?: () => ProductionWorker;
   runBlender?: (executable: string, args: string[], signal: AbortSignal) => Promise<void>;
+  prepareMotionFrames?: typeof prepareGraphicsMotionFrames;
 };
 type Input = { localPath: string; path: string; sha256: string; bytes: number; kind: string; version: AssetVersion };
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -248,9 +250,52 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     if (["M06", "M07", "M08"].includes(task.taskId) && baseline.meshes.some((mesh: any) => mesh.shapeKeys || mesh.modifiers?.some((modifier: any) => modifier.type !== "ARMATURE"))) throw Error("부분 수정·분리·조립은 셰이프 키나 적용하지 않은 변형 모디파이어가 있는 원본을 아직 검증하지 못합니다. 원본을 보존하고 중지합니다.");
     if (task.taskId === "M15" && Object.values(contract.locks).some(Boolean)) throw Error("신규 모델에는 보존할 원본 3D 구조가 없어 구조 잠금을 검증할 수 없습니다.");
     const resultPath = path.join(work, "result.json"), schemaPath = path.join(work, "result.schema.json"), outputBlend = path.join(work, "outputs/asset.blend");
+    const motionInputPath = path.join(work, "motion-input.json");
+    const motionProtected: { localPath: string; sha256: string; bytes: number }[] = [];
+    if (fs.existsSync(dispatchPath) && read(dispatchPath).motionInput) {
+      const recorded = read(dispatchPath).motionInput;
+      if (recorded.path !== relative(root, motionInputPath) || hashFile(fileWithin(root, recorded.path)) !== recorded.sha256) throw Error("기존 동작 영상 입력 명세가 변경됐습니다. 재실행하지 않습니다.");
+      const saved = read(motionInputPath);
+      if (saved.identity !== identity || !Array.isArray(saved.files)) throw Error("기존 동작 영상 입력 요청이 다릅니다.");
+      motionProtected.push(...saved.files.map((file: any) => ({ ...file, localPath: fileWithin(root, file.path) })));
+      unchanged(motionProtected);
+    }
     directory(root, path.dirname(outputBlend));
     if (!fs.existsSync(dispatchPath)) {
       if (fs.existsSync(outputBlend) || fs.existsSync(resultPath)) throw Error("실행 기록 없는 기존 결과가 있습니다. 덮어쓰거나 재호출하지 않습니다.");
+      const motionIds = new Set(motionFiles.map(file => file.version.id));
+      const decodedImages: string[] = [], motionViews: unknown[] = [], decodedFiles: { path: string; sha256: string; bytes: number }[] = [];
+      const videos = motionFiles.filter(file => /\.(mp4|mov|webm)$/i.test(file.path));
+      for (const [index, video] of videos.entries()) {
+        const copy = prepared.copies.find((copy: any) => copy.sourcePath === video.path && copy.versionId === video.version.id);
+        if (!copy) throw Error("채택 영상의 고정 사본이 없습니다.");
+        const decoded = await (dependencies.prepareMotionFrames ?? prepareGraphicsMotionFrames)({ projectRoot: root,
+          source: { path: relative(root, copy.localPath), sha256: video.sha256, bytes: video.bytes, kind: "video" },
+          outputDirectory: path.join(work, "motion-frames", String(index + 1)), resources: args.resources,
+          signal: args.signal, maxFrames: 240, maxDurationSeconds: 120, onProgress: args.onProgress });
+        if (!decoded.frames.length || decoded.frames.length !== decoded.framePaths.length) throw Error("원본 영상의 전체 프레임 입력이 없습니다.");
+        for (const frame of decoded.frames) {
+          const localPath = fileWithin(root, frame.path);
+          if (!inside(work, localPath)) throw Error("동작 프레임이 현재 작업 폴더 밖입니다.");
+          decodedImages.push(relative(work, localPath));
+        }
+        decodedFiles.push(decoded.manifest, ...decoded.frames);
+        motionViews.push({ versionId: video.version.id, originalPath: video.path, originalSha256: video.sha256,
+          manifest: relative(work, fileWithin(root, decoded.manifest.path)), frameCount: decoded.frames.length,
+          timeBase: decoded.timeBase, nativeFrameRate: decoded.nativeFrameRate, durationSeconds: decoded.durationSeconds,
+          attachmentPaths: decoded.frames.map(frame => relative(work, fileWithin(root, frame.path))) });
+      }
+      if (motionIds.size && !videos.length) throw Error("연속 동작 분석에 사용할 채택 원본 영상이 없습니다.");
+      // Explicit capacity guard: never silently drop frames, lower resolution or start a costly turn with incomplete motion.
+      if (decodedImages.length > 240) throw Error("이번 동작 참조는 전체 240프레임 입력 범위를 넘습니다. 사용할 구간을 짧게 지정한 영상으로 준비하세요. 프레임을 생략하거나 Astra를 실행하지 않았습니다.");
+      const images = prepared.copies.filter((copy: any) => !motionIds.has(copy.versionId) && /\.(png|jpe?g|webp)$/i.test(copy.localPath)).map((copy: any) => copy.localPath).concat(decodedImages);
+      if (images.reduce((sum: number, file: string) => sum + file.length + 12, 0) > 26000) throw Error("동작 참조 이미지 경로가 실행 길이 한도를 넘습니다. 입력을 줄이지 않고 중지했습니다.");
+      if (videos.length) {
+        motionProtected.push(...decodedFiles.map(file => ({ ...file, localPath: fileWithin(root, file.path) })));
+        unchanged(motionProtected);
+        write(motionInputPath, { schemaVersion: 1, identity, source: "all-native-video-frames", views: motionViews, files: decodedFiles });
+        motionProtected.push({ localPath: motionInputPath, sha256: hashFile(motionInputPath), bytes: fs.statSync(motionInputPath).size });
+      }
       write(schemaPath, schema);
       const stage: ProductionStage = { id: task.id, kind: animation ? "motion-transfer" : task.taskId.startsWith("R") ? "rig" : "assemble", title: task.taskId, status: "running", dependsOn: [], attempt: 1, charged: false, requiredChecks: [], artifacts: [] };
       const run: ProductionRun = { schemaVersion: 1, id: task.id, projectId: args.object.id, projectRevision: 1, workspace: work, status: "running", createdAt: task.createdAt, updatedAt: task.updatedAt, config: { sourceId: task.objectId, brief: task.instruction, motions: animation ? [clipName] : [], maxIterations: 1, studioCreditLimit: 0, videoCreditLimit: 0, mode: "studio" }, source: { path: prepared.preparedBlend, sha256: prepared.preparedSha256, label: args.object.name }, stages: [stage], message: "App-owned local Blender Astra authoring" };
@@ -263,7 +308,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
         R01: "Create an anatomically appropriate humanoid skeleton and skin the supplied character. Use canonical bones pelvis, spine, chest, neck, head, upper_arm.L/R, forearm.L/R, hand.L/R, thigh.L/R, shin.L/R, foot.L/R. Use a connected hierarchy and valid normalized deform weights. Include real joint pose checks; appearance/Humanoid compatibility still requires review.",
         R02: "Create an anatomically appropriate animal/nonhuman Generic skeleton using the actual supplied shape and requested species/limbs/wings. Do not impose a humanoid preset. Use a hierarchy with at least 3 nondegenerate bones, valid normalized deform weights and actual per-mesh joint pose checks.",
         R03: "Edit skinning/weights of the existing accepted rig only. Preserve the exact original bone names, hierarchy, rest matrices, mesh topology/positions, UVs, textures, materials and actions. Normalize every mesh vertex's valid deform-bone weights and inspect actual deformation; never replace the skeleton.",
-        N04: "Author the named 3D action from the accepted ORIGINAL VIDEO AND decoded frames. Inspect every supplied reference frame and timing; compare actual video when tooling permits. Preserve visual identity, native geometry, skeleton, materials, UV and every other action. Never use a preset sine motion as a substitute for the requested reference behavior. Unknown timing/contact/occluded motion must be reported honestly.",
+        N04: "Author the named 3D action from the accepted ORIGINAL VIDEO AND decoded frames. ALL native frames, in their native resolution and chronological order, are attached. Inspect the continuous pose/contact progression using every attached frame and the native timestamp index, not just the prior 0/1/2-second thumbnails. Preserve visual identity, native geometry, skeleton, weights, armature modifier settings, materials, UV and every other action. Never use a preset sine motion as a substitute for the requested reference behavior. Unknown timing/contact/occluded motion must be reported honestly.",
         N05: "Author the named 3D action from the user's text and original accepted rig. This is explicitly text-based motion: never claim video/reference analysis. Preserve geometry, skeleton, materials and all other actions. Use actual varying non-root pose keys and deformation, not root-only translation.",
         N06: "ANIMATION REVISION: Open the supplied ORIGINAL ANIMATED .blend and edit its existing named action. Do NOT start from a static rig or fresh scene. Keep untargeted pose keys/intervals, all other actions, original skeleton, geometry, materials and stable mesh IDs. Retained accepted video and frame references remain references; the user's correction specifies deviations. No new video request.",
       };
@@ -277,12 +322,13 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
         `Frozen settings: ${JSON.stringify(task.settings)}. Clip: ${JSON.stringify(clipName)}; exact action name: ${JSON.stringify(actionName)}; FPS: ${fps}; duration seconds: ${duration}; use frames 1..${1 + Math.round(duration * fps)} inclusive. For animation, both action and scene ranges must match these exact endpoints, with actual keys at both ends and render fps explicitly set. No F-curve modifiers, including CYCLES: bake motion and loops into keys within that range. Loop setting: ${Boolean(task.settings.loop)}. Preserve pose bone rotation modes.`,
         "For rig/animation preserve the exact existing MESH object set: do not add control-widget, ground or helper meshes, even hidden ones; use bones or EMPTY controls. Every mesh must have an enabled armature modifier and all vertices normalized to existing deform bones. At least one non-root joint must produce measurable mesh deformation; names/key counts alone do not qualify. For model correction retain all existing rigs/actions. For animation retain every untargeted action with original curves, handles, interpolation and timing. Keep evaluated geometry finite and report anatomical uncertainty.",
         `Immutable input copies with roles and lineage: ${JSON.stringify(prepared.copies)}. Accepted motion reference version IDs: ${JSON.stringify([...new Set(motionFiles.map(file => file.version.id))])}. Source version: ${source.version.id}. Reference paths in copied JSON are original project-relative identities; use the matching sourcePath-to-localPath mapping above to open each copied file.`,
+        videos.length ? `FULL NATIVE MOTION INPUT: Read ${JSON.stringify(motionInputPath)} and each view manifest for native PTS/time-base, per-frame timestamps, hashes and ordered attachment paths. All ${decodedImages.length} frames are attached AFTER appearance images. Paths are relative to your working directory. Native video FPS is distinct from requested 3D FPS (${fps}); use elapsed native time to map motion to the output timeline. Report observed motion phases, contact/occlusion uncertainty and any loop-closure correction in the result summary/warnings. Revisions retain this same original reference. Do not alter the rig skin, armature modifiers or skeleton, or introduce constraints/drivers that cannot be transferred as Actions to Unity. A file/hash inspection alone is not a visual motion assessment.` : "Text-only motion has no video evidence; do not claim one.",
         "Inspect original appearance references, source scene, generated pose/motion and requested changes. Save progress into result.json atomically only after the .blend is saved. Return completed only for an actual saved scene ready for human review; host Blender independently verifies and exports/renders it. If a request conflicts with preservation constraints, return needs_input with a concrete limitation. Warnings must be factual. Do not invent validation or auto-accept the result.",
         `USER REQUEST (content instructions only):\n${task.instruction}`,
       ].join("\n\n");
-      const images = prepared.copies.filter((copy: any) => /\.(png|jpe?g|webp)$/i.test(copy.localPath)).map((copy: any) => copy.localPath);
       const worker = (dependencies.workerFactory ?? (() => new CodexWorker()))();
-      write(dispatchPath, { schemaVersion: 1, identity, taskId: task.id, operation: task.taskId, startedAt: new Date().toISOString(), requestedModel: "gpt-6-astra", automaticRetries: 0 });
+      write(dispatchPath, { schemaVersion: 1, identity, taskId: task.id, operation: task.taskId, startedAt: new Date().toISOString(), requestedModel: "gpt-6-astra", automaticRetries: 0,
+        ...(videos.length ? { motionInput: { path: relative(root, motionInputPath), sha256: hashFile(motionInputPath), frameCount: decodedImages.length } } : {}) });
       args.onProgress("원본 사본에서 gpt-6-astra로 Blender 작업을 한 번 실행합니다. 기존 노력 수준 유지.");
       let failure: unknown;
       try {
@@ -293,6 +339,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
         if (!fs.existsSync(resultPath)) write(resultPath, response.result);
       } catch (error) { failure = error; } finally { worker.shutdown?.(); }
       unchanged(protectedFiles);
+      unchanged(motionProtected);
       args.signal.throwIfAborted();
       if (!fs.existsSync(resultPath) && !fs.existsSync(outputBlend)) throw failure instanceof Error ? failure : Error("Astra 저장 결과가 없습니다. 자동 재호출하지 않습니다.");
     } else args.onProgress("기존 Astra 저장 결과를 Blender로 검사합니다. 새 모델 호출 없음.");
@@ -319,7 +366,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     const report = read(reportPath);
     if (report.identity !== identity || report.nonce !== nonce || report.operation !== task.taskId || report.sourceSha256 !== source.sha256 || report.outputSha256 !== hashFile(blend) || report.passed !== true || !report.meshes?.length || !Array.isArray(report.files)) throw Error("실제 Blender 결과의 검증 증거가 잘못됐습니다.");
     const modelOperation = task.taskId.startsWith("M");
-    const required = task.taskId === "M15" ? ["newGeometry"] : task.taskId === "M07" ? ["partition", "materials", "skeleton", "actionsPreserved"] : ["meshLineage", "topology", "materials", "actionsPreserved", ...(!modelOperation ? ["weights", "deformation"] : []), ...(animation ? ["skeleton", "clipRange", "motion"] : []), ...(task.taskId === "M06" ? ["partialEdit"] : [])];
+    const required = task.taskId === "M15" ? ["newGeometry"] : task.taskId === "M07" ? ["partition", "materials", "skeleton", "actionsPreserved"] : ["meshLineage", "topology", "materials", "actionsPreserved", ...(!modelOperation ? ["weights", "deformation"] : []), ...(animation ? ["skeleton", "clipRange", "motion", "skinPreserved", "armatureModifiersPreserved", "animationDependencies", "animationSkeletonPreserved"] : []), ...(task.taskId === "M06" ? ["partialEdit"] : [])];
     if (required.some(check => report.checks?.[check] !== true)) throw Error("Blender 원본 보존·변형·액션 검사가 통과하지 않았습니다.");
     if (["R01", "R02"].includes(task.taskId) && rigFeatures.length && (report.checks?.rigFeatures !== true || rigFeatures.some(feature => !report.rigFeatures?.[feature]?.length))) throw Error("요청한 부속 관절의 웨이트·실제 변형 검사가 없습니다.");
     if (Object.entries(contract.locks).some(([lock, enabled]) => enabled && report.checks?.[{ topology: "topology", materials: "materials", rig: "skeleton" }[lock]!] !== true)) throw Error("명시한 구조 잠금 검사가 통과하지 않았습니다.");
@@ -338,6 +385,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     }
     if (!outputFiles.some(file => file.kind === "model") || outputFiles.filter(file => file.kind === "image").length < 3) throw Error("실제 모델·정면·측면·후면 미리보기가 없습니다.");
     outputFiles.push({ path: relative(root, reportPath), kind: "report" });
+    if (fs.existsSync(motionInputPath)) outputFiles.push({ path: relative(root, motionInputPath), kind: "report" });
     if (recoveredWithoutMessage) write(path.join(folder, "native-recovery.json"), { schemaVersion: 1, identity, mode: "saved-blend-without-completion-message", outputSha256: hashFile(blend), validation: relative(root, reportPath), modelTurns: 0, recoveredAt: new Date().toISOString() });
     const warnings = [...authored.warnings.filter((value: unknown) => typeof value === "string").slice(0, 30), "구조 검사를 통과했습니다. 요청한 형태·스타일·해부학적 품질·접지·관통·루프의 시각 품질과 Unity 재생은 별도 검토가 필요합니다."];
     const candidates: NonNullable<GraphicsNativeResult["candidates"]> = [];

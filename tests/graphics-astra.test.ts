@@ -53,7 +53,7 @@ async function blenderMock(_executable: string, command: string[], _signal?: Abo
     for (const name of ["front", "side", "back"]) {
       const png = new PNG({ width: 8, height: 8 }); png.data.fill(140); fs.writeFileSync(path.join(q.output, name + ".png"), PNG.sync.write(png));
     }
-    write(q.report, { identity: q.identity, nonce: q.nonce, operation: q.operation, sourceSha256: q.sourceSha256, outputSha256: hash(q.outputBlend), passed: true, meshes: [{ id: "mesh-original", vertices: 8, weightedVertices: 8 }], files: ["asset.glb", "front.png", "side.png", "back.png"], checks: Object.fromEntries(["meshLineage", "topology", "materials", "actionsPreserved", "weights", "deformation", "skeleton", "clipRange", "motion"].map(key => [key, true])) });
+    write(q.report, { identity: q.identity, nonce: q.nonce, operation: q.operation, sourceSha256: q.sourceSha256, outputSha256: hash(q.outputBlend), passed: true, meshes: [{ id: "mesh-original", vertices: 8, weightedVertices: 8 }], files: ["asset.glb", "front.png", "side.png", "back.png"], checks: Object.fromEntries(["meshLineage", "topology", "materials", "actionsPreserved", "weights", "deformation", "skeleton", "clipRange", "motion", "skinPreserved", "armatureModifiersPreserved", "animationDependencies", "animationSkeletonPreserved"].map(key => [key, true])) });
   }
 }
 
@@ -248,23 +248,46 @@ test("N04 requires accepted same-clip video, decoded frame hashes and explicit c
   const manifest = { schemaVersion: 1, source: "video-ai", clipName: "Idle", duration: 1, videos: { side: { path: path.basename(reference.file), sha256: hash(reference.file) } }, frames: [{ time: 0, side: path.basename(frame), sha256: hash(frame) }] };
   write(manifestPath, manifest);
   for (const [file, kind] of [[frame, "image"], [manifestPath, "frames"]]) reference.version.files.push({ path: path.basename(file), kind, sha256: hash(file), bytes: fs.statSync(file).size });
-  let calls = 0;
-  const execute = createGraphicsAstraExecutor({ runBlender: blenderMock, workerFactory: () => f.worker(task => {
-    calls++; assert.match(task.prompt, /ORIGINAL VIDEO AND decoded frames/); assert.equal(task.imagePaths.length, 1); return f.authored(task);
+  let calls = 0, decodes = 0;
+  const prepareMotionFrames: NonNullable<Parameters<typeof createGraphicsAstraExecutor>[0]>["prepareMotionFrames"] = async options => {
+    decodes++; assert.equal(options.source.sha256, hash(reference.file)); assert.equal(options.maxFrames, 240);
+    const dir = options.outputDirectory; fs.mkdirSync(dir, { recursive: true });
+    const frames = Array.from({ length: 4 }, (_, index) => {
+      const local = path.join(dir, `${index}.png`); fs.copyFileSync(frame, local);
+      return { path: path.relative(f.root, local), sha256: hash(local), bytes: fs.statSync(local).size, kind: "image", index, pts: index, time: index / 4, relativeTime: index / 4, duration: 0.25, width: 8, height: 8 };
+    });
+    const indexFile = path.join(dir, "native-frames.json"); write(indexFile, { frames });
+    return { source: options.source, frames, manifest: { path: path.relative(f.root, indexFile), sha256: hash(indexFile), bytes: fs.statSync(indexFile).size, kind: "report" }, timeBase: { numerator: 1, denominator: 4 }, nativeFrameRate: { numerator: 4, denominator: 1 }, durationSeconds: 1, framePaths: frames.map(item => path.join(f.root, item.path)) };
+  };
+  const execute = createGraphicsAstraExecutor({ runBlender: blenderMock, prepareMotionFrames, workerFactory: () => f.worker(task => {
+    calls++; assert.match(task.prompt, /ORIGINAL VIDEO AND decoded frames/); assert.match(task.prompt, /ALL native frames/);
+    assert.equal(task.imagePaths.length, 4); assert.ok(task.imagePaths.every(file => fs.existsSync(path.resolve(task.run.workspace, file))));
+    assert.match(task.prompt, /Native video FPS is distinct from requested 3D FPS/);
+    const index = read(path.join(task.run.workspace, "motion-input.json"));
+    assert.equal(index.views[0].frameCount, 4); assert.equal(index.views[0].originalSha256, hash(reference.file));
+    assert.equal(index.views[0].nativeFrameRate.numerator, 4);
+    return f.authored(task);
   }) });
   delete f.args.object.accepted["motion-reference:Idle"];
   await assert.rejects(execute(f.args), /같은 클립 이름/); assert.equal(calls, 0);
   f.args.object.accepted["motion-reference:Idle"] = reference.version.id;
-  const result = await execute(f.args); assert.equal(result.slot, "Idle"); assert.equal(calls, 1);
+  const failedDecode = createGraphicsAstraExecutor({ runBlender: blenderMock,
+    prepareMotionFrames: async () => { throw Error("native frame decode incomplete"); },
+    workerFactory: () => { throw Error("must not start inference"); } });
+  await assert.rejects(failedDecode(f.args), /native frame decode incomplete/);
+  assert.equal(fs.existsSync(path.join(f.root, "graphics/jobs/task-1/astra/dispatch.json")), false);
+  const result = await execute(f.args); assert.equal(result.slot, "Idle"); assert.equal(calls, 1); assert.equal(decodes, 1);
+  assert.ok(result.files.some(file => file.path.endsWith("motion-input.json")));
+  await execute({ ...f.args, recoveryOnly: true }); assert.equal(calls, 1); assert.equal(decodes, 1);
   // A later revision retains this exact original reference even after another
   // reference becomes accepted for the clip. The source lineage is authoritative.
   const animated = f.input("animation", ".blend", "Idle");
   animated.version.sourceVersionIds.push(reference.version.id);
   f.args.task.id = "revision-2"; f.args.task.taskId = "N06";
   f.args.object.accepted["motion-reference:Idle"] = "a-newer-unrelated-reference";
-  const revise = createGraphicsAstraExecutor({ runBlender: blenderMock, workerFactory: () => f.worker(task => {
+  const revise = createGraphicsAstraExecutor({ runBlender: blenderMock, prepareMotionFrames, workerFactory: () => f.worker(task => {
     calls++; assert.match(task.prompt, /Retained accepted video/); assert.match(task.prompt, new RegExp(reference.version.id));
-    assert.equal(task.imagePaths.length, 1); return f.authored(task);
+    assert.equal(task.imagePaths.length, 4); return f.authored(task);
   }) });
   assert.equal((await revise(f.args)).slot, "Idle"); assert.equal(calls, 2);
 });
