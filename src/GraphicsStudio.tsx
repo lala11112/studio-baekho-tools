@@ -40,6 +40,13 @@ import {
 import { catalog } from "../shared/catalog";
 import { Viewport } from "./Viewport";
 import { CreationOptions } from "./CreationOptions";
+import { CreationSubjectChooser } from './CreationSubjectChooser';
+import { GraphicsStoragePanel } from './GraphicsStoragePanel';
+import { modelProductionLabel } from '../shared/graphics-provenance';
+import { creationForSubject, creationSubjects } from '../shared/graphics-creation';
+import { normalizePhysicalSize, physicalSizeSummary, type PhysicalSize } from '../shared/graphics-size';
+import { GraphicsSizePanel } from './GraphicsSizePanel';
+import type { ModelMeasurement, MeshSelection } from './viewport-inspection';
 import {
   creationStages,
   creationTaskId,
@@ -184,12 +191,16 @@ function ModelStatistics({
   version,
   versions,
   tasks,
+  onMeasure,
 }: {
   projectId: string;
   version: AssetVersion;
   versions: AssetVersion[];
   tasks: GraphicsTask[];
+  onMeasure?: (measurement: { versionId: string; faces?: number }) => void;
 }) {
+  const measureCallback = useRef(onMeasure);
+  measureCallback.current = onMeasure;
   const report = version.files.find(
     (file) => file.kind === "report" && /\.report\.json$/i.test(file.path),
   );
@@ -212,6 +223,7 @@ function ModelStatistics({
     complete: boolean;
   }>();
   useEffect(() => {
+    measureCallback.current?.({ versionId: version.id });
     if (!reportPath || !nativeHash) return;
     const controller = new AbortController();
     let active = true;
@@ -234,13 +246,15 @@ function ModelStatistics({
           data.triangles < data.faces
         )
           throw new Error("Model statistics do not match the original");
-        if (active)
+        if (active) {
           setMeasurement({
             key: requestKey,
             complete: true,
             faces: data.faces,
             triangles: data.triangles,
           });
+          measureCallback.current?.({ versionId: version.id, faces: data.faces as number });
+        }
       })
       .catch(() => {
         if (active) setMeasurement({ key: requestKey, complete: true });
@@ -287,9 +301,17 @@ function ModelStatistics({
 function VersionPreview({
   project,
   version,
+  physicalSize,
+  onBounds,
+  onMeshSelect,
+  nativePolygonCount,
 }: {
   project: Project;
   version?: AssetVersion;
+  physicalSize?: PhysicalSize;
+  onBounds?: (bounds: ModelMeasurement) => void;
+  onMeshSelect?: (selection: MeshSelection | null) => void;
+  nativePolygonCount?: number;
 }) {
   const [mediaError, setMediaError] = useState(false);
   useEffect(() => setMediaError(false), [version?.id]);
@@ -363,6 +385,10 @@ function VersionPreview({
         project={previewProject}
         previewId={id}
         animation={version.role === "animation"}
+        physicalSize={physicalSize}
+        onBounds={onBounds}
+        onMeshSelect={onMeshSelect}
+        nativePolygonCount={nativePolygonCount}
       />
     );
   }
@@ -570,7 +596,7 @@ export function GraphicsStudio({
 }: Props) {
   const [objectId, setObjectId] = useState("");
   const [newName, setNewName] = useState("");
-  const [newKind, setNewKind] = useState<GraphicsKind>("prop");
+  const [newSubject, setNewSubject] = useState("");
   const [query, setQuery] = useState("");
   const [catalogTab, setCatalogTab] = useState<
     "all" | "recommended" | "selected"
@@ -587,7 +613,11 @@ export function GraphicsStudio({
     label: string;
   }>();
   const imageDialog = useRef<HTMLDialogElement>(null);
-  const [auxiliary, setAuxiliary] = useState<"history" | "support">();
+  const [auxiliary, setAuxiliary] = useState<"history" | "support" | "storage">();
+  const [meshSelection, setMeshSelection] = useState<MeshSelection | null>(null);
+  const [modelBounds, setModelBounds] = useState<ModelMeasurement>();
+  const [sizeInputsValid, setSizeInputsValid] = useState(true);
+  const [nativeMeasurement, setNativeMeasurement] = useState<{versionId: string; faces?: number}>();
   const auxiliaryDialog = useRef<HTMLDialogElement>(null);
   const [legacyPreview, setLegacyPreview] =
     useState<GraphicsWorkspace["legacyPreview"]>();
@@ -653,6 +683,7 @@ export function GraphicsStudio({
     latestMediaGroup?.candidates[0].version ??
     versions.find((version) => object && acceptedVersion(object, version)) ??
     versions.at(-1);
+  useEffect(() => { setMeshSelection(null); setModelBounds(undefined); }, [shownVersion?.id, objectId]);
   const comparisonGroup = shownVersionId
     ? mediaGroups.find((group) =>
         group.candidates.some(
@@ -780,7 +811,7 @@ export function GraphicsStudio({
               ? "3D 애니메이션 제작 · 입력 확인"
               : `${activeTask.name} · ${activeTask.executor === "local" ? "입력 확인" : "비용 확인"}`;
 
-  function showAuxiliary(view: "history" | "support") {
+  function showAuxiliary(view: "history" | "support" | "storage") {
     setAuxiliary(view);
     document
       .querySelector<HTMLDetailsElement>(".gs-aux-menu")
@@ -922,6 +953,14 @@ export function GraphicsStudio({
     }));
   }
   function changeCreation(next: CreationSpec) {
+    if (next.subject !== creation.subject && versions.length > 0) {
+      setNewSubject(next.subject);
+      setNewName(creationSubjects.find(item => item.id === next.subject)?.label ?? '새 오브젝트');
+      document.querySelector<HTMLDetailsElement>('.gs-create-disclosure')?.setAttribute('open', '');
+      document.getElementById('gs-object-name')?.focus();
+      setNotice('기존 원본과 기록을 유지합니다. 새 오브젝트의 이름과 대상을 확인한 뒤 만들기를 누르세요.');
+      return;
+    }
     setCreation(next);
     setTaskId(undefined);
   }
@@ -986,6 +1025,7 @@ export function GraphicsStudio({
     if (
       !object ||
       disabled ||
+      !sizeInputsValid ||
       (active && !["A01", "A02", "A03"].includes(activeTask.id)) ||
       activeTask.status === "planned" ||
       multiviewProblem ||
@@ -1022,6 +1062,17 @@ export function GraphicsStudio({
       setPending(false);
     }
   }
+  async function prepareSizeCopy() {
+    if (!object || disabled || active || !sizeInputsValid) return;
+    setPending(true); setError('');
+    try {
+      await onAction({ kind: 'update-object', objectId: object.id, patch: { creation } });
+      await onAction({ kind: 'prepare', objectId: object.id, taskId: 'A05' });
+      setTaskId('A05');
+      setNotice('채택한 원본의 크기 맞춤 사본을 준비했습니다. 무료 로컬 실행 카드를 확인하세요.');
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setPending(false); }
+  }
   async function importSource() {
     if (!object || disabled) return;
     setPending(true);
@@ -1053,12 +1104,14 @@ export function GraphicsStudio({
   }
   async function createObject(event: FormEvent) {
     event.preventDefault();
-    if (!newName.trim() || disabled) return;
+    const subject = creationSubjects.find(item => item.id === newSubject);
+    if (!newName.trim() || !subject || disabled) return;
     if (
       await run({
         kind: "create-object",
         name: newName.trim(),
-        objectKind: newKind,
+        objectKind: subject.kind,
+        creation: creationForSubject(subject.id),
       })
     ) {
       setNewName("");
@@ -1092,6 +1145,7 @@ export function GraphicsStudio({
               <button onClick={() => showAuxiliary("support")}>
                 <ListChecks size={14} /> 기능 지원 현황
               </button>
+              <button onClick={() => showAuxiliary('storage')}>저장 공간 현황</button>
             </div>
           </details>
           {onExportProject && (
@@ -1169,31 +1223,14 @@ export function GraphicsStudio({
               onChange={(event) => setNewName(event.target.value)}
               maxLength={100}
             />
-            <label htmlFor="gs-object-kind">종류</label>
-            <select
-              id="gs-object-kind"
-              value={newKind}
-              onChange={(event) =>
-                setNewKind(event.target.value as GraphicsKind)
-              }
-            >
-              {Object.entries(kinds).map(([value, label]) => (
-                <option
-                  key={value}
-                  value={value}
-                  disabled={["sprite", "ui", "vfx"].includes(value)}
-                >
-                  {label}
-                  {["sprite", "ui", "vfx"].includes(value)
-                    ? " · 후속 지원"
-                    : ""}
-                </option>
-              ))}
-            </select>
-            <button type="submit" disabled={disabled || !newName.trim()}>
+            <CreationSubjectChooser value={newSubject} disabled={disabled} onChange={id => {
+              setNewSubject(id);
+              if (!newName) setNewName(creationSubjects.find(item => item.id === id)?.label ?? '');
+            }} />
+            <button type="submit" disabled={disabled || !newName.trim() || !newSubject}>
               <FilePlus2 size={15} /> 오브젝트 만들기
             </button>
-            <p>파일과 작업은 생성 후 연결합니다.</p>
+            <p>대상·설명·참고 이미지를 연결할 새 오브젝트입니다. 기존 원본은 유지하고, 생성은 실행 버튼에서 시작합니다.</p>
           </form>
         </details>
         <button
@@ -1224,6 +1261,14 @@ export function GraphicsStudio({
                 </button>
               ))}
             </nav>
+            <div className="gs-execution-summary" aria-label="실행 설정 요약">
+              <span><b>대상</b> {creationSubjects.find(item => item.id === creation.subject)?.label ?? object.name}</span>
+              <span><b>도구·모델</b> {activeTask.executor === 'tripo' && stage !== 'model' ? `Tripo API · ${activeTask.name}` : activeTask.executor === 'tripo' ? `Tripo · ${catalog.model.find(model => model.id === String(settings.model ?? 'P2-20260801'))?.label ?? settings.model}` : activeTask.executor === 'astra' ? 'Blender + Astra' : activeTask.executor === 'local' ? '로컬 처리' : activeTask.executor === 'runway' ? 'Runway' : activeTask.executor === 'codex-image' ? 'Codex 이미지' : '설정 확인'}</span>
+              <span><b>후보</b> {String(settings.count ?? 1)}개</span>
+              {stage === 'model' && <span><b>목표 면 수</b> {Number(settings.faceLimit ?? 10000).toLocaleString()}</span>}
+              <span><b>목표 크기</b> {physicalSizeSummary(creation.physicalSize)}</span>
+              <span><b>예상 비용</b> {activeTask.executor === 'local' ? '무료 · GPT 0회' : '준비 후 비용 카드 확인'}</span>
+            </div>
             <div className="gs-creation-execute" aria-label="현재 단계 실행">
               <div>
                 <strong>{activeTask.name}</strong>
@@ -1243,6 +1288,7 @@ export function GraphicsStudio({
                 data-testid="graphics-prepare"
                 disabled={
                   disabled ||
+                  !sizeInputsValid ||
                   Boolean(
                     multiviewProblem || modelProblem || selectionProblem,
                   ) ||
@@ -1421,7 +1467,7 @@ export function GraphicsStudio({
                 </details>
                 <button
                   type="button"
-                  disabled={disabled}
+                  disabled={disabled || !sizeInputsValid}
                   onClick={() =>
                     void run(
                       {
@@ -1777,8 +1823,21 @@ export function GraphicsStudio({
                     </section>
                   )}
                   <div className="gs-preview" data-testid="graphics-preview">
-                    <VersionPreview project={project} version={shownVersion} />
+                    <VersionPreview project={project} version={shownVersion} physicalSize={shownVersion?.slot.startsWith("part-") ? undefined : creation.physicalSize} onBounds={setModelBounds} onMeshSelect={setMeshSelection} nativePolygonCount={nativeMeasurement?.versionId === shownVersion?.id ? nativeMeasurement?.faces : undefined} />
                   </div>
+                  {meshSelection && shownVersion && <div className="gs-mesh-correction">
+                    <strong>선택 부품: {meshSelection.name}</strong>
+                    <p>위치·형태만 보정하며 다른 메시와 원본 구조를 보존합니다. 재생성·재토폴로지는 별도 작업입니다.</p>
+                    <button disabled={disabled || active || shownVersion.role !== 'model' || !acceptedVersion(object, shownVersion) || (!meshSelection.sourceId && !meshSelection.sourceName)} onClick={() => {
+                      const sourceName = meshSelection.sourceName;
+                      setCreation(current => ({ ...current, stageSettings: { ...current.stageSettings, assembly: { instruction: current.stageSettings.assembly?.instruction ?? '', values: { ...current.stageSettings.assembly?.values, assemblyMode: 'partial', editMeshIds: JSON.stringify(meshSelection.sourceId ? [meshSelection.sourceId] : []), editMeshNames: JSON.stringify(meshSelection.sourceId ? [] : [sourceName]), meshSelectionVersionId: shownVersion.id } } } }));
+                      setStage('assembly'); setTaskId(undefined);
+                      setNotice('선택 부품을 수정 대상으로 지정했습니다. 수정할 내용을 적고 실행을 준비하세요.');
+                    }}>선택 부품 보정하기</button>
+                    {!meshSelection.sourceId && !meshSelection.sourceName && <small>원본 메시 연결 미확인 · 안전하게 대응되는 이름 또는 ID가 필요합니다.</small>}
+                    {meshSelection.sourceName && <small>보정 범위: 원본 메시 {meshSelection.sourceName} 전체. 재질별로 나뉜 미리보기 조각도 같은 원본 메시를 대상으로 합니다.</small>}
+                    {(shownVersion.role !== 'model' || !acceptedVersion(object, shownVersion)) && <small>채택한 모델에서 선택하세요. 리그·동작 결과의 직접 메시 보정은 지원하지 않습니다.</small>}
+                  </div>}
                   {shownVersion && (
                     <div className="gs-version-detail">
                       <div>
@@ -1797,12 +1856,14 @@ export function GraphicsStudio({
                         {provenanceLabels[shownVersion.provenance.type]} · 저장
                         파일 {shownVersion.files.length}개
                       </p>
+                      {["model", "rig", "animation"].includes(shownVersion.role) && <p className="gs-model-provenance">제작 원본: {modelProductionLabel(shownVersion, versions, objectTasks)}</p>}
                       {shownVersion.role === "model" && (
                         <ModelStatistics
                           projectId={project.id}
                           version={shownVersion}
                           versions={versions}
                           tasks={objectTasks}
+                          onMeasure={setNativeMeasurement}
                         />
                       )}
                       {shownVersion.warnings.map((warning, index) => (
@@ -1938,6 +1999,7 @@ export function GraphicsStudio({
                 </section>
 
                 <section className="gs-instruction">
+                  {["model", "unity"].includes(stage) && <GraphicsSizePanel key={object.id} value={creation.physicalSize} bounds={!shownVersion?.slot.startsWith("part-") && shownVersion?.files.some(file => /\.glb$/i.test(file.path)) ? modelBounds : undefined} restricted={object.kind === "character" || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation)} disabled={disabled || active} onValidityChange={setSizeInputsValid} onChange={physicalSize => setCreation(current => ({ ...current, physicalSize }))} onSave={() => void run({ kind: "update-object", objectId: object.id, patch: { creation } }, "크기 설정을 저장했습니다. 새 생성은 없습니다.")} onApply={creation.attributes.composition !== "parts" && (object.accepted["model:main"] || object.accepted["rig:main"]) ? () => void prepareSizeCopy() : undefined} />}
                   <CreationOptions
                     kind={object.kind}
                     spec={creation}
@@ -2488,34 +2550,6 @@ export function GraphicsStudio({
                     {stage === "unity" && (
                       <>
                         <label>
-                          출력 배율
-                          <input
-                            aria-label="출력 배율"
-                            type="number"
-                            min={0.001}
-                            max={1000}
-                            step={0.01}
-                            value={String(settings.scale ?? 1)}
-                            onChange={(event) =>
-                              setting("scale", Number(event.target.value))
-                            }
-                          />
-                        </label>
-                        <label>
-                          피벗
-                          <select
-                            aria-label="피벗"
-                            value={String(settings.pivot ?? "keep")}
-                            onChange={(event) =>
-                              setting("pivot", event.target.value)
-                            }
-                          >
-                            <option value="keep">기존 유지</option>
-                            <option value="center">중심</option>
-                            <option value="bottom">바닥 중심</option>
-                          </select>
-                        </label>
-                        <label>
                           출력 형식
                           <select
                             aria-label="출력 형식"
@@ -2578,8 +2612,8 @@ export function GraphicsStudio({
                   {stage === "model" &&
                     settings.modelMethod !== "local" &&
                     settings.modelMethod !== "astra" && (
-                      <details className="gs-api-model-options">
-                        <summary>AI 모델 · 토폴로지 세부 설정</summary>
+                      <details className="gs-api-model-options" open>
+                        <summary>사용할 Tripo 모델 · 토폴로지</summary>
                         <label htmlFor="gs-model">모델 제작 모델</label>
                         <select
                           id="gs-model"
@@ -2983,6 +3017,7 @@ export function GraphicsStudio({
             </button>
           </header>
           <div className="gs-aux-body">
+
             {error && (
               <p className="gs-error" role="alert">
                 {error}
@@ -3116,7 +3151,7 @@ export function GraphicsStudio({
         <dialog
           ref={auxiliaryDialog}
           className="gs-aux-dialog"
-          aria-label={auxiliary === "history" ? "작업 기록" : "기능 지원 현황"}
+          aria-label={auxiliary === "storage" ? "저장 공간 현황" : auxiliary === "history" ? "작업 기록" : "기능 지원 현황"}
           onCancel={(event) => {
             event.preventDefault();
             setAuxiliary(undefined);
@@ -3126,7 +3161,7 @@ export function GraphicsStudio({
           }}
         >
           <header>
-            <h2>{auxiliary === "history" ? "작업 기록" : "기능 지원 현황"}</h2>
+            <h2>{auxiliary === "storage" ? "저장 공간 현황" : auxiliary === "history" ? "작업 기록" : "기능 지원 현황"}</h2>
             <button
               autoFocus
               aria-label="보조 화면 닫기"
@@ -3136,6 +3171,7 @@ export function GraphicsStudio({
             </button>
           </header>
           <div className="gs-aux-body">
+            {auxiliary === "storage" && <GraphicsStoragePanel onAction={onAction} />}
             {auxiliary === "support" && notice && (
               <p className="gs-notice" role="status">
                 {notice}

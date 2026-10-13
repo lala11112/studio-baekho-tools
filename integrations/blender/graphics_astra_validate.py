@@ -14,6 +14,7 @@ from mathutils import Vector, Quaternion
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from graphics_size import MARKER as SIZE_ROOT_MARKER
 from graphics_glb import export_packed_glb
 
 
@@ -130,7 +131,10 @@ def animation_contract():
     if bpy.data.libraries or len(rigs) != 1:
         raise RuntimeError('Animation requires one local armature for compatible Action-only export')
     rig = rigs[0]
-    if rig.parent or any(obj.constraints for obj in bpy.context.scene.objects) or any(bone.constraints for bone in rig.pose.bones):
+    ancestors=[];parent=rig.parent
+    while parent:
+        ancestors.append(parent);parent=parent.parent
+    if any(not obj.get(SIZE_ROOT_MARKER) or obj.type!='EMPTY' or obj.animation_data or obj.constraints for obj in ancestors) or any(obj.constraints for obj in bpy.context.scene.objects) or any(bone.constraints for bone in rig.pose.bones):
         raise RuntimeError('Animation constraints or a parented rig require an explicit baked compatible export before authoring')
     # Include data/shape-key/material node drivers, which do not travel with an Action.
     for owner in bpy.data.user_map():

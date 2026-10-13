@@ -94,6 +94,35 @@ test("actual Blender partial edit locks all untargeted geometry and new local mo
   assert.equal(hash(image), model.args.inputs[0].files[0].sha256); assert.equal(model.calls(), 1);
 });
 
+test("actual GLB mesh name without extras resolves against the frozen native blend before M06 authoring", { skip: !fs.existsSync(blender), timeout: 120_000 }, async t => {
+  const f = fixture(t, "M06"), original = path.join(f.root, "original.blend"), preview = path.join(f.root, "preview.glb");
+  python(f.root, twoMeshes + `bpy.ops.wm.save_as_mainfile(filepath=${JSON.stringify(original)},compress=False)\nbpy.ops.export_scene.gltf(filepath=${JSON.stringify(preview)},export_format='GLB',export_extras=False)\n`);
+  const bytes = fs.readFileSync(preview), json = JSON.parse(bytes.toString("utf8", 20, 20 + bytes.readUInt32LE(12)));
+  const selected = json.nodes.filter((node: any) => node.mesh !== undefined && node.name === "blade");
+  assert.equal(selected.length, 1); assert.equal(selected[0].extras, undefined);
+  const version = f.adopt(original), sourceHash = hash(original);
+  f.args.task.settings.editMeshNames = JSON.stringify([selected[0].name]);
+  f.args.task.settings.meshSelectionVersionId = version.id;
+  f.args.task.settings.sourceVersionId = version.id;
+  let workers = 0;
+  const execute = createGraphicsAstraExecutor({ workerFactory: () => ({ probe: async () => { throw Error("No service probe"); }, run: async task => {
+    workers++;
+    assert.match(task.prompt, /PARTIAL EDIT: edit positions only within exact mesh IDs \["blade"\]/);
+    assert.match(task.prompt, new RegExp(`Source version: ${version.id}\\.`));
+    const baseline = read(path.join(f.root, "graphics/jobs/task-1/astra/baseline.json"));
+    assert.equal(baseline.sourceSha256, sourceHash);
+    assert.equal(baseline.meshes.find((mesh: any) => mesh.name === selected[0].name).id, "blade");
+    python(f.root, `import bpy\nmesh=bpy.data.objects['blade']\nassert mesh['partsmith_id']=='blade'\nassert bpy.data.objects['handle']['partsmith_id']=='handle'\nmesh.data.vertices[0].co.z += 0.1\nbpy.ops.wm.save_as_mainfile(filepath=${JSON.stringify(path.join(task.run.workspace, "outputs/asset.blend"))},compress=False)\n`, path.join(task.run.workspace, "source.blend"));
+    return { result: { status: "completed", summary: "Injected deterministic partial edit; no GPT call", blendPath: "outputs/asset.blend", warnings: [] } };
+  } }) });
+  const result = await execute(f.args), report = read(path.join(f.root, result.files.find(file => file.kind === "report")!.path));
+  const baseline = read(path.join(f.root, "graphics/jobs/task-1/astra/baseline.json"));
+  assert.equal(workers, 1); assert.equal(report.checks.partialEdit, true); assert.equal(hash(original), sourceHash);
+  assert.deepEqual(report.meshes.find((mesh: any) => mesh.id === "handle").positions, baseline.meshes.find((mesh: any) => mesh.id === "handle").positions);
+  assert.notDeepEqual(report.meshes.find((mesh: any) => mesh.id === "blade").positions, baseline.meshes.find((mesh: any) => mesh.id === "blade").positions);
+  assert.equal(hash(preview), createHash("sha256").update(bytes).digest("hex"));
+});
+
 test("actual wings control requires tagged deform bone, direct weights and measurable joint response", { skip: !fs.existsSync(blender), timeout: 60_000 }, t => {
   const f = fixture(t, "R02");
   python(f.root, `import bpy\nbpy.ops.wm.read_factory_settings(use_empty=True)\nbpy.ops.mesh.primitive_cube_add(size=1)\nmesh=bpy.context.object;mesh['partsmith_id']='wing-mesh'\nbpy.ops.object.armature_add()\nrig=bpy.context.object\nbpy.ops.object.mode_set(mode='EDIT')\nroot=rig.data.edit_bones[0]\nwing=rig.data.edit_bones.new('wing.L');wing.head=(0,0,1);wing.tail=(1,0,1);wing.parent=root\nbpy.ops.object.mode_set(mode='OBJECT')\nmod=mesh.modifiers.new('Skin','ARMATURE');mod.object=rig\ngroup=mesh.vertex_groups.new(name='wing.L');group.add(list(range(8)),1,'REPLACE')\nrig.data.bones['wing.L']['partsmith_feature']='wings'\nbpy.context.view_layer.update()\n` + loadValidator + `proof=namespace['rig_feature_test'](['wings'])\nassert proof['wings'][0]['movingMeshIds']==['wing-mesh']\nmesh.vertex_groups.clear()\ntry:\n namespace['rig_feature_test'](['wings'])\n raise AssertionError('Label-only wing accepted')\nexcept RuntimeError as error:\n assert 'actual weighted pose response: wings' in str(error)\n`);

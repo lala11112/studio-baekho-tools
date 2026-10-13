@@ -67,7 +67,9 @@ test("imported video and extracted manifest reach N04 with the exact accepted cl
     const q = JSON.parse(fs.readFileSync(command.at(-1)!, "utf8")); assert.equal(q.mode, "prepare");
     fs.writeFileSync(q.outputBlend, "prepared immutable rig"); fs.writeFileSync(q.report, JSON.stringify({ identity: q.identity, nonce: q.nonce, sourceSha256: q.sourceSha256, meshes: [{ id: "mesh" }] }));
   }, workerFactory: () => ({ probe: async () => { throw Error("Service forbidden"); }, run: async task => {
-    workers++; assert.equal(task.requestedModel, "gpt-6-astra"); assert.equal(task.imagePaths.length, 5);
+    workers++; assert.equal(task.requestedModel, "gpt-6-astra"); assert.equal(task.imagePaths.length, result.metadata.decodedFrames);
+    // Import review keeps five thumbnails; authoring receives every native frame.
+    for(const file of task.imagePaths){const png=PNG.sync.read(fs.readFileSync(path.resolve(task.run.workspace,file)));assert.equal(png.width,result.metadata.width);assert.equal(png.height,result.metadata.height);}
     assert(task.referencePaths?.some(file => file.endsWith("native.mp4"))); assert(task.referencePaths?.some(file => file.endsWith("motion-reference.json")));
     assert.match(task.prompt, /ORIGINAL VIDEO AND decoded frames/); assert(task.prompt.includes(result.slot));
     throw Error("Synthetic authoring boundary only; no Astra call");

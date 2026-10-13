@@ -1,6 +1,8 @@
 """Deterministic Unity derivative; no authoring, online operations, or source writes."""
 import bpy, json, pathlib, sys, hashlib, shutil, re, math, struct, zlib
 import numpy as np
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from graphics_size import apply_physical_size, logical_parent
 
 q = json.loads(pathlib.Path(sys.argv[sys.argv.index('--') + 1]).read_text(encoding='utf8'))
 source = pathlib.Path(q['source']).resolve()
@@ -66,6 +68,8 @@ if not meshes or any(len(o.data.vertices) == 0 for o in meshes):
     raise RuntimeError('Model has no usable mesh')
 if len(rigs) > 1:
     raise RuntimeError('Multiple skeletons require an explicit compatible export')
+physical_size = apply_physical_size(q.get('physicalSize'), hashlib.sha256(source.read_bytes()).hexdigest())
+(out/'physical-size.json').write_text(json.dumps(physical_size,ensure_ascii=False),encoding='utf8')
 
 textures = out/'Textures'
 textures.mkdir()
@@ -247,7 +251,7 @@ for record in bindings:
     'packing':'Unity metallic R, smoothness A = 1 - Blender roughness; unchanged source bytes retained'},ensure_ascii=False),encoding='utf8')
 
 def signature(o):
-    return {'name': o.name, 'parent': o.parent.name if o.parent else None,
+    return {'name': o.name, 'parent': logical_parent(o),
             'vertices': len(o.data.vertices), 'edges': len(o.data.edges),
             'polygons': [list(p.vertices) for p in o.data.polygons],
             'materials': [m.name if m else '' for m in o.data.materials]}
@@ -307,21 +311,22 @@ if optimization.get('collider') in {'mesh','convex'} and rigs:
     raise RuntimeError('Mesh/convex collision delivery supports static meshes only; choose box for a rig')
 (out/'optimization.json').write_text(json.dumps({'schemaVersion':1,'settings':optimization,'lods':lods},ensure_ascii=False),encoding='utf8')
 
-if suffix == '.fbx' and not lod_enabled:
+if suffix == '.fbx' and not lod_enabled and not physical_size['transformed']:
     # Preserve native animation curves and original FBX bytes instead of re-encoding them.
     shutil.copyfile(source, out/'Asset.fbx')
     # FBX take names are reported by Unity rather than guessed from Blender action names.
     clips = []
 else:
     bpy.ops.object.select_all(action='DESELECT')
-    for obj in meshes + rigs:
+    for obj in meshes + rigs + [o for o in bpy.context.scene.objects if o.type=='EMPTY']:
         obj.select_set(True)
     bpy.context.view_layer.objects.active = rigs[0] if rigs else meshes[0]
     bpy.ops.export_scene.fbx(filepath=str(out/'Asset.fbx'), use_selection=True,
-        object_types={'ARMATURE','MESH'}, add_leaf_bones=False, bake_anim=bool(clips),
+        object_types={'ARMATURE','MESH','EMPTY'}, axis_forward='-Z', axis_up='Y',
+        apply_unit_scale=True, apply_scale_options='FBX_SCALE_UNITS', add_leaf_bones=False, bake_anim=bool(clips),
         bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False,
         bake_anim_simplify_factor=0.0, path_mode='COPY', embed_textures=True)
 warnings.append('Import checks do not establish visual material fidelity or animation playback quality.')
 (out/'inspection.json').write_text(json.dumps({'structure':structure,'clips':clips,
     'bones':sum(len(r.data.bones) for r in rigs),'warnings':warnings,
-    'sourceChanged':False,'animationAuthored':False},ensure_ascii=False),encoding='utf8')
+    'sourceChanged':False,'animationAuthored':False,'physicalSize':physical_size},ensure_ascii=False),encoding='utf8')

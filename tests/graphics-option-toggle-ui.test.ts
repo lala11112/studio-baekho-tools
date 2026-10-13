@@ -88,7 +88,7 @@ test("creation choices deselect explicitly, persist empty values and block incom
     await button("방향", "정면").click();
     assert.equal(await button("방향", "후면").getAttribute("aria-pressed"), "false");
     await page.getByText("수정할 때 유지할 특징", { exact: true }).click();
-    const lock = page.getByRole("checkbox", { name: "얼굴 유지", exact: true });
+    const lock = page.getByRole("checkbox", { name: "색 유지", exact: true });
     await lock.click(); assert.equal(await lock.isChecked(), true);
     await lock.click(); assert.equal(await lock.isChecked(), false);
     assert.deepEqual(await actions(), [], "Changing choices or checkboxes only edits the draft");

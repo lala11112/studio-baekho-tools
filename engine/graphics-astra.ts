@@ -55,6 +55,13 @@ function jsonSetting(value: unknown, label: string): unknown {
   if (typeof value !== "string") return value;
   try { return JSON.parse(value); } catch { throw Error(label + " JSON 형식을 확인하세요."); }
 }
+export function resolveEditMeshNames(meshes: {id: string; name: string}[], names: string[], ids: string[] = []): string[] {
+  return [...new Set([...ids, ...names.map(name => {
+    const matches = meshes.filter(mesh => mesh.name === name);
+    if (matches.length !== 1 || !matches[0].id) throw Error('선택 부품 이름이 채택 원본과 유일하게 연결되지 않습니다. 메시 ID를 확인하세요.');
+    return matches[0].id;
+  })])];
+}
 function modelingContract(args: GraphicsNativeArgs) {
   const settings = args.task.settings, operation = args.task.taskId;
   if (["M06", "M07", "M08", "M15"].includes(operation) && Number(settings.count ?? 1) !== 1)
@@ -66,11 +73,13 @@ function modelingContract(args: GraphicsNativeArgs) {
     return { id: part.id, label: part.label.trim().slice(0, 120) };
   });
   if (new Set(requestedParts.map(part => part.id)).size !== requestedParts.length) throw Error("분리 파츠 ID가 중복됩니다.");
-  const editMeshIds = operation === "M06" ? jsonSetting(settings.editMeshIds, "부분 수정 메시 ID") : [];
-  if (!Array.isArray(editMeshIds) || editMeshIds.some(value => typeof value !== "string" || !value.trim() || value.length > 200) || new Set(editMeshIds).size !== editMeshIds.length || operation === "M06" && !editMeshIds.length)
+  const editMeshIds = operation === "M06" ? jsonSetting(settings.editMeshIds ?? '[]', "부분 수정 메시 ID") : [];
+  const editMeshNames = operation === "M06" ? jsonSetting(settings.editMeshNames ?? '[]', "부분 수정 메시 이름") : [];
+  if (!Array.isArray(editMeshNames) || editMeshNames.length > 64 || editMeshNames.some(value => typeof value !== 'string' || !value.trim() || value.length > 200) || new Set(editMeshNames).size !== editMeshNames.length) throw Error('부분 수정 메시 이름을 확인하세요.');
+  if (!Array.isArray(editMeshIds) || editMeshIds.some(value => typeof value !== "string" || !value.trim() || value.length > 200) || new Set(editMeshIds).size !== editMeshIds.length || operation === "M06" && !editMeshIds.length && !editMeshNames.length)
     throw Error("부분 수정에는 원본 partsmith_id 목록(editMeshIds)이 필요합니다. 지정 메시의 형태만 수정하며 재토폴로지·재생성은 지원하지 않습니다.");
   const locks = Object.fromEntries(["topology", "materials", "rig"].map(name => [name, settings[`lock.${name}`] === true]));
-  return { requestedParts, editMeshIds, locks };
+  return { requestedParts, editMeshIds, editMeshNames, locks };
 }
 function requestedRigFeatures(settings: GraphicsNativeArgs["task"]["settings"]) {
   const enabled: Record<string, boolean> = {
@@ -246,6 +255,9 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     unchanged(protectedFiles);
     if (hashFile(fileWithin(folder, prepared.baseline)) !== prepared.baselineSha256) throw Error("원본 Blender 검사 기록이 변경됐습니다.");
     const baseline = read(prepared.baseline);
+    if (task.taskId === 'M06' && contract.editMeshNames.length) {
+      contract.editMeshIds = resolveEditMeshNames(baseline.meshes, contract.editMeshNames, contract.editMeshIds);
+    }
     if (task.taskId === "M06" && contract.editMeshIds.some(id => !baseline.meshes.some((mesh: any) => mesh.id === id))) throw Error("부분 수정 메시 ID가 채택 원본에 없습니다. 원본 partsmith_id를 확인하세요.");
     if (["M06", "M07", "M08"].includes(task.taskId) && baseline.meshes.some((mesh: any) => mesh.shapeKeys || mesh.modifiers?.some((modifier: any) => modifier.type !== "ARMATURE"))) throw Error("부분 수정·분리·조립은 셰이프 키나 적용하지 않은 변형 모디파이어가 있는 원본을 아직 검증하지 못합니다. 원본을 보존하고 중지합니다.");
     if (task.taskId === "M15" && Object.values(contract.locks).some(Boolean)) throw Error("신규 모델에는 보존할 원본 3D 구조가 없어 구조 잠금을 검증할 수 없습니다.");

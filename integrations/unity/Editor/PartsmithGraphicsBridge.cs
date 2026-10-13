@@ -17,7 +17,11 @@ namespace Partsmith.Graphics {
   public FileEntry[] files,sources,profileFiles; public string[] expectedClips; public float spritePixelsPerUnit;
   public DeliveryOptimization optimization;
   public ClipSettings[] clipSettings;
+  public PhysicalSizeSettings physicalSize;
  }
+ [Serializable] public class MeterVector { public float x,y,z; }
+ [Serializable] public class PhysicalSizeSettings { public string mode,axis,pivot;public float lengthMeters;public MeterVector dimensionsMeters; }
+ [Serializable] public class PhysicalSizeManifest { public int schemaVersion;public string sourceSha256,basis,unitStatus;public PhysicalSizeSettings settings;public MeterVector dimensionsMeters;public bool originalPreserved; }
  [Serializable] public class ClipSettings { public string versionId,name; public bool loop,rootMotion; public float fps; }
  [Serializable] public class SourceClip { public string name,armatureName,rootBoneName; public float sourceFps,firstFrame,lastFrame; }
  [Serializable] public class AnimationManifest { public int schemaVersion; public ClipSettings[] clipSettings; public SourceClip[] clips; }
@@ -29,6 +33,7 @@ namespace Partsmith.Graphics {
   public string requestId,objectId,profileFingerprint,converterVersion,status,guid,prefabPath,userPrefabPath,unityVersion,pipeline;
   public bool playbackVerified; public string[] clips,warnings,errors;
   public ImportedClip[] clipSettings;
+  public PhysicalSizeManifest physicalSize;
  }
  [Serializable] public class ManagedManifest { public string objectId,profileFingerprint,converterVersion,structure,requestId,pipeline,unityVersion; public FileEntry[] files; }
  [Serializable] public class MaterialTexture { public string path,sha256; public int width,height; }
@@ -104,6 +109,11 @@ namespace Partsmith.Graphics {
     var animationFile=q.files.SingleOrDefault(f=>f.destination==generated+"/animation.json");
     if(animationFile!=null)ValidateAnimationManifest(q,JsonUtility.FromJson<AnimationManifest>(File.ReadAllText(animationFile.source)));
     else if(q.clipSettings!=null&&q.clipSettings.Length>0)throw new Conflict("Frozen animation settings have no source manifest");
+    if(q.physicalSize!=null){
+     var sizeFile=q.files.SingleOrDefault(f=>f.destination==generated+"/physical-size.json");
+     if(sizeFile==null)throw new Conflict("Physical dimensions require a hash-bound manifest");
+     ValidatePhysicalSize(q,JsonUtility.FromJson<PhysicalSizeManifest>(File.ReadAllText(sizeFile.source)));
+    }
     foreach(var f in q.sources??Array.Empty<FileEntry>())ValidateFile(f.path,f.sha256);
     if(File.Exists(Safe("Library/PartsmithGraphicsStaging/"+q.requestId+"/cancelled.json")))throw new Exception("Delivery cancelled before import");
     if(File.Exists(manifestPath)){
@@ -263,12 +273,32 @@ namespace Partsmith.Graphics {
    var scene=EditorSceneManager.NewPreviewScene();
    try{
     var obj=(GameObject)PrefabUtility.InstantiatePrefab(model,scene);obj.name="Asset";
+    if(q.physicalSize!=null)r.physicalSize=VerifyPhysicalSize(q,obj);
     ApplyOptimization(q,obj,warnings);
     if(controller||skinned){var animator=obj.GetComponent<Animator>();if(!animator)animator=obj.AddComponent<Animator>();animator.avatar=avatar;animator.runtimeAnimatorController=controller;animator.applyRootMotion=q.clipSettings?.Any(clip=>clip.rootMotion)??false;}
     SavePrefab(obj,r);UnityEngine.Object.DestroyImmediate(obj);
    }finally{EditorSceneManager.ClosePreviewScene(scene);}
    warnings.Add("Supported opaque Principled materials use source-node base color, tangent normal and explicit metallic R / smoothness A packing. Unsupported graphs use a warned base-color fallback. Appearance still requires visual review.");
    if(q.clipSettings?.Length>0)warnings.Add("Frozen clip loop/root-motion import settings and source FPS were checked. No Play Mode, loop-seam or runtime movement quality was verified.");
+  }
+  static void ValidatePhysicalSize(DeliveryRequest q,PhysicalSizeManifest evidence){
+   if(evidence?.schemaVersion!=1||!evidence.originalPreserved||evidence.dimensionsMeters==null||evidence.settings==null||string.IsNullOrEmpty(evidence.sourceSha256)||JsonUtility.ToJson(evidence.settings)!=JsonUtility.ToJson(q.physicalSize))throw new Conflict("Physical size settings differ from the immutable source measurement");
+  }
+  static PhysicalSizeManifest VerifyPhysicalSize(DeliveryRequest q,GameObject obj){
+   var evidence=JsonUtility.FromJson<PhysicalSizeManifest>(File.ReadAllText(Safe(q.destination+"/Generated/physical-size.json")));ValidatePhysicalSize(q,evidence);
+   var points=new List<Vector3>();
+   foreach(var filter in obj.GetComponentsInChildren<MeshFilter>(true).Where(f=>!f.name.EndsWith("__PS_LOD1")&&f.sharedMesh))foreach(var vertex in filter.sharedMesh.vertices)points.Add(filter.transform.TransformPoint(vertex));
+   foreach(var skin in obj.GetComponentsInChildren<SkinnedMeshRenderer>(true).Where(s=>!s.name.EndsWith("__PS_LOD1")&&s.sharedMesh)){
+    // The contract is the undeformed bind mesh, not a sampled pose or Unity's
+    // inflated animation bounds. BakeMesh can include the skeleton root scale;
+    // applying the renderer transform again would falsely count it twice.
+    foreach(var vertex in skin.sharedMesh.vertices)points.Add(skin.transform.TransformPoint(vertex));
+   }
+   if(points.Count==0||points.Any(p=>!float.IsFinite(p.x)||!float.IsFinite(p.y)||!float.IsFinite(p.z)))throw new Exception("No finite imported baseline vertices for physical size inspection");
+   var dimensions=new MeterVector{x=points.Max(p=>p.x)-points.Min(p=>p.x),y=points.Max(p=>p.y)-points.Min(p=>p.y),z=points.Max(p=>p.z)-points.Min(p=>p.z)};
+   float[] expected={evidence.dimensionsMeters.x,evidence.dimensionsMeters.y,evidence.dimensionsMeters.z},actual={dimensions.x,dimensions.y,dimensions.z};
+   for(int i=0;i<3;i++)if(!float.IsFinite(actual[i])||Math.Abs(actual[i]-expected[i])>Math.Max(.001f,expected[i]*.001f))throw new Exception("Imported meter dimensions differ from the frozen rest-pose derivative on axis "+i+": "+actual[i]+" vs "+expected[i]);
+   evidence.dimensionsMeters=dimensions;return evidence;
   }
   static void ValidateAnimationManifest(DeliveryRequest q,AnimationManifest evidence){
    var settings=q.clipSettings??Array.Empty<ClipSettings>();

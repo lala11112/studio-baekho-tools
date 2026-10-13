@@ -398,8 +398,9 @@ test(
       await page
         .getByLabel("이 단계 추가 지시 · 선택지에 없는 내용")
         .fill("Keep the original geometry and markings");
-      await page.getByLabel("출력 배율", { exact: true }).fill("2");
-      await page.getByLabel("피벗", { exact: true }).selectOption("bottom");
+      await page.getByLabel("실제 크기 모드", { exact: true }).selectOption("uniform");
+      await page.getByLabel("기준 길이 미터", { exact: true }).fill("2");
+      await page.getByLabel("크기 피벗", { exact: true }).selectOption("bottom-center");
       await page.getByLabel("출력 형식", { exact: true }).selectOption("fbx");
       await page
         .getByText("이미 가진 이미지 · 모델 · 동작 가져오기", { exact: true })
@@ -525,8 +526,10 @@ test(
       const sword = result.workspace.objects.find(
         (object) => object.id === "sword",
       )!;
-      assert.equal(sword.creation?.stageSettings.unity?.values.scale, 2);
-      assert.equal(sword.creation?.stageSettings.unity?.values.pivot, "bottom");
+      assert.equal(sword.creation?.physicalSize?.mode, "uniform");
+      assert.equal(sword.creation?.physicalSize?.axis, "y");
+      assert.equal(sword.creation?.physicalSize?.lengthMeters, 2);
+      assert.equal(sword.creation?.physicalSize?.pivot, "bottom-center");
       assert.equal(
         sword.creation?.stageSettings.unity?.values.exportFormat,
         "fbx",
@@ -540,7 +543,8 @@ test(
       assert.equal(sword.references.length, 1);
       await page.locator(".gs-create-disclosure > summary").click();
       await page.getByLabel("이름", { exact: true }).fill("Shield");
-      await page.getByLabel("종류", { exact: true }).selectOption("weapon");
+      await page.getByRole("group", { name: "오브젝트 분류", exact: true }).getByRole("button", { name: "무기·장비", exact: true }).click();
+      await page.getByRole("group", { name: "만들 대상 선택", exact: true }).getByRole("button", { name: "검·총·활·방패", exact: true }).click();
       await page
         .getByRole("button", { name: "오브젝트 만들기", exact: true })
         .click();

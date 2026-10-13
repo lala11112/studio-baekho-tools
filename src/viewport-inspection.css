@@ -1,0 +1,23 @@
+.viewport.inspection-viewport { display:flex; flex-direction:column; min-width:0; overflow:auto; }
+.inspection-viewport .viewport-top { position:static; padding:7px 9px; flex-wrap:wrap; flex-shrink:0; gap:6px; }
+.inspection-viewport .viewport-label { font-size:12px; }
+.inspection-viewport .segmented { flex-wrap:wrap; max-width:100%; }
+.inspection-viewport .segmented button { font-size:11px; padding:5px 7px; min-height:28px; }
+.inspection-toolbar { display:flex; flex-wrap:wrap; gap:5px; padding:0 9px 7px; flex-shrink:0; }
+.inspection-viewport .inspection-toolbar button,
+.inspection-viewport .mesh-inspector button { font-size:12px; min-height:28px; padding:4px 8px; }
+.inspection-viewport button[aria-pressed="true"] { background:#42593c; color:#e0efd5; border-color:#88a779; }
+.inspection-canvas-wrap { position:relative; flex:1 0 220px; min-height:220px; overflow:hidden; }
+.inspection-viewport .canvas { position:absolute; inset:0; }
+.inspection-viewport .viewport-bottom { position:static; padding:6px 9px; gap:8px; flex-wrap:wrap; flex-shrink:0; font-size:11px; }
+.inspection-viewport .mesh-inspector { margin:0 9px 7px; flex-shrink:0; font-size:12px; border-top:1px solid #3a473e; }
+.inspection-viewport .mesh-inspector summary { padding:6px 0; cursor:pointer; font-size:12px; }
+.inspection-viewport .mesh-inspector p { font-size:11px; margin:4px 0 7px; color:#a6b5ac; }
+.mesh-statistics { display:flex; flex-wrap:wrap; gap:4px 10px; padding:5px 0; border-bottom:1px solid #293e33; }
+.mesh-statistics strong { min-width:65px; }
+.mesh-list { display:flex; flex-direction:column; max-height:140px; overflow:auto; margin:6px 0; gap:4px; }
+.mesh-list > div { display:flex; gap:4px; flex-shrink:0; align-items:start; }
+.mesh-list > div > button:first-child { flex:1; min-width:0; overflow-wrap:anywhere; text-align:left; }
+.inspection-viewport .playback { position:static; transform:none; margin:0 9px 7px; flex-wrap:wrap; flex-shrink:0; }
+.inspection-viewport .playback select { max-width:100%; width:auto; flex:1; min-width:100px; }
+.inspection-viewport .playback span { white-space:normal; font-size:11px; }

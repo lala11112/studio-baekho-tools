@@ -234,6 +234,38 @@ test("creation choices, imports, adoption and preparing a frozen request dispatc
   assert.equal(f.apiCalls, 0);
 });
 
+test("M06 mesh selection is tied to the selected source version and remains frozen across later form edits", async t => {
+  const f = await fixture(t), original = f.seed("model"), replacement = f.seed("model");
+  await f.accept(original);
+  await f.setCreation(c => {
+    c.stageSettings.assembly = { instruction: "선택한 손잡이만 두껍게", values: {
+      assemblyMode: "partial", editMeshNames: '["Handle"]', editMeshIds: "[]", meshSelectionVersionId: original.id,
+    } };
+  });
+  await f.accept(replacement);
+  await assert.rejects(f.prepare("M06"), /메시를 선택한 원본과 현재 채택 모델이 다릅니다/);
+  assert.equal(f.state().tasks.length, 0); assert.equal(f.calls.length, 0); assert.equal(f.apiCalls, 0);
+  await f.accept(original);
+  const task = await f.prepare("M06"), frozen = structuredClone(task);
+  assert.equal(task.settings.sourceVersionId, original.id);
+  assert.equal(task.settings.meshSelectionVersionId, original.id);
+  assert.equal(task.settings.editMeshNames, '["Handle"]');
+  await f.setCreation(c => {
+    c.stageSettings.assembly!.values.editMeshNames = '["DifferentMesh"]';
+    c.stageSettings.assembly!.values.meshSelectionVersionId = replacement.id;
+  });
+  assert.deepEqual(f.state().tasks.at(-1), frozen);
+  f.implementations.astra = async args => {
+    assert.equal(args.task.settings.sourceVersionId, original.id);
+    assert.equal(args.task.settings.meshSelectionVersionId, original.id);
+    assert.equal(args.task.settings.editMeshNames, '["Handle"]');
+    assert.equal(args.inputs[0].id, original.id);
+    throw Error("Injected worker boundary reached; no authoring or service executed");
+  };
+  await f.approve(task.id);
+  assert.equal(f.calls.length, 1); assert.equal(f.apiCalls, 0);
+});
+
 test("M04 count two dispatches independent one-candidate requests and never adopts outputs", async (t) => {
   const f = await fixture(t),
     image = f.seed("design");

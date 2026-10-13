@@ -7,6 +7,7 @@ import { CodexWorker, type ProductionWorker } from "./codex-worker";
 import type { ProductionRun, ProductionStage } from "../shared/production";
 import type { AssetVersion, GraphicsObject, GraphicsRole, GraphicsTask } from "../shared/graphics";
 import type { WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from "../shared/workbench";
+import { normalizePhysicalSize } from "../shared/graphics-size";
 
 export type GraphicsNativeArgs = {
   projectRoot: string;
@@ -424,12 +425,13 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
       const scale = task.taskId === "A05" ? Number(task.settings.scale ?? 1) : 1;
       const pivot = task.taskId === "A05" ? String(task.settings.pivot ?? "keep") : "keep";
       const format = task.taskId === "X04" ? String(task.settings.exportFormat ?? "both") : "both";
+      const physicalSize = task.settings.physicalSize === undefined ? undefined : normalizePhysicalSize(task.settings.physicalSize);
       if (!Number.isFinite(scale) || scale <= 0 || scale > 1e6 || !["keep", "center", "bottom"].includes(pivot) || !["fbx", "glb", "both"].includes(format)) throw Error("크기·피벗·내보내기 설정을 확인하세요.");
       if (!args.blenderPath || !fs.existsSync(args.blenderPath)) throw Error("설정된 Blender 실행 파일을 확인하세요.");
       const script = path.join(args.resources, "blender", "graphics_local.py");
       if (!fs.existsSync(script)) throw Error("로컬 그래픽 변환 스크립트가 없습니다.");
       const reportPath = path.join(output, "report.json"), specPath = path.join(work, "local-request.json");
-      write(specPath, { schemaVersion: 1, identity, source: source.localPath, output, operation: task.taskId, scale, pivot, format });
+      write(specPath, { schemaVersion: 1, identity, source: source.localPath, output, operation: task.taskId, scale, pivot, format, physicalSize });
       // Local work may be repeated after failure, but never silently overwrite a completed output.
       if (!fs.existsSync(reportPath)) {
         args.onProgress(task.taskId === "A05" ? "Blender에서 원본을 보존하며 크기·피벗을 새 버전에 적용합니다." : "Blender에서 새 FBX/GLB 내보내기 파일을 만듭니다.");
@@ -438,6 +440,7 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
       args.signal.throwIfAborted();
       const report = read(reportPath);
       if (report.identity !== identity || report.operation !== task.taskId || report.originalPreserved !== true || report.sourceSha256 !== source.sha256 || !Array.isArray(report.files) || !report.files.length) throw Error("로컬 그래픽 변환 결과 검증에 실패했습니다.");
+      if (physicalSize && (report.physicalSize?.sourceSha256 !== source.sha256 || JSON.stringify(normalizePhysicalSize(report.physicalSize?.settings)) !== JSON.stringify(physicalSize))) throw Error("실제 크기 검사와 고정한 원본·설정이 다릅니다.");
       const expected = ["asset.blend", ...(format !== "fbx" ? ["asset.glb"] : []), ...(format !== "glb" ? ["asset.fbx"] : [])];
       if (!expected.every(file => report.files.includes(file))) throw Error("요청한 그래픽 내보내기 파일이 없습니다.");
       const files = report.files.map((file: string) => {
@@ -448,7 +451,7 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
         return { path: relative(root, absolute), kind: extension === ".blend" ? "blend" : extension === ".fbx" ? "fbx" : extension === ".glb" ? "model" : "image" };
       });
       files.push({ path: relative(root, reportPath), kind: "report" });
-      return finish({ files, label: task.taskId === "A05" ? "크기·피벗 보정" : "Unity용 모델 내보내기", role: source.role === "rig" || source.role === "animation" ? source.role : "model", slot: "main", warnings: ["Unity 에디터 가져오기·재생 검증은 아직 실행하지 않았습니다.", ...(Array.isArray(report.warnings) ? report.warnings.filter((item: unknown) => typeof item === "string") : [])] });
+      return finish({ files, label: task.taskId === "A05" ? "크기·피벗 보정" : "Unity용 모델 내보내기", role: source.role === "rig" || source.role === "animation" ? source.role : "model", slot: args.inputs.find(v=>v.id===source.versionId)?.slot ?? "main", warnings: ["Unity 에디터 가져오기·재생 검증은 아직 실행하지 않았습니다.", ...(Array.isArray(report.warnings) ? report.warnings.filter((item: unknown) => typeof item === "string") : [])] });
     }
 
     const views = expectedImageViews(task);

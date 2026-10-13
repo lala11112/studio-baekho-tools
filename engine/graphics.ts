@@ -18,6 +18,7 @@ import { prepareGraphicsVideo, prepareGraphicsVideoUploadRetry } from "./graphic
 import { executeGraphicsMotionSource } from "./graphics-motion-source";
 import { prepareGraphicsMotionImport } from "./graphics-motion-import";
 import { readUnityTarget, prepareUnityDelivery, inspectUnityDelivery, cancelUnityDelivery } from "./graphics-unity";
+import { inspectGraphicsStorage } from './graphics-storage';
 
 const hash = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
 const now = () => new Date().toISOString();
@@ -51,6 +52,7 @@ function candidateTasks(task: GraphicsTask): GraphicsTask[] {
 }
 type Options = {
   resources: string;
+  storageRoot?: string;
   ffmpegPath?: string;
   native?: typeof executeGraphicsNative;
   astra?: typeof executeGraphicsNative;
@@ -325,7 +327,8 @@ export class GraphicsEngine {
       case "create-object": {
         if (!["character", "weapon", "prop", "environment", "sprite", "ui", "vfx"].includes(action.objectKind)) throw Error("잘못된 대상 종류입니다.");
         const name = action.name.trim(); if (!name || name.length > 100) throw Error("이름을 1–100자로 입력하세요.");
-        w.objects.push({ id: uid(), name, kind: action.objectKind, createdAt: now(), selectedTasks: [], instruction: "", settings: { count: 1, faceLimit: 10000, textureSize: 4096, scale: 1, pivot: "keep", exportFormat: "both" }, references: [], accepted: {} });
+        const creation = action.creation ? validateCreation(action.creation, action.objectKind) : undefined;
+        w.objects.push({ id: uid(), name, kind: action.objectKind, createdAt: now(), selectedTasks: [], instruction: "", settings: { count: 1, faceLimit: 10000, textureSize: 4096, scale: 1, pivot: "keep", exportFormat: "both" }, references: [], accepted: {}, ...(creation ? { creation } : {}) });
         return this.save(w);
       }
       case "update-object": {
@@ -350,6 +353,10 @@ export class GraphicsEngine {
       }
       case "inspect-target": w.target = readUnityTarget(this.store.project(id).unityPath || this.store.settings.unityPath); return this.save(w);
       case "audit-usage": return this.audit(id);
+      case "inspect-storage": return { ...w, storageReport: await inspectGraphicsStorage({
+        profileRoot: this.store.root, appRoot: this.options.storageRoot,
+        registeredFiles: this.list().flatMap(space => space.versions.flatMap(version => version.files.map(file => this.store.file(space.projectId, file.path)))),
+      }) };
       case "set-tripo-budget": {
         if (!Number.isSafeInteger(action.credits) || action.credits < 0 || action.credits > 100000) throw Error("API 한도는 0–100,000크레딧의 정수로 입력하세요.");
         if (this.isActive(id) || this.engine.isProjectActive(id)) throw Error("실행이 끝난 후 한도를 변경하세요.");
@@ -427,6 +434,8 @@ export class GraphicsEngine {
     if (graphicsProceduralTasks.has(taskId)) { const problem = proceduralProblem({ ...o.settings, count: 1 }, taskId); if (problem) throw Error(problem); }
     if (w.tasks.some(t => t.objectId === o.id && ["awaiting_approval", "running", "submission_unknown"].includes(t.status))) throw Error("이 대상의 기존 작업을 확인하거나 취소한 뒤 새 작업을 준비하세요.");
     const inputs = this.inputs(w, o, taskId);
+    if (taskId === 'M06' && o.settings.meshSelectionVersionId !== undefined && inputs[0]?.id !== o.settings.meshSelectionVersionId)
+      throw Error('메시를 선택한 원본과 현재 채택 모델이 다릅니다. 현재 모델에서 부품을 다시 선택하세요.');
     const count = Number(o.settings.count ?? 1);
     if (!Number.isInteger(count) || count < 1 || count > 4) throw Error("출력 개수는 1–4개입니다.");
     if (["I01", "I02", "I03", "I05", "I06", "M03", "M05", "N02", "N05", "N06"].includes(taskId) && !o.instruction.trim()) throw Error("제작 또는 수정할 내용을 입력하세요.");

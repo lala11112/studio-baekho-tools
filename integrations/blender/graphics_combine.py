@@ -10,6 +10,8 @@ import math
 import pathlib
 import re
 import sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from graphics_size import MARKER
 
 
 def file_hash(file):
@@ -75,7 +77,10 @@ def armature():
     if len(rigs) != 1:
         raise RuntimeError('Each accepted rig and clip must contain exactly one armature')
     rig = rigs[0]
-    if rig.parent or rig.constraints or any(bone.constraints for bone in rig.pose.bones):
+    ancestors=[];parent=rig.parent
+    while parent:
+        ancestors.append(parent);parent=parent.parent
+    if any(not o.get(MARKER) or o.type!='EMPTY' or o.animation_data or o.constraints for o in ancestors) or rig.constraints or any(bone.constraints for bone in rig.pose.bones):
         raise RuntimeError('Parented or constrained rigs need an explicit baked compatible export')
     if any(obj.animation_data and obj.animation_data.drivers for obj in bpy.context.scene.objects):
         raise RuntimeError('Drivers require an explicit baked compatible export')
@@ -83,7 +88,11 @@ def armature():
 
 
 def skeleton(rig):
-    return {'transform': matrix(rig.matrix_world), 'rotationMode': rig.rotation_mode,
+    # Absolute meter wrappers are a delivery transform, not a skeleton change.
+    # Removing only the marked static ancestor allows original Actions to remain compatible.
+    world=rig.matrix_world.copy()
+    if rig.parent:world=rig.matrix_parent_inverse@rig.matrix_basis
+    return {'transform': matrix(world), 'rotationMode': rig.rotation_mode,
             'bones': sorted([{'name': bone.name, 'parent': bone.parent.name if bone.parent else None,
                               'bind': matrix(bone.matrix_local), 'length': float(bone.length),
                               'deform': bone.use_deform, 'connected': bone.use_connect,

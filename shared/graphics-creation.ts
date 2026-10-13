@@ -1,5 +1,6 @@
 import type { GraphicsKind, GraphicsObject } from './graphics';
 import { isGraphicsClipName } from './graphics';
+import { defaultPhysicalSize, normalizePhysicalSize, type PhysicalSize } from './graphics-size';
 
 export type CreationStage = 'design' | 'model' | 'surface' | 'assembly' | 'rig' | 'animation' | 'unity';
 export type CreationValues = Record<string, string | number | boolean>;
@@ -12,6 +13,7 @@ export type CreationSpec = {
   schemaVersion: 1; subject: string; attributes: CreationValues; instruction: string; locks: string[];
   stageSettings: Partial<Record<CreationStage, { instruction: string; values: CreationValues }>>;
   parts: PartSpec[]; activePartId?: string;
+  physicalSize?: PhysicalSize;
   clipSettings?: Record<string, { instruction: string; values: CreationValues }>;
 };
 export type OptionDefinition = { id: string; label: string; values: { value: string; label: string }[]; subjects?: string[]; advanced?: boolean };
@@ -19,13 +21,38 @@ export const creationStages: { id: CreationStage; label: string }[] = [
   { id: 'design', label: '이미지' }, { id: 'model', label: '모델' }, { id: 'surface', label: '재질' },
   { id: 'assembly', label: '조립·수정' }, { id: 'rig', label: '리깅' }, { id: 'animation', label: '애니메이션' }, { id: 'unity', label: 'Unity 전달' },
 ];
-export const creationSubjects: { id: string; label: string; kind: GraphicsKind }[] = [
-  { id: 'human', label: '인간형 캐릭터', kind: 'character' }, { id: 'animal', label: '동물', kind: 'character' },
-  { id: 'creature', label: '크리처', kind: 'character' }, { id: 'weapon', label: '무기', kind: 'weapon' },
-  { id: 'armor', label: '의상·장비', kind: 'weapon' }, { id: 'rock', label: '바위·광물', kind: 'prop' },
-  { id: 'box', label: '상자·용기', kind: 'prop' }, { id: 'prop', label: '가구·소품', kind: 'prop' },
-  { id: 'building', label: '건축·환경', kind: 'environment' }, { id: 'plant', label: '식물', kind: 'environment' },
+export type CreationSubjectGroup = 'living' | 'objects' | 'equipment' | 'architecture' | 'nature';
+export type CreationSubject = { id: string; label: string; kind: GraphicsKind; group: CreationSubjectGroup; family?: string; defaults?: CreationValues; legacy?: boolean };
+export const creationSubjectGroups: { id: CreationSubjectGroup; label: string; description: string }[] = [
+  { id: 'living', label: '생물', description: '인간형 캐릭터, 동물, 크리처' },
+  { id: 'objects', label: '사물', description: '가구, 생활용품, 용기, 도구, 기계, 음식, 장식품' },
+  { id: 'equipment', label: '무기·장비', description: '무기, 의상, 방어구, 장신구' },
+  { id: 'architecture', label: '건물·건축 부품', description: '개별 건물과 부품을 제작합니다. 전체 레벨 배치나 플레이 가능한 내부를 자동 완성하지 않습니다.' },
+  { id: 'nature', label: '자연환경', description: '바위, 식물, 지형 조각 등 개별 오브젝트' },
 ];
+const subject = (id: string, label: string, kind: GraphicsKind, group: CreationSubjectGroup, family?: string, defaults?: CreationValues): CreationSubject => ({ id, label, kind, group, family, defaults });
+export const creationSubjects: CreationSubject[] = [
+  subject('human', '인간형 캐릭터', 'character', 'living'), subject('animal', '동물', 'character', 'living'), subject('creature', '크리처', 'character', 'living'),
+  subject('furniture', '가구', 'prop', 'objects', 'prop', { propType: 'furniture' }),
+  subject('everyday', '생활용품', 'prop', 'objects', 'prop', { propType: 'everyday' }),
+  subject('box', '상자·용기', 'prop', 'objects'),
+  subject('tool', '도구', 'prop', 'objects', 'prop', { propType: 'tool' }),
+  subject('machine', '기계', 'prop', 'objects', 'prop', { propType: 'machine' }),
+  subject('food', '음식', 'prop', 'objects', 'prop', { propType: 'food' }),
+  subject('decoration', '장식품', 'prop', 'objects', 'prop', { propType: 'decoration' }),
+  subject('prop', '직접 설명할 사물', 'prop', 'objects'),
+  subject('weapon', '검·총·활·방패', 'weapon', 'equipment'), subject('armor', '의상·방어구', 'weapon', 'equipment'),
+  subject('accessory', '장신구', 'weapon', 'equipment', 'armor', { equipmentType: 'accessory' }),
+  subject('building', '단독 건물', 'environment', 'architecture', undefined, { buildingType: 'house' }),
+  ...[['wall', '벽'], ['floor', '바닥'], ['roof', '지붕'], ['door', '문·창문'], ['stairs', '계단'], ['column', '기둥'], ['fence', '울타리']].map(([id, label]) => subject(id, label, 'environment', 'architecture', 'building', { buildingType: id })),
+  subject('rock', '바위·광물', 'prop', 'nature'),
+  ...[['tree', '나무'], ['shrub', '관목'], ['grass', '풀·꽃']].map(([id, label]) => subject(id, label, 'environment', 'nature', 'plant', { plantType: id })),
+  subject('terrain', '지형 조각', 'environment', 'nature', 'building', { buildingType: 'terrain' }),
+  { ...subject('plant', '식물', 'environment', 'nature'), legacy: true },
+];
+export const isBiologicalSubject = (id: string): boolean => creationSubjects.find(s => s.id === id)?.group === 'living';
+export const optionAppliesToSubject = (option: OptionDefinition, id: string): boolean => !option.subjects || option.subjects.includes(id) || Boolean(creationSubjects.find(s => s.id === id)?.family && option.subjects.includes(creationSubjects.find(s => s.id === id)!.family!));
+export const creationLockAppliesToSubject = (id: string, target: string): boolean => !['face', 'body', 'hair'].includes(id) || isBiologicalSubject(target);
 const option = (id: string, label: string, choices: string[], subjects?: string[], advanced = false): OptionDefinition => ({ id, label, values: choices.map(pair => { const [value, label] = pair.split(':'); return { value, label }; }), subjects, advanced });
 export const creationOptions: OptionDefinition[] = [
   option('style', '어떤 표현으로 만들까요?', ['stylized:스타일화', 'lowpoly:로우폴리 표현', 'anime:애니풍', 'realistic:사실적']),
@@ -40,7 +67,7 @@ export const creationOptions: OptionDefinition[] = [
   option('mineral', '광물 노출', ['none:없음', 'vein:광맥', 'crystal:수정 덩어리'], ['rock'], true),
   option('lid', '뚜껑', ['none:없음', 'closed:닫힘', 'open:열림'], ['box']),
   option('container', '용기 형태', ['crate:나무 상자', 'chest:보물 상자', 'metal:금속 상자', 'barrel:통', 'jar:항아리'], ['box']),
-  option('hinge', '경첩·가동부', ['none:없음', 'hinge:경첩', 'sliding:미닫이'], ['box', 'building'], true),
+  option('hinge', '경첩·가동부', ['none:없음', 'hinge:경첩', 'sliding:미닫이'], ['box', 'building', 'furniture', 'machine'], true),
   option('interior', '내부 공간', ['solid:외형만', 'hollow:속이 빈 구조'], ['box', 'building'], true),
   option('weaponType', '무기 종류', ['sword:검', 'greatsword:대검', 'axe:도끼', 'spear:창', 'mace:둔기', 'bow:활', 'gun:총기', 'shield:방패'], ['weapon']),
   option('blade', '날·머리 모양', ['straight:곧게', 'curved:휘게', 'broad:넓게', 'serrated:톱니'], ['weapon'], true),
@@ -57,8 +84,8 @@ export const creationOptions: OptionDefinition[] = [
   option('covering', '몸 표면', ['fur:털', 'scales:비늘', 'shell:껍질', 'skin:피부'], ['animal', 'creature'], true),
   option('equipmentType', '장비 종류', ['top:상의', 'bottom:하의', 'suit:전신복', 'armor:갑옷', 'shoes:신발', 'accessory:장신구'], ['armor']),
   option('fit', '착용 형태', ['fitted:밀착', 'loose:헐렁함', 'reference:참조 유지'], ['armor'], true),
-  option('propType', '소품 종류', ['furniture:가구', 'tool:도구', 'food:음식', 'decoration:장식품', 'custom:직접 설명'], ['prop']),
-  option('buildingType', '환경 부품', ['wall:벽', 'floor:바닥', 'door:문', 'stairs:계단', 'column:기둥', 'house:건물', 'terrain:지형 조각'], ['building']),
+  option('propType', '소품 종류', ['furniture:가구', 'everyday:생활용품', 'tool:도구', 'machine:기계', 'food:음식', 'decoration:장식품', 'custom:직접 설명'], ['prop']),
+  option('buildingType', '환경 부품', ['wall:벽', 'floor:바닥', 'roof:지붕', 'door:문·창문', 'stairs:계단', 'column:기둥', 'fence:울타리', 'house:건물', 'terrain:지형 조각'], ['building']),
   option('modular', '연결 방식', ['single:단독', 'repeat:반복 연결', 'corner:모서리 연결'], ['building'], true),
   option('plantType', '식물 종류', ['tree:나무', 'shrub:관목', 'grass:풀', 'flower:꽃'], ['plant']),
   option('foliage', '잎 밀도', ['sparse:드문드문', 'normal:보통', 'dense:빽빽하게'], ['plant']),
@@ -85,13 +112,48 @@ const stageDefaults: Record<CreationStage, CreationValues> = {
 };
 export function defaultCreation(kind: GraphicsKind): CreationSpec {
   const subject = ({ character: 'human', weapon: 'weapon', prop: 'prop', environment: 'building' } as Record<string, string>)[kind] ?? 'prop';
-  return { schemaVersion: 1, subject, instruction: '', attributes: { style: 'stylized', composition: 'whole' }, locks: [],
+  return { schemaVersion: 1, subject, instruction: '', attributes: { style: 'stylized', composition: 'whole' }, locks: [], physicalSize: defaultPhysicalSize(),
     stageSettings: Object.fromEntries(creationStages.map(({ id }) => [id, { instruction: '', values: { ...stageDefaults[id], ...(id === 'design' && kind === 'character' ? { pose: 'a' } : {}) } }])), parts: [] };
+}
+/** Start a new object with the chosen subject. No service execution or reference mutation. */
+export function creationForSubject(subjectId: string): CreationSpec {
+  const target = creationSubjects.find(s => s.id === subjectId);
+  if (!target) throw Error('만들 대상을 선택하세요.');
+  const spec = defaultCreation(target.kind);
+  spec.subject = target.id;
+  Object.assign(spec.attributes, target.defaults);
+  spec.stageSettings.design!.values.pose = target.id === 'human' ? 'a' : isBiologicalSubject(target.id) ? 'natural' : '';
+  return spec;
+}
+/** Subject-scoped options never leak into the next target, while explicit free text is retained. */
+function applicableAttributes(spec: CreationSpec): CreationValues {
+  return Object.fromEntries(Object.entries(spec.attributes).filter(([key]) => {
+    const optionId = key.startsWith('custom.') ? key.slice('custom.'.length) : key;
+    const definition = creationOptions.find(o => o.id === optionId);
+    return !definition || optionAppliesToSubject(definition, spec.subject);
+  }));
+}
+/** Used only for an existing object's editable subject preset; caller decides whether a new object is required. */
+export function changeCreationSubject(spec: CreationSpec, subjectId: string): CreationSpec {
+  const target = creationSubjects.find(s => s.id === subjectId);
+  if (!target) throw Error('만들 대상을 선택하세요.');
+  const next = structuredClone(spec);
+  next.subject = subjectId;
+  next.attributes = { ...applicableAttributes(next), ...target.defaults };
+  next.locks = next.locks.filter(id => creationLockAppliesToSubject(id, subjectId));
+  const design = next.stageSettings.design;
+  if (design && spec.subject !== subjectId) {
+    design.values.pose = subjectId === 'human' ? 'a' : isBiologicalSubject(subjectId) ? 'natural' : '';
+    if (!isBiologicalSubject(subjectId) && ['upper', 'face'].includes(String(design.values.framing))) design.values.framing = 'full';
+  }
+  return next;
 }
 /** Read-only compatibility. Legacy settings are copied, never rewritten on open. */
 export function effectiveCreation(object: GraphicsObject): CreationSpec {
   if (object.creation) return structuredClone(object.creation);
   const spec = defaultCreation(object.kind); spec.instruction = object.instruction;
+  // Legacy objects retain their earlier scale until the common size control is explicitly saved.
+  delete spec.physicalSize;
   for (const { id } of creationStages) {
     for (const key of Object.keys(stageDefaults[id])) if (object.settings[key] !== undefined) spec.stageSettings[id]!.values[key] = object.settings[key];
     if (!['design', 'model'].includes(id)) spec.stageSettings[id]!.values.count = 1;
@@ -149,16 +211,17 @@ export function stageForTask(taskId: string): CreationStage {
 }
 export function summarizeCreation(spec: CreationSpec): string[] {
   return [creationSubjects.find(s => s.id === spec.subject)?.label ?? spec.subject,
-    ...creationOptions.filter(o => !o.subjects || o.subjects.includes(spec.subject)).flatMap(o => {
+    ...creationOptions.filter(o => optionAppliesToSubject(o, spec.subject)).flatMap(o => {
       const v = spec.attributes[o.id]; if (v === undefined || v === '') return [];
       return [`${o.label}: ${o.values.find(x => x.value === v)?.label ?? String(v)}`];
-    }), ...Object.entries(spec.attributes).filter(([key, value]) => key.startsWith('custom.') && String(value).trim()).map(([, value]) => String(value))];
+    }), ...Object.entries(applicableAttributes(spec)).filter(([key, value]) => key.startsWith('custom.') && String(value).trim()).map(([, value]) => String(value))];
 }
 export function validateCreation(value: CreationSpec, kind: GraphicsKind): CreationSpec {
   if (!value || value.schemaVersion !== 1 || creationSubjects.find(s => s.id === value.subject)?.kind !== kind) throw Error('대상 종류와 제작 프리셋을 확인하세요.');
   const values = (v: CreationValues) => { if (!v || typeof v !== 'object' || Array.isArray(v) || Object.keys(v).length > 100 || Object.entries(v).some(([k,x]) => k.length > 100 || !['string','number','boolean'].includes(typeof x) || typeof x === 'number' && !Number.isFinite(x) || typeof x === 'string' && x.length > 2000)) throw Error('제작 옵션 값이 잘못됐습니다.'); };
   const text = (s: unknown) => { if (typeof s !== 'string' || s.length > 12000) throw Error('제작 지시는 12,000자 이내로 입력하세요.'); };
   values(value.attributes); text(value.instruction);
+  if (value.physicalSize !== undefined) normalizePhysicalSize(value.physicalSize);
   if (!Array.isArray(value.locks) || value.locks.some(x => !creationLocks.some(l => l.id === x))) throw Error('유지 잠금 항목을 확인하세요.');
   if (!value.stageSettings || typeof value.stageSettings !== 'object' || Object.keys(value.stageSettings).some(k => !creationStages.some(s => s.id === k))) throw Error('제작 단계 설정을 확인하세요.');
   for (const s of Object.values(value.stageSettings)) { if (!s) throw Error('단계 설정이 없습니다.'); text(s.instruction); values(s.values); if (s.values.count !== undefined && (!Number.isInteger(s.values.count) || Number(s.values.count) < 1 || Number(s.values.count) > 4)) throw Error('후보 수는 1–4개입니다.'); }
@@ -186,17 +249,24 @@ const imageLabels: Record<string, Record<string, string>> = {
 /** Deterministic option compilation. No model call, no execution on option changes. */
 export function compileCreation(object: GraphicsObject, taskId: string): { settings: CreationValues; instruction: string; spec: CreationSpec } {
   const spec = validateCreation(effectiveCreation(object), object.kind), stage = stageForTask(taskId), settings = creationSettings(object, stage);
-  const selectionProblem = creationSelectionProblem(spec, stage);
+  // A05 uses the common size contract only, not the Unity delivery route/collider/compression choices.
+  const selectionProblem = taskId === 'A05' ? undefined : creationSelectionProblem(spec, stage);
   if (selectionProblem) throw Error(selectionProblem);
   // Cleared optional descriptions must not become default wording in the frozen request.
   for (const key of ['direction', 'framing', 'pose', 'background', 'perspective', 'margin', 'motionPreset'])
     if (settings[key] === '') delete settings[key];
+  if (!isBiologicalSubject(spec.subject)) {
+    delete settings.pose;
+    if (['upper', 'face'].includes(String(settings.framing))) delete settings.framing;
+  }
   const part = spec.attributes.composition === 'parts' && spec.activePartId ? spec.parts.find(p => p.id === spec.activePartId && p.enabled) : undefined;
   settings.subject = spec.subject;
+  if (stage !== 'design' && spec.physicalSize !== undefined) settings.physicalSize = JSON.stringify(normalizePhysicalSize(spec.physicalSize));
   if (stage === 'design') settings.imageSchedule = 'parallel-native-4';
-  for (const [key, value] of Object.entries(spec.attributes)) if (value !== '') settings[`attr.${key}`] = value;
-  for (const lock of spec.locks) settings[`lock.${lock}`] = true;
-  const free = [spec.instruction, spec.stageSettings[stage]?.instruction, ...Object.entries(spec.attributes).filter(([k]) => k.startsWith('custom.')).map(([, v]) => String(v))].filter(Boolean).join('\n');
+  for (const [key, value] of Object.entries(applicableAttributes(spec))) if (value !== '') settings[`attr.${key}`] = value;
+  const locks = spec.locks.filter(id => creationLockAppliesToSubject(id, spec.subject));
+  for (const lock of locks) settings[`lock.${lock}`] = true;
+  const free = [spec.instruction, spec.stageSettings[stage]?.instruction, ...Object.entries(applicableAttributes(spec)).filter(([k]) => k.startsWith('custom.')).map(([, v]) => String(v))].filter(Boolean).join('\n');
   settings.freeInstruction = (['T02','T05'].includes(taskId) ? spec.stageSettings[stage]?.instruction ?? '' : free).slice(0, 12000);
   settings.requestedParts = JSON.stringify(spec.parts.filter(p => p.enabled));
   const partWork = part && !['I01','I02','M07','M08'].includes(taskId) && ['design','model','surface','assembly'].includes(stage);
@@ -204,7 +274,7 @@ export function compileCreation(object: GraphicsObject, taskId: string): { setti
   const descriptions = [...summarizeCreation(spec), spec.instruction, spec.stageSettings[stage]?.instruction].filter(Boolean);
   if (stage === 'design') for (const [key, labels] of Object.entries(imageLabels)) if (settings[key] !== undefined) descriptions.push(`${key}: ${labels[String(settings[key])] ?? String(settings[key])}`);
   if (partWork) descriptions.push(`제작 대상 파츠만: ${part.label}. ${part.instruction}. 전체 디자인의 비율·색·스타일을 유지하고 다른 파츠는 생성하지 마세요.`);
-  if (spec.locks.length) descriptions.push(`유지할 특징: ${spec.locks.map(id => creationLocks.find(l => l.id === id)!.label).join(', ')}. 변경 지시와 충돌하면 무시하지 말고 원인을 보고하세요. 외형 보존을 자동 검증했다고 주장하지 마세요.`);
+  if (locks.length) descriptions.push(`유지할 특징: ${locks.map(id => creationLocks.find(l => l.id === id)!.label).join(', ')}. 변경 지시와 충돌하면 무시하지 말고 원인을 보고하세요. 외형 보존을 자동 검증했다고 주장하지 마세요.`);
   if (stage === 'animation') descriptions.push([settings.motionPreset ? `동작: ${settings.motionPreset}` : '', settings.rootMotion ? '이동 동작' : '제자리', settings.loop ? '반복' : '단발'].filter(Boolean).join(', '));
   return { settings, instruction: descriptions.join('\n'), spec };
 }

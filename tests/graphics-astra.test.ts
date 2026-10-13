@@ -79,6 +79,27 @@ test("new model contracts reject ambiguous parts, unknown edit IDs, multi-candid
   });
 });
 
+test("M06 name resolution rejects missing or ambiguous prepared names before dispatch or worker creation", async t => {
+  for (const variant of ["missing", "duplicate"] as const) await t.test(variant, async child => {
+    const f = fixture(child, "M06"), source = f.input();
+    f.args.task.settings.editMeshNames = '["selected-part"]';
+    let workers = 0, prepareCalls = 0;
+    const execute = createGraphicsAstraExecutor({ workerFactory: () => { workers++; return f.worker(f.authored); }, runBlender: async (...args) => {
+      await blenderMock(...args);
+      const q = read(args[1].at(-1)!);
+      assert.equal(q.mode, "prepare"); prepareCalls++;
+      const baseline = read(q.report);
+      baseline.meshes = variant === "missing" ? [{ id: "other", name: "unrelated-part" }] :
+        [{ id: "first", name: "selected-part" }, { id: "second", name: "selected-part" }];
+      write(q.report, baseline);
+    } });
+    await assert.rejects(execute(f.args), /유일하게 연결되지/);
+    assert.equal(prepareCalls, 1); assert.equal(workers, 0);
+    assert.equal(hash(source.file), source.version.files[0].sha256);
+    assert(!fs.existsSync(path.join(f.root, "graphics/jobs/task-1/astra/dispatch.json")));
+  });
+});
+
 test("enabled appendage and explicit structural lock require positive host evidence", async t => {
   for (const setting of ["rigWings", "rigClothing", "rigCloth", "rigAccessories", "lock.rig"] as const) await t.test(setting, async child => {
     const f = fixture(child); f.input(); f.args.task.settings[setting] = true;

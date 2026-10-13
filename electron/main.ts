@@ -675,6 +675,16 @@ app.whenReady().then(async () => {
     })) },
   );
   graphics = new GraphicsEngine(store, engine, {
+    storageRoot: (() => {
+      const installed = app.isPackaged ? path.dirname(app.getPath('exe')) : app.getAppPath();
+      let candidate = installed;
+      for (let i = 0; i < 5; i++, candidate = path.dirname(candidate)) {
+        try {
+          if (fs.existsSync(path.join(candidate, '.git')) && JSON.parse(fs.readFileSync(path.join(candidate, 'package.json'), 'utf8')).name === 'partsmith') return candidate;
+        } catch { /* Packaged apps may have no development checkout. */ }
+      }
+      return installed;
+    })(),
     ffmpegPath: app.isPackaged ? path.join(process.resourcesPath, "media", "ffmpeg.exe") : path.join(app.getAppPath(), "node_modules", "ffmpeg-static", "ffmpeg.exe"),
     video: createGraphicsVideoExecutor({
       ffmpegPath: app.isPackaged ? path.join(process.resourcesPath, "media", "ffmpeg.exe") : path.join(app.getAppPath(), "node_modules", "ffmpeg-static", "ffmpeg.exe"),

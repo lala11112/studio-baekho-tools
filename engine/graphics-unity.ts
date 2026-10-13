@@ -4,6 +4,7 @@ import os from "node:os";
 import { createHash } from "node:crypto";
 import { runProcess } from "./local";
 import { isGraphicsClipName, type AssetVersion, type GraphicsFile, type GraphicsObject, type UnityClipSettings, type UnityDelivery, type UnityTargetProfile } from "../shared/graphics";
+import { normalizePhysicalSize, type PhysicalSize, type SizeVector } from "../shared/graphics-size";
 
 export const GRAPHICS_UNITY_CONVERTER = "graphics-unity-1";
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -123,6 +124,7 @@ type QueueRequest = {
   pipeline: string; converterVersion: string; structure: string; rigType: string;
   mode: string; files: Output[]; expectedClips: string[]; sources: { path: string; sha256: string }[];
   profileFiles: { path: string; sha256: string }[]; spritePixelsPerUnit: number; materialManifest?: string; optimization?:GraphicsUnityOptimization; clipSettings?:UnityClipSettings[];
+  physicalSize?:PhysicalSize;
 };
 function assertRequestBinding(root:string, delivery:UnityDelivery, q:QueueRequest) {
   if(q.files?.some(file=>file.destination===delivery.destination+"/Generated/materials.json") && q.materialManifest!==delivery.destination+"/Generated/materials.json")throw Error("Unity 재질 역할 manifest 연결이 고정 요청과 다릅니다.");
@@ -144,6 +146,11 @@ function assertRequestBinding(root:string, delivery:UnityDelivery, q:QueueReques
     const file=safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/animation.json`);
     if(sha(file)!==animationFile.sha256||JSON.stringify(json(file).clipSettings??[])!==JSON.stringify(q.clipSettings??[]))throw Error("Unity 동작 설정이 고정된 원본 검사 기록과 다릅니다.");
   }else if(q.clipSettings?.length)throw Error("Unity 동작 설정에 대응하는 원본 검사 기록이 없습니다.");
+  if(q.physicalSize){
+    const evidence=q.files.find(file=>file.destination===delivery.destination+"/Generated/physical-size.json");
+    const file=safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/physical-size.json`);
+    if(!evidence||sha(file)!==evidence.sha256||JSON.stringify(normalizePhysicalSize(json(file).settings))!==JSON.stringify(normalizePhysicalSize(q.physicalSize)))throw Error("Unity 실제 크기 설정이 고정된 원본 치수 검사와 다릅니다.");
+  }
 }
 export type PrepareUnityDeliveryArgs = { projectRoot: string; object: GraphicsObject; versions: AssetVersion[]; profile: UnityTargetProfile; blenderPath: string; resources: string; signal?: AbortSignal; clipSettings?:UnityClipSettings[] };
 const busy = new Set<string>();
@@ -195,6 +202,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
   const inputs = validateSources(a.projectRoot, a.object, a.versions);
   const sprite = a.object.kind === "sprite" || a.object.kind === "ui";
   const optimization=graphicsUnityOptimization(a.object.settings);
+  const physicalSize=normalizePhysicalSize(a.object.settings.physicalSize);
   if(sprite&&(optimization.lodEnabled||optimization.collider!=="none"))throw Error("스프라이트 전달은 3D LOD·충돌체를 지원하지 않습니다.");
   const models = inputs.filter(i=>/\.(fbx|blend|glb|obj)$/i.test(i.path));
   // A version may contain preview GLB beside its editable/native source.
@@ -222,8 +230,8 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
   const bridgeSource = path.join(a.resources,"unity/Editor/PartsmithGraphicsBridge.cs");
   const converterSource = path.join(a.resources,"blender/graphics_prepare.py");
   const combineSource = path.join(a.resources,"blender/graphics_combine.py");
-  const converterVersion = GRAPHICS_UNITY_CONVERTER + "-" + digest(fs.readFileSync(bridgeSource)).slice(0,12) + "-" + digest(fs.readFileSync(converterSource)).slice(0,12) + (combine ? "-" + digest(fs.readFileSync(combineSource)).slice(0,12) : "");
-  const identity = digest(JSON.stringify({ objectId:a.object.id, versionIds:a.versions.map(v=>v.id), inputs:inputs.map(i=>({path:i.path,sha256:i.sha256})), ...(combine?{clips:clips.map(v=>({versionId:v.id,action:v.slot})),rigVersion:rigs[0].id}:{}), profile:target.fingerprint, converterVersion, rigType, sprite, spritePixelsPerUnit,optimization,clipSettings }));
+  const converterVersion = GRAPHICS_UNITY_CONVERTER + "-" + digest(fs.readFileSync(bridgeSource)).slice(0,12) + "-" + digest(fs.readFileSync(converterSource)).slice(0,12) + "-" + digest(fs.readFileSync(path.join(a.resources,"blender/graphics_size.py"))).slice(0,12) + (combine ? "-" + digest(fs.readFileSync(combineSource)).slice(0,12) : "");
+  const identity = digest(JSON.stringify({ objectId:a.object.id, versionIds:a.versions.map(v=>v.id), inputs:inputs.map(i=>({path:i.path,sha256:i.sha256})), ...(combine?{clips:clips.map(v=>({versionId:v.id,action:v.slot})),rigVersion:rigs[0].id}:{}), profile:target.fingerprint, converterVersion, rigType, sprite, spritePixelsPerUnit,optimization,clipSettings,physicalSize }));
   const id = identity.slice(0,32), dest = `Assets/PartsmithGraphics/${objectFolder(a.object.id)}`;
   const staging = safePath(root,`Library/PartsmithGraphicsStaging/${id}`);
   const deliveryFile = safePath(root,`Library/PartsmithGraphicsStaging/${id}/delivery.json`);
@@ -294,12 +302,14 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
           merge=combinedReport; nativeSource=combined;
           copied.push({original:combined,local:combined,sha256:sha(combined)});
         }
-        write(spec,{source:nativeSource,inputRoot,files:copied,output:path.join(temp,"export"),optimization,clipSettings});
+        write(spec,{source:nativeSource,inputRoot,files:copied,output:path.join(temp,"export"),optimization,clipSettings,physicalSize});
         a.signal?.throwIfAborted();
         await runProcess(a.blenderPath,["--background","--factory-startup","--disable-autoexec","--python-exit-code","1","--python",converterSource,"--",spec]);
         a.signal?.throwIfAborted();
         const converted=json(path.join(temp,"export/inspection.json"));
         if(!converted.structure || !Array.isArray(converted.clips)) throw Error("Blender 구조 검사 결과가 없습니다.");
+        const sizeEvidence=json(path.join(temp,"export/physical-size.json"));
+        if(sizeEvidence.schemaVersion!==1||sizeEvidence.sourceSha256!==sha(nativeSource)||sizeEvidence.originalPreserved!==true||JSON.stringify(normalizePhysicalSize(sizeEvidence.settings))!==JSON.stringify(physicalSize)||["x","y","z"].some(axis=>!Number.isFinite(sizeEvidence.dimensionsMeters?.[axis])||sizeEvidence.dimensionsMeters[axis]<0))throw Error("Blender의 실제 크기·원본 해시 검사 결과가 고정 요청과 다릅니다.");
         const animationManifest=json(path.join(temp,"export/animation.json"));
         if(animationManifest.schemaVersion!==1||JSON.stringify(animationManifest.clipSettings)!==JSON.stringify(clipSettings)||!Array.isArray(animationManifest.clips)||animationManifest.clips.length!==clipSettings.length)throw Error("Blender 동작 설정의 검사 근거가 고정 요청과 다릅니다.");
         for(const setting of clipSettings){const evidence=animationManifest.clips.find((clip:{name:string})=>clip.name===setting.name);if(!evidence||Math.abs(evidence.sourceFps-setting.fps)>.0001||!Number.isFinite(evidence.firstFrame)||!Number.isFinite(evidence.lastFrame)||evidence.lastFrame<=evidence.firstFrame)throw Error("Blender 동작 이름·FPS·프레임 범위 검사에 실패했습니다.");}
@@ -333,7 +343,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
     validateSources(a.projectRoot,a.object,a.versions);
     if(readUnityTarget(root).fingerprint!==target.fingerprint)throw Error("처리 중 Unity 대상 설정이 변경됐습니다.");
     a.signal?.throwIfAborted();
-    const request: QueueRequest={schemaVersion:1,requestId:id,objectId:a.object.id,objectName:a.object.name,destination:dest,resultPath,profileFingerprint:target.fingerprint,unityVersion:target.unityVersion,pipeline:target.pipeline,converterVersion,structure,rigType,mode:sprite?"sprite":"model",files:outputs,expectedClips,sources:inputs.map(i=>({path:i.absolute,sha256:i.sha256})),profileFiles:profileFiles(root),spritePixelsPerUnit,optimization,clipSettings,...(!sprite?{materialManifest:dest+"/Generated/materials.json"}:{})};
+    const request: QueueRequest={schemaVersion:1,requestId:id,objectId:a.object.id,objectName:a.object.name,destination:dest,resultPath,profileFingerprint:target.fingerprint,unityVersion:target.unityVersion,pipeline:target.pipeline,converterVersion,structure,rigType,mode:sprite?"sprite":"model",files:outputs,expectedClips,sources:inputs.map(i=>({path:i.absolute,sha256:i.sha256})),profileFiles:profileFiles(root),spritePixelsPerUnit,optimization,clipSettings,...(!sprite?{materialManifest:dest+"/Generated/materials.json",physicalSize}:{})};
     // User code is not overwritten. Existing .meta files are deliberately never replaced.
     if(!fs.existsSync(bridgeDest)||sha(bridgeDest)!==bridgeHash){fs.mkdirSync(path.dirname(bridgeDest),{recursive:true});fs.copyFileSync(bridgeSource,bridgeDest);}
     write(bridgeRecord,{sha256:bridgeHash,converterVersion});
@@ -396,6 +406,11 @@ export function inspectUnityDelivery(projectPath: string, delivery: UnityDeliver
     if(r.requestId!==delivery.id || r.objectId!==delivery.objectId || r.profileFingerprint!==delivery.profileFingerprint || r.converterVersion!==delivery.converterVersion || !["imported","failed","conflict"].includes(r.status))throw Error("Unity 결과와 고정한 전달 요청이 다릅니다.");
     result.status=r.status;result.warnings=[...new Set([...result.warnings,...(r.warnings??[])])];result.errors=[...new Set([...result.errors,...(r.errors??[])])];
     if(r.status==="imported") {
+      if(request.physicalSize){
+        const evidence=json(safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/physical-size.json`));
+        if(!r.physicalSize||r.physicalSize.sourceSha256!==evidence.sourceSha256||JSON.stringify(normalizePhysicalSize(r.physicalSize.settings))!==JSON.stringify(normalizePhysicalSize(request.physicalSize)))throw Error("Unity 결과에 실제 크기 설정·원본 연결 검증이 없습니다.");
+        for(const axis of ["x","y","z"] as const){const expected=evidence.dimensionsMeters[axis],actual=r.physicalSize.dimensionsMeters?.[axis];if(!Number.isFinite(actual)||Math.abs(actual-expected)>Math.max(.001,expected*.001))throw Error("Unity에 가져온 치수가 로컬 전달본 검사와 다릅니다: "+axis);}
+      }
       const contracted=request.clipSettings??[];
       if(contracted.length){
         if(!Array.isArray(r.clipSettings)||r.clipSettings.length!==contracted.length)throw Error("Unity 결과에 고정 클립 설정 검증이 없습니다.");

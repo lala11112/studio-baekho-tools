@@ -5,6 +5,10 @@ import {
   creationLocks,
   humanParts,
   toggleCreationChoice,
+  changeCreationSubject,
+  isBiologicalSubject,
+  optionAppliesToSubject,
+  creationLockAppliesToSubject,
   type CreationSpec,
   type CreationStage,
 } from "../shared/graphics-creation";
@@ -75,8 +79,9 @@ export function CreationOptions({
   const attr = (key: string, value: Value) =>
     onChange({ ...spec, attributes: { ...spec.attributes, [key]: value } });
   const options = creationOptions.filter(
-    (option) => !option.subjects || option.subjects.includes(spec.subject),
+    (option) => optionAppliesToSubject(option, spec.subject),
   );
+  const biological = isBiologicalSubject(spec.subject);
   const choice = (
     label: string,
     key: string,
@@ -124,7 +129,7 @@ export function CreationOptions({
               value={spec.subject}
               disabled={disabled}
               onChange={(event) =>
-                onChange({ ...spec, subject: event.target.value })
+                onChange(changeCreationSubject(spec, event.target.value))
               }
             >
               {creationSubjects
@@ -136,6 +141,7 @@ export function CreationOptions({
                 ))}
             </select>
           </label>
+          <p className="gs-fine">다른 분류는 ‘새 오브젝트’에서 선택하세요. 기존 원본과 채택 결과는 유지됩니다.</p>
           {attributeOptions(false)}
           <label>
             목록에 없는 특징 · 전체 외형 설명
@@ -183,11 +189,10 @@ export function CreationOptions({
             ])}
             {choice("구도", "framing", "full", [
               ["full", "전체"],
-              ["upper", "상반신"],
-              ["face", "얼굴"],
+              ...(biological ? [["upper", "상반신"], ["face", "얼굴"]] as [string, string][] : []),
               ["part", "지정 부위"],
             ])}
-            {choice(
+            {biological && choice(
               "자세",
               "pose",
               spec.subject === "human" ? "a" : "natural",
@@ -219,7 +224,7 @@ export function CreationOptions({
               확인한 뒤 채택하세요.
             </p>
             <div className="gs-lock-options">
-              {creationLocks.map((option) => (
+              {creationLocks.filter(option => creationLockAppliesToSubject(option.id, spec.subject)).map((option) => (
                 <label key={option.id}>
                   <input
                     type="checkbox"

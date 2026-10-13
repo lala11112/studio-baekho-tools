@@ -1591,3 +1591,33 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Local inspection and shared physical sizing: compact, flowing, no overlays. */
+.gs-execution-summary{display:flex;flex-wrap:wrap;gap:6px 18px;padding:8px 10px;border:1px solid #34483e;border-radius:8px;font-size:12px;background:#17241e}
+.gs-execution-summary span{overflow-wrap:anywhere}.gs-execution-summary b{color:#a7c2b3;margin-right:5px}
+.gs-size-panel{min-width:0;display:grid;gap:8px;border:1px solid #465e4b;border-radius:8px;padding:10px;margin:0 0 12px}
+.gs-size-panel legend{font-weight:700}.gs-size-panel label{display:grid;gap:4px}.gs-size-panel p{margin:0;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.gs-size-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px}.gs-size-fields input{min-width:0;width:100%}.gs-size-actions{display:flex;gap:6px;flex-wrap:wrap}.gs-size-actions button{white-space:normal;height:auto;min-height:30px}
+.gs-storage code{overflow-wrap:anywhere}.gs-storage-rows article{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;padding:10px 0;border-bottom:1px solid #334139}.gs-storage-rows small{grid-column:1/-1}
+.gs-mesh-correction{display:flex;align-items:center;flex-wrap:wrap;gap:7px;padding:8px;border:1px solid #42564b;border-radius:7px}.gs-mesh-correction p{flex-basis:100%;margin:0;font-size:12px}
+.gs-model-provenance{color:#c3d8ac}.gs-api-model-options[open]{border:1px solid #4b6452;padding:8px;border-radius:6px}
+
+/* A narrow/zoomed shell has three stacked regions; the two-row desktop rule
+   otherwise collapses the object picker beneath the workspace. */
+@media (max-width: 760px) {
+  .app-body > .graphics-studio[data-testid="graphics-studio"] {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+  .app-body > .graphics-studio > .gs-objects {
+    min-height: 0;
+    max-height: min(35vh, 240px);
+    overflow-y: auto;
+  }
+  .graphics-studio .gs-object-list { flex: 0 0 auto; }
+  .graphics-studio .gs-object { flex: 0 0 180px; width: 180px; }
+  .graphics-studio .gs-create > .gs-subject-chooser { grid-column: 1 / -1; }
+  .app-body > .graphics-studio:has(.gs-empty) {
+    grid-template-rows: auto minmax(0, 1fr) minmax(80px, 22vh);
+  }
+  .app-body > .graphics-studio:has(.gs-empty) > .gs-objects { max-height: none; }
+}

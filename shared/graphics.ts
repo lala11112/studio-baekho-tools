@@ -70,6 +70,8 @@ export type GraphicsWorkspace = {
   connections?: { name: string; available: boolean; message: string; checkedAt: string }[];
   /** Read-only inspect-legacy response only; never saved in the workspace. */
   legacyPreview?: { versions: AssetVersion[]; fingerprint: string; objectName: string };
+  /** Transient, read-only storage inspection; never persisted with production state. */
+  storageReport?: import('./graphics-storage').GraphicsStorageReport;
 };
 
 /** Unlink only an unused legacy collection. Never remove production objects or their history. */
@@ -100,7 +102,7 @@ export function isGraphicsClipName(value: unknown): value is string {
 }
 
 export type GraphicsAction =
-  | { kind: "create-object"; name: string; objectKind: GraphicsKind }
+  | { kind: "create-object"; name: string; objectKind: GraphicsKind; creation?: CreationSpec }
   | { kind: "update-object"; objectId: string; patch: Partial<Pick<GraphicsObject, "name" | "selectedTasks" | "instruction" | "settings" | "references" | "creation">> }
   | { kind: "import"; objectId: string; role: GraphicsRole; clipName?: string }
   | { kind: "accept"; objectId: string; versionId: string }
@@ -110,4 +112,4 @@ export type GraphicsAction =
   | { kind: "set-tripo-budget"; credits: number }
   | { kind: "import-legacy"; versionIds: string[]; fingerprint: string }
   | { kind: "unlink-legacy"; objectId: string }
-  | { kind: "inspect-target" | "audit-usage" | "inspect-legacy" | "probe-connections" };
+  | { kind: "inspect-target" | "audit-usage" | "inspect-legacy" | "probe-connections" | "inspect-storage" };

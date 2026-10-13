@@ -8,6 +8,7 @@ import sys
 from mathutils import Matrix, Vector
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from graphics_glb import export_packed_glb
+from graphics_size import apply_physical_size
 
 spec_path = pathlib.Path(sys.argv[sys.argv.index('--') + 1]).resolve()
 q = json.loads(spec_path.read_text(encoding='utf8'))
@@ -40,8 +41,8 @@ if not meshes:
 if any(obj.library for obj in bpy.context.scene.objects):
     raise RuntimeError('Linked external objects must be made local explicitly before export')
 
-# Refuse ambiguous transform baking on animated objects; authored Actions stay intact.
-if operation == 'A05' and (scale != 1 or pivot != 'keep'):
+# Legacy relative transforms remain explicit. New absolute fitting is shared with Unity.
+if not q.get('physicalSize') and operation == 'A05' and (scale != 1 or pivot != 'keep'):
     if any(obj.animation_data or obj.constraints for obj in bpy.context.scene.objects):
         raise RuntimeError('Transforming animated/constrained objects needs an explicit authoring review')
     if any(obj.type == 'ARMATURE' for obj in bpy.context.scene.objects):
@@ -56,7 +57,7 @@ if pivot in ('center', 'bottom'):
         anchor.z = low.z
 transform = Matrix.Scale(scale, 4) @ Matrix.Translation(-anchor)
 roots = [obj for obj in bpy.context.scene.objects if obj.parent is None and obj.type not in ('CAMERA', 'LIGHT')]
-if operation == 'A05' and (scale != 1 or pivot != 'keep'):
+if not q.get('physicalSize') and operation == 'A05' and (scale != 1 or pivot != 'keep'):
     # A common asset root gives Unity a stable pivot without changing vertex/UV data.
     root = bpy.data.objects.new('Partsmith_AssetRoot', None)
     bpy.context.scene.collection.objects.link(root)
@@ -67,6 +68,8 @@ if operation == 'A05' and (scale != 1 or pivot != 'keep'):
         obj.parent = root
         obj.matrix_world = transform @ world
     bpy.context.view_layer.update()
+
+physical_size = apply_physical_size(q.get('physicalSize'), original_hash)
 
 files = []
 glb_images = []
@@ -114,6 +117,7 @@ report = {'schemaVersion': 1, 'identity': q['identity'], 'operation': operation,
     'meshCount': len(meshes), 'vertexCount': sum(len(obj.data.vertices) for obj in meshes),
     'geometryAuthored': False, 'motionAuthored': False, 'unityPlaybackVerified': False,
     'warnings': warnings, 'glbImages': glb_images}
+report['physicalSize'] = physical_size
 temporary = out / 'report.json.tmp'
 temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf8')
 temporary.replace(out / 'report.json')

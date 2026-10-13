@@ -6,6 +6,11 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { skeletonOverlay } from "./skeleton-overlay";
 import { loadedModelBounds, frameModelBounds } from "./viewport-framing";
+import { meshEntries, gltfMeshIdentities, inspectMeshes, showMeshAppearance, syncMeshWire, disposeMeshInspection,
+  measurementGuides, disposeGuides, formatLength, type MeshEntry, type MeshSelection,
+  type ModelMeasurement, type PreviewTransform } from "./viewport-inspection";
+import { physicalSizeTransform, type PhysicalSize } from "../shared/graphics-size";
+import "./viewport-inspection.css";
 import {
   RotateCcw,
   Move,
@@ -23,6 +28,12 @@ type Props = {
   onSelect?: (id: string) => void;
   onTransform?: (id: string, t: Transform) => void;
   animation?: boolean;
+  onMeshSelect?: (selection: MeshSelection | null) => void;
+  onBounds?: (measurement: ModelMeasurement) => void;
+  previewTransform?: PreviewTransform;
+  physicalSize?: PhysicalSize;
+  unitsKnown?: boolean;
+  nativePolygonCount?: number;
 };
 export function Viewport({
   project,
@@ -31,6 +42,7 @@ export function Viewport({
   onSelect,
   onTransform,
   animation,
+  onMeshSelect, onBounds, previewTransform, physicalSize, unitsKnown = false, nativePolygonCount,
 }: Props) {
   const host = useRef<HTMLDivElement>(null),
     api = useRef<any>(null);
@@ -42,8 +54,33 @@ export function Viewport({
     [showSkeleton, setShowSkeleton] = useState(true),
     [boneCount, setBoneCount] = useState(0),
     [mode, setMode] = useState<"translate" | "rotate" | "scale">("translate");
-  const callbacks = useRef({ onSelect, onTransform });
-  callbacks.current = { onSelect, onTransform };
+  const [meshList, setMeshList] = useState<MeshEntry[]>([]);
+  const [selectedMesh, setSelectedMesh] = useState("");
+  const [hiddenMeshes, setHiddenMeshes] = useState<string[]>([]);
+  const [solid, setSolid] = useState(false), [wire, setWire] = useState(false), [guides, setGuides] = useState(false);
+  const [hasAnimation, setHasAnimation] = useState(false);
+  const callbacks = useRef({ onSelect, onTransform, onMeshSelect, onBounds });
+  callbacks.current = { onSelect, onTransform, onMeshSelect, onBounds };
+  const baseline = inspectMeshes(meshList);
+  let effectiveTransform = previewTransform, sizeError = "";
+  if (physicalSize && baseline.measurement) {
+    try {
+      const t = physicalSizeTransform({ min: baseline.bounds.min, max: baseline.bounds.max }, physicalSize,
+        baseline.measurement.hasSkin || baseline.measurement.hasMorph || hasAnimation);
+      effectiveTransform = { scale: [t.factors.x, t.factors.y, t.factors.z],
+        translation: [-t.anchor.x * t.factors.x, -t.anchor.y * t.factors.y, -t.anchor.z * t.factors.z] };
+    } catch (error) { sizeError = error instanceof Error ? error.message : String(error); }
+  }
+  const calibrated = unitsKnown || (!!physicalSize && physicalSize.mode !== "keep" && !sizeError);
+  const appearance = useRef({ solid, wire, selectedMesh, hiddenMeshes, guides, previewTransform: effectiveTransform, unitsKnown: calibrated });
+  appearance.current = { solid, wire, selectedMesh, hiddenMeshes, guides, previewTransform: effectiveTransform, unitsKnown: calibrated };
+  const inspected = inspectMeshes(meshList, effectiveTransform);
+  const selectedStats = inspectMeshes(meshList.filter(entry => entry.id === selectedMesh), effectiveTransform);
+  function selectMesh(id: string) {
+    setSelectedMesh(id);
+    const entry = meshList.find(item => item.id === id);
+    callbacks.current.onMeshSelect?.(entry ? { id: entry.id, name: entry.name, sourceId: entry.sourceId, sourceName: entry.sourceName } : null);
+  }
   const skeletonVisible = useRef(showSkeleton);
   skeletonVisible.current = showSkeleton;
   const sources = previewId
@@ -76,7 +113,14 @@ export function Viewport({
     const actions: THREE.AnimationAction[] = [];
     const skeletons: NonNullable<ReturnType<typeof skeletonOverlay>>[] = [];
     setBoneCount(0);
+    setMeshList([]); setSelectedMesh(""); setHiddenMeshes([]); setHasAnimation(false);
+    callbacks.current.onMeshSelect?.(null);
+    const entries: MeshEntry[] = [];
+    const previewRoot = new THREE.Group();
+    let measures: THREE.Group | undefined;
+    let hasAnyAnimation = false;
     const scene = new THREE.Scene();
+    scene.add(previewRoot);
     scene.background = new THREE.Color("#151a1b");
     scene.fog = new THREE.Fog("#151a1b", 9, 22);
     let renderer: THREE.WebGLRenderer;
@@ -124,9 +168,36 @@ export function Viewport({
     axes.position.set(-0.8, 0.01, 0.6);
     scene.add(axes);
     const objects = new Map<string, THREE.Group>();
+    const applyInspection = () => {
+      const state = appearance.current;
+      for (const entry of entries) {
+        showMeshAppearance(entry, state.solid, state.selectedMesh === entry.id);
+        entry.mesh.visible = entry.originallyVisible && !state.hiddenMeshes.includes(entry.id);
+      }
+    };
+    const applyPreview = () => {
+      const state = appearance.current, transform = state.previewTransform;
+      previewRoot.scale.fromArray(transform?.scale ?? [1, 1, 1]);
+      previewRoot.position.fromArray(transform?.translation ?? [0, 0, 0]);
+      previewRoot.updateWorldMatrix(true, true);
+      if (measures) disposeGuides(measures);
+      measures = measurementGuides(inspectMeshes(entries, transform).bounds, state.unitsKnown);
+      measures.visible = state.guides;
+      scene.add(measures);
+      grid.visible = entries.length === 0;
+      axes.visible = entries.length === 0;
+    };
     const fitModels = (direction = camera.position.clone().sub(orbit.target)) => {
       const bounds = loadedModelBounds(objects.values());
-      const framing = frameModelBounds(camera, bounds, direction);
+      const framingBounds = bounds.clone();
+      if (appearance.current.guides && appearance.current.unitsKnown && entries.length) {
+        const rest = inspectMeshes(entries, appearance.current.previewTransform).bounds;
+        const margin = rest.getSize(new THREE.Vector3()).length() * 0.12;
+        // A true 1 m bar can exceed a tiny object. Include both endpoints rather
+        // than silently clipping the scale reference at the edge of the canvas.
+        framingBounds.expandByPoint(new THREE.Vector3(rest.min.x + 1, rest.min.y, rest.max.z + margin * 2));
+      }
+      const framing = frameModelBounds(camera, framingBounds, direction);
       if (!framing) return false;
       if (previewId) {
         // Imported origins may lie halfway through the asset. Move only the
@@ -183,7 +254,9 @@ export function Viewport({
           const group = new THREE.Group();
           group.userData.partId = s.id;
           group.add(gltf.scene);
-          scene.add(group);
+          // Bounds are captured in the source rest pose, before preview-only sizing.
+          previewRoot.scale.set(1, 1, 1); previewRoot.position.set(0, 0, 0);
+          previewRoot.add(group);
           group.position.fromArray(s.transform.position);
           group.rotation.set(
             ...(s.transform.rotation.map((x) =>
@@ -194,6 +267,15 @@ export function Viewport({
           if (explode && !previewId) group.position.x += (i - 1) * 0.65;
           group.traverse((o) => (o.userData.partId = s.id));
           objects.set(s.id, group);
+          const added = meshEntries(group, s.id, gltfMeshIdentities(gltf.scene, gltf.parser));
+          entries.push(...added);
+          added.forEach(entry => scene.add(entry.wire));
+          hasAnyAnimation ||= gltf.animations.length > 0;
+          setHasAnimation(hasAnyAnimation);
+          setMeshList([...entries]);
+          const measurement = inspectMeshes(entries).measurement;
+          if (measurement) callbacks.current.onBounds?.({ ...measurement, hasAnimation: hasAnyAnimation });
+          applyInspection(); applyPreview();
           fitModels();
           const skeleton = skeletonOverlay(gltf.scene);
           if (skeleton) {
@@ -265,7 +347,7 @@ export function Viewport({
     }
     const ray = new THREE.Raycaster();
     const down = (event: MouseEvent) => {
-      if (controls.dragging || previewId) return;
+      if (controls.dragging) return;
       const r = renderer.domElement.getBoundingClientRect();
       ray.setFromCamera(
         new THREE.Vector2(
@@ -275,7 +357,13 @@ export function Viewport({
         camera,
       );
       const hits = ray.intersectObjects([...objects.values()], true);
-      if (hits[0]) callbacks.current.onSelect?.(hits[0].object.userData.partId);
+      const hit = hits.find(hit => entries.some(entry => entry.mesh === hit.object && entry.mesh.visible));
+      if (hit) {
+        const entry = entries.find(item => item.mesh === hit.object)!;
+        setSelectedMesh(entry.id);
+        callbacks.current.onMeshSelect?.({ id: entry.id, name: entry.name, sourceId: entry.sourceId, sourceName: entry.sourceName });
+        if (!previewId) callbacks.current.onSelect?.(entry.assetId);
+      }
     };
     renderer.domElement.addEventListener("dblclick", down);
     const resize = new ResizeObserver(() => {
@@ -289,7 +377,8 @@ export function Viewport({
     });
     resize.observe(host.current);
     const clock = new THREE.Clock();
-    api.current = { camera, orbit, controls, actions, mixers, objects, scene, skeletons, fitModels };
+    api.current = { camera, orbit, controls, actions, mixers, objects, scene, skeletons, fitModels,
+      applyInspection, applyPreview, entries, playing };
     controls.setMode(mode);
     const tick = () => {
       frame = requestAnimationFrame(tick);
@@ -297,6 +386,8 @@ export function Viewport({
       if (api.current?.playing !== false) mixers.forEach((m) => m.update(dt));
       skeletons.forEach(s => { if (s.overlay.visible) s.update(); });
       orbit.update();
+      scene.updateMatrixWorld(true);
+      entries.forEach(entry => syncMeshWire(entry, appearance.current.wire));
       renderer.render(scene, camera);
     };
     tick();
@@ -306,6 +397,9 @@ export function Viewport({
       resize.disconnect();
       orbit.dispose();
       controls.dispose();
+      renderer.domElement.removeEventListener("dblclick", down);
+      entries.forEach(disposeMeshInspection);
+      if (measures) disposeGuides(measures);
       scene.traverse((o: any) => {
         o.geometry?.dispose();
         const materials = Array.isArray(o.material) ? o.material : [o.material];
@@ -321,6 +415,10 @@ export function Viewport({
       renderer.domElement.remove();
     };
   }, [signature, project.id, selectedPart, previewId, explode, animation]);
+  useEffect(() => { api.current?.applyInspection(); }, [solid, selectedMesh, hiddenMeshes]);
+  const transformSignature = JSON.stringify(effectiveTransform);
+  useEffect(() => { api.current?.applyPreview(); api.current?.fitModels(); }, [transformSignature, calibrated]);
+  useEffect(() => { api.current?.applyPreview(); api.current?.fitModels(); }, [guides]);
   useEffect(() => {
     if (api.current) api.current.playing = playing;
   }, [playing]);
@@ -347,8 +445,8 @@ export function Viewport({
     current.orbit.update();
   }
   return (
-    <div className="viewport" data-bone-count={boneCount} data-skeleton-visible={boneCount > 0 && showSkeleton}>
-      <div className="canvas" ref={host} />
+    <div className="viewport inspection-viewport" data-bone-count={boneCount} data-skeleton-visible={boneCount > 0 && showSkeleton}
+      data-mesh-count={meshList.length} data-wire-visible={wire} data-display-mode={solid ? "solid" : "material"}>
       <div className="viewport-top">
         <span className="viewport-label">
           <span className="status-dot" />{" "}
@@ -365,7 +463,14 @@ export function Viewport({
           </button>
         </div>
       </div>
-      <div className="viewport-tools">
+      {meshList.length > 0 && <div className="inspection-toolbar">
+        <button aria-pressed={!solid} onClick={() => setSolid(false)}>재질 보기</button>
+        <button aria-pressed={solid} onClick={() => setSolid(true)}>단색 보기</button>
+        <button data-testid="viewport-wire-toggle" aria-pressed={wire} onClick={() => setWire(!wire)}>메시 선 {wire ? "ON" : "OFF"}</button>
+        <button aria-pressed={guides} onClick={() => setGuides(!guides)}>치수·기준자 {guides ? "ON" : "OFF"}</button>
+      </div>}
+      <div className="inspection-canvas-wrap"><div className="canvas" ref={host} />
+      {!previewId && !!onTransform && <div className="viewport-tools">
         {(
           [
             ["translate", Move],
@@ -389,21 +494,44 @@ export function Viewport({
         >
           <Layers3 size={17} />
         </button>
-      </div>
+      </div>}
       {!sources.some((s) => s.asset) && (
         <div className="guide-label">
           조립 가이드 <span>생성 결과가 아닙니다</span>
         </div>
       )}
-      {error && <div className="viewport-error">{error}</div>}
+      {(error || sizeError) && <div className="viewport-error">{error || sizeError}</div>}
+      </div>
       <div className="viewport-bottom">
         <span>
           {previewId
             ? "드래그 회전 · 휠 확대"
             : "드래그 회전 · 휠 확대 · 더블클릭 파츠 선택"}
         </span>
-        <span>Y ↑ · m</span>
+        <span>Y ↑ · {calibrated ? "m" : "원본 단위 · 미터 미확인"}</span>
       </div>
+      {meshList.length > 0 && <details className="mesh-inspector">
+        <summary>메시·부품 검사 · {meshList.length}개 · {inspected.triangles.toLocaleString()} 삼각형</summary>
+        <p>GLB 삼각형 메시 기준입니다. 기본 자세에서 측정하며, 한 메시를 임의의 신체 부위로 나누지 않습니다.</p>
+        <div className="mesh-statistics" data-testid="viewport-total-stats">
+          <strong>전체</strong><span>정점 {inspected.vertices.toLocaleString()}</span><span>삼각형 {inspected.triangles.toLocaleString()}</span>
+          <span>원본 면 {nativePolygonCount?.toLocaleString() ?? "미확인"}</span><span>재질 {inspected.materials}</span>
+          <span>{inspected.measurement?.size.map((value, index) => `${["X", "Y", "Z"][index]} ${formatLength(value, calibrated)}`).join(" · ")}</span>
+        </div>
+        {selectedMesh && <div className="mesh-statistics" data-testid="viewport-selected-stats"><strong>선택 부품</strong>
+          <span>정점 {selectedStats.vertices.toLocaleString()}</span><span>삼각형 {selectedStats.triangles.toLocaleString()}</span>
+          <span>원본 면 미확인</span><span>재질 {selectedStats.materials}</span>
+          <span>{selectedStats.measurement?.size.map((value, index) => `${["X", "Y", "Z"][index]} ${formatLength(value, calibrated)}`).join(" · ")}</span>
+        </div>}
+        <div className="mesh-list" role="list" aria-label="실제 메시 목록">{meshList.map(entry => <div role="listitem" key={entry.id}>
+          <button aria-pressed={selectedMesh === entry.id} onClick={() => selectMesh(selectedMesh === entry.id ? "" : entry.id)} title={entry.sourceName}>{entry.name}</button>
+          <button aria-label={`${entry.name} ${hiddenMeshes.includes(entry.id) ? "표시" : "숨기기"}`} onClick={() => setHiddenMeshes(hidden => hidden.includes(entry.id) ? hidden.filter(id => id !== entry.id) : [...hidden, entry.id])}>{hiddenMeshes.includes(entry.id) ? "표시" : "숨김"}</button>
+          <button aria-label={`${entry.name} 단독 보기`} onClick={() => { selectMesh(entry.id); setHiddenMeshes(meshList.filter(item => item.id !== entry.id).map(item => item.id)); }}>단독</button>
+        </div>)}</div>
+        <button onClick={() => { setHiddenMeshes([]); selectMesh(""); }}>전체 복원</button>
+        {!calibrated && <p>실제 미터 크기는 미확인입니다. 크기 설정에서 기준 길이를 지정하세요.</p>}
+        {onMeshSelect && selectedMesh && <p>선택 메시를 보정 지시의 대상으로 전달합니다. 선 보기·숨김은 저장된 원본을 바꾸지 않습니다.</p>}
+      </details>}
       {animation && clips.length > 0 && (
         <div className="playback">
           <button onClick={() => setPlaying(!playing)}>

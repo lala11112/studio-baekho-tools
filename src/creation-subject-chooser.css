@@ -1,0 +1,11 @@
+.gs-subject-chooser { min-width: 0; padding: 10px; margin: 0; border: 1px solid var(--border, #35473e); border-radius: 8px; }
+.gs-subject-chooser legend { font-size: 14px; font-weight: 700; padding: 0 4px; }
+.gs-subject-groups, .gs-subject-targets { display: flex; flex-wrap: wrap; gap: 5px; }
+.gs-subject-groups { margin-bottom: 10px; }
+.gs-subject-chooser button { min-height: 30px; height: auto; max-width: 100%; padding: 5px 8px; font-size: 12px; line-height: 1.35; white-space: normal; overflow-wrap: anywhere; }
+.gs-subject-chooser button[aria-pressed="true"] { border-color: #bedcb0; background: #31483b; color: #e1f2d9; box-shadow: inset 0 0 0 1px #bedcb0; }
+.gs-subject-chooser button:focus-visible { outline: 2px solid #bedcb0; outline-offset: 2px; }
+.gs-subject-chooser button:disabled { opacity: .55; }
+.gs-subject-description, .gs-subject-current { font-size: 12px; line-height: 1.5; margin: 8px 0 0; overflow-wrap: anywhere; }
+.gs-subject-description { color: var(--muted, #a7b8ae); }
+.gs-subject-current { font-weight: 600; }
