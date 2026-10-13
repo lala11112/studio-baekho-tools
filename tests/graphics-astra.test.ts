@@ -47,13 +47,14 @@ async function blenderMock(_executable: string, command: string[], _signal?: Abo
   const q = read(command.at(-1)!);
   if (q.mode === "prepare") {
     fs.writeFileSync(q.outputBlend, "host-prepared immutable scene");
-    write(q.report, { identity: q.identity, nonce: q.nonce, sourceSha256: q.sourceSha256, meshes: [{ id: "mesh-original" }] });
+    write(q.report, { identity: q.identity, nonce: q.nonce, sourceSha256: q.sourceSha256, meshes: [{ id: "mesh-original" }], ...(q.candidateRevision ? { candidateRevisionContract: {} } : {}) });
   } else {
     glb(path.join(q.output, "asset.glb"));
     for (const name of ["front", "side", "back"]) {
       const png = new PNG({ width: 8, height: 8 }); png.data.fill(140); fs.writeFileSync(path.join(q.output, name + ".png"), PNG.sync.write(png));
     }
-    write(q.report, { identity: q.identity, nonce: q.nonce, operation: q.operation, sourceSha256: q.sourceSha256, outputSha256: hash(q.outputBlend), passed: true, meshes: [{ id: "mesh-original", vertices: 8, weightedVertices: 8 }], files: ["asset.glb", "front.png", "side.png", "back.png"], checks: Object.fromEntries(["meshLineage", "topology", "materials", "actionsPreserved", "weights", "deformation", "skeleton", "clipRange", "motion", "skinPreserved", "armatureModifiersPreserved", "animationDependencies", "animationSkeletonPreserved"].map(key => [key, true])) });
+    if (q.candidateRevision) fs.writeFileSync(path.join(q.output, "asset.fbx"), "native polygon fixture");
+    write(q.report, { identity: q.identity, nonce: q.nonce, operation: q.operation, sourceSha256: q.sourceSha256, outputSha256: hash(q.outputBlend), passed: true, meshes: [{ id: "mesh-original", vertices: 8, weightedVertices: 8 }], files: [...(q.candidateRevision ? ["asset.fbx"] : []), "asset.glb", "front.png", "side.png", "back.png"], checks: Object.fromEntries(["meshLineage", "topology", "materials", "actionsPreserved", "weights", "deformation", "skeleton", "clipRange", "motion", "skinPreserved", "armatureModifiersPreserved", "animationDependencies", "animationSkeletonPreserved", "candidateStatic", "candidateObjectPreserved"].map(key => [key, true])) });
   }
 }
 
@@ -129,6 +130,75 @@ test("parts refresh rejects missing or corrupt completion evidence before Blende
 
 test("Astra routes only the actual catalog operation IDs", () => {
   assert.deepEqual(graphicsAstraOperations, ["M05", "M06", "M07", "M08", "M09", "M15", "R01", "R02", "R03", "N04", "N05", "N06"]);
+});
+
+test("M05 explicit candidate revision preserves unaccepted model/material role and part slot with an exact static source", async t => {
+  for (const role of ["model", "material"] as const) await t.test(role, async child => {
+    const f = fixture(child, "M05"), source = f.input(role, ".blend", "part-head"), context = f.input("model", ".blend", "main");
+    delete f.args.object.accepted[`${role}:part-head`];
+    const acceptance = structuredClone(f.args.object.accepted), hashes = [hash(source.file), hash(context.file)];
+    f.args.task.settings = { editSourceMode: "candidate", sourceVersionId: source.version.id, editSourceSlot: "part-head" };
+    let workers = 0;
+    const execute = createGraphicsAstraExecutor({ runBlender: async (...args) => {
+      const q = read(args[1].at(-1)!);
+      assert.equal(q.candidateRevision, true); assert.equal(q.sourceSha256, source.version.files[0].sha256);
+      if (q.mode === "prepare") assert.equal(fs.readFileSync(q.source, "utf8"), fs.readFileSync(source.file, "utf8"));
+      await blenderMock(...args);
+    }, workerFactory: () => f.worker(task => {
+      workers++; assert.equal(task.requestedModel, "gpt-6-astra");
+      assert.match(task.prompt, /explicit static candidate revision/);
+      assert.match(task.prompt, new RegExp(`Source version: ${source.version.id}\\.`));
+      return f.authored(task);
+    }) });
+    const result = await execute(f.args);
+    assert.equal(result.role, role); assert.equal(result.slot, "part-head");
+    assert(result.files.findIndex(file => file.path.endsWith('.fbx')) < result.files.findIndex(file => file.path.endsWith('.glb')));
+    assert.deepEqual(f.args.object.accepted, acceptance); assert.deepEqual([hash(source.file), hash(context.file)], hashes);
+    f.args.recoveryOnly = true; assert.deepEqual(await execute(f.args), result); assert.equal(workers, 1);
+  });
+});
+
+test("M05 candidate revision rejects missing/stale identity, wrong role/object, implicit permission and unsupported native sources before dispatch", async t => {
+  for (const variant of ["missing-source", "unknown-source", "missing-slot", "stale-slot", "other-object", "rig", "design", "implicit", "rigged", "morph", "modifier", "no-static-proof"])
+    await t.test(variant, async child => {
+      const f = fixture(child, "M05"), source = f.input(variant === "rig" ? "rig" : variant === "design" ? "design" : "model", ".blend", "part-head");
+      f.input("model", ".blend", "main"); // An accepted context must never become a fallback editable source.
+      delete f.args.object.accepted[`${source.version.role}:part-head`];
+      f.args.task.settings = { editSourceMode: "candidate", sourceVersionId: source.version.id, editSourceSlot: "part-head" };
+      if (variant === "missing-source") delete f.args.task.settings.sourceVersionId;
+      if (variant === "unknown-source") f.args.task.settings.sourceVersionId = "unknown-version";
+      if (variant === "missing-slot") delete f.args.task.settings.editSourceSlot;
+      if (variant === "stale-slot") f.args.task.settings.editSourceSlot = "part-body";
+      if (variant === "other-object") source.version.objectId = "other-object";
+      if (variant === "implicit") delete f.args.task.settings.editSourceMode;
+      let workers = 0;
+      const execute = createGraphicsAstraExecutor({ workerFactory: () => { workers++; throw Error("Unexpected worker"); }, runBlender: async (...args) => {
+        await blenderMock(...args);
+        const q = read(args[1].at(-1)!); assert.equal(q.mode, "prepare");
+        const report = read(q.report);
+        if (variant === "rigged") report.rigs = [{ name: "armature" }];
+        if (variant === "morph") report.meshes[0].shapeKeys = "morph";
+        if (variant === "modifier") report.meshes[0].modifiers = [{ type: "SUBSURF" }];
+        if (variant === "no-static-proof") delete report.candidateRevisionContract;
+        write(q.report, report);
+      } });
+      await assert.rejects(execute(f.args), /후보|채택 원본/);
+      assert.equal(workers, 0);
+      assert.equal(fs.existsSync(path.join(f.root, "graphics/jobs/task-1/astra/dispatch.json")), false);
+    });
+});
+
+test("M05 accepted-source mode retains its existing contract and now preserves a part source slot", async t => {
+  for (const slot of ["main", "part-head"]) await t.test(slot, async child => {
+    const f = fixture(child, "M05"), source = f.input("model", ".blend", slot);
+    f.args.task.settings.sourceVersionId = source.version.id;
+    const result = await createGraphicsAstraExecutor({ workerFactory: () => f.worker(f.authored), runBlender: async (...args) => {
+      assert.equal(read(args[1].at(-1)!).candidateRevision, undefined);
+      await blenderMock(...args);
+    } })(f.args);
+    assert.equal(result.slot, slot); assert.equal(result.role, "model");
+    assert.equal(result.files.some(file => file.path.endsWith('.fbx')), false);
+  });
 });
 
 test("M09 rejects stale selection, absent explicit source, invalid caps and unsupported native scope before authoring", async t => {

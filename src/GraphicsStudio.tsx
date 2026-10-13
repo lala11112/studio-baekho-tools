@@ -56,6 +56,8 @@ import {
   effectiveCreation,
   summarizeCreation,
   selectMissingSurfaceRepair,
+  selectModelRevision,
+  changeCreationAssemblyMode,
   type CreationSpec,
   type CreationStage,
 } from "../shared/graphics-creation";
@@ -848,6 +850,15 @@ export function GraphicsStudio({
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   }
 
+  function chooseRevisionSource(source: AssetVersion) {
+    if (disabled || active) return;
+    try {
+      setCreation(selectModelRevision(creation, source));
+      setStage('assembly'); setTaskId(undefined); setError('');
+      setNotice(`${source.label}을 추가 보정 원본으로 지정했습니다. 다듬을 위치와 유지할 부분을 적은 뒤 실행을 준비하세요. 채택 상태는 유지됩니다.`);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  }
+
   function showAuxiliary(view: "history" | "support" | "storage") {
     setAuxiliary(view);
     document
@@ -1347,6 +1358,7 @@ export function GraphicsStudio({
               <span><b>후보</b> {String(settings.count ?? 1)}개</span>
               {stage === 'model' && <span><b>목표 면 수</b> {Number(settings.faceLimit ?? 5000).toLocaleString()}</span>}
               {taskId === 'M09' && <span><b>보완 원본</b> {versions.find(version => version.id === settings.sourceVersionId)?.label ?? '미리보기에서 선택 필요'}</span>}
+              {taskId === 'M05' && settings.editSourceMode === 'candidate' && <span><b>보정 원본</b> {versions.find(version => version.id === settings.sourceVersionId)?.label ?? '미리보기에서 선택 필요'}</span>}
               {taskId === 'M09' && <span><b>추가 상한</b> {String(settings.repairMaxAddedFaces ?? 1500)}면 · {String(settings.repairMaxAddedVertices ?? 1000)}정점</span>}
               <span><b>목표 크기</b> {physicalSizeSummary(creation.physicalSize)}</span>
               <span><b>예상 비용</b> {activeTask.executor === 'local' ? '무료 · GPT 0회' : '준비 후 비용 카드 확인'}</span>
@@ -1887,7 +1899,11 @@ export function GraphicsStudio({
                     <p>위치·형태만 보정하며 다른 메시와 원본 구조를 보존합니다. 재생성·재토폴로지는 별도 작업입니다.</p>
                     <button disabled={disabled || active || shownVersion.role !== 'model' || !acceptedVersion(object, shownVersion) || (!meshSelection.sourceId && !meshSelection.sourceName)} onClick={() => {
                       const sourceName = meshSelection.sourceName;
-                      setCreation(current => ({ ...current, stageSettings: { ...current.stageSettings, assembly: { instruction: current.stageSettings.assembly?.instruction ?? '', values: { ...current.stageSettings.assembly?.values, assemblyMode: 'partial', editMeshIds: JSON.stringify(meshSelection.sourceId ? [meshSelection.sourceId] : []), editMeshNames: JSON.stringify(meshSelection.sourceId ? [] : [sourceName]), meshSelectionVersionId: shownVersion.id } } } }));
+                      setCreation(current => {
+                        const next = changeCreationAssemblyMode(current, 'partial');
+                        Object.assign(next.stageSettings.assembly!.values, { editMeshIds: JSON.stringify(meshSelection.sourceId ? [meshSelection.sourceId] : []), editMeshNames: JSON.stringify(meshSelection.sourceId ? [] : [sourceName]), meshSelectionVersionId: shownVersion.id });
+                        return next;
+                      });
                       setStage('assembly'); setTaskId(undefined);
                       setNotice('선택 부품을 수정 대상으로 지정했습니다. 수정할 내용을 적고 실행을 준비하세요.');
                     }}>선택 부품 보정하기</button>
@@ -1928,6 +1944,10 @@ export function GraphicsStudio({
                       {shownVersion.warnings.length > 0 && <div className="gs-result-notes" aria-label="결과 검토 사항">
                         <strong>검토할 사항</strong>
                         <ul>{shownVersion.warnings.map((warning, index) => <li className="gs-warning" key={index}>{warning}</li>)}</ul>
+                      </div>}
+                      {['model', 'material'].includes(shownVersion.role) && <div className="gs-result-notes" aria-label="결과 추가 보정">
+                        <button disabled={disabled || active} onClick={() => chooseRevisionSource(shownVersion)}>이 결과 더 보정</button>
+                        <small>현재 보는 결과의 형태를 이어서 수정합니다. 채택 전 후보도 지정할 수 있으며, 원본과 채택 상태는 유지됩니다.</small>
                       </div>}
                       {['model', 'material'].includes(shownVersion.role) && shownVersion.slot.startsWith('part-') && <div className="gs-result-notes" aria-label="파트 빠진 면 보완">
                         <p>분리된 파트에 두피·뒤통수처럼 빠진 면이 있으면, 이 원본의 기존 면을 보존하면서 보완할 수 있습니다. UV·텍스처는 보완 결과를 채택한 다음 준비하세요.</p>

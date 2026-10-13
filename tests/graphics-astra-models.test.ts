@@ -70,6 +70,32 @@ for index in range(4): bm.faces.new((top[index],top[(index+1)%4],apex))
 bm.to_mesh(mesh);bm.free();mesh.update()
 `;
 
+test("actual M05 static candidate keeps the unaccepted head slot and native FBX quads after vertex-only correction", { skip: !fs.existsSync(blender), timeout: 120_000 }, async t => {
+  const f = fixture(t, "M05"), original = path.join(f.root, "original.blend");
+  python(f.root, twoMeshes + `bpy.ops.wm.save_as_mainfile(filepath=${JSON.stringify(original)},compress=False)\n`);
+  const source = f.adopt(original, "model", "part-head"), originalHash = hash(original);
+  delete f.args.object.accepted['model:part-head'];
+  f.args.task.settings = { editSourceMode: "candidate", sourceVersionId: source.id, editSourceSlot: "part-head" };
+  const execute = f.execute(`bpy.data.objects['blade'].data.vertices[0].co.z += 0.1`);
+  const result = await execute(f.args);
+  assert.equal(result.slot, "part-head"); assert.equal(result.role, "model");
+  assert.equal(f.args.object.accepted['model:part-head'], undefined); assert.equal(hash(original), originalHash);
+  const report = read(path.join(f.root, result.files.find(file => file.kind === 'report')!.path));
+  assert.equal(report.checks.topology, true); assert.equal(report.checks.materials, true);
+  assert.equal(report.checks.candidateStatic, true); assert.equal(report.checks.candidateObjectPreserved, true);
+  const fbx = result.files.find(file => file.path.endsWith('.fbx'))!;
+  assert(fbx); assert(result.files.indexOf(fbx) < result.files.findIndex(file => file.path.endsWith('.glb')));
+  python(f.root, `import bpy
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.import_scene.fbx(filepath=${JSON.stringify(path.join(f.root, fbx.path))},use_image_search=False)
+meshes={obj.get('partsmith_id'):obj for obj in bpy.context.scene.objects if obj.type=='MESH'}
+assert set(meshes)=={'blade','handle'}
+assert all(len(obj.data.vertices)==8 and len(obj.data.polygons)==6 for obj in meshes.values())
+assert all(len(face.vertices)==4 for obj in meshes.values() for face in obj.data.polygons)
+`);
+  f.args.recoveryOnly = true; assert.deepEqual(await execute(f.args), result); assert.equal(f.calls(), 1);
+});
+
 test("actual M09 append-only repair retains an unaccepted source slot and rejects geometry, boundary, scope and dependency violations", { skip: !fs.existsSync(blender), timeout: 180_000 }, async t => {
   const f = fixture(t, "M09"), original = path.join(f.root, "original.blend");
   python(f.root, missingSurfaceSource + `bpy.ops.wm.save_as_mainfile(filepath=${JSON.stringify(original)},compress=False)\n`);

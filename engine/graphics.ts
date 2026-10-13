@@ -226,24 +226,25 @@ export class GraphicsEngine {
         if (mode === "auto" && o.settings.partId && !design) throw Error('이 파츠에 채택한 디자인 이미지가 없습니다. 파츠 참조를 채택하거나 텍스처 입력을 설명만 사용으로 변경하세요.');
         if (mode === "auto" && design) values.push(design);
       }
-    } else if (taskId === 'M09') {
+    } else if (taskId === 'M09' || taskId === 'M05' && o.settings.editSourceMode === 'candidate') {
       const source = w.versions.find(v => v.id === o.settings.sourceVersionId && v.objectId === o.id && ['model', 'material'].includes(v.role));
-      if (!source) throw Error('빠진 면을 보완할 모델 후보를 결과 화면에서 선택하세요. 채택 전 후보도 수정할 수 있습니다.');
-      if (o.settings.partId && source.slot !== `part-${o.settings.partId}`) throw Error('선택한 보완 원본과 현재 파츠가 다릅니다. 해당 파츠 결과에서 다시 선택하세요.');
+      if (!source) throw Error('수정할 모델 후보를 결과 화면에서 선택하세요. 채택 전 후보도 수정할 수 있습니다.');
+      if (o.settings.partId && source.slot !== `part-${o.settings.partId}` || taskId === 'M05' && o.settings.editSourceSlot !== source.slot) throw Error('선택한 수정 원본과 현재 파츠가 다릅니다. 해당 결과에서 다시 선택하세요.');
       values = [source, ...refs.filter(v => v.role !== 'motion-reference')];
       // Context is immutable and read-only: the original assembly plus sibling
       // parts help fit the patch without changing which candidate is repaired.
-      const producer = w.tasks.find(t => t.id === source.provenance.jobId && t.taskId === 'M07');
+      const producer = w.tasks.find(t => t.id === source.provenance.jobId);
       if (producer) {
         const siblings = new Set<string>();
-        for (const versionId of producer.outputVersionIds) {
+        for (const versionId of producer.taskId === 'M07' ? producer.outputVersionIds : []) {
           const version = w.versions.find(v => v.id === versionId && v.objectId === o.id && v.role === 'model');
           if (!version || version.slot === source.slot || siblings.has(version.slot)) continue;
           siblings.add(version.slot); values.push(version);
         }
         for (const versionId of producer.inputVersionIds) {
           const version = w.versions.find(v => v.id === versionId && v.objectId === o.id);
-          if (!version) throw Error('분리 원본의 참조 연결이 없습니다. 보완 작업을 시작하지 않습니다.');
+          if (!version) throw Error('수정 원본의 참조 연결이 없습니다. 작업을 시작하지 않습니다.');
+          if (['model', 'material', 'rig', 'animation'].includes(version.role) && version.slot === source.slot) continue;
           values.push(version);
         }
       }
@@ -465,7 +466,7 @@ export class GraphicsEngine {
     const count = Number(o.settings.count ?? 1);
     if (!Number.isInteger(count) || count < 1 || count > 4) throw Error("출력 개수는 1–4개입니다.");
     if (["I01", "I02", "I03", "I05", "I06", "M03", "M05", "M09", "N02", "N05", "N06"].includes(taskId) && !o.instruction.trim()) throw Error("제작 또는 수정할 내용을 입력하세요.");
-    if (taskId === 'M09' && compiled && !String(o.settings.freeInstruction ?? '').trim()) throw Error('추가 지시에 보완할 빠진 면과 유지할 경계를 적어 주세요.');
+    if ((taskId === 'M09' || taskId === 'M05' && o.settings.editSourceMode === 'candidate') && compiled && !String(o.settings.freeInstruction ?? '').trim()) throw Error('추가 지시에 수정할 부분과 유지할 내용을 적어 주세요.');
     if (["N02", "N04", "N05", "N06"].includes(taskId)) {
       if (!isGraphicsClipName(o.settings.clipName)) throw Error("정확한 클립 이름을 100자 이내로 입력하세요. 경로 구분자와 제어 문자는 사용할 수 없습니다.");
       if (!Number.isFinite(Number(o.settings.duration ?? 2)) || Number(o.settings.duration ?? 2) <= 0 || Number(o.settings.duration ?? 2) > 30) throw Error("동작 길이는 0초 초과 30초 이하입니다.");

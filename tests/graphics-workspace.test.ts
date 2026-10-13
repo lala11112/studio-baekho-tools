@@ -117,6 +117,37 @@ test("missing-surface repair freezes an unaccepted same-object candidate without
   assert.equal(f.calls.uploads.length + f.calls.submissions.length, 0);
 });
 
+test("candidate shape revision freezes part source and lineage context without adopting or charging", async t => {
+  const f = await fixture(t), whole = await f.importSource('model', 'whole.blend'), head = await f.importSource('model', 'head.blend'), body = await f.importSource('model', 'body.blend'), design = await f.importSource('design');
+  await f.graphics.action(f.project.id, { kind: 'accept', objectId: f.objectId, versionId: whole.version.id });
+  const saved = f.state();
+  Object.assign(saved.versions.find(v => v.id === head.version.id)!, { slot: 'part-head', provenance: { type: 'codex', jobId: 'previous-repair' } });
+  saved.versions.find(v => v.id === body.version.id)!.slot = 'part-body';
+  saved.tasks.push({ id: 'previous-repair', taskId: 'M09', objectId: f.objectId, status: 'review', inputVersionIds: [whole.version.id, body.version.id, design.version.id], outputVersionIds: [head.version.id], settings: {}, backendJobIds: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), instruction: 'prior repaired head', requestHash: 'fixture-only', message: 'Synthetic prior review', localOnly: false } as GraphicsTask);
+  f.store.put('graphics', f.project.id, saved);
+  const update = (settings: Record<string, string>) => f.graphics.action(f.project.id, { kind: 'update-object', objectId: f.objectId, patch: { selectedTasks: ['M05'], instruction: 'Smooth the temple transition and revise the scalp profile; keep face identity and original topology', settings: { editSourceMode: 'candidate', sourceVersionId: head.version.id, editSourceSlot: 'part-head', partId: 'head', ...settings } } });
+  await update({ sourceVersionId: 'missing' }); await assert.rejects(f.prepare('M05'), /모델 후보/);
+  await update({ editSourceSlot: 'part-body' }); await assert.rejects(f.prepare('M05'), /현재 파츠/);
+  await update({ partId: 'body' }); await assert.rejects(f.prepare('M05'), /현재 파츠/);
+  await update({}); const task = await f.prepare('M05');
+  assert.deepEqual(task.inputVersionIds, [head.version.id, whole.version.id, body.version.id, design.version.id]);
+  assert.equal(task.settings.editSourceSlot, 'part-head'); assert.equal(task.cost?.provider, 'Codex'); assert.equal(task.cost?.credits, null);
+  assert.equal(f.calls.native.length + f.calls.submissions.length + f.calls.uploads.length, 0);
+  await update({ sourceVersionId: whole.version.id, editSourceSlot: 'main', partId: '' });
+  f.setNative(async args => {
+    assert.equal(args.task.settings.sourceVersionId, head.version.id); assert.equal(args.inputs[0].slot, 'part-head');
+    assert.equal(args.task.objectSnapshot?.accepted['model:main'], whole.version.id);
+    const rel = 'graphics/test-results/head-revised.blend'; f.store.write(f.project.id, rel, 'revision fixture');
+    return { files: [{ path: rel, kind: 'blend' }], role: 'model', slot: 'part-head', label: 'shape revision', warnings: [] };
+  });
+  await f.graphics.action(f.project.id, { kind: 'approve', taskId: task.id }); await idle(f.graphics, f.project.id);
+  assert.equal(f.state().tasks.at(-1)!.status, 'review');
+  assert.equal(f.state().versions.at(-1)!.slot, 'part-head');
+  assert.deepEqual(f.state().objects[0].accepted, saved.objects[0].accepted);
+  await f.reopen(); assert.deepEqual(f.state().objects[0].accepted, saved.objects[0].accepted);
+  assert.equal(f.calls.submissions.length + f.calls.uploads.length, 0); assert.equal(f.calls.native.length, 1);
+});
+
 test("completed parts refresh is explicit, local-only, preserves adoption/history and deduplicates unchanged derivatives", async t => {
   const f = await fixture(t), source = await f.importSource("model", "source.blend");
   await f.graphics.action(f.project.id, { kind: "accept", objectId: f.objectId, versionId: source.version.id });

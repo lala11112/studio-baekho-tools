@@ -140,7 +140,42 @@ export function selectMissingSurfaceRepair(spec: CreationSpec, source: Pick<Asse
     repairMaxAddedFaces: assembly?.values.repairMaxAddedFaces ?? 1500,
     repairMaxAddedVertices: assembly?.values.repairMaxAddedVertices ?? 1000,
   } };
+  delete next.stageSettings.assembly.values.editSourceMode;
+  delete next.stageSettings.assembly.values.editSourceSlot;
   return next;
+}
+/** Explicit candidate selection changes only the draft; acceptance stays outside this helper. */
+export function selectModelRevision(spec: CreationSpec, source: Pick<AssetVersion, 'id' | 'slot' | 'role'>): CreationSpec {
+  if (!['model', 'material'].includes(source.role)) throw Error('더 보정할 모델 또는 재질 결과를 선택하세요.');
+  const partId = source.slot.startsWith('part-') ? source.slot.slice(5) : undefined;
+  if (partId && (spec.attributes.composition !== 'parts' || !spec.parts.some(part => part.id === partId && part.enabled))) throw Error('보정할 원본에 해당하는 파트를 선택하세요.');
+  if (!partId && (source.slot !== 'main' || spec.attributes.composition === 'parts')) throw Error('분리된 파트의 원본을 선택하세요.');
+  const next = structuredClone(spec), assembly = next.stageSettings.assembly;
+  next.activePartId = partId;
+  next.stageSettings.assembly = { instruction: assembly?.instruction ?? '', values: {
+    ...assembly?.values, assemblyMode: 'correct', editSourceMode: 'candidate', sourceVersionId: source.id, editSourceSlot: source.slot, count: 1,
+  } };
+  for (const key of ['meshSelectionVersionId', 'editMeshIds', 'editMeshNames']) delete next.stageSettings.assembly.values[key];
+  return next;
+}
+/** Candidate source authorization is scoped to the correction route and does not cross an explicit route change. */
+export function changeCreationAssemblyMode(spec: CreationSpec, mode: string): CreationSpec {
+  const next = structuredClone(spec), assembly = next.stageSettings.assembly ?? { instruction: '', values: {} };
+  if (assembly.values.editSourceMode === 'candidate' && mode !== 'correct') {
+    for (const key of ['editSourceMode', 'editSourceSlot', 'sourceVersionId', 'meshSelectionVersionId', 'editMeshIds', 'editMeshNames']) delete assembly.values[key];
+  }
+  assembly.values.assemblyMode = mode;
+  next.stageSettings.assembly = assembly;
+  return next;
+}
+function modelRevisionProblem(spec: CreationSpec, settings: CreationValues): string | undefined {
+  if (settings.editSourceMode !== 'candidate') return undefined;
+  if (typeof settings.sourceVersionId !== 'string' || !settings.sourceVersionId.trim()) return '미리보기에서 더 보정할 결과를 선택하세요.';
+  const slot = settings.editSourceSlot;
+  if (typeof slot !== 'string' || slot !== 'main' && !slot.startsWith('part-')) return '보정 원본의 파트 연결을 다시 지정하세요.';
+  const partId = slot.startsWith('part-') ? slot.slice(5) : undefined;
+  if (partId ? spec.attributes.composition !== 'parts' || spec.activePartId !== partId || !spec.parts.some(part => part.id === partId && part.enabled) : spec.attributes.composition === 'parts' || Boolean(spec.activePartId)) return '선택한 보정 원본과 현재 파트가 다릅니다. 해당 결과에서 더 보정을 다시 선택하세요.';
+  return undefined;
 }
 function missingSurfaceRepairProblem(spec: CreationSpec, settings: CreationValues): string | undefined {
   if (!String(settings.sourceVersionId ?? '').trim()) return '미리보기에서 보완할 원본 파트를 선택하세요.';
@@ -265,6 +300,7 @@ export function creationSelectionProblem(spec: CreationSpec, stage: CreationStag
   if (['design', 'model', 'surface', 'assembly'].includes(stage) && spec.attributes.composition === '') return '모델 구성 선택이 필요합니다. 이미지 또는 모델 단계에서 선택하세요.';
   if (stage === 'surface' && spec.attributes.composition === 'parts' && !spec.parts.some(part => part.id === spec.activePartId && part.enabled)) return 'UV·텍스처를 적용할 파트를 선택하세요.';
   if (stage === 'assembly' && s.assemblyMode === 'repair') return missingSurfaceRepairProblem(spec, s);
+  if (stage === 'assembly' && s.assemblyMode === 'correct') return modelRevisionProblem(spec, s);
   if (stage === 'model') {
     const part = creationCompositionStrategy(spec) === 'independent-parts' ? spec.parts.find(p => p.id === spec.activePartId && p.enabled) : undefined;
     return modelGeometryProblem({ ...s, ...(part ? { faceLimit: part.faceLimit } : {}) });
@@ -334,6 +370,11 @@ export function compileCreation(object: GraphicsObject, taskId: string): { setti
   // A05 uses the common size contract only, not the Unity delivery route/collider/compression choices.
   const selectionProblem = taskId === 'A05' ? undefined : creationSelectionProblem(spec, stage);
   if (selectionProblem) throw Error(selectionProblem);
+  if (taskId === 'M05' && settings.editSourceMode === 'candidate') {
+    const revisionProblem = modelRevisionProblem(spec, settings);
+    if (revisionProblem) throw Error(revisionProblem);
+    settings.count = 1;
+  }
   if (taskId === 'M09') {
     const repairProblem = missingSurfaceRepairProblem(spec, settings);
     if (repairProblem) throw Error(repairProblem);

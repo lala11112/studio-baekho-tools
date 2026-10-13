@@ -484,6 +484,8 @@ def prepare(q):
     evidence = snapshot(allow_empty=q['operation'] == 'M15')
     if q['operation'] == 'M09':
         evidence['repairContract'] = repair_contract()
+    if q['operation'] == 'M05' and q.get('candidateRevision') is True:
+        evidence['candidateRevisionContract'] = repair_contract()
     if q['operation'] in ('R03', 'N04', 'N05', 'N06') and not evidence['rigs']:
         raise RuntimeError('Accepted editable source has no actual rig')
     if q['operation'] == 'N06' and not any(action['name'] == q['actionName'] for action in evidence['actions']):
@@ -712,7 +714,7 @@ def preview(q, export_model=True):
     bpy.context.view_layer.objects.active = meshes[0]
     glb_images = []
     if export_model:
-        if q['operation'] == 'M09':
+        if q['operation'] == 'M09' or q['operation'] == 'M05' and q.get('candidateRevision') is True:
             bpy.ops.export_scene.fbx(filepath=str(out / 'asset.fbx'), use_selection=True,
                 object_types={'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y', apply_unit_scale=True,
                 apply_scale_options='FBX_SCALE_UNITS', use_mesh_modifiers=False, use_triangles=False,
@@ -883,6 +885,13 @@ def validate(q):
     checks['actionsPreserved'] = all(action['name'] == q['actionName'] and q['operation'].startswith('N') or action['name'] in new_actions and action['sha256'] == new_actions[action['name']]['sha256'] for action in baseline['actions'])
     if not checks['actionsPreserved']:
         raise RuntimeError('An untargeted original animation action was removed or modified')
+    if q['operation'] == 'M05' and q.get('candidateRevision') is True:
+        candidate_contract = repair_contract()
+        previous = baseline.get('candidateRevisionContract')
+        if not previous or previous['objects'] != candidate_contract['objects']:
+            raise RuntimeError('Static candidate revision changed an original object, transform, hierarchy or custom ID')
+        checks['candidateStatic'] = True
+        checks['candidateObjectPreserved'] = True
     evidence = {}
     if q['operation'] == 'M09':
         checks, evidence['repair'] = repair_checks(q, baseline, current)

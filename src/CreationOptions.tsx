@@ -8,6 +8,7 @@ import {
   setHumanPartsCreation,
   toggleCreationChoice,
   changeCreationSubject,
+  changeCreationAssemblyMode,
   isBiologicalSubject,
   optionAppliesToSubject,
   creationLockAppliesToSubject,
@@ -508,18 +509,24 @@ export function CreationOptions({
       )}
       {stage === "assembly" && (
         <>
-          {choice("이번에 할 작업", "assemblyMode", "correct", [
+          <Choices label="이번에 할 작업" value={settings.assemblyMode ?? 'correct'} disabled={disabled}
+            onChange={value => onChange(changeCreationAssemblyMode(spec, value))} values={[
             ["correct", "전체 비율·모양 수정"],
             ["assemble", "채택 파트 조립"],
             ["separate", "모델 파트 분리"],
             ["partial", "지정 메시만 수정"],
             ["repair", "빠진 면 보완"],
-          ])}
+          ]} />
           <p>
             채택한 파트를 전체 외형 참고에 맞춰 조립하거나, 기존 모델의 비율과
             모양을 수정합니다. 수정하지 않아도 되는 단일 모델은 리깅 또는 Unity
             단계로 이동할 수 있습니다.
           </p>
+          {settings.assemblyMode === 'correct' && settings.editSourceMode === 'candidate' && <section className="gs-human-workflow" aria-label="선택 결과 추가 보정">
+            <strong>선택한 결과에서 이어서 보정</strong>
+            <p>{activePart ? `현재 파트: ${activePart.label}. ` : ''}실행 설정에 표시된 원본의 형태와 비율을 수정합니다. 이번 단계 지시에 다듬을 위치와 유지할 부분을 적어 주세요.</p>
+            <p className="gs-fine">기존 면 연결·UV·재질을 유지하며 접합선과 각진 형태 등을 다듬습니다. 원본과 채택 상태는 유지하고, 수정 결과를 별도 후보로 확인합니다. 작업 종류를 바꾸면 이 원본 지정은 해제됩니다.</p>
+          </section>}
           {settings.assemblyMode === "repair" && (
             <section className="gs-human-workflow" aria-label="빠진 면 보완 범위">
               <strong>기존 면을 보존하고 빠진 면만 추가</strong>
