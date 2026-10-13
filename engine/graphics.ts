@@ -9,7 +9,8 @@ import { workbenchUsage } from "../shared/workbench-usage";
 import type { Workbench, WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from "../shared/workbench";
 import type { Generation, Quote } from "../shared/types";
 import type { AssetVersion, GraphicsAction, GraphicsFile, GraphicsObject, GraphicsRole, GraphicsTask, GraphicsWorkspace, UnityClipSettings } from "../shared/graphics";
-import { isGraphicsClipName, graphicsLegacyUnlinkProblem } from "../shared/graphics";
+import { isGraphicsClipName, graphicsLegacyUnlinkProblem, requiresPartSpaceRestoration } from "../shared/graphics";
+import { restoreTripoPartPreservation } from './tripo-part-preservation';
 import { compileCreation, validateCreation, creationCompositionStrategy } from "../shared/graphics-creation";
 import { freezeUnityRigContract } from '../shared/graphics-rig';
 import { DEFAULT_MODEL_FACE_LIMIT, requireModelGeometry } from '../shared/graphics-model-geometry';
@@ -62,6 +63,7 @@ type Options = {
   motionSource?: typeof executeGraphicsNative;
   procedural?: typeof executeGraphicsNative;
   prepareUnity?: typeof prepareUnityDelivery;
+  restorePartSpace?: typeof restoreTripoPartPreservation;
   legacyActive?: (id: string) => boolean;
   probe?: () => Promise<NonNullable<GraphicsWorkspace["connections"]>>;
 };
@@ -83,6 +85,10 @@ export class GraphicsEngine {
       let changed = false;
       for (const t of w.tasks.filter(t => t.status === "running")) {
         this.closeRuntimeApproval(t, "interrupted");
+        if (t.partSpaceRecoveryVersionId) {
+          t.status = 'failed'; t.message = '파트 크기·위치 복원이 중단됐습니다. 저장된 API 결과만 복구하며 새 제출은 하지 않습니다.';
+          changed = true; continue;
+        }
         if (t.taskId === "X05" && t.deliveryId && w.deliveries.some(d => d.id === t.deliveryId && d.status === "queued")) continue;
         const jobs = store.project(w.projectId).jobs.filter(j => j.quoteId === t.quoteId);
         if (jobs.length) t.backendJobIds = jobs.map(j => j.id);
@@ -372,6 +378,7 @@ export class GraphicsEngine {
       case "accept": {
         const o = this.object(w, action.objectId), v = w.versions.find(v => v.id === action.versionId && v.objectId === o.id);
         if (!v) throw Error("이 대상의 결과가 아닙니다."); for (const f of v.files) this.verified(id, f);
+        if (requiresPartSpaceRestoration(w, v)) throw Error('파트의 원래 크기·위치를 먼저 복원·검사하세요. API 원본은 별도로 보존합니다.');
         o.accepted[`${v.role}:${v.slot}`] = v.id;
         // Other slots and clips remain accessible. Compatibility is checked on delivery, not by deleting history.
         return this.save(w);
@@ -407,6 +414,7 @@ export class GraphicsEngine {
       case "prepare": return this.prepare(id, action.objectId, action.taskId);
       case "approve": return this.approve(id, action.taskId);
       case "recover": return this.recover(id, action.taskId);
+      case 'restore-part-space': return this.restorePartSpace(id, action.versionId);
       case "refresh-parts": return this.refreshParts(id, action.taskId);
       case "runtime-approval": {
         const task = w.tasks.find(value => value.id === action.taskId), pending = this.pendingApprovals.get(action.taskId);
@@ -432,7 +440,7 @@ export class GraphicsEngine {
         if (t.status === "review") throw Error("완료한 결과는 취소하지 않습니다. 다른 버전을 채택할 수 있습니다.");
         this.closeRuntimeApproval(t, "cancelled");
         this.active.get(t.id)?.controller.abort();
-        for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
+        if (!t.partSpaceRecoveryVersionId) for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
         if (t.deliveryId && t.targetProfile) {
           const index = w.deliveries.findIndex(d => d.id === t.deliveryId);
           if (index >= 0) {
@@ -442,7 +450,7 @@ export class GraphicsEngine {
             }
           }
         }
-        t.status = "cancelled"; t.message = "사용자가 중지했습니다. 이미 제출한 원격 작업의 과금 취소를 뜻하지는 않습니다."; t.updatedAt = now();
+        t.status = "cancelled"; t.message = t.partSpaceRecoveryVersionId ? '로컬 크기·위치 복원을 중지했습니다. 기존 API 결과는 유지합니다.' : "사용자가 중지했습니다. 이미 제출한 원격 작업의 과금 취소를 뜻하지는 않습니다."; t.updatedAt = now();
         return this.save(w);
       }
       case "import": throw Error("앱 파일 선택 창을 사용하세요.");
@@ -461,6 +469,7 @@ export class GraphicsEngine {
     if (graphicsProceduralTasks.has(taskId)) { const problem = proceduralProblem({ ...o.settings, count: 1 }, taskId); if (problem) throw Error(problem); }
     if (w.tasks.some(t => t.objectId === o.id && ["awaiting_approval", "running", "submission_unknown"].includes(t.status))) throw Error("이 대상의 기존 작업을 확인하거나 취소한 뒤 새 작업을 준비하세요.");
     const inputs = this.inputs(w, o, taskId);
+    if (inputs.some(version => requiresPartSpaceRestoration(w, version))) throw Error('API 파트 결과의 원래 크기·위치 복원을 먼저 완료하세요. 원본은 유지됩니다.');
     if (['M06', 'M09'].includes(taskId) && o.settings.meshSelectionVersionId !== undefined && inputs[0]?.id !== o.settings.meshSelectionVersionId)
       throw Error('메시를 선택한 원본과 현재 채택 모델이 다릅니다. 현재 모델에서 부품을 다시 선택하세요.');
     const count = Number(o.settings.count ?? 1);
@@ -717,9 +726,61 @@ export class GraphicsEngine {
     t.message = "저장된 분리 장면으로 미리보기를 갱신합니다. GPT·유료 생성 없음.";
     this.save(w); this.launch(id, taskId, true); return this.get(id);
   }
+  private restorePartSpace(id: string, versionId: string) {
+    const w = this.get(id), provider = w.versions.find(version => version.id === versionId);
+    if (!provider || !requiresPartSpaceRestoration(w, provider)) throw Error('크기·위치 검사가 필요한 API 파트 결과가 아닙니다.');
+    const task = w.tasks.find(task => task.outputVersionIds.includes(versionId));
+    if (!task || !['review', 'failed', ...(task.partSpaceRecoveryVersionId ? ['cancelled'] : [])].includes(task.status)) throw Error('완료된 API 결과만 로컬에서 복원할 수 있습니다.');
+    if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error('다른 제작이 실행 중입니다.');
+    const existing = w.versions.find(version => version.partSpace?.providerVersionId === provider.id);
+    if (existing) { for (const file of existing.files) this.verified(id, file); return w; }
+    const source = w.versions.find(version => version.id === task.inputVersionIds[0]);
+    if (!source || source.objectId !== provider.objectId || source.slot !== provider.slot || !provider.provenance.jobId) throw Error('API 파트의 고정 입력 연결이 없습니다.');
+    const sourceFile = source.files.find(file => /\.fbx$/i.test(file.path));
+    const providerFile = provider.files.find(file => /\.fbx$/i.test(file.path));
+    if (!sourceFile || !providerFile) throw Error('크기·위치 복원에는 입력과 결과의 원본 FBX가 필요합니다.');
+    for (const version of [source, provider]) for (const file of version.files) this.verified(id, file);
+    const controller = new AbortController();
+    this.active.set(task.id, { projectId: id, controller });
+    task.partSpaceRecoveryVersionId = provider.id; task.status = 'running'; task.updatedAt = now();
+    task.message = '저장된 파트의 원래 크기·위치를 복원하고 UV를 검사합니다. 새 GPT·API 제출 없음.';
+    this.save(w);
+    const restore = this.options.restorePartSpace ?? restoreTripoPartPreservation;
+    void restore({ projectRoot: this.store.directory(id), source: sourceFile, provider: providerFile,
+      sourceVersionId: source.id, providerJobId: provider.provenance.jobId, slot: provider.slot,
+      blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal: controller.signal,
+      onProgress: message => {
+        if (controller.signal.aborted) return;
+        const current = this.get(id), running = current.tasks.find(value => value.id === task.id);
+        if (running?.status === 'running') { running.message = message; running.updatedAt = now(); this.save(current); }
+      },
+    }).then(result => {
+      controller.signal.throwIfAborted();
+      const current = this.get(id), running = current.tasks.find(value => value.id === task.id)!;
+      if (running.status !== 'running' || running.partSpaceRecoveryVersionId !== provider.id) throw Error('복원 작업 상태가 변경됐습니다.');
+      for (const version of [source, provider]) for (const file of version.files) this.verified(id, file);
+      const files = result.files.map(file => this.file(id, file.path, file.kind));
+      const report = files.find(file => /\.json$/i.test(file.path));
+      if (!report || !files.some(file => /\.blend$/i.test(file.path)) || !files.some(file => /\.fbx$/i.test(file.path)) || !files.some(file => /\.glb$/i.test(file.path))) throw Error('복원한 원본·미리보기·검사 기록이 없습니다.');
+      const version: AssetVersion = { id: uid(), objectId: provider.objectId, role: provider.role, slot: provider.slot,
+        label: `${provider.label} · 원래 크기·위치`, files, createdAt: now(), sourceVersionIds: [provider.id, source.id],
+        provenance: { ...provider.provenance }, warnings: ['API 원본은 별도 보존했습니다. UV·재질은 API 결과를 사용하고 조립 크기·위치와 파트 식별자를 복원했습니다.'],
+        partSpace: { schemaVersion: 1, sourceVersionId: source.id, providerVersionId: provider.id, reportPath: report.path } };
+      current.versions.push(version); running.outputVersionIds.push(version.id);
+      running.status = 'review'; delete running.partSpaceRecoveryVersionId; running.updatedAt = now();
+      running.message = 'UV 결과의 원래 크기·위치 복원 완료. 새 API·GPT 요청 없이 저장된 결과를 복구했습니다. 확인 후 채택하세요.';
+      this.save(current);
+    }).catch(error => {
+      const current = this.get(id), running = current.tasks.find(value => value.id === task.id);
+      if (running && running.status !== 'cancelled') { running.status = 'failed'; running.updatedAt = now();
+        running.message = `파트 크기·위치 복원 보류 · ${error instanceof Error ? error.message : String(error)} · 기존 원본 유지, 새 유료 제출 없음`; this.save(current); }
+    }).finally(() => { this.active.delete(task.id); });
+    return this.get(id);
+  }
   async recover(id: string, taskId: string) {
     const w = this.get(id), t = w.tasks.find(t => t.id === taskId);
     if (!t || !["failed", "submission_unknown"].includes(t.status)) throw Error("복구할 중단 작업이 없습니다.");
+    if (t.partSpaceRecoveryVersionId) return this.restorePartSpace(id, t.partSpaceRecoveryVersionId);
     if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error("다른 제작이 실행 중입니다.");
     if (t.taskId === "X05" && !t.objectSnapshot?.accepted && !t.deliveryId) throw Error("이전 Unity 요청에 고정된 채택 기록이 없습니다. 새 전달 요청을 준비하세요. 원본은 보존됩니다.");
     if (t.quoteId) {
@@ -776,10 +837,12 @@ export class GraphicsEngine {
     for (const w of this.list()) {
       let changed = false;
       const p = this.store.project(w.projectId);
-      for (const t of w.tasks.filter(t => t.status === "running" && t.quoteId)) {
+      const restoreVersions: string[] = [];
+      for (const t of w.tasks.filter(t => t.status === "running" && t.quoteId && !t.partSpaceRecoveryVersionId)) {
         const jobs = p.jobs.filter(j => j.quoteId === t.quoteId);
         if (!jobs.length) continue;
         if (jobs.some(j => ["queued", "submitting", "running"].includes(j.status))) continue;
+        if (this.engine.isProjectActive(w.projectId)) continue;
         t.backendJobIds = jobs.map(j => j.id);
         const batchAssets = p.assets.filter(a => jobs.some(j => j.id === a.jobId && j.status === "success"));
         const newVersions: AssetVersion[] = [];
@@ -829,6 +892,7 @@ export class GraphicsEngine {
         w.versions.push(...newVersions); t.outputVersionIds.push(...newVersions.map(version => version.id));
         t.status = jobs.some(j => j.status === "submission_unknown") ? "submission_unknown" : jobs.every(j => j.status === "success") && t.outputVersionIds.length ? "review" : "failed";
         t.message = t.status === "review" ? "API 원본을 수집했습니다. 외형·UV·재질을 검토한 뒤 채택하세요." : jobs.map(j => j.message ?? j.status).join(" · "); t.updatedAt = now(); changed = true;
+        if (t.status === 'review') restoreVersions.push(...newVersions.filter(version => requiresPartSpaceRestoration(w, version)).map(version => version.id));
       }
       for (let i = 0; i < w.deliveries.length; i++) {
         const d = w.deliveries[i];
@@ -842,6 +906,16 @@ export class GraphicsEngine {
         }
       }
       if (changed) this.save(w);
+      // Continue the approved task with local normalization only. Startup/review
+      // browsing never transforms old results or replays a remote submission.
+      if (restoreVersions.length === 1) {
+        try { this.restorePartSpace(w.projectId, restoreVersions[0]); }
+        catch (error) {
+          const current = this.get(w.projectId), task = current.tasks.find(task => task.outputVersionIds.includes(restoreVersions[0]));
+          if (task) { task.status = 'failed'; task.partSpaceRecoveryVersionId = restoreVersions[0];
+            task.message = `파트 원래 크기·위치 검사 필요 · ${error instanceof Error ? error.message : String(error)}`; this.save(current); }
+        }
+      }
     }
   }
   private inspectLegacy(id: string): NonNullable<GraphicsWorkspace["legacyPreview"]> {

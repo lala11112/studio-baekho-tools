@@ -1,0 +1,67 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { defaultCreation, setHumanPartsCreation } from '../shared/graphics-creation';
+
+test('external part result requires local restoration before adoption and result viewing selects the restored derivative', { timeout: 60000 }, async () => {
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const { build } = await import('esbuild'), { _electron: electron } = await import('playwright');
+  const { default: electronBinary } = await import('electron');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'graphics-part-space-ui-'));
+  const creation = setHumanPartsCreation(defaultCreation('character'), 'whole-then-split');
+  creation.stageSettings.surface!.values = { count: 1, surfaceOperation: 'uv', uvMode: 'tripo' };
+  const object = { id: 'human', name: 'Ch', kind: 'character', createdAt: '', selectedTasks: [], instruction: '', settings: {}, references: [], accepted: { 'model:part-head': 'head-source' }, creation };
+  const version = (id: string, label: string) => ({ id, objectId: object.id, role: 'model', slot: 'part-head', label, files: [], createdAt: '', sourceVersionIds: [], provenance: { type: 'tripo' }, warnings: [] });
+  const raw = version('raw-uv', '외부 UV 원본');
+  const completed = { id: 'completed-uv', objectId: object.id, taskId: 'T01', createdAt: '2026-10-14T01:00:00Z', updatedAt: '', status: 'review', inputVersionIds: ['head-source'], outputVersionIds: ['raw-uv'], settings: { partId: 'head', partLabel: '머리', count: 1 }, instruction: '', requestHash: 'request', backendJobIds: ['remote-job'], message: '머리 UV 완료', localOnly: false, paidApproval: { provider: 'Tripo API', credits: 20, requestHash: 'request', approvedAt: '' } };
+  const initial = { schemaVersion: 1, id: 'ws', projectId: 'p', revision: 0, objects: [object], versions: [version('head-source', '채택한 머리'), raw], tasks: [completed], deliveries: [] };
+  const entry = `
+    import React,{useState}from'react';import{createRoot}from'react-dom/client';
+    import{GraphicsStudio}from${JSON.stringify(path.resolve('src/GraphicsStudio.tsx'))};
+    import${JSON.stringify(path.resolve('src/style.css'))};
+    window.desktop={assetUrl:()=>'',call:()=>{throw Error('Unexpected desktop request')}};window.actions=[];
+    const project={schemaVersion:1,id:'p',name:'Part restoration fixture',style:'',height:1,unityPath:'',unityFolder:'',createdAt:'',updatedAt:'',revision:0,assets:[],parts:[],jobs:[],assemblies:[],builds:[],demo:false};
+    function Harness(){const[workspace,setWorkspace]=useState(${JSON.stringify(initial)});window.workspace=workspace;
+      window.showRestorationState=status=>setWorkspace(current=>{const next=structuredClone(current);next.tasks[0].status=status;return next;});
+      window.finishRestore=()=>setWorkspace(current=>{const next=structuredClone(current);next.versions.push({...next.versions[1],id:'restored-uv',label:'복원한 머리 UV',provenance:{type:'local'},partSpace:{schemaVersion:1,sourceVersionId:'head-source',providerVersionId:'raw-uv',reportPath:'restored/report.json'}});next.tasks[0].outputVersionIds.push('restored-uv');next.tasks[0].status='review';delete next.tasks[0].partSpaceRecoveryVersionId;return next;});
+      const action=async value=>{window.actions.push(value);if(value.kind!=='restore-part-space')throw Error('Unexpected mutation');const next=structuredClone(workspace);next.tasks[0].status='running';next.tasks[0].partSpaceRecoveryVersionId=value.versionId;next.tasks[0].message='원래 크기·위치 복원 중';setWorkspace(next);return next;};
+      return <GraphicsStudio project={project} workspace={workspace} busy={false} onAction={action}/>;
+    }createRoot(document.getElementById('root')).render(<Harness/>);`;
+  await build({ stdin: { contents: entry, loader: 'tsx', resolveDir: process.cwd() }, bundle: true, format: 'iife', outfile: path.join(root, 'ui.js'), jsx: 'automatic', logLevel: 'silent' });
+  fs.writeFileSync(path.join(root, 'index.html'), '<!doctype html><html lang="ko"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src \'self\'; script-src \'self\'; style-src \'self\' \'unsafe-inline\'; connect-src \'none\'"><link rel="stylesheet" href="ui.css"></head><body style="margin:0"><div id="root"></div><script src="ui.js"></script></body></html>');
+  fs.writeFileSync(path.join(root, 'main.cjs'), `const{app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(root, 'profile'))});app.whenReady().then(()=>{const w=new BrowserWindow({show:false,width:1280,height:1000,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});w.loadFile(${JSON.stringify(path.join(root, 'index.html'))});});`);
+  const app = await electron.launch({ executablePath: electronBinary as unknown as string, args: [path.join(root, 'main.cjs')] });
+  try {
+    const page = await app.firstWindow(), errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message)); page.setDefaultTimeout(8000);
+    await page.getByRole('navigation', { name: '제작 단계', exact: true }).getByRole('button', { name: '3 재질', exact: true }).click();
+    await page.getByTestId('graphics-open-completed-result').click();
+    assert.equal(await page.getByTestId('graphics-part-space-warning').isVisible(), true);
+    assert.match(await page.getByTestId('graphics-part-space-warning').innerText(), /유지했는지 아직 확인하지 않았습니다/);
+    assert.equal(await page.getByTestId('graphics-accept-version').isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: '이 결과 더 보정', exact: true }).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: '이 파트 빠진 면 보완', exact: true }).isDisabled(), true);
+    assert.equal(await page.evaluate(() => (window as any).actions.length), 0);
+    await page.getByTestId('graphics-restore-part-space').click();
+    await page.waitForFunction(() => (window as any).workspace.tasks[0].status === 'running');
+    assert.equal(await page.getByTestId('graphics-restore-part-space').isDisabled(), true);
+    assert.equal(await page.getByTestId('graphics-accept-version').isDisabled(), true);
+    const task = page.getByTestId('graphics-current-task-completed-uv');
+    assert.match(await task.innerText(), /로컬 크기·위치 복원 중/);
+    await page.evaluate(() => (window as any).showRestorationState('cancelled'));
+    assert.match(await task.innerText(), /로컬 복원 중지/);
+    assert.doesNotMatch(await task.innerText(), /원격 상태 확인 필요|과금 취소를 뜻하지 않습니다/);
+    await page.evaluate(() => (window as any).showRestorationState('failed'));
+    assert.equal(await page.getByTestId('graphics-recover-completed-uv').innerText(), '저장된 파트 크기·위치 복원 · 무료');
+    assert.equal(await page.getByTestId('graphics-restore-part-space').isEnabled(), true);
+    await page.evaluate(() => (window as any).finishRestore());
+    await page.getByTestId('graphics-open-completed-result').click();
+    assert.equal(await page.getByTestId('graphics-version-restored-uv').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.getByTestId('graphics-part-space-restored').isVisible(), true);
+    assert.equal(await page.getByTestId('graphics-restore-part-space').count(), 0);
+    assert.equal(await page.getByTestId('graphics-accept-version').isEnabled(), true);
+    assert.deepEqual(await page.evaluate(() => (window as any).actions), [{ kind: 'restore-part-space', versionId: 'raw-uv' }]);
+    assert.deepEqual(await page.evaluate(() => (window as any).workspace.versions.find((v: any) => v.id === 'raw-uv')), raw);
+    assert.deepEqual(await page.evaluate(() => (window as any).workspace.objects[0].accepted), object.accepted);
+    assert.deepEqual(errors, []);
+  } finally { await app.close(); }
+});

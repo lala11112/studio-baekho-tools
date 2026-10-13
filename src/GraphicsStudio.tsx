@@ -26,7 +26,7 @@ import type {
   GraphicsTask,
   GraphicsWorkspace,
 } from "../shared/graphics";
-import { graphicsLegacyUnlinkProblem } from "../shared/graphics";
+import { graphicsLegacyUnlinkProblem, requiresPartSpaceRestoration } from "../shared/graphics";
 import {
   filterGraphicsTasks,
   findGraphicsTask,
@@ -713,6 +713,7 @@ export function GraphicsStudio({
     latestMediaGroup?.candidates[0].version ??
     versions.find((version) => object && acceptedVersion(object, version)) ??
     versions.at(-1);
+  const needsPartSpaceRestoration = Boolean(workspace && shownVersion && requiresPartSpaceRestoration(workspace, shownVersion));
   useEffect(() => { setMeshSelection(null); setModelBounds(undefined); }, [shownVersion?.id, objectId]);
   const comparisonGroup = shownVersionId
     ? mediaGroups.find((group) =>
@@ -810,15 +811,16 @@ export function GraphicsStudio({
       task.status === "awaiting_approval",
   );
   const latestTaskByOperation = new Map<string, GraphicsTask>();
+  const latestResultByOperation = new Map<string, GraphicsTask>();
   for (const task of [...objectTasks].sort((a, b) =>
     a.createdAt.localeCompare(b.createdAt),
   )) {
-    latestTaskByOperation.set(
-      `${task.taskId}:${task.settings.clipName ?? ""}:${task.settings.partId ?? ""}`,
-      task,
-    );
+    const operation = `${task.taskId}:${task.settings.clipName ?? ""}:${task.settings.partId ?? ""}`;
+    latestTaskByOperation.set(operation, task);
+    // A later cancelled/failed request must not hide an already registered result.
+    if (task.status === 'review' && task.outputVersionIds.some(id => versions.some(version => version.id === id))) latestResultByOperation.set(operation, task);
   }
-  const visibleTasks = [...latestTaskByOperation.values()]
+  const visibleTasks = [...new Map([...latestTaskByOperation.values(), ...latestResultByOperation.values()].map(task => [task.id, task])).values()]
     .filter(
       (task) =>
         task.taskId === taskId ||
@@ -827,10 +829,12 @@ export function GraphicsStudio({
         ),
     )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const completedUvTask = taskId === 'T01' ? latestResultByOperation.get(`T01::${texturePart?.id ?? ''}`) : undefined;
   const prepareLabel = selectionProblem
     ? "제작 옵션을 선택하세요"
     : activeTask.status === "planned"
       ? "실행 연결 준비 중"
+      : completedUvTask ? '새 UV 작업 · 비용 확인'
       : taskId === "N01"
         ? "측면 이미지 만들기 · 입력 확인"
         : taskId === "N02"
@@ -840,6 +844,12 @@ export function GraphicsStudio({
             : ["N04", "N05", "N06"].includes(taskId)
               ? "3D 애니메이션 제작 · 입력 확인"
               : `${activeTask.name} · ${activeTask.executor === "local" ? "입력 확인" : "비용 확인"}`;
+
+  function showTaskResult(task: GraphicsTask) {
+    const results = task.outputVersionIds.map(id => versions.find(version => version.id === id)).filter((version): version is AssetVersion => !!version);
+    setShownVersionId([...results].reverse().find(version => version.partSpace)?.id ?? results[0]?.id ?? '');
+    document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
 
   function chooseRepairSource(source: AssetVersion, mesh?: MeshSelection) {
     if (disabled || active) return;
@@ -1328,13 +1338,15 @@ export function GraphicsStudio({
                       ? activeTask.reason
                       : active
                         ? "기존 작업의 승인 또는 결과를 확인하세요."
-                        : activeTask.executor === "local"
+                      : completedUvTask ? '완료된 UV 결과가 있습니다. 결과 보기는 새 제작이나 과금을 시작하지 않습니다.'
+                      : activeTask.executor === "local"
                           ? "로컬 처리 · GPT 요청 없이 준비"
                           : "실행 전 입력과 비용을 앱에서 확인합니다.")}
                 </small>
               </div>
+              {completedUvTask && <button className="gs-primary" data-testid="graphics-open-completed-result" onClick={() => showTaskResult(completedUvTask)}>완료 · 결과 보기</button>}
               <button
-                className="gs-primary"
+                className={completedUvTask ? undefined : "gs-primary"}
                 data-testid="graphics-prepare"
                 disabled={
                   disabled ||
@@ -1392,13 +1404,18 @@ export function GraphicsStudio({
                         )}
                         {task.settings.clipName
                           ? `${task.settings.clipName} · `
-                          : ""}
+                          : task.settings.partLabel || task.settings.partId ? `${task.settings.partLabel ?? task.settings.partId} · ` : ""}
                         {findGraphicsTask(task.taskId)?.name ?? task.taskId} ·{" "}
                         {task.runtimeApproval && task.status === "running"
                           ? "사용자 확인 대기"
+                          : task.partSpaceRecoveryVersionId && task.status === 'running' ? '로컬 크기·위치 복원 중'
+                          : task.partSpaceRecoveryVersionId && task.status === 'cancelled' ? '로컬 복원 중지'
+                          : task.status === 'review' && task.outputVersionIds.length ? '완료 · 결과 확인'
+                          : task.status === 'cancelled' && task.paidApproval ? '추적 중지 · 원격 상태 확인 필요'
                           : taskStatuses[task.status]}
                       </strong>
                       <p>{task.message || "작업 상태를 확인하고 있습니다."}</p>
+                      {task.status === 'cancelled' && task.paidApproval && !task.partSpaceRecoveryVersionId && <p className="gs-warning">유료 실행이 승인된 요청입니다. 추적 중지는 원격 처리나 과금 취소를 뜻하지 않습니다. 이전에 완료된 결과는 별도로 유지됩니다.</p>}
                       {task.errorCode && <code>{task.errorCode}</code>}
                       {task.runtimeApproval && task.status === "running" && (
                         <RuntimeApprovalCard
@@ -1443,7 +1460,7 @@ export function GraphicsStudio({
                             void run({ kind: "recover", taskId: task.id })
                           }
                         >
-                          {recoveryLabel(task)}
+                          {task.partSpaceRecoveryVersionId ? '저장된 파트 크기·위치 복원 · 무료' : recoveryLabel(task)}
                         </button>
                       )}
                       {task.status === "running" && (
@@ -1453,22 +1470,14 @@ export function GraphicsStudio({
                             void run({ kind: "cancel", taskId: task.id })
                           }
                         >
-                          추적 중지
+                          {task.partSpaceRecoveryVersionId ? '로컬 복원 중지' : '추적 중지'}
                         </button>
                       )}
-                      {task.status === "review" && (
+                      {task.status === "review" && task.outputVersionIds.some(id => versions.some(version => version.id === id)) && (
                         <button
-                          onClick={() => {
-                            setShownVersionId(task.outputVersionIds[0] ?? "");
-                            document
-                              .querySelector(".gs-result")
-                              ?.scrollIntoView({
-                                block: "start",
-                                behavior: "smooth",
-                              });
-                          }}
+                          onClick={() => showTaskResult(task)}
                         >
-                          결과 보기
+                          완료 · 결과 보기
                         </button>
                       )}
                       {task.status === "review" && task.taskId === "M07" && (
@@ -1897,7 +1906,7 @@ export function GraphicsStudio({
                   {meshSelection && shownVersion && <div className="gs-mesh-correction">
                     <strong>선택 부품: {meshSelection.name}</strong>
                     <p>위치·형태만 보정하며 다른 메시와 원본 구조를 보존합니다. 재생성·재토폴로지는 별도 작업입니다.</p>
-                    <button disabled={disabled || active || shownVersion.role !== 'model' || !acceptedVersion(object, shownVersion) || (!meshSelection.sourceId && !meshSelection.sourceName)} onClick={() => {
+                    <button disabled={disabled || active || needsPartSpaceRestoration || shownVersion.role !== 'model' || !acceptedVersion(object, shownVersion) || (!meshSelection.sourceId && !meshSelection.sourceName)} onClick={() => {
                       const sourceName = meshSelection.sourceName;
                       setCreation(current => {
                         const next = changeCreationAssemblyMode(current, 'partial');
@@ -1907,7 +1916,7 @@ export function GraphicsStudio({
                       setStage('assembly'); setTaskId(undefined);
                       setNotice('선택 부품을 수정 대상으로 지정했습니다. 수정할 내용을 적고 실행을 준비하세요.');
                     }}>선택 부품 보정하기</button>
-                    <button disabled={disabled || active || !['model', 'material'].includes(shownVersion.role) || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation) || (!meshSelection.sourceId && !meshSelection.sourceName)}
+                    <button disabled={disabled || active || needsPartSpaceRestoration || !['model', 'material'].includes(shownVersion.role) || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation) || (!meshSelection.sourceId && !meshSelection.sourceName)}
                       onClick={() => chooseRepairSource(shownVersion, meshSelection)}>선택 부품 빠진 면 보완</button>
                     {!meshSelection.sourceId && !meshSelection.sourceName && <small>원본 메시 연결 미확인 · 안전하게 대응되는 이름 또는 ID가 필요합니다.</small>}
                     {meshSelection.sourceName && <small>보정 범위: 원본 메시 {meshSelection.sourceName} 전체. 재질별로 나뉜 미리보기 조각도 같은 원본 메시를 대상으로 합니다.</small>}
@@ -1945,13 +1954,22 @@ export function GraphicsStudio({
                         <strong>검토할 사항</strong>
                         <ul>{shownVersion.warnings.map((warning, index) => <li className="gs-warning" key={index}>{warning}</li>)}</ul>
                       </div>}
+                      {needsPartSpaceRestoration && <div className="gs-result-notes" aria-label="파트 크기·위치 확인 필요" data-testid="graphics-part-space-warning">
+                        <strong>채택 전 원래 크기·위치 확인 필요</strong>
+                        <p>외부 UV·텍스처 결과가 원래 파트의 크기와 위치를 유지했는지 아직 확인하지 않았습니다. 무료 복원을 거친 새 결과를 확인한 뒤 채택하세요. 외부 원본 파일은 그대로 보관합니다.</p>
+                        <button data-testid="graphics-restore-part-space" disabled={disabled || active}
+                          onClick={() => void run({ kind: 'restore-part-space', versionId: shownVersion.id }, '원래 크기·위치 복원을 요청했습니다. 새 제작 없이 로컬에서 확인하며, 완료되면 결과 보기를 눌러 주세요.')}>
+                          원래 크기·위치 복원 · 무료
+                        </button>
+                      </div>}
+                      {shownVersion.partSpace && <p className="gs-fine" data-testid="graphics-part-space-restored">원래 파트의 크기·위치 복원 결과입니다. 외부 원본은 별도 버전으로 보관됩니다.</p>}
                       {['model', 'material'].includes(shownVersion.role) && <div className="gs-result-notes" aria-label="결과 추가 보정">
-                        <button disabled={disabled || active} onClick={() => chooseRevisionSource(shownVersion)}>이 결과 더 보정</button>
+                        <button disabled={disabled || active || needsPartSpaceRestoration} onClick={() => chooseRevisionSource(shownVersion)}>이 결과 더 보정</button>
                         <small>현재 보는 결과의 형태를 이어서 수정합니다. 채택 전 후보도 지정할 수 있으며, 원본과 채택 상태는 유지됩니다.</small>
                       </div>}
                       {['model', 'material'].includes(shownVersion.role) && shownVersion.slot.startsWith('part-') && <div className="gs-result-notes" aria-label="파트 빠진 면 보완">
                         <p>분리된 파트에 두피·뒤통수처럼 빠진 면이 있으면, 이 원본의 기존 면을 보존하면서 보완할 수 있습니다. UV·텍스처는 보완 결과를 채택한 다음 준비하세요.</p>
-                        <button disabled={disabled || active || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation)}
+                        <button disabled={disabled || active || needsPartSpaceRestoration || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation)}
                           onClick={() => chooseRepairSource(shownVersion)}>이 파트 빠진 면 보완</button>
                         <small>원본과 채택 상태는 유지됩니다. 단일 메시 파트만 바로 지정할 수 있으며, 여러 메시가 있으면 위 미리보기에서 보완할 메시를 선택하세요.</small>
                       </div>}
@@ -2037,7 +2055,7 @@ export function GraphicsStudio({
                       <button
                         data-testid="graphics-accept-version"
                         disabled={
-                          disabled || acceptedVersion(object, shownVersion)
+                          disabled || needsPartSpaceRestoration || acceptedVersion(object, shownVersion)
                         }
                         onClick={() =>
                           void run(
@@ -2052,6 +2070,7 @@ export function GraphicsStudio({
                       >
                         {acceptedVersion(object, shownVersion)
                           ? "현재 채택 버전"
+                          : needsPartSpaceRestoration ? '크기·위치 복원 후 채택'
                           : `${roles[shownVersion.role]} / ${shownVersion.slot}에 채택`}
                       </button>
                     </div>

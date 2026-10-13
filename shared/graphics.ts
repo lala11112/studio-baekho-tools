@@ -9,6 +9,8 @@ export type AssetVersion = {
   files: GraphicsFile[]; createdAt: string; sourceVersionIds: string[];
   provenance: { type: "import" | "legacy" | "local" | "codex" | "tripo" | "runway"; jobId?: string; remoteId?: string };
   preview?: string; warnings: string[];
+  /** Local, hash-verified restoration after a service normalizes an individual part. */
+  partSpace?: { schemaVersion: 1; sourceVersionId: string; providerVersionId: string; reportPath: string };
 };
 export type UnityTargetProfile = {
   id: string; projectPath: string; unityVersion: string;
@@ -49,6 +51,7 @@ export type GraphicsTask = {
   /** Durable, independently registered candidate executions; never repeat them on recovery. */
   completedExecutions?: string[];
   derivativeRefreshRequested?: boolean;
+  partSpaceRecoveryVersionId?: string;
   objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted" | "creation">;
   targetProfile?: UnityTargetProfile;
   deliveryId?: string;
@@ -104,11 +107,17 @@ export function isGraphicsClipName(value: unknown): value is string {
     value !== "." && value !== ".." && !/[\\/\p{Cc}]/u.test(value);
 }
 
+export function requiresPartSpaceRestoration(workspace: GraphicsWorkspace, version: AssetVersion): boolean {
+  return !version.partSpace && version.provenance.type === 'tripo' && version.slot.startsWith('part-') &&
+    workspace.tasks.some(task => ['T01', 'T03'].includes(task.taskId) && !!task.settings.partId && task.outputVersionIds.includes(version.id));
+}
+
 export type GraphicsAction =
   | { kind: "create-object"; name: string; objectKind: GraphicsKind; creation?: CreationSpec }
   | { kind: "update-object"; objectId: string; patch: Partial<Pick<GraphicsObject, "name" | "selectedTasks" | "instruction" | "settings" | "references" | "creation">> }
   | { kind: "import"; objectId: string; role: GraphicsRole; clipName?: string }
   | { kind: "accept"; objectId: string; versionId: string }
+  | { kind: 'restore-part-space'; versionId: string }
   | { kind: "prepare"; objectId: string; taskId: string }
   | { kind: "approve" | "cancel" | "recover" | "refresh-parts"; taskId: string }
   | { kind: "runtime-approval"; taskId: string; approvalId: string; answer: WorkbenchRuntimeAnswer }
