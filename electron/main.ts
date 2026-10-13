@@ -21,6 +21,7 @@ import { ProductionEngine } from "../engine/production";
 import { restoreProductionArchives } from "../engine/production-backup";
 import { WorkbenchEngine } from "../engine/workbench";
 import { GraphicsEngine } from "../engine/graphics";
+import { NativeTopologyManager } from "./native-topology";
 import { createGraphicsVideoExecutor } from "../engine/graphics-video";
 import { probeGraphicsConnections } from "../engine/graphics-connections";
 import { CodexWorkbenchExecutor } from "../engine/workbench-executor";
@@ -57,6 +58,7 @@ let engine: Engine;
 let production: ProductionEngine;
 let workbench: WorkbenchEngine;
 let graphics: GraphicsEngine;
+let nativeTopology: NativeTopologyManager;
 let studio: StudioBrowser;
 let chatgpt: ChatGptBrowser;
 let local: LocalPipeline;
@@ -138,6 +140,8 @@ async function dispatch(c: Command): Promise<unknown> {
         workbenches: workbench.list(),
         graphicsWorkspaces: graphics.list(),
       };
+    case "graphics.topology":
+      return nativeTopology.inspect(c.id, c.versionId);
     case "graphics.action": {
       if (c.action.kind === "import") {
         const animation = c.action.role === "animation";
@@ -695,6 +699,12 @@ app.whenReady().then(async () => {
     legacyActive: id => workbench.isProjectActive(id) || production.isProjectActive(id),
     probe: () => probeGraphicsConnections(store.settings, engine.tripo, vault.info().configured),
   });
+  nativeTopology = new NativeTopologyManager({
+    projectRoot: id => store.directory(id),
+    version: (id, versionId) => graphics.get(id).versions.find(version => version.id === versionId),
+    blenderPath: () => store.settings.blenderPath,
+    resources: () => app.isPackaged ? path.join(process.resourcesPath, "integrations") : path.join(app.getAppPath(), "integrations"),
+  });
   protocol.handle("asset", async (request) => {
     try {
       const u = new URL(request.url);
@@ -735,7 +745,8 @@ app.whenReady().then(async () => {
         !p.assets.some((a) => store.file(id, a.file) === file) &&
         !knownProductionArtifact &&
         !knownWorkbenchArtifact &&
-        !graphics.get(id).versions.some(v => v.files.some(f => store.file(id, f.path) === file))
+        !graphics.get(id).versions.some(v => v.files.some(f => store.file(id, f.path) === file)) &&
+        !nativeTopology.isAllowed(id, file)
       )
         return new Response("", { status: 403 });
       if (

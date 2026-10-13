@@ -9,9 +9,11 @@ import {
   isBiologicalSubject,
   optionAppliesToSubject,
   creationLockAppliesToSubject,
+  updateCreationModelGeometry,
   type CreationSpec,
   type CreationStage,
 } from "../shared/graphics-creation";
+import { ModelGeometrySettings } from './ModelGeometrySettings';
 
 type Value = string | number | boolean;
 type Props = {
@@ -76,6 +78,7 @@ export function CreationOptions({
   onChange,
   onSetting,
 }: Props) {
+  const activeModelPart = spec.attributes.composition === 'parts' ? spec.parts.find(part => part.id === spec.activePartId && part.enabled) : undefined;
   const attr = (key: string, value: Value) =>
     onChange({ ...spec, attributes: { ...spec.attributes, [key]: value } });
   const options = creationOptions.filter(
@@ -247,26 +250,17 @@ export function CreationOptions({
       )}
       {stage === "model" && (
         <>
-          {spec.attributes.composition !== "parts" && (
-            <Choices
-              label="모델 밀도 빠른 설정"
-              value={String(settings.faceLimit ?? 10000)}
-              values={[
-                ["5000", "낮게 · 5,000면"],
-                ["10000", "보통 · 10,000면"],
-                ["50000", "높게 · 50,000면"],
-              ]}
-              onChange={(value) =>
-                onSetting("faceLimit", value === "" ? "" : Number(value))
-              }
-              disabled={disabled}
-            />
-          )}
           {choice("제작 방식", "modelMethod", "tripo", [
             ["tripo", "Tripo AI 모델"],
             ["local", "규칙형 로컬 모델"],
             ["astra", "Blender + Astra"],
           ])}
+          {(spec.attributes.composition !== 'parts' || activeModelPart) && <ModelGeometrySettings
+            settings={{ ...settings, ...(activeModelPart ? { faceLimit: activeModelPart.faceLimit } : {}) }} disabled={disabled}
+            partLabel={activeModelPart?.label} onChange={(change, adjustToSelection) => {
+              const result = updateCreationModelGeometry(spec, change, adjustToSelection);
+              onChange(result.spec); return result.notice;
+            }} />}
           {settings.modelMethod !== "local" &&
             choice("모델에 사용할 이미지", "inputMode", "image", [
               ["image", "채택 이미지 한 장"],
@@ -388,28 +382,6 @@ export function CreationOptions({
                     </label>
                     {stage === "model" && (
                       <div className="gs-settings-grid">
-                        <label>
-                          파트 목표 면 수
-                          <input
-                            type="number"
-                            min={100}
-                            step={100}
-                            value={part.faceLimit}
-                            onChange={(event) =>
-                              onChange({
-                                ...spec,
-                                parts: spec.parts.map((item) =>
-                                  item.id === part.id
-                                    ? {
-                                        ...item,
-                                        faceLimit: Number(event.target.value),
-                                      }
-                                    : item,
-                                ),
-                              })
-                            }
-                          />
-                        </label>
                         <label>
                           파트 모델 후보 수
                           <input

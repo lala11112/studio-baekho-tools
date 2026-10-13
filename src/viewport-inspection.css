@@ -4,6 +4,8 @@
 .inspection-viewport .segmented { flex-wrap:wrap; max-width:100%; }
 .inspection-viewport .segmented button { font-size:11px; padding:5px 7px; min-height:28px; }
 .inspection-toolbar { display:flex; flex-wrap:wrap; gap:5px; padding:0 9px 7px; flex-shrink:0; }
+.inspection-viewport .topology-status { padding:0 9px 7px; flex-shrink:0; font-size:11px; overflow-wrap:anywhere; color:#bed3c8; }
+.inspection-viewport .topology-status[data-state="unavailable"] { color:#efbb82; }
 .inspection-viewport .inspection-toolbar button,
 .inspection-viewport .mesh-inspector button { font-size:12px; min-height:28px; padding:4px 8px; }
 .inspection-viewport button[aria-pressed="true"] { background:#42593c; color:#e0efd5; border-color:#88a779; }

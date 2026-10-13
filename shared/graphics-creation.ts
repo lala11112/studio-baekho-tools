@@ -1,6 +1,7 @@
 import type { GraphicsKind, GraphicsObject } from './graphics';
 import { isGraphicsClipName } from './graphics';
 import { defaultPhysicalSize, normalizePhysicalSize, type PhysicalSize } from './graphics-size';
+import { DEFAULT_MODEL_FACE_LIMIT, DEFAULT_TRIPO_MODEL, changeModelGeometry, modelGeometryProblem, requireModelGeometry } from './graphics-model-geometry';
 
 export type CreationStage = 'design' | 'model' | 'surface' | 'assembly' | 'rig' | 'animation' | 'unity';
 export type CreationValues = Record<string, string | number | boolean>;
@@ -8,7 +9,7 @@ export type CreationValues = Record<string, string | number | boolean>;
 export function toggleCreationChoice(current: string | number | boolean | undefined, selected: string): string {
   return String(current) === selected ? '' : selected;
 }
-export type PartSpec = { id: string; label: string; enabled: boolean; instruction: string; faceLimit: number; count: number };
+export type PartSpec = { id: string; label: string; enabled: boolean; instruction: string; faceLimit: number | ''; count: number };
 export type CreationSpec = {
   schemaVersion: 1; subject: string; attributes: CreationValues; instruction: string; locks: string[];
   stageSettings: Partial<Record<CreationStage, { instruction: string; values: CreationValues }>>;
@@ -98,12 +99,12 @@ export const creationLocks = [
 ];
 export const humanParts = (): PartSpec[] => [
   { id: 'head', label: '머리', enabled: true, instruction: '얼굴·귀·목 연결부. 머리카락 제외.', faceLimit: 5000, count: 1 },
-  { id: 'body', label: '몸통', enabled: true, instruction: '몸통·팔·손·다리·발. 머리와 머리카락 제외.', faceLimit: 10000, count: 1 },
+  { id: 'body', label: '몸통', enabled: true, instruction: '몸통·팔·손·다리·발. 머리와 머리카락 제외.', faceLimit: 5000, count: 1 },
   { id: 'hair', label: '머리카락', enabled: true, instruction: '채택한 헤어스타일 전체. 두피·얼굴·몸 제외.', faceLimit: 5000, count: 1 },
 ];
 const stageDefaults: Record<CreationStage, CreationValues> = {
   design: { count: 2, designMode: 'new', direction: 'front', framing: 'full', pose: 'natural', background: 'solid', perspective: 'orthographic', margin: 'full', multiview: false, viewFront: true, viewBack: true, viewLeft: true, viewRight: true },
-  model: { count: 1, modelMethod: 'tripo', inputMode: 'image', faceLimit: 10000, quad: true, scale: 1, symmetry: true },
+  model: { count: 1, modelMethod: 'tripo', model: DEFAULT_TRIPO_MODEL, inputMode: 'image', faceLimit: DEFAULT_MODEL_FACE_LIMIT, quad: true, scale: 1, symmetry: true },
   surface: { count: 1, surfaceOperation: 'texture', textureMode: 'tripo', uvMode: 'keep', textureSize: 4096, color: '#808080', roughness: .65, metallic: 0, emission: 0, opacity: 1 },
   assembly: { count: 1, assemblyMode: 'correct' },
   rig: { count: 1, rigType: 'none', rigEars: false, rigTail: false, rigHair: false, rigClothing: false, rigWings: false, rigAccessories: false },
@@ -162,11 +163,37 @@ export function effectiveCreation(object: GraphicsObject): CreationSpec {
     const stage = /^(front|left|right|back)VersionId$/.test(key) ? 'model' : /^(motion|actionName|clipName)/.test(key) ? 'animation' : undefined;
     if (stage) spec.stageSettings[stage]!.values[key] = value;
   }
+  if (object.settings.model === 'P1-20260311' && object.settings.quad === undefined) spec.stageSettings.model!.values.quad = false;
   return spec;
 }
 export function creationSettings(object: GraphicsObject, stage: CreationStage): CreationValues {
   const spec = effectiveCreation(object);
-  return { ...stageDefaults[stage], ...spec.stageSettings[stage]?.values };
+  return stageValues(spec, stage);
+}
+function stageValues(spec: CreationSpec, stage: CreationStage): CreationValues {
+  const saved = spec.stageSettings[stage]?.values;
+  return { ...stageDefaults[stage], ...(stage === 'model' && saved?.model === 'P1-20260311' ? { quad: false } : {}), ...saved };
+}
+/** Batch provider/topology changes and their visible face-target adjustments in one draft update. */
+export function updateCreationModelGeometry(spec: CreationSpec, change: CreationValues, adjustToSelection = false): { spec: CreationSpec; notice?: string } {
+  const next = structuredClone(spec), current = stageValues(spec, 'model');
+  const stage = next.stageSettings.model ?? { instruction: '', values: {} }, notices: string[] = [];
+  if (adjustToSelection) {
+    const result = changeModelGeometry(current, change);
+    stage.values = { ...stage.values, ...result.patch };
+    if (result.notice && spec.attributes.composition !== 'parts') notices.push(result.notice);
+    next.parts = next.parts.map(part => {
+      const result = changeModelGeometry({ ...current, faceLimit: part.faceLimit }, change);
+      if (result.notice) notices.push(`${part.label}: ${result.notice}`);
+      return result.patch.faceLimit !== undefined ? { ...part, faceLimit: result.patch.faceLimit as number | '' } : part;
+    });
+    if (!notices.length && result.notice) notices.push(result.notice);
+  } else if (spec.attributes.composition === 'parts' && spec.activePartId && change.faceLimit !== undefined) {
+    next.parts = next.parts.map(part => part.id === spec.activePartId ? { ...part, faceLimit: change.faceLimit as number | '' } : part);
+    stage.values = { ...stage.values, ...Object.fromEntries(Object.entries(change).filter(([key]) => key !== 'faceLimit')) };
+  } else stage.values = { ...stage.values, ...change };
+  next.stageSettings.model = stage;
+  return { spec: next, notice: notices.join(' ') || undefined };
 }
 export function creationInstruction(object: GraphicsObject, stage: CreationStage): string { return effectiveCreation(object).stageSettings[stage]?.instruction ?? ''; }
 const stageRouteChoice: Record<CreationStage, [string, string]> = {
@@ -175,7 +202,7 @@ const stageRouteChoice: Record<CreationStage, [string, string]> = {
 };
 /** Saving incomplete options is allowed; only execution requires these choices. */
 export function creationSelectionProblem(spec: CreationSpec, stage: CreationStage): string | undefined {
-  const s = { ...stageDefaults[stage], ...spec.stageSettings[stage]?.values };
+  const s = stageValues(spec, stage);
   const required = [stageRouteChoice[stage]];
   if (stage === 'model') {
     if (s.modelMethod !== 'local') required.push(['inputMode', '모델에 사용할 이미지']);
@@ -187,10 +214,14 @@ export function creationSelectionProblem(spec: CreationSpec, stage: CreationStag
   const missing = required.find(([key]) => s[key] === '');
   if (missing) return `${missing[1]} 선택이 필요합니다.`;
   if (['design', 'model', 'surface', 'assembly'].includes(stage) && spec.attributes.composition === '') return '모델 구성 선택이 필요합니다. 이미지 또는 모델 단계에서 선택하세요.';
+  if (stage === 'model') {
+    const part = spec.attributes.composition === 'parts' ? spec.parts.find(p => p.id === spec.activePartId && p.enabled) : undefined;
+    return modelGeometryProblem({ ...s, ...(part ? { faceLimit: part.faceLimit } : {}) });
+  }
   return undefined;
 }
 export function creationTaskId(spec: CreationSpec, stage: CreationStage): string {
-  const s = { ...stageDefaults[stage], ...spec.stageSettings[stage]?.values };
+  const s = stageValues(spec, stage);
   if (s[stageRouteChoice[stage][0]] === '') return '';
   if (stage === 'design') return ({ new: 'I01', reference: 'I02', revision: 'I03', variation: 'I05', equipment: 'I06', multiview: 'I07', parts: 'I08' } as Record<string, string>)[String(s.designMode)] ?? 'I01';
   if (stage === 'model') return s.modelMethod === 'local' ? 'M04' : s.modelMethod === 'astra' ? 'M15' : s.inputMode === 'multiview' ? 'M02' : 'M01';
@@ -234,7 +265,7 @@ export function validateCreation(value: CreationSpec, kind: GraphicsKind): Creat
     }
   }
   if (!Array.isArray(value.parts) || value.parts.length > 12 || new Set(value.parts.map(p => p.id)).size !== value.parts.length) throw Error('파츠는 중복 없이 최대 12개입니다.');
-  for (const p of value.parts) { if (!/^[a-z][a-z0-9-]{0,39}$/.test(p.id) || !p.label?.trim() || p.label.length > 60 || typeof p.enabled !== 'boolean' || !Number.isInteger(p.faceLimit) || p.faceLimit < 100 || p.faceLimit > 1000000 || !Number.isInteger(p.count) || p.count < 1 || p.count > 4) throw Error('파츠 이름·면 수·후보 수를 확인하세요.'); text(p.instruction); }
+  for (const p of value.parts) { if (!/^[a-z][a-z0-9-]{0,39}$/.test(p.id) || !p.label?.trim() || p.label.length > 60 || typeof p.enabled !== 'boolean' || p.faceLimit !== '' && !Number.isSafeInteger(p.faceLimit) || !Number.isInteger(p.count) || p.count < 1 || p.count > 4) throw Error('파츠 이름·면 수·후보 수를 확인하세요.'); text(p.instruction); }
   if (value.activePartId && !value.parts.some(p => p.id === value.activePartId && p.enabled)) throw Error('현재 파츠를 확인하세요.');
   return structuredClone(value);
 }
@@ -271,6 +302,7 @@ export function compileCreation(object: GraphicsObject, taskId: string): { setti
   settings.requestedParts = JSON.stringify(spec.parts.filter(p => p.enabled));
   const partWork = part && !['I01','I02','M07','M08'].includes(taskId) && ['design','model','surface','assembly'].includes(stage);
   if (partWork) { settings.partId = part.id; settings.partLabel = part.label; if (stage === 'model') { settings.count = part.count; settings.faceLimit = part.faceLimit; } }
+  if (['M01', 'M02', 'M03', 'M04', 'M15'].includes(taskId)) Object.assign(settings, requireModelGeometry(settings, taskId));
   const descriptions = [...summarizeCreation(spec), spec.instruction, spec.stageSettings[stage]?.instruction].filter(Boolean);
   if (stage === 'design') for (const [key, labels] of Object.entries(imageLabels)) if (settings[key] !== undefined) descriptions.push(`${key}: ${labels[String(settings[key])] ?? String(settings[key])}`);
   if (partWork) descriptions.push(`제작 대상 파츠만: ${part.label}. ${part.instruction}. 전체 디자인의 비율·색·스타일을 유지하고 다른 파츠는 생성하지 마세요.`);

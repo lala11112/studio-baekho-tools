@@ -11,6 +11,8 @@ import { meshEntries, gltfMeshIdentities, inspectMeshes, showMeshAppearance, syn
   type ModelMeasurement, type PreviewTransform } from "./viewport-inspection";
 import { physicalSizeTransform, type PhysicalSize } from "../shared/graphics-size";
 import "./viewport-inspection.css";
+import { createNativeEdgeViews, syncNativeEdgeView, disposeNativeEdgeView, nativeCounts, type NativeEdgeView } from './native-topology-view';
+import type { NativeTopologyResult } from '../shared/native-topology';
 import {
   RotateCcw,
   Move,
@@ -34,6 +36,7 @@ type Props = {
   physicalSize?: PhysicalSize;
   unitsKnown?: boolean;
   nativePolygonCount?: number;
+  nativeVersionId?: string;
 };
 export function Viewport({
   project,
@@ -42,7 +45,7 @@ export function Viewport({
   onSelect,
   onTransform,
   animation,
-  onMeshSelect, onBounds, previewTransform, physicalSize, unitsKnown = false, nativePolygonCount,
+  onMeshSelect, onBounds, previewTransform, physicalSize, unitsKnown = false, nativePolygonCount, nativeVersionId,
 }: Props) {
   const host = useRef<HTMLDivElement>(null),
     api = useRef<any>(null);
@@ -59,6 +62,25 @@ export function Viewport({
   const [hiddenMeshes, setHiddenMeshes] = useState<string[]>([]);
   const [solid, setSolid] = useState(false), [wire, setWire] = useState(false), [guides, setGuides] = useState(false);
   const [hasAnimation, setHasAnimation] = useState(false);
+  const [wireMode, setWireMode] = useState<'game' | 'native'>('game');
+  const [topology, setTopology] = useState<NativeTopologyResult>();
+  const [topologyLoading, setTopologyLoading] = useState(false), [topologyError, setTopologyError] = useState('');
+  const [nativeLoaded, setNativeLoaded] = useState(false);
+  const topologyIdentity = useRef(''); topologyIdentity.current = `${project.id}:${nativeVersionId ?? ''}`;
+  useEffect(() => { setTopology(undefined); setTopologyLoading(false); setTopologyError(''); setNativeLoaded(false); setWireMode('game'); }, [project.id, nativeVersionId]);
+  async function originalEdges() {
+    setWire(true);
+    if (topology?.status === 'ready') { setWireMode('native'); return; }
+    if (!nativeVersionId || topologyLoading) return;
+    const identity = topologyIdentity.current;
+    setTopologyLoading(true); setTopologyError('');
+    try {
+      const result = await window.desktop.call({ type: 'graphics.topology', id: project.id, versionId: nativeVersionId }) as NativeTopologyResult;
+      if (topologyIdentity.current !== identity) return;
+      setTopology(result); setWireMode(result.status === 'ready' ? 'native' : 'game');
+    } catch (error) { if (topologyIdentity.current === identity) setTopologyError(error instanceof Error ? error.message : String(error)); }
+    finally { if (topologyIdentity.current === identity) setTopologyLoading(false); }
+  }
   const callbacks = useRef({ onSelect, onTransform, onMeshSelect, onBounds });
   callbacks.current = { onSelect, onTransform, onMeshSelect, onBounds };
   const baseline = inspectMeshes(meshList);
@@ -72,8 +94,8 @@ export function Viewport({
     } catch (error) { sizeError = error instanceof Error ? error.message : String(error); }
   }
   const calibrated = unitsKnown || (!!physicalSize && physicalSize.mode !== "keep" && !sizeError);
-  const appearance = useRef({ solid, wire, selectedMesh, hiddenMeshes, guides, previewTransform: effectiveTransform, unitsKnown: calibrated });
-  appearance.current = { solid, wire, selectedMesh, hiddenMeshes, guides, previewTransform: effectiveTransform, unitsKnown: calibrated };
+  const appearance = useRef({ solid, wire, wireMode, selectedMesh, hiddenMeshes, guides, previewTransform: effectiveTransform, unitsKnown: calibrated });
+  appearance.current = { solid, wire, wireMode, selectedMesh, hiddenMeshes, guides, previewTransform: effectiveTransform, unitsKnown: calibrated };
   const inspected = inspectMeshes(meshList, effectiveTransform);
   const selectedStats = inspectMeshes(meshList.filter(entry => entry.id === selectedMesh), effectiveTransform);
   function selectMesh(id: string) {
@@ -116,6 +138,8 @@ export function Viewport({
     setMeshList([]); setSelectedMesh(""); setHiddenMeshes([]); setHasAnimation(false);
     callbacks.current.onMeshSelect?.(null);
     const entries: MeshEntry[] = [];
+    const nativeViews: NativeEdgeView[] = [];
+    setNativeLoaded(false);
     const previewRoot = new THREE.Group();
     let measures: THREE.Group | undefined;
     let hasAnyAnimation = false;
@@ -242,9 +266,7 @@ export function Viewport({
     const allClips: string[] = [];
     for (const [i, s] of sources.entries()) {
       if (!s.asset) continue;
-      loader.load(
-        window.desktop.assetUrl(project.id, s.asset.file),
-        (gltf) => {
+      const loaded = (gltf: import('three/addons/loaders/GLTFLoader.js').GLTF) => {
           if (dead) {
             gltf.scene.traverse((o: any) => {
               o.geometry?.dispose();
@@ -270,6 +292,12 @@ export function Viewport({
           const added = meshEntries(group, s.id, gltfMeshIdentities(gltf.scene, gltf.parser));
           entries.push(...added);
           added.forEach(entry => scene.add(entry.wire));
+          if (topology?.status === 'ready' && previewId) {
+            try {
+              const views = createNativeEdgeViews(added, gltf.parser, topology.map);
+              nativeViews.push(...views); views.forEach(view => scene.add(view.lines)); setNativeLoaded(true);
+            } catch (error) { setTopologyError(error instanceof Error ? error.message : String(error)); setWireMode('game'); }
+          }
           hasAnyAnimation ||= gltf.animations.length > 0;
           setHasAnimation(hasAnyAnimation);
           setMeshList([...entries]);
@@ -304,13 +332,23 @@ export function Viewport({
               mixer.clipAction(selected).play();
             }
           }
-        },
-        undefined,
-        () =>
-          setError(
-            "모델을 읽지 못했습니다. 자체 포함 GLB와 압축 형식을 확인하세요.",
-          ),
-      );
+        };
+      const failed = () => {
+        if (dead) return;
+        if (topology?.status === 'ready') {
+          setTopologyError('원본 면 미리보기를 불러오지 못했습니다.'); setTopology(undefined); setWireMode('game');
+        } else setError("모델을 읽지 못했습니다. 자체 포함 GLB와 압축 형식을 확인하세요.");
+      };
+      if (topology?.status === 'ready' && previewId) {
+        const url = window.desktop.assetUrl(project.id, topology.preview.path);
+        void fetch(url).then(async response => {
+          if (!response.ok) throw Error('원본 면 미리보기에 접근하지 못했습니다.');
+          const data = await response.arrayBuffer();
+          const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', data))].map(value => value.toString(16).padStart(2, '0')).join('');
+          if (digest !== topology.preview.sha256 || digest !== topology.map.previewSha256) throw Error('원본 면 미리보기 해시가 달라 표시하지 않았습니다.');
+          if (!dead) loader.parse(data, '', loaded, failed);
+        }).catch(error => { if (!dead) { setTopologyError(error instanceof Error ? error.message : String(error)); setTopology(undefined); setWireMode('game'); } });
+      } else loader.load(window.desktop.assetUrl(project.id, s.asset.file), loaded, undefined, failed);
     }
     if (!sources.some((s) => s.asset)) {
       // Visible alignment guide, never presented as a generated candidate.
@@ -387,7 +425,8 @@ export function Viewport({
       skeletons.forEach(s => { if (s.overlay.visible) s.update(); });
       orbit.update();
       scene.updateMatrixWorld(true);
-      entries.forEach(entry => syncMeshWire(entry, appearance.current.wire));
+      entries.forEach(entry => syncMeshWire(entry, appearance.current.wire && appearance.current.wireMode === 'game'));
+      nativeViews.forEach(view => syncNativeEdgeView(view, appearance.current.wire && appearance.current.wireMode === 'native'));
       renderer.render(scene, camera);
     };
     tick();
@@ -399,6 +438,7 @@ export function Viewport({
       controls.dispose();
       renderer.domElement.removeEventListener("dblclick", down);
       entries.forEach(disposeMeshInspection);
+      nativeViews.forEach(disposeNativeEdgeView);
       if (measures) disposeGuides(measures);
       scene.traverse((o: any) => {
         o.geometry?.dispose();
@@ -414,7 +454,7 @@ export function Viewport({
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [signature, project.id, selectedPart, previewId, explode, animation]);
+  }, [signature, project.id, selectedPart, previewId, explode, animation, topology?.status === 'ready' ? topology.preview.sha256 : '']);
   useEffect(() => { api.current?.applyInspection(); }, [solid, selectedMesh, hiddenMeshes]);
   const transformSignature = JSON.stringify(effectiveTransform);
   useEffect(() => { api.current?.applyPreview(); api.current?.fitModels(); }, [transformSignature, calibrated]);
@@ -444,9 +484,12 @@ export function Viewport({
     current.camera.position.copy(current.orbit.target).add(new THREE.Vector3(x, y, z).normalize().multiplyScalar(5.7));
     current.orbit.update();
   }
+  const counts = topology?.status === 'ready' && nativeLoaded ? nativeCounts(topology.map) : undefined;
+  const selectedCounts = topology?.status === 'ready' && nativeLoaded ? nativeCounts(topology.map, selectedMesh, meshList) : undefined;
+  const unavailable = topology?.status === 'unavailable' ? topology.reason : topologyError;
   return (
     <div className="viewport inspection-viewport" data-bone-count={boneCount} data-skeleton-visible={boneCount > 0 && showSkeleton}
-      data-mesh-count={meshList.length} data-wire-visible={wire} data-display-mode={solid ? "solid" : "material"}>
+      data-mesh-count={meshList.length} data-wire-visible={wire} data-wire-mode={wireMode} data-display-mode={solid ? "solid" : "material"}>
       <div className="viewport-top">
         <span className="viewport-label">
           <span className="status-dot" />{" "}
@@ -467,7 +510,12 @@ export function Viewport({
         <button aria-pressed={!solid} onClick={() => setSolid(false)}>재질 보기</button>
         <button aria-pressed={solid} onClick={() => setSolid(true)}>단색 보기</button>
         <button data-testid="viewport-wire-toggle" aria-pressed={wire} onClick={() => setWire(!wire)}>메시 선 {wire ? "ON" : "OFF"}</button>
+        <button data-testid="viewport-native-topology" aria-pressed={wireMode === 'native'} disabled={!nativeVersionId || topologyLoading || topology?.status === 'unavailable' || !!topologyError} onClick={() => void originalEdges()}>원본 면 선</button>
+        <button data-testid="viewport-game-topology" aria-pressed={wireMode === 'game'} onClick={() => { setWireMode('game'); setWire(true); }}>게임용 삼각형 선</button>
         <button aria-pressed={guides} onClick={() => setGuides(!guides)}>치수·기준자 {guides ? "ON" : "OFF"}</button>
+      </div>}
+      {(topologyLoading || unavailable || topology?.status === 'ready') && <div className="topology-status" data-testid="viewport-topology-status" data-state={topologyLoading ? 'loading' : unavailable ? 'unavailable' : nativeLoaded ? 'ready' : 'loading'} role="status">
+        {topologyLoading ? '원본 면 검사 중 · 로컬 처리 · 추가 생성 비용 없음' : unavailable ? `${unavailable} 게임용 삼각형 선을 표시합니다.` : counts ? `원본 면: 사각형 ${counts.quads.toLocaleString()} · 삼각형 ${counts.triangles.toLocaleString()} · 다각형 ${counts.ngons.toLocaleString()}` : '원본 면 미리보기 불러오는 중'}
       </div>}
       <div className="inspection-canvas-wrap"><div className="canvas" ref={host} />
       {!previewId && !!onTransform && <div className="viewport-tools">
@@ -512,15 +560,15 @@ export function Viewport({
       </div>
       {meshList.length > 0 && <details className="mesh-inspector">
         <summary>메시·부품 검사 · {meshList.length}개 · {inspected.triangles.toLocaleString()} 삼각형</summary>
-        <p>GLB 삼각형 메시 기준입니다. 기본 자세에서 측정하며, 한 메시를 임의의 신체 부위로 나누지 않습니다.</p>
+        <p>{counts ? '원본 면 선은 원본의 실제 변을 표시하며, 게임용 삼각형 선에는 면 내부의 대각선도 표시됩니다.' : '현재 GLB 삼각형 메시 기준입니다. 원본 면 선을 선택하면 원본 면 정보를 로컬에서 검사합니다.'} 기본 자세에서 측정하며, 한 메시를 임의의 신체 부위로 나누지 않습니다.</p>
         <div className="mesh-statistics" data-testid="viewport-total-stats">
-          <strong>전체</strong><span>정점 {inspected.vertices.toLocaleString()}</span><span>삼각형 {inspected.triangles.toLocaleString()}</span>
-          <span>원본 면 {nativePolygonCount?.toLocaleString() ?? "미확인"}</span><span>재질 {inspected.materials}</span>
+          <strong>전체</strong>{counts && <span>원본 정점 {counts.vertices.toLocaleString()}</span>}<span>{counts ? 'GLB ' : ''}정점 {inspected.vertices.toLocaleString()}</span><span>삼각형 {inspected.triangles.toLocaleString()}</span>
+          <span>원본 면 {(counts?.polygons ?? nativePolygonCount)?.toLocaleString() ?? "미확인"}</span><span>재질 {inspected.materials}</span>
           <span>{inspected.measurement?.size.map((value, index) => `${["X", "Y", "Z"][index]} ${formatLength(value, calibrated)}`).join(" · ")}</span>
         </div>
         {selectedMesh && <div className="mesh-statistics" data-testid="viewport-selected-stats"><strong>선택 부품</strong>
-          <span>정점 {selectedStats.vertices.toLocaleString()}</span><span>삼각형 {selectedStats.triangles.toLocaleString()}</span>
-          <span>원본 면 미확인</span><span>재질 {selectedStats.materials}</span>
+          {selectedCounts && <span>원본 정점 {selectedCounts.vertices.toLocaleString()}</span>}<span>{selectedCounts ? 'GLB ' : ''}정점 {selectedStats.vertices.toLocaleString()}</span><span>삼각형 {selectedStats.triangles.toLocaleString()}</span>
+          <span>원본 면 {selectedCounts?.polygons.toLocaleString() ?? '미확인'}{selectedCounts ? ` · 사각 ${selectedCounts.quads} · 삼각 ${selectedCounts.triangles} · 다각 ${selectedCounts.ngons}` : ''}</span><span>재질 {selectedStats.materials}</span>
           <span>{selectedStats.measurement?.size.map((value, index) => `${["X", "Y", "Z"][index]} ${formatLength(value, calibrated)}`).join(" · ")}</span>
         </div>}
         <div className="mesh-list" role="list" aria-label="실제 메시 목록">{meshList.map(entry => <div role="listitem" key={entry.id}>

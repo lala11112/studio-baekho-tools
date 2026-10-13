@@ -58,6 +58,7 @@ test('all category groups are visible, navigation is inert, target clears, and n
       assert.equal(await page.getByTestId('creation-subject-chooser').evaluate(el=>el.scrollWidth>el.clientWidth),false);
     }
     await page.evaluate(()=>(window as any).disable());
+    await page.waitForFunction(()=>document.querySelector<HTMLFieldSetElement>('[data-testid="creation-subject-chooser"]')?.disabled);
     assert.equal(await groups.getByRole('button',{name:'사물',exact:true}).isDisabled(),true);
     assert.deepEqual(errors,[]);
     assert.deepEqual(await page.evaluate(()=>(window as any).changes),['machine','','roof','tree','accessory']);

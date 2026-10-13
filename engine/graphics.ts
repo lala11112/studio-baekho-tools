@@ -11,6 +11,7 @@ import type { Generation, Quote } from "../shared/types";
 import type { AssetVersion, GraphicsAction, GraphicsFile, GraphicsObject, GraphicsRole, GraphicsTask, GraphicsWorkspace, UnityClipSettings } from "../shared/graphics";
 import { isGraphicsClipName, graphicsLegacyUnlinkProblem } from "../shared/graphics";
 import { compileCreation, validateCreation } from "../shared/graphics-creation";
+import { DEFAULT_MODEL_FACE_LIMIT, requireModelGeometry } from '../shared/graphics-model-geometry';
 import { executeGraphicsProcedural, proceduralProblem } from "./graphics-procedural";
 import { executeGraphicsNative } from "./graphics-native";
 import { executeGraphicsAstra } from "./graphics-astra";
@@ -328,7 +329,7 @@ export class GraphicsEngine {
         if (!["character", "weapon", "prop", "environment", "sprite", "ui", "vfx"].includes(action.objectKind)) throw Error("잘못된 대상 종류입니다.");
         const name = action.name.trim(); if (!name || name.length > 100) throw Error("이름을 1–100자로 입력하세요.");
         const creation = action.creation ? validateCreation(action.creation, action.objectKind) : undefined;
-        w.objects.push({ id: uid(), name, kind: action.objectKind, createdAt: now(), selectedTasks: [], instruction: "", settings: { count: 1, faceLimit: 10000, textureSize: 4096, scale: 1, pivot: "keep", exportFormat: "both" }, references: [], accepted: {}, ...(creation ? { creation } : {}) });
+        w.objects.push({ id: uid(), name, kind: action.objectKind, createdAt: now(), selectedTasks: [], instruction: "", settings: { count: 1, faceLimit: DEFAULT_MODEL_FACE_LIMIT, quad: true, textureSize: 4096, scale: 1, pivot: "keep", exportFormat: "both" }, references: [], accepted: {}, ...(creation ? { creation } : {}) });
         return this.save(w);
       }
       case "update-object": {
@@ -425,7 +426,8 @@ export class GraphicsEngine {
   private prepare(id: string, objectId: string, taskId: string) {
     const w = this.get(id), stored = this.object(w, objectId), definition = findGraphicsTask(taskId);
     const compiled = stored.creation ? compileCreation(stored, taskId) : undefined;
-    const o = compiled ? { ...stored, settings: compiled.settings, instruction: compiled.instruction, creation: compiled.spec } : stored;
+    const base = compiled ? { ...stored, settings: compiled.settings, instruction: compiled.instruction, creation: compiled.spec } : stored;
+    const o = ['M01', 'M02', 'M03', 'M04', 'M15'].includes(taskId) ? { ...base, settings: requireModelGeometry(base.settings, taskId) } : base;
     if (!definition || definition.status === "planned") throw Error(definition?.reason ?? "등록되지 않은 작업입니다.");
     if (["A01", "A02", "A03"].includes(taskId)) throw Error("자료 가져오기·대상 추가·참고 연결 버튼을 사용하세요.");
     if (compiled && ['sprite', 'ui', 'vfx'].includes(o.kind)) throw Error('2D·게임 UI·이펙트는 이번 3D 제작 범위 밖입니다. 기존 자료는 보존됩니다.');
@@ -488,9 +490,8 @@ export class GraphicsEngine {
     };
     let request: Generation, unit: number;
     if (["M01", "M02", "M03"].includes(t.taskId)) {
-      const version = String(t.settings.model ?? 'P2-20260801');
-      if (!['P2-20260801','P1-20260311','v3.1-20260211'].includes(version)) throw Error('지원되는 Tripo 제작 모델을 선택하세요.');
-      request = { kind: "model", prompt: t.instruction, model: version, count: Number(t.settings.count), faceLimit: Number(t.settings.faceLimit ?? 10000), quad: t.settings.quad !== false, texture: false, inputMode: t.taskId === "M03" ? "text" : t.taskId === "M02" ? "multiview" : "image" };
+      const geometry = requireModelGeometry(t.settings, t.taskId), version = String(geometry.model);
+      request = { kind: "model", prompt: t.instruction, model: version, count: Number(t.settings.count), faceLimit: geometry.faceLimit, quad: geometry.quad, texture: false, inputMode: t.taskId === "M03" ? "text" : t.taskId === "M02" ? "multiview" : "image" };
       if (t.taskId === "M01") request.sourceId = alias(inputs[0], true);
       if (t.taskId === "M02") request.sourceIds = inputs.map(v => alias(v, true));
       unit = version === 'P2-20260801' ? 100 : version === 'P1-20260311' ? (t.taskId === 'M03' ? 30 : 40) : (t.taskId === 'M03' ? 10 : 20) + (request.quad ? 5 : 0);

@@ -1,0 +1,9 @@
+.gs-model-geometry { display: grid; gap: 10px; min-width: 0; }
+.gs-model-geometry > label { display: grid; gap: 6px; min-width: 0; }
+.gs-model-geometry select { min-width: 0; width: 100%; box-sizing: border-box; }
+.gs-face-inputs { display: grid; grid-template-columns: minmax(0, 1fr) minmax(90px, 112px); gap: 7px 10px; align-items: center; min-width: 0; }
+.gs-face-inputs input { min-width: 0; width: 100%; box-sizing: border-box; }
+.gs-face-inputs input[type="range"] { grid-column: 1 / -1; min-height: 28px; padding: 0; margin: 0; accent-color: #bcd8aa; cursor: pointer; }
+.gs-geometry-problem, .gs-geometry-notice { margin: 0; padding: 8px 10px; border-radius: 8px; overflow-wrap: anywhere; line-height: 1.5; font-size: 12px; }
+.gs-geometry-problem { color: #ffe3ad; background: #423629; }
+.gs-geometry-notice { color: #dbf0cb; background: #263b2d; }

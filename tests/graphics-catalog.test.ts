@@ -541,7 +541,7 @@ test(
       assert.equal(sword.accepted["model:main"], "new");
       assert.equal(result.workspace.versions.length, 3);
       assert.equal(sword.references.length, 1);
-      await page.locator(".gs-create-disclosure > summary").click();
+      await page.getByTestId("graphics-new-object").click();
       await page.getByLabel("이름", { exact: true }).fill("Shield");
       await page.getByRole("group", { name: "오브젝트 분류", exact: true }).getByRole("button", { name: "무기·장비", exact: true }).click();
       await page.getByRole("group", { name: "만들 대상 선택", exact: true }).getByRole("button", { name: "검·총·활·방패", exact: true }).click();

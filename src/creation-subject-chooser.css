@@ -9,3 +9,20 @@
 .gs-subject-description, .gs-subject-current { font-size: 12px; line-height: 1.5; margin: 8px 0 0; overflow-wrap: anywhere; }
 .gs-subject-description { color: var(--muted, #a7b8ae); }
 .gs-subject-current { font-weight: 600; }
+.gs-subject-cards { padding: 0; border: 0; }
+.gs-subject-cards > legend { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.gs-subject-cards h3 { font-size: 15px; margin: 0 0 10px; }
+.gs-subject-cards .gs-subject-groups { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 9px; margin-bottom: 22px; }
+.graphics-studio .gs-subject-cards .gs-subject-groups button { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; text-align: left; gap: 9px; padding: 13px; min-height: 116px; height: auto; border: 1px solid #4c5d52; border-radius: 10px; background: #202c27; }
+.gs-subject-cards .gs-subject-groups button > span { font-size: 14px; font-weight: 700; }
+.gs-subject-cards .gs-subject-groups button > small { font-size: 12px; font-weight: 400; line-height: 1.45; color: #abbfb0; }
+.gs-subject-cards .gs-subject-targets { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
+.graphics-studio .gs-subject-cards .gs-subject-targets button { display: flex; justify-content: space-between; min-height: 45px; height: auto; text-align: left; font-size: 14px; padding: 10px 12px; border: 1px solid #4c5d52; border-radius: 8px; }
+.graphics-studio .gs-subject-cards button[aria-pressed="true"] { border-color: #bfdfac; background: #354d3a; color: #e6f5dc; box-shadow: inset 0 0 0 1px #bfdfac; }
+.gs-subject-cards .gs-subject-description { margin-top: 12px; }
+.gs-subject-cards .gs-subject-current { display: none; }
+@media (max-width: 760px) {
+  .gs-subject-cards .gs-subject-groups { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .graphics-studio .gs-subject-cards .gs-subject-groups button { min-height: 84px; gap: 6px; }
+  .gs-subject-cards .gs-subject-targets { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}

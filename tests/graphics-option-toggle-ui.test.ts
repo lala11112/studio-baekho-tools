@@ -129,26 +129,28 @@ test("creation choices deselect explicitly, persist empty values and block incom
     assert.equal(await page.getByTestId("graphics-prepare").isEnabled(), true);
     await save();
 
-    // A deselected numeric preset remains an empty string in the input and saved spec.
+    // Topology clears explicitly; numeric values are independent and remain empty when cleared.
     await stage("2 모델").click(); await stage("2 모델").click();
     assert.equal(await stage("2 모델").getAttribute("aria-current"), "step");
-    assert.equal(await button("모델 밀도 빠른 설정", "보통 · 10,000면").getAttribute("aria-pressed"), "true");
-    await button("모델 밀도 빠른 설정", "보통 · 10,000면").click();
-    assert.equal(await button("모델 밀도 빠른 설정", "보통 · 10,000면").getAttribute("aria-pressed"), "false");
-    assert.match(await choices("모델 밀도 빠른 설정").innerText(), /미선택/);
+    assert.equal(await button("메시 형태", "쿼드").getAttribute("aria-pressed"), "true");
+    await button("메시 형태", "쿼드").click();
+    assert.equal(await button("메시 형태", "쿼드").getAttribute("aria-pressed"), "false");
+    assert.match(await choices("메시 형태").innerText(), /미선택/);
+    await page.getByRole("spinbutton", { name: "목표 면 수", exact: true }).fill("");
     assert.equal(await page.getByRole("spinbutton", { name: "목표 면 수", exact: true }).inputValue(), "");
     await save();
     assert.equal((await savedTarget()).creation.stageSettings.model.values.faceLimit, "");
     await page.reload(); await page.getByTestId("graphics-object-target").click(); await stage("2 모델").click();
     assert.equal(await page.getByRole("spinbutton", { name: "목표 면 수", exact: true }).inputValue(), "");
-    assert.equal(await button("모델 밀도 빠른 설정", "보통 · 10,000면").getAttribute("aria-pressed"), "false");
-    await button("모델 밀도 빠른 설정", "낮게 · 5,000면").click();
+    assert.equal(await button("메시 형태", "쿼드").getAttribute("aria-pressed"), "false");
+    await button("메시 형태", "쿼드").click();
+    await page.getByRole("spinbutton", { name: "목표 면 수", exact: true }).fill("5000");
     assert.equal(await page.getByRole("spinbutton", { name: "목표 면 수", exact: true }).inputValue(), "5000");
-    assert.equal(await button("모델 밀도 빠른 설정", "낮게 · 5,000면").getAttribute("aria-pressed"), "true");
+    assert.equal(await button("메시 형태", "쿼드").getAttribute("aria-pressed"), "true");
     await page.getByRole("spinbutton", { name: "목표 면 수", exact: true }).fill("");
     await save();
     assert.equal((await savedTarget()).creation.stageSettings.model.values.faceLimit, "", "Clearing the numeric input must also preserve the empty sentinel, never Number('') = 0");
-    await button("모델 밀도 빠른 설정", "보통 · 10,000면").click();
+    await page.getByRole("spinbutton", { name: "목표 면 수", exact: true }).fill("10000");
     assert.equal(await page.getByRole("spinbutton", { name: "목표 면 수", exact: true }).inputValue(), "10000");
     await save();
 

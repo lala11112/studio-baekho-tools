@@ -42,7 +42,7 @@ import { Viewport } from "./Viewport";
 import { CreationOptions } from "./CreationOptions";
 import { CreationSubjectChooser } from './CreationSubjectChooser';
 import { GraphicsStoragePanel } from './GraphicsStoragePanel';
-import { modelProductionLabel } from '../shared/graphics-provenance';
+import { modelProductionGeometry, modelProductionLabel } from '../shared/graphics-provenance';
 import { creationForSubject, creationSubjects } from '../shared/graphics-creation';
 import { normalizePhysicalSize, physicalSizeSummary, type PhysicalSize } from '../shared/graphics-size';
 import { GraphicsSizePanel } from './GraphicsSizePanel';
@@ -389,6 +389,7 @@ function VersionPreview({
         onBounds={onBounds}
         onMeshSelect={onMeshSelect}
         nativePolygonCount={nativePolygonCount}
+        nativeVersionId={version.id}
       />
     );
   }
@@ -597,6 +598,14 @@ export function GraphicsStudio({
   const [objectId, setObjectId] = useState("");
   const [newName, setNewName] = useState("");
   const [newSubject, setNewSubject] = useState("");
+  const [newObjectOpen, setNewObjectOpen] = useState(false);
+  const [newObjectError, setNewObjectError] = useState("");
+  const [focusNewObject, setFocusNewObject] = useState(false);
+  const newObjectDialog = useRef<HTMLDialogElement>(null);
+  const newObjectTrigger = useRef<HTMLElement | null>(null);
+  const newObjectNameFocus = useRef(false);
+  const createSubmitting = useRef(false);
+  const previousObjectIds = useRef<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [catalogTab, setCatalogTab] = useState<
     "all" | "recommended" | "selected"
@@ -639,7 +648,18 @@ export function GraphicsStudio({
     setLegacyPreview(undefined);
     setLegacySelection([]);
     setUnlinkObjectId(undefined);
+    setNewObjectOpen(false);
+    setNewObjectError("");
+    setNewName("");
+    setNewSubject("");
+    setFocusNewObject(false);
   }, [project.id]);
+  useEffect(() => {
+    if (!newObjectOpen || !newObjectDialog.current) return;
+    const dialog = newObjectDialog.current;
+    if (!dialog.open) dialog.showModal();
+    dialog.querySelector<HTMLElement>(newObjectNameFocus.current ? '#gs-object-name' : '.gs-subject-groups button')?.focus();
+  }, [newObjectOpen]);
   useEffect(() => {
     if (auxiliary && !auxiliaryDialog.current?.open)
       auxiliaryDialog.current?.showModal();
@@ -837,6 +857,11 @@ export function GraphicsStudio({
     setImportRole("design");
   }, [object?.id]);
   useEffect(() => {
+    if (!focusNewObject || !object || previousObjectIds.current.has(object.id)) return;
+    setFocusNewObject(false);
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.gs-creation-stages button')?.focus());
+  }, [object?.id, focusNewObject]);
+  useEffect(() => {
     if (!waiting.length) return;
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
@@ -956,8 +981,7 @@ export function GraphicsStudio({
     if (next.subject !== creation.subject && versions.length > 0) {
       setNewSubject(next.subject);
       setNewName(creationSubjects.find(item => item.id === next.subject)?.label ?? '새 오브젝트');
-      document.querySelector<HTMLDetailsElement>('.gs-create-disclosure')?.setAttribute('open', '');
-      document.getElementById('gs-object-name')?.focus();
+      openNewObject(undefined, true);
       setNotice('기존 원본과 기록을 유지합니다. 새 오브젝트의 이름과 대상을 확인한 뒤 만들기를 누르세요.');
       return;
     }
@@ -1102,20 +1126,47 @@ export function GraphicsStudio({
       setPending(false);
     }
   }
+  function openNewObject(trigger?: HTMLElement, focusName = false) {
+    if (disabled || createSubmitting.current) return;
+    newObjectTrigger.current = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    newObjectNameFocus.current = focusName;
+    setNewObjectError("");
+    setNewObjectOpen(true);
+  }
+  function closeNewObject() {
+    if (createSubmitting.current) return;
+    newObjectDialog.current?.close();
+    setNewObjectOpen(false);
+    requestAnimationFrame(() => { if (newObjectTrigger.current?.isConnected) newObjectTrigger.current.focus(); });
+  }
   async function createObject(event: FormEvent) {
     event.preventDefault();
     const subject = creationSubjects.find(item => item.id === newSubject);
-    if (!newName.trim() || !subject || disabled) return;
-    if (
-      await run({
+    if (!newName.trim() || !subject || disabled || createSubmitting.current) return;
+    createSubmitting.current = true;
+    setPending(true);
+    setNewObjectError("");
+    previousObjectIds.current = new Set(workspace?.objects.map(item => item.id));
+    try {
+      const result = await onAction({
         kind: "create-object",
         name: newName.trim(),
         objectKind: subject.kind,
         creation: creationForSubject(subject.id),
-      })
-    ) {
+      });
+      const created = (result as GraphicsWorkspace | undefined)?.objects?.find(item => !previousObjectIds.current.has(item.id));
       setNewName("");
-      setObjectId("");
+      setNewSubject("");
+      newObjectDialog.current?.close();
+      setNewObjectOpen(false);
+      setObjectId(created?.id ?? "");
+      setStage("design");
+      setFocusNewObject(true);
+    } catch (cause) {
+      setNewObjectError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      createSubmitting.current = false;
+      setPending(false);
     }
   }
 
@@ -1166,6 +1217,11 @@ export function GraphicsStudio({
         </div>
       </header>
       <aside className="gs-objects" aria-label="오브젝트 목록">
+        <div className="gs-new-object-action">
+          <button type="button" className="gs-primary" data-testid="graphics-new-object" disabled={disabled} onClick={event => openNewObject(event.currentTarget)}>
+            <FilePlus2 size={17} /> 새 오브젝트
+          </button>
+        </div>
         <div className="gs-section-title">
           <h2>오브젝트</h2>
           <span>{workspace?.objects.length ?? 0}</span>
@@ -1209,30 +1265,6 @@ export function GraphicsStudio({
             <X size={15} /> 선택한 오브젝트 연결 해제
           </button>
         )}
-        <details
-          className="gs-create-disclosure"
-          open={!workspace?.objects.length}
-        >
-          <summary>오브젝트 추가</summary>
-          <form className="gs-create" onSubmit={createObject}>
-            <label htmlFor="gs-object-name">이름</label>
-            <input
-              id="gs-object-name"
-              placeholder="예: 기사 대검"
-              value={newName}
-              onChange={(event) => setNewName(event.target.value)}
-              maxLength={100}
-            />
-            <CreationSubjectChooser value={newSubject} disabled={disabled} onChange={id => {
-              setNewSubject(id);
-              if (!newName) setNewName(creationSubjects.find(item => item.id === id)?.label ?? '');
-            }} />
-            <button type="submit" disabled={disabled || !newName.trim() || !newSubject}>
-              <FilePlus2 size={15} /> 오브젝트 만들기
-            </button>
-            <p>대상·설명·참고 이미지를 연결할 새 오브젝트입니다. 기존 원본은 유지하고, 생성은 실행 버튼에서 시작합니다.</p>
-          </form>
-        </details>
         <button
           className="gs-legacy"
           disabled={disabled}
@@ -1444,10 +1476,11 @@ export function GraphicsStudio({
               <Box size={54} strokeWidth={1} />
               <h2>무엇을 만들까요?</h2>
               <p>
-                왼쪽에서 만들 대상을 추가하고 원하는 모양과 특징을 선택하세요.
+                새 오브젝트에서 만들 대상을 고른 뒤 모양과 특징을 설정하세요.
                 <br />
                 이미 모델이 있다면 이미지 생성 없이 바로 작업할 수 있습니다.
               </p>
+              <button type="button" className="gs-primary" data-testid="graphics-empty-new-object" disabled={disabled} onClick={event => openNewObject(event.currentTarget)}><FilePlus2 size={18} /> 첫 오브젝트 만들기</button>
             </div>
           ) : (
             <>
@@ -1856,7 +1889,7 @@ export function GraphicsStudio({
                         {provenanceLabels[shownVersion.provenance.type]} · 저장
                         파일 {shownVersion.files.length}개
                       </p>
-                      {["model", "rig", "animation"].includes(shownVersion.role) && <p className="gs-model-provenance">제작 원본: {modelProductionLabel(shownVersion, versions, objectTasks)}</p>}
+                      {["model", "rig", "animation"].includes(shownVersion.role) && <p className="gs-model-provenance">제작 원본: {modelProductionLabel(shownVersion, versions, objectTasks)}<br />{modelProductionGeometry(shownVersion, versions, objectTasks)} · 실제 결과 면수와 다를 수 있습니다.</p>}
                       {shownVersion.role === "model" && (
                         <ModelStatistics
                           projectId={project.id}
@@ -2493,28 +2526,6 @@ export function GraphicsStudio({
                           />
                         </label>
                       )}
-                    {stage === "model" &&
-                      creation.attributes.composition !== "parts" && (
-                        <label>
-                          목표 면 수
-                          <input
-                            aria-label="목표 면 수"
-                            type="number"
-                            min={100}
-                            max={1000000}
-                            step={100}
-                            value={String(settings.faceLimit ?? 10000)}
-                            onChange={(event) =>
-                              setting(
-                                "faceLimit",
-                                event.target.value === ""
-                                  ? ""
-                                  : Number(event.target.value),
-                              )
-                            }
-                          />
-                        </label>
-                      )}
                     {stage === "surface" &&
                       settings.surfaceOperation !== "uv" && (
                         <label>
@@ -2609,56 +2620,6 @@ export function GraphicsStudio({
                       결제를 방지합니다. 실제 청구 잔액과 구분됩니다.
                     </p>
                   </details>
-                  {stage === "model" &&
-                    settings.modelMethod !== "local" &&
-                    settings.modelMethod !== "astra" && (
-                      <details className="gs-api-model-options" open>
-                        <summary>사용할 Tripo 모델 · 토폴로지</summary>
-                        <label htmlFor="gs-model">모델 제작 모델</label>
-                        <select
-                          id="gs-model"
-                          value={String(settings.model ?? "P2-20260801")}
-                          disabled={disabled}
-                          onChange={(event) =>
-                            setting("model", event.target.value)
-                          }
-                        >
-                          {catalog.model.map((model) => (
-                            <option value={model.id} key={model.id}>
-                              {model.label}
-                            </option>
-                          ))}
-                        </select>
-                        <fieldset className="gs-choice">
-                          <legend>출력 토폴로지</legend>
-                          <div>
-                            <button
-                              type="button"
-                              aria-pressed={settings.quad === false}
-                              disabled={disabled}
-                              onClick={() => setting("quad", false)}
-                            >
-                              삼각형
-                            </button>
-                            <button
-                              type="button"
-                              aria-pressed={settings.quad !== false}
-                              disabled={
-                                disabled || settings.model === "P1-20260311"
-                              }
-                              onClick={() => setting("quad", true)}
-                            >
-                              쿼드
-                            </button>
-                          </div>
-                        </fieldset>
-                        <p className="gs-fine">
-                          모델별 외형 품질과 지원 기능은 다릅니다. 낮은 비용의
-                          모델이 같은 품질을 보장하지 않습니다. P1은 쿼드 출력을
-                          지원하지 않습니다.
-                        </p>
-                      </details>
-                    )}
                   {modelProblem && (
                     <p role="alert" className="gs-warning">
                       {modelProblem}
@@ -3369,6 +3330,28 @@ export function GraphicsStudio({
               </section>
             )}
           </div>
+        </dialog>
+      )}
+      {newObjectOpen && (
+        <dialog ref={newObjectDialog} className="gs-new-object-dialog" data-testid="graphics-create-dialog" aria-labelledby="gs-new-object-title" aria-describedby="gs-new-object-description"
+          onCancel={event => { event.preventDefault(); closeNewObject(); }}>
+          <form onSubmit={createObject} aria-busy={pending}>
+            <header>
+              <div><h2 id="gs-new-object-title">새 오브젝트 만들기</h2><p id="gs-new-object-description">만들 대상을 고르고 이름을 붙이세요. 모양과 참조는 다음 이미지 단계에서 설정합니다.</p></div>
+              <button type="button" aria-label="새 오브젝트 닫기" disabled={pending} onClick={closeNewObject}><X size={20} /></button>
+            </header>
+            <div className="gs-new-object-body">
+              <CreationSubjectChooser variant="cards" value={newSubject} disabled={disabled} onChange={id => {
+                setNewSubject(id);
+                if (!newName || newName === creationSubjects.find(item => item.id === newSubject)?.label) setNewName(creationSubjects.find(item => item.id === id)?.label ?? '');
+              }} />
+              <div className="gs-new-object-name"><label htmlFor="gs-object-name">3. 이름</label><input id="gs-object-name" aria-label="이름" placeholder="예: 기사 대검" value={newName} disabled={disabled} onChange={event => setNewName(event.target.value)} maxLength={100} /></div>
+            </div>
+            <footer>
+              <div><p>{newSubject ? `선택: ${creationSubjects.find(item => item.id === newSubject)?.label}` : '만들 대상을 선택하세요.'} · 이미지나 모델은 아직 생성하지 않습니다.</p>{newObjectError && <p role="alert" className="gs-error">{newObjectError}</p>}</div>
+              <div className="gs-new-object-buttons"><button type="button" disabled={pending} onClick={closeNewObject}>취소</button><button type="submit" className="gs-primary" disabled={disabled || !newName.trim() || !newSubject}>{pending ? <><LoaderCircle size={16} className="gs-spin" /> 만드는 중…</> : <><FilePlus2 size={16} /> 오브젝트 만들기</>}</button></div>
+            </footer>
+          </form>
         </dialog>
       )}
       {focusedImage && (

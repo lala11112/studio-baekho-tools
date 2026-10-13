@@ -6,6 +6,7 @@ const cacheNames = new Set(['Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCach
 const definitions = [
   ['originals', '등록된 제작 원본·버전', '현재 등록 파일과 채택 결과입니다. 보존이 필요합니다.'],
   ['project-other', '프로젝트 작업·검사·기록', '미등록 작업 원본도 포함할 수 있습니다. 불필요한 자료로 단정하지 않습니다.'],
+  ['inspection-cache', '원본 메시 검사 캐시', '원본에서 로컬로 다시 만들 수 있는 면 검사 미리보기와 대응표입니다. 제작 원본과 구분하며 자동 삭제하지 않습니다.'],
   ['cache', '브라우저 렌더링 캐시', '재생성 가능한 후보입니다. 로그인 데이터는 포함하지 않습니다. 실행 중 정리하지 않습니다.'],
   ['profile', '앱 설정·기타 데이터', '프로젝트 목록, 인증·설정과 복구 기록을 보존합니다.'],
   ['archive', '과거 제작 원본 보관본', '유일하게 남은 과거 제작 원본이 포함됩니다. 삭제하지 마세요.'],
@@ -47,7 +48,9 @@ export async function inspectGraphicsStorage(args: {
       const relative = path.relative(root.path, current).split(path.sep);
       const first = relative[0];
       const id = root.profile
-        ? sources.has(key(current)) ? 'originals' : first === 'projects' ? 'project-other'
+        ? sources.has(key(current)) ? 'originals'
+          : first === 'projects' && relative[2] === 'graphics' && relative[3] === 'inspection' && relative[4] === 'native-topology' ? 'inspection-cache'
+          : first === 'projects' ? 'project-other'
           : relative.some(part => cacheNames.has(part)) ? 'cache' : 'profile'
         : first === 'node_modules' ? 'dependencies'
           : first === 'release' ? 'release'

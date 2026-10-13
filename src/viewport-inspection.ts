@@ -40,6 +40,7 @@ export function gltfMeshIdentities(root: THREE.Object3D, parser: {
   return identities;
 }
 export type MeshEntry = MeshSelection & {
+  nativeCounts?: import('../shared/native-topology').NativeFaceCounts;
   mesh: THREE.Mesh; original: THREE.Material | THREE.Material[]; originallyVisible: boolean;
   assetId: string;
   restBounds: THREE.Box3; vertices: number; triangles: number; materials: Set<THREE.Material>;

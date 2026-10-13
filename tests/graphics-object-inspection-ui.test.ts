@@ -23,6 +23,7 @@ test('question UI creates atomic subject objects, preserves existing results, di
   const graphics = new GraphicsEngine(store,engine,{resources:path.resolve('integrations'),native:forbidden,procedural:forbidden,astra:forbidden,video:forbidden,motionSource:forbidden,storageRoot:path.join(root,'empty-app')});
   const project = engine.create('Object UI integration fixture');
   const actions: GraphicsAction[] = [], persistedRevisions: number[] = [];
+  let delayedCreate: (() => void) | undefined, failCreate = false, deferCreate = false;
   const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
   const entry = `
     import React,{useState} from 'react';import {createRoot} from 'react-dom/client';
@@ -47,12 +48,19 @@ test('question UI creates atomic subject objects, preserves existing results, di
     await page.exposeFunction('fixtureAction',async (action:GraphicsAction)=>{
       assert(['create-object','update-object','inspect-storage'].includes(action.kind),`Unexpected action ${action.kind}`);
       actions.push(structuredClone(action));
+      if (action.kind === 'create-object') {
+        if (deferCreate) await new Promise<void>(resolve => { delayedCreate = resolve; });
+        if (failCreate) throw Error('검사: 저장 실패');
+      }
       const result=await graphics.action(project.id,action);
       persistedRevisions.push(graphics.get(project.id).revision);
       return result;
     });
     await page.goto('file:///'+path.join(root,'index.html').replaceAll('\\','/'));
     await page.getByTestId('graphics-studio').waitFor();
+    assert.equal(await page.getByTestId('graphics-empty-new-object').isVisible(),true);
+    await page.getByTestId('graphics-new-object').click();
+    await page.getByRole('dialog',{name:'새 오브젝트 만들기',exact:true}).waitFor();
     const groups=page.getByRole('group',{name:'오브젝트 분류',exact:true}),targets=page.getByRole('group',{name:'만들 대상 선택',exact:true});
     const stage=(name:string)=>page.getByRole('navigation',{name:'제작 단계'}).getByRole('button',{name,exact:true});
     assert.equal(await groups.getByRole('button').count(),5);
@@ -66,6 +74,7 @@ test('question UI creates atomic subject objects, preserves existing results, di
     assert.equal(actions.length,0,'Category and name changes must not call backend');
     await page.getByRole('button',{name:'오브젝트 만들기',exact:true}).click();
     await page.waitForFunction(()=>(window as any).workspace.objects.length===1);
+    await page.getByTestId('graphics-create-dialog').waitFor({state:'detached'});
     assert.equal(actions.length,1);assert.equal(actions[0].kind,'create-object');
     const created=graphics.get(project.id).objects[0];
     assert.equal(created.kind,'prop');assert.equal(created.creation?.subject,'machine');
@@ -77,7 +86,7 @@ test('question UI creates atomic subject objects, preserves existing results, di
     const sourceBytes=Buffer.from(pixel,'base64'), sourcePath='graphics/fixture/source.png';store.write(project.id,sourcePath,sourceBytes);
     const file={path:sourcePath,kind:'image',bytes:sourceBytes.length,sha256:createHash('sha256').update(sourceBytes).digest('hex')};
     const version:AssetVersion={id:'original-model',objectId:created.id,role:'model',slot:'main',label:'기존 P2 모델',createdAt:'2026-10-13',files:[file],sourceVersionIds:[],provenance:{type:'tripo',remoteId:'fixture-only'},warnings:[]};
-    const task:GraphicsTask={id:'historical-model-task',objectId:created.id,taskId:'M01',createdAt:'2026-10-13',updatedAt:'2026-10-13',status:'review',inputVersionIds:[],settings:{model:'P2-20260801',faceLimit:5000,count:1},instruction:'fixture',requestHash:'fixture',outputVersionIds:[version.id],backendJobIds:[],message:'기존 검사 결과',localOnly:false};
+    const task:GraphicsTask={id:'historical-model-task',objectId:created.id,taskId:'M01',createdAt:'2026-10-13',updatedAt:'2026-10-13',status:'review',inputVersionIds:[],settings:{model:'P2-20260801',quad:true,faceLimit:5000,count:1},instruction:'fixture',requestHash:'fixture',outputVersionIds:[version.id],backendJobIds:[],message:'기존 검사 결과',localOnly:false};
     const seeded=graphics.get(project.id);seeded.versions.push(version);seeded.tasks.push(task);seeded.objects[0].accepted['model:main']=version.id;store.put('graphics',project.id,seeded);
     const preserved=structuredClone(seeded.objects[0]);
     await page.reload();await page.getByTestId(`graphics-object-${created.id}`).click();
@@ -95,11 +104,15 @@ test('question UI creates atomic subject objects, preserves existing results, di
 
     await page.getByTestId(`graphics-object-${created.id}`).click();await stage('2 모델').click();
     const summary=page.getByLabel('실행 설정 요약',{exact:true}), provenance=page.locator('.gs-model-provenance');
-    assert.match(await summary.innerText(),/기계|Tripo|P2\.0|10,000|원본 크기/);
+    assert.match(await summary.innerText(),/기계|Tripo|P2\.0|5,000|원본 크기/);
     assert.match(await provenance.innerText(),/P2\.0.*P2-20260801/);
     await page.getByLabel('모델 제작 모델',{exact:true}).selectOption('v3.1-20260211');
     assert.match(await summary.innerText(),/v3\.1|v3\.1-20260211|3\.1/);
     assert.match(await provenance.innerText(),/P2\.0.*P2-20260801/);
+    await page.getByTestId('model-geometry-settings').getByRole('button',{name:'삼각형',exact:true}).click();
+    await page.getByTestId('model-face-count').fill('6000');
+    assert.match(await provenance.innerText(),/요청 토폴로지 쿼드 · 목표 5,000면/);
+    assert.match(await summary.innerText(),/6,000/);
     assert.equal(actions.length,2,'Model choice must not generate or save silently');
     assert.equal(await page.getByLabel('실제 크기 모드',{exact:true}).inputValue(),'keep');
     await page.getByLabel('실제 크기 모드',{exact:true}).selectOption('uniform');
@@ -150,6 +163,53 @@ test('question UI creates atomic subject objects, preserves existing results, di
     await page.reload();await page.getByTestId(`graphics-object-${created.id}`).click();await stage('2 모델').click();
     assert.equal(await page.getByLabel('실제 크기 모드',{exact:true}).inputValue(),'keep','Unsaved draft must not rewrite the preserved object');
     assert.match(await page.locator('.gs-model-provenance').innerText(),/P2\.0.*P2-20260801/);
+
+    // Modal drafts are separate from the current object's stage and unsaved options.
+    await page.getByLabel('모델 제작 모델',{exact:true}).selectOption('v3.1-20260211');
+    const beforeModal = structuredClone(graphics.get(project.id)), actionCount = actions.length;
+    const newObjectButton=page.getByTestId('graphics-new-object'), createDialog=page.getByTestId('graphics-create-dialog');
+    await newObjectButton.click();
+    await groups.getByRole('button',{name:'건물·건축 부품',exact:true}).click();
+    await targets.getByRole('button',{name:'문·창문',exact:true}).click();
+    await createDialog.getByLabel('이름',{exact:true}).fill('새 문 초안');
+    for (const [width,height,zoom] of [[1440,1000,1],[960,720,1.5],[800,600,1.5]]) {
+      await app.evaluate(({BrowserWindow},{width,height,zoom})=>{const win=BrowserWindow.getAllWindows()[0];win.setSize(width,height);win.webContents.setZoomFactor(zoom);},{width,height,zoom});
+      const layout=await createDialog.evaluate(el=>{const body=el.querySelector('.gs-new-object-body')!,footer=el.querySelector('footer')!,r=el.getBoundingClientRect(),f=footer.getBoundingClientRect();return{viewport:[innerWidth,innerHeight],dialog:[r.left,r.top,r.right,r.bottom],footer:[f.top,f.bottom],bodyScroll:body.scrollHeight,bodyHeight:body.clientHeight,overflow:el.scrollWidth-el.clientWidth};});
+      assert(layout.dialog[0]>=0&&layout.dialog[1]>=0&&layout.dialog[2]<=layout.viewport[0]+1&&layout.dialog[3]<=layout.viewport[1]+1,JSON.stringify(layout));
+      assert(layout.footer[0]>=0&&layout.footer[1]<=layout.viewport[1]+1,JSON.stringify(layout));
+      assert(layout.overflow<=1,JSON.stringify(layout));
+      await createDialog.getByRole('button',{name:'오브젝트 만들기',exact:true}).scrollIntoViewIfNeeded();
+    }
+    await createDialog.getByRole('button',{name:'취소',exact:true}).click();
+    assert.equal(await newObjectButton.evaluate(el=>el===document.activeElement),true);
+    assert.equal(await stage('2 모델').getAttribute('aria-current'),'step');
+    assert.equal(await page.getByLabel('모델 제작 모델',{exact:true}).inputValue(),'v3.1-20260211');
+    assert.equal(actions.length,actionCount);assert.deepEqual(graphics.get(project.id),beforeModal);
+    await newObjectButton.click();assert.equal(await createDialog.getByLabel('이름',{exact:true}).inputValue(),'새 문 초안');
+    assert.equal(await targets.getByRole('button',{name:'문·창문',exact:true}).getAttribute('aria-pressed'),'true');
+    deferCreate=true;failCreate=true;
+    await createDialog.getByRole('button',{name:'오브젝트 만들기',exact:true}).click();
+    await createDialog.locator('form[aria-busy="true"]').waitFor();
+    assert.equal(await createDialog.getByLabel('이름',{exact:true}).isDisabled(),true);
+    assert.equal(await groups.getByRole('button').first().isDisabled(),true);
+    assert.equal(await createDialog.getByRole('button',{name:'취소',exact:true}).isDisabled(),true);
+    await page.keyboard.press('Escape');assert.equal(await createDialog.isVisible(),true);
+    await createDialog.locator('form').evaluate(el=>{el.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));el.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));});
+    assert.equal(actions.length,actionCount+1,'Pending submission must be guarded synchronously');
+    delayedCreate!();await createDialog.getByRole('alert').waitFor();
+    assert.match(await createDialog.getByRole('alert').innerText(),/저장 실패/);
+    assert.equal(await createDialog.getByLabel('이름',{exact:true}).inputValue(),'새 문 초안');
+    assert.deepEqual(graphics.get(project.id),beforeModal);
+    deferCreate=false;failCreate=false;
+    await createDialog.getByRole('button',{name:'오브젝트 만들기',exact:true}).click();
+    await createDialog.waitFor({state:'detached'});
+    await page.waitForFunction(()=>(window as any).workspace.objects.length===3);
+    assert.equal(await stage('1 이미지').getAttribute('aria-current'),'step');
+    await page.waitForFunction(()=>document.querySelector('.gs-creation-stages button')===document.activeElement);
+    assert.equal(graphics.get(project.id).objects.at(-1)?.name,'새 문 초안');
+    assert.deepEqual(graphics.get(project.id).objects[0],preserved);
+    assert.deepEqual(graphics.get(project.id).versions,[version]);assert.deepEqual(graphics.get(project.id).tasks,[task]);
+    assert.equal(serviceCalls,0);
     assert.deepEqual(errors,[]);
   } catch (error) {
     const page=await app.firstWindow();
