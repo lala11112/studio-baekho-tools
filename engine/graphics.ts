@@ -226,6 +226,27 @@ export class GraphicsEngine {
         if (mode === "auto" && o.settings.partId && !design) throw Error('이 파츠에 채택한 디자인 이미지가 없습니다. 파츠 참조를 채택하거나 텍스처 입력을 설명만 사용으로 변경하세요.');
         if (mode === "auto" && design) values.push(design);
       }
+    } else if (taskId === 'M09') {
+      const source = w.versions.find(v => v.id === o.settings.sourceVersionId && v.objectId === o.id && ['model', 'material'].includes(v.role));
+      if (!source) throw Error('빠진 면을 보완할 모델 후보를 결과 화면에서 선택하세요. 채택 전 후보도 수정할 수 있습니다.');
+      if (o.settings.partId && source.slot !== `part-${o.settings.partId}`) throw Error('선택한 보완 원본과 현재 파츠가 다릅니다. 해당 파츠 결과에서 다시 선택하세요.');
+      values = [source, ...refs.filter(v => v.role !== 'motion-reference')];
+      // Context is immutable and read-only: the original assembly plus sibling
+      // parts help fit the patch without changing which candidate is repaired.
+      const producer = w.tasks.find(t => t.id === source.provenance.jobId && t.taskId === 'M07');
+      if (producer) {
+        const siblings = new Set<string>();
+        for (const versionId of producer.outputVersionIds) {
+          const version = w.versions.find(v => v.id === versionId && v.objectId === o.id && v.role === 'model');
+          if (!version || version.slot === source.slot || siblings.has(version.slot)) continue;
+          siblings.add(version.slot); values.push(version);
+        }
+        for (const versionId of producer.inputVersionIds) {
+          const version = w.versions.find(v => v.id === versionId && v.objectId === o.id);
+          if (!version) throw Error('분리 원본의 참조 연결이 없습니다. 보완 작업을 시작하지 않습니다.');
+          values.push(version);
+        }
+      }
     } else if (taskId === 'M08') {
       const parts = o.creation?.parts.filter(part => part.enabled) ?? [];
       if (parts.length < 2) throw Error('조립할 파츠를 두 개 이상 설정하세요.');
@@ -385,6 +406,7 @@ export class GraphicsEngine {
       case "prepare": return this.prepare(id, action.objectId, action.taskId);
       case "approve": return this.approve(id, action.taskId);
       case "recover": return this.recover(id, action.taskId);
+      case "refresh-parts": return this.refreshParts(id, action.taskId);
       case "runtime-approval": {
         const task = w.tasks.find(value => value.id === action.taskId), pending = this.pendingApprovals.get(action.taskId);
         const request = task?.runtimeApproval;
@@ -438,11 +460,12 @@ export class GraphicsEngine {
     if (graphicsProceduralTasks.has(taskId)) { const problem = proceduralProblem({ ...o.settings, count: 1 }, taskId); if (problem) throw Error(problem); }
     if (w.tasks.some(t => t.objectId === o.id && ["awaiting_approval", "running", "submission_unknown"].includes(t.status))) throw Error("이 대상의 기존 작업을 확인하거나 취소한 뒤 새 작업을 준비하세요.");
     const inputs = this.inputs(w, o, taskId);
-    if (taskId === 'M06' && o.settings.meshSelectionVersionId !== undefined && inputs[0]?.id !== o.settings.meshSelectionVersionId)
+    if (['M06', 'M09'].includes(taskId) && o.settings.meshSelectionVersionId !== undefined && inputs[0]?.id !== o.settings.meshSelectionVersionId)
       throw Error('메시를 선택한 원본과 현재 채택 모델이 다릅니다. 현재 모델에서 부품을 다시 선택하세요.');
     const count = Number(o.settings.count ?? 1);
     if (!Number.isInteger(count) || count < 1 || count > 4) throw Error("출력 개수는 1–4개입니다.");
-    if (["I01", "I02", "I03", "I05", "I06", "M03", "M05", "N02", "N05", "N06"].includes(taskId) && !o.instruction.trim()) throw Error("제작 또는 수정할 내용을 입력하세요.");
+    if (["I01", "I02", "I03", "I05", "I06", "M03", "M05", "M09", "N02", "N05", "N06"].includes(taskId) && !o.instruction.trim()) throw Error("제작 또는 수정할 내용을 입력하세요.");
+    if (taskId === 'M09' && compiled && !String(o.settings.freeInstruction ?? '').trim()) throw Error('추가 지시에 보완할 빠진 면과 유지할 경계를 적어 주세요.');
     if (["N02", "N04", "N05", "N06"].includes(taskId)) {
       if (!isGraphicsClipName(o.settings.clipName)) throw Error("정확한 클립 이름을 100자 이내로 입력하세요. 경로 구분자와 제어 문자는 사용할 수 없습니다.");
       if (!Number.isFinite(Number(o.settings.duration ?? 2)) || Number(o.settings.duration ?? 2) <= 0 || Number(o.settings.duration ?? 2) > 30) throw Error("동작 길이는 0초 초과 30초 이하입니다.");
@@ -630,13 +653,13 @@ export class GraphicsEngine {
     const executeCandidate = async (child: GraphicsTask, candidateIndex: number) => {
       signal.throwIfAborted();
       w = this.get(id);
-      if (w.tasks.find(x => x.id === taskId)!.completedExecutions?.includes(child.id)) {
+      if (!t.derivativeRefreshRequested && w.tasks.find(x => x.id === taskId)!.completedExecutions?.includes(child.id)) {
         const existing = w.versions.filter(v => v.provenance.jobId === child.id);
         if (!existing.length) throw Error('완료 후보의 등록 기록이 없습니다. 재생성하지 않습니다.');
         for (const version of existing) for (const file of version.files) this.verified(id, file);
         return;
       }
-      const result = await executor({ projectRoot: this.store.directory(id), workspacePath: this.store.file(id, "graphics/workspace.json"), object: { ...o, settings: child.settings, instruction: t.instruction }, task: child, inputs, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal, recoveryOnly,
+      const result = await executor({ projectRoot: this.store.directory(id), workspacePath: this.store.file(id, "graphics/workspace.json"), object: { ...o, settings: child.settings, instruction: t.instruction }, task: child, inputs, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal, recoveryOnly, refreshDerivatives: t.derivativeRefreshRequested,
         requestApproval: request => this.requestRuntimeApproval(id, taskId, child.id, signal, request),
         onProgress: message => { const latest = this.get(id), task = latest.tasks.find(x => x.id === taskId)!; if (task.status === "running" && !task.runtimeApproval) { task.message = `${executions.length > 1 ? `후보 ${candidateIndex + 1}/${executions.length} · ` : ''}${message}`; task.updatedAt = now(); this.save(latest); } } });
       if (signal.aborted) return;
@@ -653,8 +676,10 @@ export class GraphicsEngine {
           provenance: { type: t.localOnly ? "local" : graphicsVideoTasks.has(t.taskId) ? "runway" : "codex", jobId: child.id },
           preview: group.role === "motion-reference" ? verified.find(f => /\.(mp4|webm)$/i.test(f.path))?.path : verified.find(f => image.test(f.path))?.path, warnings: group.warnings };
       });
-      w.versions.push(...versions); current.outputVersionIds.push(...versions.map(v => v.id));
-      current.completedExecutions = [...(current.completedExecutions ?? []), child.id];
+      const fresh = t.derivativeRefreshRequested ? versions.filter(version => !w.versions.some(prior => prior.provenance.jobId === child.id && prior.slot === version.slot && JSON.stringify(prior.files) === JSON.stringify(version.files))) : versions;
+      w.versions.push(...fresh);
+      current.outputVersionIds = t.derivativeRefreshRequested ? [...fresh.map(v => v.id), ...current.outputVersionIds] : [...current.outputVersionIds, ...fresh.map(v => v.id)];
+      current.completedExecutions = [...new Set([...(current.completedExecutions ?? []), child.id])];
       if (!current.runtimeApproval) current.message = `후보 ${candidateIndex + 1}/${executions.length} 원본 저장 완료. 나머지 후보 실패 시에도 이 결과는 유지됩니다.`;
       current.updatedAt = now(); current.usage = executions.length === 1 ? result.usage : this.savedNativeUsage(id, taskId);
       this.save(w);
@@ -676,7 +701,20 @@ export class GraphicsEngine {
     signal.throwIfAborted();
     if (failure !== undefined) throw failure;
     w = this.get(id); const current = w.tasks.find(x => x.id === taskId)!;
-    current.status = "review"; current.message = "원본을 보존해 새 결과를 등록했습니다. 확인 후 채택하세요."; current.updatedAt = now(); this.save(w);
+    current.status = "review"; current.message = t.derivativeRefreshRequested ? "저장된 분리 결과에서 미리보기를 확인했습니다. 기존 원본·채택 유지, GPT·유료 생성 없음." : "원본을 보존해 새 결과를 등록했습니다. 확인 후 채택하세요."; delete current.derivativeRefreshRequested; current.updatedAt = now(); this.save(w);
+  }
+  private refreshParts(id: string, taskId: string) {
+    const w = this.get(id), t = w.tasks.find(t => t.id === taskId);
+    if (!t || t.taskId !== "M07" || t.status !== "review" || !t.outputVersionIds.length || !t.completedExecutions?.includes(t.id)) throw Error("완료된 파츠 분리 결과만 갱신할 수 있습니다.");
+    if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error("다른 제작이 실행 중입니다.");
+    for (const versionId of [...t.inputVersionIds, ...t.outputVersionIds]) {
+      const version = w.versions.find(v => v.id === versionId);
+      if (!version) throw Error("기존 파츠 원본 등록이 없습니다.");
+      for (const file of version.files) this.verified(id, file);
+    }
+    t.derivativeRefreshRequested = true; t.status = "running"; t.updatedAt = now();
+    t.message = "저장된 분리 장면으로 미리보기를 갱신합니다. GPT·유료 생성 없음.";
+    this.save(w); this.launch(id, taskId, true); return this.get(id);
   }
   async recover(id: string, taskId: string) {
     const w = this.get(id), t = w.tasks.find(t => t.id === taskId);

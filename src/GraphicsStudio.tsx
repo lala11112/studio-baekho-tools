@@ -55,6 +55,7 @@ import {
   defaultCreation,
   effectiveCreation,
   summarizeCreation,
+  selectMissingSurfaceRepair,
   type CreationSpec,
   type CreationStage,
 } from "../shared/graphics-creation";
@@ -838,6 +839,15 @@ export function GraphicsStudio({
               ? "3D 애니메이션 제작 · 입력 확인"
               : `${activeTask.name} · ${activeTask.executor === "local" ? "입력 확인" : "비용 확인"}`;
 
+  function chooseRepairSource(source: AssetVersion, mesh?: MeshSelection) {
+    if (disabled || active) return;
+    try {
+      setCreation(selectMissingSurfaceRepair(creation, source, mesh));
+      setStage('assembly'); setTaskId(undefined); setError('');
+      setNotice(`${source.label}을 빠진 면 보완 원본으로 지정했습니다. 보완할 위치와 추가 상한을 확인한 뒤 실행을 준비하세요.`);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  }
+
   function showAuxiliary(view: "history" | "support" | "storage") {
     setAuxiliary(view);
     document
@@ -1336,6 +1346,8 @@ export function GraphicsStudio({
               <span><b>도구·모델</b> {activeTask.executor === 'tripo' && stage !== 'model' ? `Tripo API · ${activeTask.name}` : activeTask.executor === 'tripo' ? `Tripo · ${catalog.model.find(model => model.id === String(settings.model ?? 'P2-20260801'))?.label ?? settings.model}` : activeTask.executor === 'astra' ? 'Blender + Astra' : activeTask.executor === 'local' ? '로컬 처리' : activeTask.executor === 'runway' ? 'Runway' : activeTask.executor === 'codex-image' ? 'Codex 이미지' : '설정 확인'}</span>
               <span><b>후보</b> {String(settings.count ?? 1)}개</span>
               {stage === 'model' && <span><b>목표 면 수</b> {Number(settings.faceLimit ?? 5000).toLocaleString()}</span>}
+              {taskId === 'M09' && <span><b>보완 원본</b> {versions.find(version => version.id === settings.sourceVersionId)?.label ?? '미리보기에서 선택 필요'}</span>}
+              {taskId === 'M09' && <span><b>추가 상한</b> {String(settings.repairMaxAddedFaces ?? 1500)}면 · {String(settings.repairMaxAddedVertices ?? 1000)}정점</span>}
               <span><b>목표 크기</b> {physicalSizeSummary(creation.physicalSize)}</span>
               <span><b>예상 비용</b> {activeTask.executor === 'local' ? '무료 · GPT 0회' : '준비 후 비용 카드 확인'}</span>
             </div>
@@ -1445,6 +1457,12 @@ export function GraphicsStudio({
                           }}
                         >
                           결과 보기
+                        </button>
+                      )}
+                      {task.status === "review" && task.taskId === "M07" && (
+                        <button disabled={disabled} data-testid={`graphics-refresh-parts-${task.id}`}
+                          onClick={() => void run({ kind: "refresh-parts", taskId: task.id })}>
+                          파츠 미리보기 갱신 · 생성 없음
                         </button>
                       )}
                       <button onClick={() => showAuxiliary("history")}>
@@ -1873,6 +1891,8 @@ export function GraphicsStudio({
                       setStage('assembly'); setTaskId(undefined);
                       setNotice('선택 부품을 수정 대상으로 지정했습니다. 수정할 내용을 적고 실행을 준비하세요.');
                     }}>선택 부품 보정하기</button>
+                    <button disabled={disabled || active || !['model', 'material'].includes(shownVersion.role) || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation) || (!meshSelection.sourceId && !meshSelection.sourceName)}
+                      onClick={() => chooseRepairSource(shownVersion, meshSelection)}>선택 부품 빠진 면 보완</button>
                     {!meshSelection.sourceId && !meshSelection.sourceName && <small>원본 메시 연결 미확인 · 안전하게 대응되는 이름 또는 ID가 필요합니다.</small>}
                     {meshSelection.sourceName && <small>보정 범위: 원본 메시 {meshSelection.sourceName} 전체. 재질별로 나뉜 미리보기 조각도 같은 원본 메시를 대상으로 합니다.</small>}
                     {(shownVersion.role !== 'model' || !acceptedVersion(object, shownVersion)) && <small>채택한 모델에서 선택하세요. 리그·동작 결과의 직접 메시 보정은 지원하지 않습니다.</small>}
@@ -1908,6 +1928,12 @@ export function GraphicsStudio({
                       {shownVersion.warnings.length > 0 && <div className="gs-result-notes" aria-label="결과 검토 사항">
                         <strong>검토할 사항</strong>
                         <ul>{shownVersion.warnings.map((warning, index) => <li className="gs-warning" key={index}>{warning}</li>)}</ul>
+                      </div>}
+                      {['model', 'material'].includes(shownVersion.role) && shownVersion.slot.startsWith('part-') && <div className="gs-result-notes" aria-label="파트 빠진 면 보완">
+                        <p>분리된 파트에 두피·뒤통수처럼 빠진 면이 있으면, 이 원본의 기존 면을 보존하면서 보완할 수 있습니다. UV·텍스처는 보완 결과를 채택한 다음 준비하세요.</p>
+                        <button disabled={disabled || active || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation)}
+                          onClick={() => chooseRepairSource(shownVersion)}>이 파트 빠진 면 보완</button>
+                        <small>원본과 채택 상태는 유지됩니다. 단일 메시 파트만 바로 지정할 수 있으며, 여러 메시가 있으면 위 미리보기에서 보완할 메시를 선택하세요.</small>
                       </div>}
                       <div className="gs-file-actions">
                         <button

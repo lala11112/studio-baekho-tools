@@ -144,7 +144,7 @@ export function CreationOptions({
       <h2>{stageQuestions[stage]}</h2>
       {splitWhole && <section className="gs-human-workflow" aria-label="인간형 파트 제작 순서">
         <strong>전체 제작 후 3파트 분리</strong>
-        <p>전체 무텍스처 모델 → 머리 / 몸통 / 머리카락 분리 → 파트별 UV·4K 텍스처 → 조립 → Humanoid → Unity</p>
+        <p>전체 무텍스처 모델 → 머리 / 몸통 / 머리카락 분리 → 필요시 빠진 면 보완 → 파트별 UV·4K 텍스처 → 조립 → Humanoid → Unity</p>
         <p className="gs-fine">몸통에는 팔·손·손가락·다리·발과 의상이 포함됩니다. 분리된 파트는 원본의 실제 면 수를 이어받습니다.</p>
         {stage === 'model' && <p className="gs-fine">현재 파트 선택과 관계없이 전체 모델을 제작합니다. 아래 목표 면 수는 세 파트의 합계입니다.</p>}
         {stage === 'surface' && <p className="gs-fine">현재 파트: {activePart?.label ?? '선택 필요'}. 이 파트의 채택 모델에만 UV·텍스처를 적용합니다.</p>}
@@ -513,19 +513,36 @@ export function CreationOptions({
             ["assemble", "채택 파트 조립"],
             ["separate", "모델 파트 분리"],
             ["partial", "지정 메시만 수정"],
+            ["repair", "빠진 면 보완"],
           ])}
           <p>
             채택한 파트를 전체 외형 참고에 맞춰 조립하거나, 기존 모델의 비율과
             모양을 수정합니다. 수정하지 않아도 되는 단일 모델은 리깅 또는 Unity
             단계로 이동할 수 있습니다.
           </p>
-          {settings.assemblyMode === "partial" && (
+          {settings.assemblyMode === "repair" && (
+            <section className="gs-human-workflow" aria-label="빠진 면 보완 범위">
+              <strong>기존 면을 보존하고 빠진 면만 추가</strong>
+              <p>미리보기에서 보완할 원본 파트를 지정하세요. 아직 채택하지 않은 분리 결과도 선택할 수 있습니다. 단일 메시 파트는 전체를 대상으로 하며, 메시가 여럿이면 미리보기에서 하나를 선택하세요.</p>
+              <p className="gs-fine">{activePart ? `현재 파트: ${activePart.label}. ` : ''}리깅·변형·동작이 없는 원본만 지원합니다. 보완할 위치를 이번 단계 지시에 적고, 목처럼 연결을 위해 열린 경계는 유지하도록 지정하세요.</p>
+              <div className="gs-settings-grid">
+                {([['repairMaxAddedFaces', '추가 면 상한', 1500, 1], ['repairMaxAddedVertices', '추가 정점 상한', 1000, 0]] as const).map(([key, label, fallback, min]) => (
+                  <label key={key}>{label}<input aria-label={label} type="number" min={min} max={4000} step={1} disabled={disabled}
+                    value={settings[key] === '' ? '' : Number(settings[key] ?? fallback)}
+                    onChange={event => onSetting(key, event.target.value === '' ? '' : Number(event.target.value))} /></label>
+                ))}
+              </div>
+              <p className="gs-fine">상한 안에서 필요한 만큼만 추가합니다. 기존 면·정점·UV·재질 보존을 검사한 새 버전을 만들며, 결과를 확인하고 채택한 뒤 UV·텍스처를 준비하세요. 선택만으로 생성하거나 채택하지 않습니다.</p>
+            </section>
+          )}
+          {(settings.assemblyMode === "partial" || settings.assemblyMode === "repair") && (
             <details>
-              <summary>수정할 메시 ID · 고급</summary>
+              <summary>{settings.assemblyMode === 'repair' ? '보완할 메시 ID · 고급' : '수정할 메시 ID · 고급'}</summary>
               <label>
                 원본 보고서의 메시 ID 목록
                 <textarea
                   rows={2}
+                  disabled={disabled}
                   placeholder={'["mesh-id"]'}
                   value={String(settings.editMeshIds ?? "")}
                   onChange={(event) =>

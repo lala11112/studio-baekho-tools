@@ -48,6 +48,7 @@ export type GraphicsTask = {
   usage?: unknown;
   /** Durable, independently registered candidate executions; never repeat them on recovery. */
   completedExecutions?: string[];
+  derivativeRefreshRequested?: boolean;
   objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted" | "creation">;
   targetProfile?: UnityTargetProfile;
   deliveryId?: string;
@@ -109,7 +110,7 @@ export type GraphicsAction =
   | { kind: "import"; objectId: string; role: GraphicsRole; clipName?: string }
   | { kind: "accept"; objectId: string; versionId: string }
   | { kind: "prepare"; objectId: string; taskId: string }
-  | { kind: "approve" | "cancel" | "recover"; taskId: string }
+  | { kind: "approve" | "cancel" | "recover" | "refresh-parts"; taskId: string }
   | { kind: "runtime-approval"; taskId: string; approvalId: string; answer: WorkbenchRuntimeAnswer }
   | { kind: "set-tripo-budget"; credits: number }
   | { kind: "import-legacy"; versionIds: string[]; fingerprint: string }

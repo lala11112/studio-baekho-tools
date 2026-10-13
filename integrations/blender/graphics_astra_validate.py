@@ -249,6 +249,198 @@ def save_json(file, value):
     temporary.replace(target)
 
 
+def repair_contract():
+    """Exact append-only data; intentionally separate from rounded display snapshots."""
+    def exact(values):
+        result = [float(value) for value in values]
+        if not all(math.isfinite(value) for value in result):
+            raise RuntimeError('Repair contains non-finite geometry or attribute values')
+        return result
+
+    def properties(owner):
+        try:
+            return json.loads(json.dumps({key: value.to_list() if hasattr(value, 'to_list') else value.to_dict() if hasattr(value, 'to_dict') else value for key, value in owner.items()}, allow_nan=False, sort_keys=True))
+        except (TypeError, ValueError):
+            raise RuntimeError('Repair does not support non-serializable custom properties: ' + owner.name)
+
+    if len(bpy.data.scenes) != 1 or set(bpy.context.scene.objects) != set(bpy.data.objects) or bpy.data.libraries:
+        raise RuntimeError('Repair requires one self-contained scene without hidden unrelated objects')
+    for owner in bpy.data.user_map():
+        if getattr(owner, 'animation_data', None):
+            raise RuntimeError('Repair currently supports static sources without animation dependencies')
+    objects, meshes = [], {}
+    for obj in sorted(bpy.data.objects, key=lambda value: value.name):
+        if obj.type == 'ARMATURE' or obj.constraints or obj.modifiers or obj.type == 'MESH' and obj.data.shape_keys:
+            raise RuntimeError('Repair supports unrigged meshes without morphs, modifiers or constraints')
+        objects.append({'name': obj.name, 'type': obj.type, 'data': obj.data.name if obj.data else None,
+            'parent': obj.parent.name if obj.parent else None, 'parentType': obj.parent_type,
+            'matrix': [exact(row) for row in obj.matrix_world], 'parentInverse': [exact(row) for row in obj.matrix_parent_inverse],
+            'properties': properties(obj), 'hidden': [obj.hide_viewport, obj.hide_render, obj.hide_get()],
+            'collections': sorted(collection.name for collection in obj.users_collection)})
+        if obj.type != 'MESH':
+            continue
+        mesh = obj.data
+        attributes = {}
+        for attribute in mesh.attributes:
+            if attribute.name == 'position' or attribute.name in ('.select_vert', '.select_edge', '.select_poly', '.uv_select_vert', '.uv_select_edge', '.uv_select_face'):
+                continue  # Positions are explicit; temporary editor selections are not asset data.
+            field = 'vector' if attribute.data_type in ('FLOAT_VECTOR', 'FLOAT2') else 'color' if attribute.data_type in ('FLOAT_COLOR', 'BYTE_COLOR') else 'value'
+            values = []
+            for item in attribute.data:
+                value = getattr(item, field)
+                values.append(exact(value) if not isinstance(value, (str, int, float, bool)) else value)
+            attributes[attribute.name] = {'domain': attribute.domain, 'type': attribute.data_type, 'values': values}
+        meshes[obj['partsmith_id']] = {'positions': [exact(vertex.co) for vertex in mesh.vertices],
+            'faces': [list(face.vertices) for face in mesh.polygons], 'edges': [list(edge.vertices) for edge in mesh.edges],
+            'faceMaterials': [face.material_index for face in mesh.polygons], 'smooth': [face.use_smooth for face in mesh.polygons],
+            'uv': [[layer.name, [exact(item.uv) for item in layer.data], layer.active_render] for layer in mesh.uv_layers],
+            'activeUV': mesh.uv_layers.active_index,
+            'materials': [[slot.link, slot.material.name if slot.material else None] for slot in obj.material_slots],
+            'attributes': attributes, 'properties': properties(mesh),
+            'groups': [group.name for group in obj.vertex_groups],
+            'weights': [[[group.group, float(group.weight)] for group in vertex.groups] for vertex in mesh.vertices]}
+    return {'objects': objects, 'meshes': meshes,
+        'actions': [{'name': action.name, 'curves': [[curve.data_path, curve.array_index, curve.extrapolation,
+            [[exact(key.co), exact(key.handle_left), exact(key.handle_right), key.interpolation, key.handle_left_type, key.handle_right_type] for key in curve.keyframe_points]]
+            for curve in curves(action)]} for action in sorted(bpy.data.actions, key=lambda action: action.name)]}
+
+
+def repair_checks(q, baseline, current):
+    original = baseline.get('repairContract')
+    if not original:
+        raise RuntimeError('Repair baseline lacks its exact append-only contract')
+    actual = repair_contract()
+    targets = q.get('editMeshIds', [])
+    old, new = original['meshes'], actual['meshes']
+    if len(targets) != 1 or targets[0] not in old or set(old) != set(new):
+        raise RuntimeError('Repair requires exactly one original mesh ID and no new or deleted meshes')
+    target = targets[0]
+    if original['objects'] != actual['objects'] or original['actions'] != actual['actions'] or baseline['rigs'] != current['rigs']:
+        raise RuntimeError('Repair changed an original object, transform, custom ID, skeleton or action')
+    if baseline['textures'] != current['textures'] or baseline['materials'] != current['materials']:
+        raise RuntimeError('Repair changed original materials or packed textures')
+    if any(old[key] != new[key] for key in old if key != target):
+        raise RuntimeError('Repair changed an untargeted mesh')
+    before, after = old[target], new[target]
+    vertices, faces, edges = len(before['positions']), len(before['faces']), len(before['edges'])
+    added_vertices, added_faces = len(after['positions']) - vertices, len(after['faces']) - faces
+    max_faces, max_vertices = q.get('repairMaxAddedFaces', 1500), q.get('repairMaxAddedVertices', 1000)
+    if isinstance(max_faces, bool) or isinstance(max_vertices, bool) or not isinstance(max_faces, int) or not isinstance(max_vertices, int) or not 1 <= max_faces <= 4000 or not 0 <= max_vertices <= 4000:
+        raise RuntimeError('Repair geometry budget is invalid')
+    if not 1 <= added_faces <= max_faces or not 0 <= added_vertices <= max_vertices:
+        raise RuntimeError('Repair must append faces within the frozen vertex and face budgets')
+    tolerance = 1e-7
+    displacement = max(abs(value - after['positions'][index][axis]) for index, point in enumerate(before['positions']) for axis, value in enumerate(point))
+    if displacement > tolerance or after['faces'][:faces] != before['faces'] or after['edges'][:edges] != before['edges']:
+        raise RuntimeError('Repair moved an original vertex or changed original polygon/edge indices or winding')
+    if any(after[field] != before[field] for field in ('materials', 'activeUV', 'properties', 'groups')) or any(after[field][:faces] != before[field] for field in ('faceMaterials', 'smooth')) or after['weights'][:vertices] != before['weights'] or any(after['weights'][vertices:]):
+        raise RuntimeError('Repair changed original assignments, properties or weights')
+    if len(after['uv']) != len(before['uv']) or any(new_layer[0] != old_layer[0] or new_layer[2] != old_layer[2] or new_layer[1][:len(old_layer[1])] != old_layer[1] for old_layer, new_layer in zip(before['uv'], after['uv'])):
+        raise RuntimeError('Repair changed an original UV layer or corner')
+    def semantic_attributes(value):
+        attributes = dict(value['attributes'])
+        # Blender may allocate or elide default-valued built-in storage while
+        # preserving the exact polygon properties already checked above. Only
+        # these two known FACE properties receive semantic normalization; custom
+        # attributes, UVs and every original polygon value remain exact.
+        for name, data_type, expected in (('material_index', 'INT', value['faceMaterials']),
+                                         ('sharp_face', 'BOOLEAN', [not smooth for smooth in value['smooth']])):
+            attribute = attributes.pop(name, None)
+            if attribute is not None:
+                if attribute['domain'] != 'FACE' or attribute['type'] != data_type or attribute['values'] != expected:
+                    raise RuntimeError('Repair built-in face attribute disagrees with its polygon values: ' + name)
+            elif any(expected):
+                raise RuntimeError('Repair missing built-in face attribute has nondefault polygon values: ' + name)
+        return attributes
+
+    before_attributes, after_attributes = semantic_attributes(before), semantic_attributes(after)
+    changed_attributes = set(before_attributes) ^ set(after_attributes)
+    changed_attributes.update(name for name, value in before_attributes.items() if name in after_attributes and (value['domain'] != after_attributes[name]['domain'] or value['type'] != after_attributes[name]['type'] or value['values'] != after_attributes[name]['values'][:len(value['values'])]))
+    if changed_attributes:
+        raise RuntimeError('Repair changed an original point, corner, face or edge attribute: ' + ', '.join(sorted(changed_attributes)))
+
+    low = [min(point[axis] for point in before['positions']) for axis in range(3)]
+    high = [max(point[axis] for point in before['positions']) for axis in range(3)]
+    diagonal = math.dist(low, high)
+    if diagonal < 1e-9:
+        raise RuntimeError('Repair target has no meaningful spatial extent')
+    margin = diagonal * 0.75
+    if any(point[axis] < low[axis] - margin or point[axis] > high[axis] + margin for point in after['positions'][vertices:] for axis in range(3)):
+        raise RuntimeError('Repair added vertices outside the bounded target region')
+
+    def face_edges(face):
+        return [(face[index], face[(index + 1) % len(face)]) for index in range(len(face))]
+
+    original_edges = {}
+    for face in before['faces']:
+        for edge in face_edges(face):
+            original_edges.setdefault(tuple(sorted(edge)), []).append(edge)
+    boundary = {edge: directions[0] for edge, directions in original_edges.items() if len(directions) == 1}
+    boundary_vertices = {vertex for edge in boundary for vertex in edge}
+    if not boundary:
+        raise RuntimeError('Repair target has no original boundary to attach missing surfaces')
+    new_edges, used_vertices, signatures = {}, set(), {tuple(sorted(face)) for face in before['faces']}
+    new_faces = after['faces'][faces:]
+    mesh = next(obj.data for obj in bpy.context.scene.objects if obj.type == 'MESH' and obj.get('partsmith_id') == target)
+    for index, face in enumerate(new_faces):
+        signature = tuple(sorted(face))
+        if len(face) < 3 or len(set(face)) != len(face) or signature in signatures or any(vertex < 0 or vertex >= len(after['positions']) for vertex in face):
+            raise RuntimeError('Repair contains duplicate, invalid or repeated polygon corners')
+        signatures.add(signature)
+        area = float(mesh.polygons[faces + index].area)
+        if not math.isfinite(area) or area <= max(diagonal * diagonal * 1e-12, 1e-18) or any(math.dist(after['positions'][a], after['positions'][b]) <= diagonal * 1e-9 for a, b in face_edges(face)):
+            raise RuntimeError('Repair contains a non-finite or degenerate new face')
+        if any(vertex < vertices and vertex not in boundary_vertices for vertex in face):
+            raise RuntimeError('Repair attached new faces to an original interior vertex')
+        used_vertices.update(face)
+        for edge in face_edges(face):
+            new_edges.setdefault(tuple(sorted(edge)), []).append((index, edge))
+    if used_vertices.intersection(range(vertices, len(after['positions']))) != set(range(vertices, len(after['positions']))):
+        raise RuntimeError('Repair added unused or loose vertices')
+    if any(tuple(sorted(edge)) not in new_edges for edge in after['edges'][edges:]):
+        raise RuntimeError('Repair added a loose edge')
+    neighbors = [set() for _ in new_faces]
+    attached, attachments = set(), []
+    for edge, entries in new_edges.items():
+        previous = original_edges.get(edge, [])
+        directions = previous + [entry[1] for entry in entries]
+        if len(directions) > 2 or len(directions) == 2 and directions[0] != tuple(reversed(directions[1])):
+            raise RuntimeError('Repair boundary attachment is non-manifold or has inconsistent winding')
+        if previous:
+            if edge not in boundary or len(entries) != 1:
+                raise RuntimeError('Repair must attach only at an original boundary edge')
+            attached.add(entries[0][0])
+            attachments.append(list(edge))
+        if len(entries) == 2:
+            first, second = entries[0][0], entries[1][0]
+            neighbors[first].add(second)
+            neighbors[second].add(first)
+    visited, components = set(), 0
+    for start in range(len(new_faces)):
+        if start in visited:
+            continue
+        pending, component = [start], set()
+        while pending:
+            index = pending.pop()
+            if index in component:
+                continue
+            component.add(index)
+            pending.extend(neighbors[index] - component)
+        if not component.intersection(attached):
+            raise RuntimeError('Repair contains a disconnected component without an original boundary edge')
+        visited.update(component)
+        components += 1
+    remaining = sum(len(original_edges.get(edge, [])) + len(new_edges.get(edge, [])) == 1 for edge in set(original_edges) | set(new_edges))
+    checks = dict.fromkeys(('meshLineage', 'appendOnlyRepair', 'originalGeometry', 'boundaryAttachment', 'repairBounds', 'otherObjectsPreserved', 'materials', 'skeleton', 'actionsPreserved'), True)
+    checks['topology'] = False  # New geometry is intentional; strict M06/M07 contracts stay unchanged.
+    return checks, {'targetMeshId': target, 'addedVertices': added_vertices, 'addedFaces': added_faces,
+        'maxAddedVertices': max_vertices, 'maxAddedFaces': max_faces, 'originalPositionTolerance': tolerance,
+        'maxOriginalPositionDisplacement': displacement, 'boundaryAttachmentEdges': attachments, 'newSurfaceComponents': components,
+        'spatialMargin': margin, 'originalBounds': [low, high], 'originalBoundaryEdges': len(boundary), 'remainingBoundaryEdges': remaining,
+        'equivalentFaceAttributeStorageChanges': sorted((set(before['attributes']) ^ set(after['attributes'])) & {'material_index', 'sharp_face'}),
+        'newUVQualityVerified': False, 'selfIntersectionVerified': False, 'watertightnessVerified': False, 'anatomicalQualityVerified': False}
+
+
 def prepare(q):
     source = pathlib.Path(q['source'])
     if file_hash(source) != q['sourceSha256']:
@@ -290,6 +482,8 @@ def prepare(q):
         if obj.type == 'MESH' and not obj.get('partsmith_id'):
             obj['partsmith_id'] = 'mesh-' + digest([q['sourceSha256'], obj.name])[:24]
     evidence = snapshot(allow_empty=q['operation'] == 'M15')
+    if q['operation'] == 'M09':
+        evidence['repairContract'] = repair_contract()
     if q['operation'] in ('R03', 'N04', 'N05', 'N06') and not evidence['rigs']:
         raise RuntimeError('Accepted editable source has no actual rig')
     if q['operation'] == 'N06' and not any(action['name'] == q['actionName'] for action in evidence['actions']):
@@ -506,7 +700,7 @@ def motion_test(q):
     return {**evidence, 'sampleFrames': samples, 'movingBones': sorted(moving_bones), 'movingMeshes': sorted(moving_meshes), 'fps': q['fps'], 'duration': q['duration']}
 
 
-def preview(q):
+def preview(q, export_model=True):
     scene = bpy.context.scene
     out = pathlib.Path(q['output'])
     files = []
@@ -516,8 +710,16 @@ def preview(q):
         obj.select_set(True)
     meshes = [obj for obj in selected if obj.type == 'MESH']
     bpy.context.view_layer.objects.active = meshes[0]
-    glb_images = export_packed_glb(out / 'asset.glb', use_selection=True, export_animations=True)
-    files.append('asset.glb')
+    glb_images = []
+    if export_model:
+        if q['operation'] == 'M09':
+            bpy.ops.export_scene.fbx(filepath=str(out / 'asset.fbx'), use_selection=True,
+                object_types={'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y', apply_unit_scale=True,
+                apply_scale_options='FBX_SCALE_UNITS', use_mesh_modifiers=False, use_triangles=False,
+                use_custom_props=True, add_leaf_bones=False, bake_anim=False, path_mode='COPY', embed_textures=True)
+            files.append('asset.fbx')
+        glb_images = export_packed_glb(out / 'asset.glb', use_selection=True, use_active_scene=True, export_animations=True)
+        files.append('asset.glb')
     # Native preview cameras/lights are temporary and never alter the authored scene file.
     for obj in list(scene.objects):
         if obj.type in ('LIGHT', 'CAMERA'):
@@ -528,6 +730,8 @@ def preview(q):
     points = [Vector(point) for mesh in coordinates().values() for point in mesh]
     low = Vector(tuple(min(point[axis] for point in points) for axis in range(3)))
     high = Vector(tuple(max(point[axis] for point in points) for axis in range(3)))
+    if q.get('previewBounds'):
+        low, high = (Vector(point) for point in q['previewBounds'])
     center = (low + high) * 0.5
     radius = max((high - low).length * 0.5, 0.01)
     engines = scene.render.bl_rna.properties['engine'].enum_items.keys()
@@ -656,7 +860,7 @@ def validate(q):
     bpy.ops.wm.open_mainfile(filepath=q['outputBlend'], load_ui=False, use_scripts=False)
     current = snapshot()
     checks = {}
-    expanded_model = q['operation'] in ('M06', 'M07', 'M08', 'M15')
+    expanded_model = q['operation'] in ('M06', 'M07', 'M08', 'M09', 'M15')
     old = {mesh['id']: mesh for mesh in baseline['meshes']}
     new = {mesh['id']: mesh for mesh in current['meshes']}
     checks['meshLineage'] = set(old) == set(new)
@@ -680,7 +884,9 @@ def validate(q):
     if not checks['actionsPreserved']:
         raise RuntimeError('An untargeted original animation action was removed or modified')
     evidence = {}
-    if expanded_model:
+    if q['operation'] == 'M09':
+        checks, evidence['repair'] = repair_checks(q, baseline, current)
+    elif expanded_model:
         checks = model_checks(q, baseline, current)
     for lock, check in [('topology', 'topology'), ('materials', 'materials'), ('rig', 'skeleton')]:
         if q.get('locks', {}).get(lock) is True and not checks.get(check):
@@ -721,6 +927,20 @@ def validate(q):
     candidates = []
     if q['operation'] == 'M07':
         files, glb_images, candidates = part_previews(q, current)
+    elif q['operation'] == 'M09':
+        # Same framing for honest source/result comparison; reopen each native file
+        # so temporary preview lights/cameras never contaminate the saved output.
+        points = [point for mesh in coordinates().values() for point in mesh]
+        bounds = [[min(point[axis] for point in points) for axis in range(3)], [max(point[axis] for point in points) for axis in range(3)]]
+        before_folder = pathlib.Path(q['output']) / 'before'
+        before_folder.mkdir()
+        bpy.ops.wm.open_mainfile(filepath=q['sourceBlend'], load_ui=False, use_scripts=False)
+        before_files, _ = preview({**q, 'output': str(before_folder), 'previewBounds': bounds}, export_model=False)
+        bpy.ops.wm.open_mainfile(filepath=q['outputBlend'], load_ui=False, use_scripts=False)
+        files, glb_images = preview({**q, 'previewBounds': bounds})
+        files += ['before/' + file for file in before_files]
+        evidence['repair']['comparisonViews'] = ['front', 'side', 'back']
+        evidence['repair']['comparisonFraming'] = 'identical-output-bounds'
     else:
         files, glb_images = preview(q)
     if file_hash(q['sourceBlend']) != source_hash or file_hash(q['outputBlend']) != output_hash:

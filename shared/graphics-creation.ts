@@ -1,4 +1,4 @@
-import type { GraphicsKind, GraphicsObject } from './graphics';
+import type { AssetVersion, GraphicsKind, GraphicsObject } from './graphics';
 import { isGraphicsClipName } from './graphics';
 import { defaultPhysicalSize, normalizePhysicalSize, type PhysicalSize } from './graphics-size';
 import { DEFAULT_MODEL_FACE_LIMIT, DEFAULT_TRIPO_MODEL, changeModelGeometry, modelGeometryProblem, requireModelGeometry } from './graphics-model-geometry';
@@ -125,6 +125,32 @@ export function creationPartForTask(spec: CreationSpec, taskId: string): PartSpe
   if (!['design', 'model', 'surface', 'assembly'].includes(stage) || stage === 'model' && isWholeThenSplitCreation(spec)) return undefined;
   return spec.parts.find(part => part.id === spec.activePartId && part.enabled);
 }
+/** Select an exact displayed source in the editable draft; never adopt or execute it. */
+export function selectMissingSurfaceRepair(spec: CreationSpec, source: Pick<AssetVersion, 'id' | 'slot' | 'role'>, mesh?: { sourceId?: string; sourceName?: string }): CreationSpec {
+  if (!['model', 'material'].includes(source.role)) throw Error('리깅 전 모델 또는 파트를 선택하세요.');
+  const partId = source.slot.startsWith('part-') ? source.slot.slice(5) : undefined;
+  if (partId && !spec.parts.some(part => part.id === partId && part.enabled)) throw Error('보완할 원본에 해당하는 파트를 선택하세요.');
+  if (!partId && spec.attributes.composition === 'parts') throw Error('분리된 파트의 원본을 선택하세요.');
+  const next = structuredClone(spec), assembly = next.stageSettings.assembly;
+  next.activePartId = partId;
+  next.stageSettings.assembly = { instruction: assembly?.instruction ?? '', values: {
+    ...assembly?.values, assemblyMode: 'repair', count: 1, sourceVersionId: source.id, meshSelectionVersionId: source.id,
+    editMeshIds: JSON.stringify(mesh?.sourceId ? [mesh.sourceId] : []),
+    editMeshNames: JSON.stringify(!mesh?.sourceId && mesh?.sourceName ? [mesh.sourceName] : []),
+    repairMaxAddedFaces: assembly?.values.repairMaxAddedFaces ?? 1500,
+    repairMaxAddedVertices: assembly?.values.repairMaxAddedVertices ?? 1000,
+  } };
+  return next;
+}
+function missingSurfaceRepairProblem(spec: CreationSpec, settings: CreationValues): string | undefined {
+  if (!String(settings.sourceVersionId ?? '').trim()) return '미리보기에서 보완할 원본 파트를 선택하세요.';
+  if (spec.attributes.composition === 'parts' && !spec.parts.some(part => part.id === spec.activePartId && part.enabled)) return '빠진 면을 보완할 파트를 선택하세요.';
+  for (const [key, label, fallback, min] of [['repairMaxAddedFaces', '추가 면 상한', 1500, 1], ['repairMaxAddedVertices', '추가 정점 상한', 1000, 0]] as const) {
+    const value = settings[key] ?? fallback;
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > 4000) return `${label}은 ${min}–4,000 사이의 정수로 입력하세요.`;
+  }
+  return undefined;
+}
 const stageDefaults: Record<CreationStage, CreationValues> = {
   design: { count: 2, designMode: 'new', direction: 'front', framing: 'full', pose: 'natural', background: 'solid', perspective: 'orthographic', margin: 'full', multiview: false, viewFront: true, viewBack: true, viewLeft: true, viewRight: true },
   model: { count: 1, modelMethod: 'tripo', model: DEFAULT_TRIPO_MODEL, inputMode: 'image', faceLimit: DEFAULT_MODEL_FACE_LIMIT, quad: true, scale: 1, symmetry: true },
@@ -238,6 +264,7 @@ export function creationSelectionProblem(spec: CreationSpec, stage: CreationStag
   if (missing) return `${missing[1]} 선택이 필요합니다.`;
   if (['design', 'model', 'surface', 'assembly'].includes(stage) && spec.attributes.composition === '') return '모델 구성 선택이 필요합니다. 이미지 또는 모델 단계에서 선택하세요.';
   if (stage === 'surface' && spec.attributes.composition === 'parts' && !spec.parts.some(part => part.id === spec.activePartId && part.enabled)) return 'UV·텍스처를 적용할 파트를 선택하세요.';
+  if (stage === 'assembly' && s.assemblyMode === 'repair') return missingSurfaceRepairProblem(spec, s);
   if (stage === 'model') {
     const part = creationCompositionStrategy(spec) === 'independent-parts' ? spec.parts.find(p => p.id === spec.activePartId && p.enabled) : undefined;
     return modelGeometryProblem({ ...s, ...(part ? { faceLimit: part.faceLimit } : {}) });
@@ -250,7 +277,7 @@ export function creationTaskId(spec: CreationSpec, stage: CreationStage): string
   if (stage === 'design') return ({ new: 'I01', reference: 'I02', revision: 'I03', variation: 'I05', equipment: 'I06', multiview: 'I07', parts: 'I08' } as Record<string, string>)[String(s.designMode)] ?? 'I01';
   if (stage === 'model') return s.modelMethod === 'local' ? 'M04' : s.modelMethod === 'astra' ? 'M15' : s.inputMode === 'multiview' ? 'M02' : 'M01';
   if (stage === 'surface') return s.surfaceOperation === 'uv' ? s.uvMode === 'tripo' ? 'T01' : 'T02' : s.textureMode === 'local' ? 'T05' : 'T03';
-  if (stage === 'assembly') return s.assemblyMode === 'assemble' ? 'M08' : s.assemblyMode === 'separate' ? 'M07' : s.assemblyMode === 'partial' ? 'M06' : 'M05';
+  if (stage === 'assembly') return s.assemblyMode === 'assemble' ? 'M08' : s.assemblyMode === 'separate' ? 'M07' : s.assemblyMode === 'repair' ? 'M09' : s.assemblyMode === 'partial' ? 'M06' : 'M05';
   if (stage === 'rig') return s.rigType === 'humanoid' ? 'R01' : s.rigType === 'existing' ? 'R03' : 'R02';
   if (stage === 'animation') return ({ source: 'N01', video: 'N02', reference: 'N04', text: 'N05', revision: 'N06' } as Record<string, string>)[String(s.animationMode)] ?? 'N05';
   return s.deliveryMode === 'files' ? 'X04' : 'X05';
@@ -258,7 +285,7 @@ export function creationTaskId(spec: CreationSpec, stage: CreationStage): string
 export function stageForTask(taskId: string): CreationStage {
   if (taskId.startsWith('I')) return 'design';
   if (taskId.startsWith('T')) return 'surface';
-  if (['M05', 'M06', 'M07', 'M08'].includes(taskId)) return 'assembly';
+  if (['M05', 'M06', 'M07', 'M08', 'M09'].includes(taskId)) return 'assembly';
   if (taskId.startsWith('M')) return 'model';
   if (taskId.startsWith('R')) return 'rig';
   if (taskId.startsWith('N')) return 'animation';
@@ -307,6 +334,13 @@ export function compileCreation(object: GraphicsObject, taskId: string): { setti
   // A05 uses the common size contract only, not the Unity delivery route/collider/compression choices.
   const selectionProblem = taskId === 'A05' ? undefined : creationSelectionProblem(spec, stage);
   if (selectionProblem) throw Error(selectionProblem);
+  if (taskId === 'M09') {
+    const repairProblem = missingSurfaceRepairProblem(spec, settings);
+    if (repairProblem) throw Error(repairProblem);
+    settings.repairMaxAddedFaces ??= 1500;
+    settings.repairMaxAddedVertices ??= 1000;
+    settings.count = 1;
+  }
   if (taskId === 'M07' && spec.subject === 'human' && isWholeThenSplitCreation(spec) && ['head', 'body', 'hair'].some(id => !spec.parts.some(part => part.id === id && part.enabled))) throw Error('전체 모델 분리에는 머리·몸통·머리카락 세 파트를 모두 선택하세요.');
   // Cleared optional descriptions must not become default wording in the frozen request.
   for (const key of ['direction', 'framing', 'pose', 'background', 'perspective', 'margin', 'motionPreset'])
@@ -335,6 +369,7 @@ export function compileCreation(object: GraphicsObject, taskId: string): { setti
   const descriptions = [...summarizeCreation(spec), spec.instruction, spec.stageSettings[stage]?.instruction].filter(Boolean);
   if (stage === 'design') for (const [key, labels] of Object.entries(imageLabels)) if (settings[key] !== undefined) descriptions.push(`${key}: ${labels[String(settings[key])] ?? String(settings[key])}`);
   if (partWork) descriptions.push(`제작 대상 파츠만: ${part.label}. ${part.instruction}. 전체 디자인의 비율·색·스타일을 유지하고 다른 파츠는 생성하지 마세요.`);
+  if (taskId === 'M09') descriptions.push('선택한 리깅 전 원본 파트의 기존 면·정점·UV·재질을 보존하고, 명시한 빠진 영역에만 새 면을 추가합니다. 의도한 목 접합 경계는 유지하세요. 결과는 별도 버전으로 검토하고 채택한 다음 UV·텍스처를 준비합니다.');
   if (isWholeThenSplitCreation(spec) && stage === 'model') descriptions.push('분리 전 전체 모델을 한 번에 제작합니다. 목표 면 수는 머리·몸통(팔다리·손가락·의상 포함)·머리카락 전체의 합계이며 파트마다 새로 적용하지 않습니다. 후속 단계에서 세 파트로 분리한 뒤 각 파트의 UV와 텍스처를 준비합니다.');
   if (taskId === 'R01' && spec.subject === 'human') descriptions.push(`몸통과 팔다리는 Unity Humanoid용으로 리깅합니다. ${settings.rigFingers ? '양손 손가락 본을 포함합니다.' : '선택적 손가락 본은 만들지 않습니다.'}${settings.rigHair !== true ? ' 머리카락은 Head 본을 따라 움직이며 별도 머리카락 보조 본을 만들지 않습니다.' : ''} 표정과 물리는 이 요청에 포함하지 않습니다.`);
   if (locks.length) descriptions.push(`유지할 특징: ${locks.map(id => creationLocks.find(l => l.id === id)!.label).join(', ')}. 변경 지시와 충돌하면 무시하지 말고 원인을 보고하세요. 외형 보존을 자동 검증했다고 주장하지 마세요.`);

@@ -49,7 +49,8 @@ async function fixture(t: any) {
     store.write(project.id, rel, png);
     return { files: [{ path: rel, kind: "image" }], role: "design", slot: "main", label: "Test output", warnings: [] };
   };
-  const options = { resources: path.resolve("integrations"), native: async (args: GraphicsNativeArgs) => { calls.native.push(args); return nativeImplementation(args); } };
+  const executeFixture = async (args: GraphicsNativeArgs) => { calls.native.push(args); return nativeImplementation(args); };
+  const options = { resources: path.resolve("integrations"), native: executeFixture, astra: executeFixture };
   let graphics = new GraphicsEngine(store, engine, options); controllers.push(graphics);
   const initial = await graphics.action(project.id, { kind: "create-object", name: "Greatsword", objectKind: "weapon" });
   const objectId = initial.objects[0].id;
@@ -83,6 +84,84 @@ async function fixture(t: any) {
     },
   };
 }
+
+test("missing-surface repair freezes an unaccepted same-object candidate without replacing adopted geometry", async t => {
+  const f = await fixture(t), adopted = await f.importSource("model", "accepted.blend"), candidate = await f.importSource("model", "candidate.blend");
+  await f.graphics.action(f.project.id, { kind: "accept", objectId: f.objectId, versionId: adopted.version.id });
+  const update = (settings: Record<string, string | number>) => f.graphics.action(f.project.id, { kind: "update-object", objectId: f.objectId, patch: { selectedTasks: ["M09"], instruction: "Fill the missing scalp only, retain the original face and neck opening", settings: { partId: '', ...settings } } });
+  await update({ sourceVersionId: "missing" });
+  await assert.rejects(f.prepare("M09"), /모델 후보/);
+  await update({ sourceVersionId: candidate.version.id, partId: "head" });
+  await assert.rejects(f.prepare("M09"), /현재 파츠/);
+  await update({ sourceVersionId: candidate.version.id, meshSelectionVersionId: adopted.version.id });
+  await assert.rejects(f.prepare("M09"), /원본과 현재/);
+  await update({ sourceVersionId: candidate.version.id, meshSelectionVersionId: candidate.version.id });
+  const task = await f.prepare("M09");
+  assert.equal(task.cost?.provider, "Codex"); assert.equal(task.cost?.credits, null);
+  assert.deepEqual(task.inputVersionIds, [candidate.version.id]);
+  assert.equal(task.settings.sourceVersionId, candidate.version.id);
+  assert.equal(f.state().objects[0].accepted["model:main"], adopted.version.id);
+  assert.equal(f.calls.native.length + f.calls.uploads.length + f.calls.submissions.length, 0);
+  await update({ sourceVersionId: adopted.version.id });
+  f.setNative(async args => {
+    assert.equal(args.task.settings.sourceVersionId, candidate.version.id);
+    assert.equal(args.inputs[0].id, candidate.version.id);
+    assert.equal(args.task.objectSnapshot?.accepted["model:main"], adopted.version.id);
+    const rel = "graphics/test-results/repaired.blend"; f.store.write(f.project.id, rel, Buffer.from("repaired fixture"));
+    return { files: [{ path: rel, kind: "blend" }], role: "model", slot: "main", label: "repair", warnings: [] };
+  });
+  await f.graphics.action(f.project.id, { kind: "approve", taskId: task.id }); await idle(f.graphics, f.project.id);
+  assert.equal(f.state().tasks.at(-1)!.status, "review");
+  assert.equal(f.state().objects[0].accepted["model:main"], adopted.version.id);
+  assert.equal(digest(candidate.source), candidate.version.files[0].sha256);
+  assert.equal(f.calls.uploads.length + f.calls.submissions.length, 0);
+});
+
+test("completed parts refresh is explicit, local-only, preserves adoption/history and deduplicates unchanged derivatives", async t => {
+  const f = await fixture(t), source = await f.importSource("model", "source.blend");
+  await f.graphics.action(f.project.id, { kind: "accept", objectId: f.objectId, versionId: source.version.id });
+  await f.graphics.action(f.project.id, { kind: "update-object", objectId: f.objectId, patch: { selectedTasks: ["M07"], settings: { requestedParts: JSON.stringify([{ id: "a", label: "A" }, { id: "b", label: "B" }]) } } });
+  let revision = 1, fail = false;
+  f.setNative(async args => {
+    if (args.refreshDerivatives) assert.equal(args.recoveryOnly, true);
+    if (fail) throw Error("local export failed");
+    const candidates = ["a", "b"].map(slot => {
+      const rel = `graphics/test-results/${revision}-${slot}.glb`;
+      if (!fs.existsSync(f.store.file(f.project.id, rel))) f.store.write(f.project.id, rel, Buffer.from(`fixture ${revision} ${slot}`));
+      return { files: [{ path: rel, kind: "model" }], role: "model" as const, slot: `part-${slot}`, label: slot, warnings: [] };
+    });
+    return { candidates, files: candidates.flatMap(c => c.files), role: "model", slot: "main", label: "parts", warnings: [] };
+  });
+  const task = await f.prepare("M07");
+  await assert.rejects(f.graphics.action(f.project.id, { kind: "refresh-parts", taskId: task.id }), /완료된 파츠/);
+  await f.graphics.action(f.project.id, { kind: "approve", taskId: task.id }); await idle(f.graphics, f.project.id);
+  const original = structuredClone(f.state().versions), adopted = original.at(-1)!;
+  await f.graphics.action(f.project.id, { kind: "accept", objectId: f.objectId, versionId: adopted.id });
+  const accepted = structuredClone(f.state().objects[0].accepted);
+  revision = 2;
+  await f.graphics.action(f.project.id, { kind: "refresh-parts", taskId: task.id });
+  await assert.rejects(f.graphics.action(f.project.id, { kind: "refresh-parts", taskId: task.id }));
+  await idle(f.graphics, f.project.id);
+  assert.equal(f.state().versions.length, original.length + 2);
+  assert.deepEqual(f.state().versions.slice(0, original.length), original);
+  assert.deepEqual(f.state().objects[0].accepted, accepted);
+  assert.equal(f.state().tasks[0].requestHash, task.requestHash);
+  assert.equal(f.state().tasks[0].derivativeRefreshRequested, undefined);
+  await f.graphics.action(f.project.id, { kind: "refresh-parts", taskId: task.id }); await idle(f.graphics, f.project.id);
+  assert.equal(f.state().versions.length, original.length + 2);
+  fail = true;
+  await f.graphics.action(f.project.id, { kind: "refresh-parts", taskId: task.id }); await idle(f.graphics, f.project.id);
+  assert.equal(f.state().tasks[0].status, "failed");
+  assert.equal(f.state().tasks[0].derivativeRefreshRequested, true);
+  await f.reopen(); fail = false;
+  await f.graphics.action(f.project.id, { kind: "recover", taskId: task.id }); await idle(f.graphics, f.project.id);
+  assert.equal(f.state().tasks[0].status, "review");
+  assert.equal(f.state().versions.length, original.length + 2);
+  assert.deepEqual(f.state().objects[0].accepted, accepted);
+  assert(f.calls.native.slice(1).every(args => args.recoveryOnly && args.refreshDerivatives));
+  assert.equal(f.calls.uploads.length + f.calls.submissions.length, 0);
+  for (const version of original) for (const file of version.files) assert.equal(digest(f.store.file(f.project.id, file.path)), file.sha256);
+});
 
 test("pending approval survives 31 minutes and Store/GraphicsEngine restart without native or paid execution", async t => {
   const f = await fixture(t);

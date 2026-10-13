@@ -20,6 +20,8 @@ export type GraphicsNativeArgs = {
   signal: AbortSignal;
   /** Explicit saved-output recovery: never start a first native/service dispatch. */
   recoveryOnly?: boolean;
+  /** Revalidate a completed partition locally when the exporter version changed. */
+  refreshDerivatives?: boolean;
   /** Runtime tool permission is answered in the app; paid approval does not grant it. */
   requestApproval?: (request: WorkbenchRuntimeApproval) => Promise<WorkbenchRuntimeAnswer>;
   onProgress: (message: string) => void;

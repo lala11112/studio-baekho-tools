@@ -11,7 +11,7 @@ import { isGraphicsClipName } from "../shared/graphics";
 import { rigContractForProducer } from "../shared/graphics-rig";
 import type { ProductionRun, ProductionStage } from "../shared/production";
 
-export const graphicsAstraOperations = ["M05", "M06", "M07", "M08", "M15", "R01", "R02", "R03", "N04", "N05", "N06"] as const;
+export const graphicsAstraOperations = ["M05", "M06", "M07", "M08", "M09", "M15", "R01", "R02", "R03", "N04", "N05", "N06"] as const;
 type Dependencies = {
   workerFactory?: () => ProductionWorker;
   runBlender?: (executable: string, args: string[], signal: AbortSignal) => Promise<void>;
@@ -65,7 +65,7 @@ export function resolveEditMeshNames(meshes: {id: string; name: string}[], names
 }
 function modelingContract(args: GraphicsNativeArgs) {
   const settings = args.task.settings, operation = args.task.taskId;
-  if (["M06", "M07", "M08", "M15"].includes(operation) && Number(settings.count ?? 1) !== 1)
+  if (["M06", "M07", "M08", "M09", "M15"].includes(operation) && Number(settings.count ?? 1) !== 1)
     throw Error("Astra 모델 후보는 독립 작업으로 한 개씩 실행해야 합니다.");
   const requested = operation === "M07" ? jsonSetting(settings.requestedParts, "분리 파츠") : [];
   if (!Array.isArray(requested) || operation === "M07" && (requested.length < 2 || requested.length > 32)) throw Error("분리할 파츠 2–32개를 명시하세요.");
@@ -74,13 +74,16 @@ function modelingContract(args: GraphicsNativeArgs) {
     return { id: part.id, label: part.label.trim().slice(0, 120) };
   });
   if (new Set(requestedParts.map(part => part.id)).size !== requestedParts.length) throw Error("분리 파츠 ID가 중복됩니다.");
-  const editMeshIds = operation === "M06" ? jsonSetting(settings.editMeshIds ?? '[]', "부분 수정 메시 ID") : [];
-  const editMeshNames = operation === "M06" ? jsonSetting(settings.editMeshNames ?? '[]', "부분 수정 메시 이름") : [];
+  const editMeshIds = ["M06", "M09"].includes(operation) ? jsonSetting(settings.editMeshIds ?? '[]', "부분 수정 메시 ID") : [];
+  const editMeshNames = ["M06", "M09"].includes(operation) ? jsonSetting(settings.editMeshNames ?? '[]', "부분 수정 메시 이름") : [];
   if (!Array.isArray(editMeshNames) || editMeshNames.length > 64 || editMeshNames.some(value => typeof value !== 'string' || !value.trim() || value.length > 200) || new Set(editMeshNames).size !== editMeshNames.length) throw Error('부분 수정 메시 이름을 확인하세요.');
   if (!Array.isArray(editMeshIds) || editMeshIds.some(value => typeof value !== "string" || !value.trim() || value.length > 200) || new Set(editMeshIds).size !== editMeshIds.length || operation === "M06" && !editMeshIds.length && !editMeshNames.length)
     throw Error("부분 수정에는 원본 partsmith_id 목록(editMeshIds)이 필요합니다. 지정 메시의 형태만 수정하며 재토폴로지·재생성은 지원하지 않습니다.");
   const locks = Object.fromEntries(["topology", "materials", "rig"].map(name => [name, settings[`lock.${name}`] === true]));
-  return { requestedParts, editMeshIds, editMeshNames, locks };
+  const repairMaxAddedFaces = Number(settings.repairMaxAddedFaces ?? 1500), repairMaxAddedVertices = Number(settings.repairMaxAddedVertices ?? 1000);
+  if (operation === "M09" && ([settings.repairMaxAddedFaces, settings.repairMaxAddedVertices].some(value => value !== undefined && !(typeof value === "number" || typeof value === "string" && value.trim())) || !Number.isInteger(repairMaxAddedFaces) || repairMaxAddedFaces < 1 || repairMaxAddedFaces > 4000 || !Number.isInteger(repairMaxAddedVertices) || repairMaxAddedVertices < 0 || repairMaxAddedVertices > 4000)) throw Error("누락 면 복구의 추가 면은 1–4000개, 추가 정점은 0–4000개 범위의 정수로 제한하세요.");
+  if (operation === "M09" && locks.topology) throw Error("누락 면 복구는 기존 면을 보존하며 새 면을 추가합니다. 전체 토폴로지 잠금을 해제한 명시적 복구 요청이 필요합니다.");
+  return { requestedParts, editMeshIds, editMeshNames, locks, ...(operation === "M09" ? { repairMaxAddedFaces, repairMaxAddedVertices } : {}) };
 }
 function requestedRigFeatures(settings: GraphicsNativeArgs["task"]["settings"]) {
   const enabled: Record<string, boolean> = {
@@ -103,7 +106,9 @@ function selectInputs(args: GraphicsNativeArgs, root: string) {
   if (animation && !isGraphicsClipName(clipName)) throw Error("명시적인 클립 이름이 필요합니다.");
   const roles: GraphicsRole[] = operation === "M15" ? ["design"] : operation === "N06" ? ["animation"] : animation || operation === "R03" ? ["rig"] : ["model", "material", "rig"];
   const specified = args.task.settings.sourceVersionId;
-  let candidates = args.inputs.filter(version => roles.includes(version.role) && accepted(args, version) && (operation !== "N06" || version.slot === clipName));
+  if (operation === "M09" && (typeof specified !== "string" || !specified)) throw Error("복구할 원본 버전 하나를 명시적으로 선택하세요. 채택 여부는 변경하지 않습니다.");
+  if (operation === "M09" && args.task.settings.meshSelectionVersionId !== undefined && args.task.settings.meshSelectionVersionId !== specified) throw Error("복구 메시 선택이 고정 원본 버전과 다릅니다. 대상 메시를 다시 선택하세요.");
+  let candidates = args.inputs.filter(version => roles.includes(version.role) && (operation === "M09" ? version.objectId === args.object.id && ["model", "material"].includes(version.role) : accepted(args, version)) && (operation !== "N06" || version.slot === clipName));
   if (operation === "M08") candidates = candidates.filter(version => version.role === "model" && version.slot !== "main");
   else if (operation === "M15" && specified === undefined) candidates = candidates.sort((a, b) => Number(b.slot === "main") - Number(a.slot === "main") || a.id.localeCompare(b.id)).slice(0, 1);
   else if (specified !== undefined) candidates = candidates.filter(version => version.id === specified);
@@ -178,18 +183,26 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     directory(root, folder); directory(root, work);
     const identity = hash(JSON.stringify({ schemaVersion: 1, taskId: task.id, operation: task.taskId, requestHash: task.requestHash, settings: task.settings, instruction: task.instruction, object: task.objectSnapshot ?? args.object, inputs: files.map(file => ({ versionId: file.version.id, role: file.version.role, slot: file.version.slot, path: file.path, sha256: file.sha256, bytes: file.bytes })), source: source.version.id }));
     const checkpointPath = path.join(folder, "checkpoint.json"), dispatchPath = path.join(folder, "dispatch.json"), preparedPath = path.join(folder, "prepared.json");
+    const script = path.join(args.resources, "blender/graphics_astra_validate.py"), glbHelper = path.join(args.resources, "blender/graphics_glb.py"), humanoidHelper = path.join(args.resources, "blender/graphics_humanoid.py");
+    if (!fs.existsSync(script) || !fs.existsSync(glbHelper) || !fs.existsSync(humanoidHelper)) throw Error("Astra 원본·장면 검증 스크립트가 없습니다.");
+    const validatorFingerprint = hash(hashFile(script) + hashFile(glbHelper) + hashFile(humanoidHelper));
+    if (args.refreshDerivatives && (!args.recoveryOnly || task.taskId !== "M07" || !fs.existsSync(checkpointPath) || !fs.existsSync(dispatchPath)))
+      throw Error("완료된 파츠 분리의 저장 결과만 로컬로 갱신할 수 있습니다.");
     if (fs.existsSync(checkpointPath)) {
       const cached = read(checkpointPath);
       if (cached.identity !== identity || !Array.isArray(cached.files)) throw Error("저장된 Astra 결과의 요청이 다릅니다.");
       unchanged(cached.files.map((file: any) => ({ ...file, localPath: fileWithin(root, file.path) })));
-      args.onProgress("저장된 Astra 결과와 해시를 재사용합니다. 새 모델 호출 없음.");
-      return cached.result;
+      if (!args.refreshDerivatives || cached.validatorFingerprint === validatorFingerprint) {
+        args.onProgress("저장된 Astra 결과와 해시를 재사용합니다. 새 모델 호출 없음.");
+        return cached.result;
+      }
+      // Keep the prior checkpoint and all registered files. Only new derivatives
+      // are written, from the already hash-verified authored Blender scene.
+      const archived = path.join(folder, `checkpoint-${hash(JSON.stringify(cached))}.json`);
+      if (!fs.existsSync(archived)) fs.copyFileSync(checkpointPath, archived, fs.constants.COPYFILE_EXCL);
     }
     if (args.recoveryOnly && !fs.existsSync(dispatchPath)) throw Error("저장된 Astra 실행 기록이 없습니다. 복구에서 새 모델 호출을 시작하지 않습니다.");
     if (!args.blenderPath || !fs.existsSync(args.blenderPath)) throw Error("설정된 Blender 실행 파일을 확인하세요.");
-    const script = path.join(args.resources, "blender/graphics_astra_validate.py"), glbHelper = path.join(args.resources, "blender/graphics_glb.py"), humanoidHelper = path.join(args.resources, "blender/graphics_humanoid.py");
-    if (!fs.existsSync(script) || !fs.existsSync(glbHelper) || !fs.existsSync(humanoidHelper)) throw Error("Astra 원본·장면 검증 스크립트가 없습니다.");
-    const validatorFingerprint = hash(hashFile(script) + hashFile(glbHelper) + hashFile(humanoidHelper));
     const invoke = async (request: unknown, name: string, specRoot = folder) => {
       const spec = path.join(specRoot, name + ".json"); write(spec, request);
       await (dependencies.runBlender ?? runBlender)(args.blenderPath, ["--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1", "--python", script, "--", spec], args.signal);
@@ -277,10 +290,15 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     unchanged(protectedFiles);
     if (hashFile(fileWithin(folder, prepared.baseline)) !== prepared.baselineSha256) throw Error("원본 Blender 검사 기록이 변경됐습니다.");
     const baseline = read(prepared.baseline);
-    if (task.taskId === 'M06' && contract.editMeshNames.length) {
+    if (["M06", "M09"].includes(task.taskId) && contract.editMeshNames.length) {
       contract.editMeshIds = resolveEditMeshNames(baseline.meshes, contract.editMeshNames, contract.editMeshIds);
     }
     if (task.taskId === "M06" && contract.editMeshIds.some(id => !baseline.meshes.some((mesh: any) => mesh.id === id))) throw Error("부분 수정 메시 ID가 채택 원본에 없습니다. 원본 partsmith_id를 확인하세요.");
+    if (task.taskId === "M09") {
+      if (!contract.editMeshIds.length && baseline.meshes.length === 1) contract.editMeshIds = [baseline.meshes[0].id];
+      if (contract.editMeshIds.length !== 1 || !baseline.meshes.some((mesh: any) => mesh.id === contract.editMeshIds[0])) throw Error("누락 면 복구는 고정 원본의 메시 하나만 대상으로 합니다. 복구할 파트를 명시적으로 선택하세요.");
+      if (baseline.rigs?.length || baseline.meshes.some((mesh: any) => mesh.shapeKeys || mesh.modifiers?.length) || !baseline.repairContract) throw Error("누락 면 복구는 리그·모프·모디파이어·동적 의존성이 없는 원본만 지원합니다. 원본을 보존하고 중지합니다.");
+    }
     if (["M06", "M07", "M08"].includes(task.taskId) && baseline.meshes.some((mesh: any) => mesh.shapeKeys || mesh.modifiers?.some((modifier: any) => modifier.type !== "ARMATURE"))) throw Error("부분 수정·분리·조립은 셰이프 키나 적용하지 않은 변형 모디파이어가 있는 원본을 아직 검증하지 못합니다. 원본을 보존하고 중지합니다.");
     if (task.taskId === "M15" && Object.values(contract.locks).some(Boolean)) throw Error("신규 모델에는 보존할 원본 3D 구조가 없어 구조 잠금을 검증할 수 없습니다.");
     const resultPath = path.join(work, "result.json"), schemaPath = path.join(work, "result.schema.json"), outputBlend = path.join(work, "outputs/asset.blend");
@@ -338,6 +356,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
         M06: `PARTIAL EDIT: edit positions only within exact mesh IDs ${JSON.stringify(contract.editMeshIds)}. Every untargeted mesh must retain its original positions and world transform. Preserve every mesh ID, topology, UV, material, rig and action. Rebuilding, adding/removing meshes or topology-changing surgery is unsupported; return needs_input when required.`,
         M07: `PART SEPARATION: partition every original polygon exactly once into these requested parts: ${JSON.stringify(contract.requestedParts)}. Assign each output MESH custom property partsmith_part_id to exactly one requested id, and retain a unique partsmith_id. Do not duplicate, omit, triangulate, remesh or move any surface. Retain world-space positions, per-corner UVs, materials and skin weights, original rigs and actions. Host exports separate editable BLEND/FBX/GLB for each part from this one authored scene.`,
         M08: "PART ASSEMBLY: arrange ALL supplied accepted parts in the prepared scene using object/root transforms only. Preserve mesh IDs, vertices, topology, UV, materials, packed texture originals, rigs and actions. Do not fuse, remesh, substitute, delete or regenerate parts. Inspect the whole-appearance references for proportions; report uncertain alignment. Produce one combined editable scene.",
+        M09: `BOUNDED MISSING-SURFACE REPAIR: append geometry ONLY to exact mesh ID ${JSON.stringify(contract.editMeshIds[0])} of source version ${source.version.id}, retaining output slot ${source.version.slot}. Preserve every original vertex index/position (absolute tolerance 1e-7 Blender local units), polygon index/winding/corners, edge, UV corner, material assignment, mesh/object custom IDs, transforms, attributes and all other objects/actions. Original vertex and polygon arrays must remain prefixes; never delete, move, merge, remesh, retopologize, replace, retexture or rig anything. Append at most ${contract.repairMaxAddedFaces} faces and ${contract.repairMaxAddedVertices} vertices. Every connected new-face component must attach through an ORIGINAL boundary edge with opposite winding; new faces may use original vertices only on original boundary edges. No new loose vertices/edges, duplicate/degenerate faces or non-manifold edge attachments. New vertices must stay inside the target's original local bounding box expanded on each side by 0.75 times its diagonal. No new scene objects, materials, textures, modifiers, animation or shape keys. This initial mode supports only static unrigged meshes. Inspect immutable whole model/head/hair/front references as read-only appearance context; never import them into the output or modify their files. Restore missing scalp/back-of-head first according to the explicit instruction. Preserve the intentional neck/body mating opening unless closure is explicitly requested; do not blindly fill all boundary loops. Keep existing UVs exactly; appended UV corners may use defaults before the later SmartUV step. Inspect before/after front, side and back renders, describe remaining openings/neck defects and visual uncertainty. Host connectivity/area checks do not prove surface self-intersection, anatomical quality or full watertightness; never claim those unless separately measured. Return needs_input if the bounded append-only contract cannot achieve the request.`,
         M15: "NEW LOCAL MODEL: author exactly one independent editable Blender model using the accepted design images and compiled request. The prepared scene is intentionally empty. Create actual finite mesh geometry with unique partsmith_id on each mesh, coherent UV/material assignments and packed file textures if used. Bake non-armature modifiers into the new mesh; shape keys are not supported in this initial model contract. Do not use a prior generated model or copy another candidate. Semantic similarity, style, silhouette and requested quality require human visual review; do not claim they are machine verified.",
         R01: `Create exactly one anatomically appropriate humanoid armature and skin ALL supplied character meshes with normalized deform weights. Canonical host-owned Unity mapping: ${JSON.stringify(rigContract)}. Use pelvis as the root of the mapped human hierarchy; parent each joint to its anatomically correct upstream joint, with nondegenerate segments and plausible rest placement. ${rigContract?.fingers ? "Author all 30 mapped thumb/index/middle/ring/little .01/.02/.03.L/.R finger deform bones. Every mapped non-root bone including every finger segment requires direct vertex influence and measurable individual FK response; labels or zero-weight bones do not qualify." : "Finger controls were not requested."} Preserve all head/body/hair meshes, their stable IDs and partsmith_part_id slots; part-hair and hair denote the hair part. ${rigContract?.hairBinding === "head" ? "Bind every hair-part vertex rigidly with weight 1 to canonical head. Do not add hair or facial deform controls." : "Add the explicitly requested hair controls with measurable weighted deformation."} Keep a connected hierarchy suitable for the explicit Humanoid mapping. Include real joint pose checks; anatomical quality and actual Unity Avatar validity still require independent review.`,
         R02: "Create an anatomically appropriate animal/nonhuman Generic skeleton using the actual supplied shape and requested species/limbs/wings. Do not impose a humanoid preset. Use a hierarchy with at least 3 nondegenerate bones, valid normalized deform weights and actual per-mesh joint pose checks.",
@@ -401,7 +420,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     const report = read(reportPath);
     if (report.identity !== identity || report.nonce !== nonce || report.operation !== task.taskId || report.sourceSha256 !== source.sha256 || report.outputSha256 !== hashFile(blend) || report.passed !== true || !report.meshes?.length || !Array.isArray(report.files)) throw Error("실제 Blender 결과의 검증 증거가 잘못됐습니다.");
     const modelOperation = task.taskId.startsWith("M");
-    const required = task.taskId === "M15" ? ["newGeometry"] : task.taskId === "M07" ? ["partition", "materials", "skeleton", "actionsPreserved"] : ["meshLineage", "topology", "materials", "actionsPreserved", ...(!modelOperation ? ["weights", "deformation"] : []), ...(animation ? ["skeleton", "clipRange", "motion", "skinPreserved", "armatureModifiersPreserved", "animationDependencies", "animationSkeletonPreserved"] : []), ...(task.taskId === "M06" ? ["partialEdit"] : [])];
+    const required = task.taskId === "M15" ? ["newGeometry"] : task.taskId === "M09" ? ["meshLineage", "appendOnlyRepair", "originalGeometry", "boundaryAttachment", "repairBounds", "otherObjectsPreserved", "materials", "skeleton", "actionsPreserved"] : task.taskId === "M07" ? ["partition", "materials", "skeleton", "actionsPreserved"] : ["meshLineage", "topology", "materials", "actionsPreserved", ...(!modelOperation ? ["weights", "deformation"] : []), ...(animation ? ["skeleton", "clipRange", "motion", "skinPreserved", "armatureModifiersPreserved", "animationDependencies", "animationSkeletonPreserved"] : []), ...(task.taskId === "M06" ? ["partialEdit"] : [])];
     if (required.some(check => report.checks?.[check] !== true)) throw Error("Blender 원본 보존·변형·액션 검사가 통과하지 않았습니다.");
     if (["R01", "R02"].includes(task.taskId) && rigFeatures.length && (report.checks?.rigFeatures !== true || rigFeatures.some(feature => !report.rigFeatures?.[feature]?.length))) throw Error("요청한 부속 관절의 웨이트·실제 변형 검사가 없습니다.");
     if (rigContract && (report.checks?.humanoid !== true || JSON.stringify(report.humanoid?.contract) !== JSON.stringify(rigContract) || report.humanoid?.armatureCount !== 1 || report.humanoid?.jointEvidence?.length !== rigContract.humanBones.length - 1)) throw Error("요청한 Humanoid 본 매핑·관절별 실제 변형 검사가 없습니다.");
@@ -410,7 +429,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     for (const item of report.files) {
       if (typeof item !== "string") throw Error("Blender 출력 파일 목록이 잘못됐습니다.");
       const output = fileWithin(validation, item), extension = path.extname(output).toLowerCase();
-      if (!(task.taskId === "M07" ? [".glb", ".png", ".blend", ".fbx"] : [".glb", ".png"]).includes(extension) || !fs.statSync(output).size) throw Error("Blender 출력 파일 형식이 잘못됐습니다.");
+      if (!(task.taskId === "M07" ? [".glb", ".png", ".blend", ".fbx"] : task.taskId === "M09" ? [".fbx", ".glb", ".png"] : [".glb", ".png"]).includes(extension) || !fs.statSync(output).size) throw Error("Blender 출력 파일 형식이 잘못됐습니다.");
       if (extension === ".glb") {
         const bytes = fs.readFileSync(output);
         if (bytes.length < 20 || bytes.toString("ascii", 0, 4) !== "glTF" || bytes.readUInt32LE(4) !== 2 || bytes.readUInt32LE(8) !== bytes.length) throw Error("Blender GLB 미리보기가 손상됐습니다.");
@@ -420,10 +439,13 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
       outputFiles.push({ path: outputPath, kind: extension === ".blend" ? "blend" : extension === ".png" ? "image" : "model" });
     }
     if (!outputFiles.some(file => file.kind === "model") || outputFiles.filter(file => file.kind === "image").length < 3) throw Error("실제 모델·정면·측면·후면 미리보기가 없습니다.");
+    if (task.taskId === "M09" && !["before/front.png", "before/side.png", "before/back.png", "front.png", "side.png", "back.png"].every(name => report.files.includes(name))) throw Error("복구 전후 세 방향 비교 이미지가 없습니다.");
+    if (task.taskId === "M09" && !outputFiles.some(file => file.path.endsWith(".fbx"))) throw Error("복구 원본 폴리곤을 유지하는 FBX가 없습니다.");
     outputFiles.push({ path: relative(root, reportPath), kind: "report" });
     if (fs.existsSync(motionInputPath)) outputFiles.push({ path: relative(root, motionInputPath), kind: "report" });
     if (recoveredWithoutMessage) write(path.join(folder, "native-recovery.json"), { schemaVersion: 1, identity, mode: "saved-blend-without-completion-message", outputSha256: hashFile(blend), validation: relative(root, reportPath), modelTurns: 0, recoveredAt: new Date().toISOString() });
     const warnings = [...authored.warnings.filter((value: unknown) => typeof value === "string").slice(0, 30), "구조 검사를 통과했습니다. 요청한 형태·스타일·해부학적 품질·접지·관통·루프의 시각 품질과 Unity 재생은 별도 검토가 필요합니다."];
+    if (task.taskId === "M09") warnings.push("원본 면·정점은 보존하고 경계에 연결된 새 면만 추가했습니다. 새 면의 UV는 임시값일 수 있으며 SmartUV가 필요합니다. 목 연결부와 남은 열린 경계, 자기 관통·완전 밀폐·해부학적 품질은 직접 검토하세요.");
     const candidates: NonNullable<GraphicsNativeResult["candidates"]> = [];
     if (task.taskId === "M07") {
       const used = new Set<string>();
@@ -442,8 +464,8 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
       }
       if (used.size !== report.files.length) throw Error("어느 파츠에도 연결되지 않은 분리 출력이 있습니다.");
     }
-    const labels: Record<string, string> = { M05: "형태·비율 보정", M06: "부분 형태 수정", M07: "파츠 분리", M08: "파츠 조립", M15: "새 Blender 모델" };
-    const result: GraphicsNativeResult = { files: outputFiles, label: animation ? `${clipName} · ${task.taskId === "N06" ? "동작 수정" : "3D 동작"}` : labels[task.taskId] ?? "리그·웨이트", role: animation ? "animation" : task.taskId === "M05" ? source.version.role : modelOperation ? "model" : "rig", slot: animation ? clipName : "main", warnings, ...(candidates.length ? { candidates } : {}), ...(fs.existsSync(path.join(folder, "usage.json")) ? { usage: read(path.join(folder, "usage.json")) } : {}) };
+    const labels: Record<string, string> = { M05: "형태·비율 보정", M06: "부분 형태 수정", M07: "파츠 분리", M08: "파츠 조립", M09: "누락 면 복구", M15: "새 Blender 모델" };
+    const result: GraphicsNativeResult = { files: outputFiles, label: animation ? `${clipName} · ${task.taskId === "N06" ? "동작 수정" : "3D 동작"}` : labels[task.taskId] ?? "리그·웨이트", role: animation ? "animation" : ["M05", "M09"].includes(task.taskId) ? source.version.role : modelOperation ? "model" : "rig", slot: animation ? clipName : task.taskId === "M09" ? source.version.slot : "main", warnings, ...(candidates.length ? { candidates } : {}), ...(fs.existsSync(path.join(folder, "usage.json")) ? { usage: read(path.join(folder, "usage.json")) } : {}) };
     write(checkpointPath, { schemaVersion: 1, identity, validatorFingerprint, createdAt: new Date().toISOString(), files: outputFiles.map(file => { const localPath = fileWithin(root, file.path); return { path: file.path, bytes: fs.statSync(localPath).size, sha256: hashFile(localPath) }; }), result });
     return result;
   };

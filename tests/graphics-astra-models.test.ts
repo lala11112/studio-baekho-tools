@@ -45,6 +45,148 @@ function fixture(t: any, operation: string) {
 const twoMeshes = `import bpy\nbpy.ops.wm.read_factory_settings(use_empty=True)\nfor name,x in [('blade',-1),('handle',1)]:\n bpy.ops.mesh.primitive_cube_add(size=1,location=(x,0,0))\n obj=bpy.context.object\n obj.name=name\n obj['partsmith_id']=name\n`;
 const loadValidator = `import pathlib,sys\nsys.path.insert(0,${JSON.stringify(path.dirname(validator))})\nnamespace={'__file__':${JSON.stringify(validator)}}\nexec(pathlib.Path(${JSON.stringify(validator)}).read_text(encoding='utf8').rsplit('\\nq = json.loads(',1)[0],namespace)\n`;
 
+const missingSurfaceSource = `import bpy
+bpy.ops.wm.read_factory_settings(use_empty=True)
+mesh=bpy.data.meshes.new('HeadMesh')
+mesh.from_pydata([(-1,-1,-1),(1,-1,-1),(1,1,-1),(-1,1,-1),(-1,-1,1),(1,-1,1),(1,1,1),(-1,1,1)],[],[(0,3,2,1),(0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7)])
+obj=bpy.data.objects.new('Head',mesh);bpy.context.scene.collection.objects.link(obj)
+obj['partsmith_id']='head';obj['partsmith_part_id']='head'
+uv=mesh.uv_layers.new(name='OriginalUV')
+for index,item in enumerate(uv.data): item.uv=(index/100,index/50)
+ids=mesh.attributes.new('source_vertex_id','INT','POINT')
+for index,item in enumerate(ids.data): item.value=index+100
+ids=mesh.attributes.new('source_face_id','INT','FACE')
+for index,item in enumerate(ids.data): item.value=index+200
+material=bpy.data.materials.new('Original');mesh.materials.append(material)
+bpy.ops.mesh.primitive_cube_add(size=.2,location=(3,0,0))
+bpy.context.object.name='Untargeted';bpy.context.object['partsmith_id']='untargeted'
+`;
+const appendCap = `import bmesh
+mesh=bpy.data.objects['Head'].data
+bm=bmesh.new();bm.from_mesh(mesh);bm.verts.ensure_lookup_table()
+top=[bm.verts[index] for index in [4,5,6,7]]
+apex=bm.verts.new((0,0,1.5))
+for index in range(4): bm.faces.new((top[index],top[(index+1)%4],apex))
+bm.to_mesh(mesh);bm.free();mesh.update()
+`;
+
+test("actual M09 append-only repair retains an unaccepted source slot and rejects geometry, boundary, scope and dependency violations", { skip: !fs.existsSync(blender), timeout: 180_000 }, async t => {
+  const f = fixture(t, "M09"), original = path.join(f.root, "original.blend");
+  python(f.root, missingSurfaceSource + `bpy.ops.wm.save_as_mainfile(filepath=${JSON.stringify(original)},compress=False)\n`);
+  const source = f.adopt(original, "model", "part-head"), originalHash = hash(original);
+  delete f.args.object.accepted['model:part-head']; // Selected candidates may be repaired without silent adoption.
+  f.args.task.settings = { sourceVersionId: source.id, meshSelectionVersionId: source.id, editMeshIds: '["head"]', repairMaxAddedFaces: 4, repairMaxAddedVertices: 1 };
+  const execute = f.execute(appendCap), result = await execute(f.args);
+  assert.equal(result.slot, "part-head"); assert.equal(result.role, "model");
+  assert.equal(f.args.object.accepted['model:part-head'], undefined);
+  assert.equal(hash(original), originalHash);
+  const report = read(path.join(f.root, result.files.find(file => file.kind === "report")!.path));
+  assert.equal(report.checks.appendOnlyRepair, true);
+  assert.equal(report.checks.topology, false, "Append-only repair must not claim unchanged total topology");
+  assert.equal(report.repair.addedFaces, 4); assert.equal(report.repair.addedVertices, 1);
+  assert.equal(report.repair.boundaryAttachmentEdges.length, 4);
+  assert.equal(report.repair.maxOriginalPositionDisplacement, 0);
+  assert.equal(report.repair.selfIntersectionVerified, false);
+  assert.equal(report.repair.newUVQualityVerified, false);
+  assert.equal(result.files.filter(file => file.kind === "image").length, 6);
+  assert.equal(report.repair.comparisonFraming, "identical-output-bounds");
+  const fbx = result.files.find(file => file.path.endsWith('.fbx'))!;
+  assert(fbx); assert(result.files.indexOf(fbx) < result.files.findIndex(file => file.path.endsWith('.glb')));
+  python(f.root, `import bpy
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.import_scene.fbx(filepath=${JSON.stringify(path.join(f.root, fbx.path))},use_image_search=False)
+head=next(obj for obj in bpy.context.scene.objects if obj.get('partsmith_id')=='head')
+assert head.get('partsmith_part_id')=='head'
+assert len(head.data.vertices)==9 and len(head.data.polygons)==9
+assert sum(len(face.vertices)==4 for face in head.data.polygons)==5
+assert sum(len(face.vertices)==3 for face in head.data.polygons)==4
+other=next(obj for obj in bpy.context.scene.objects if obj.get('partsmith_id')=='untargeted')
+assert len(other.data.polygons)==6 and all(len(face.vertices)==4 for face in other.data.polygons)
+assert all(len(layer.data)==32 for layer in head.data.uv_layers)
+`);
+  f.args.recoveryOnly = true; assert.deepEqual(await execute(f.args), result); assert.equal(f.calls(), 1);
+  const baselinePath = path.join(f.root, "graphics/jobs/task-1/astra/baseline.json"), sourcePath = path.join(f.root, "graphics/jobs/task-1/astra/work/source.blend");
+  python(f.root, loadValidator + `import bpy,json,bmesh
+baseline=json.loads(pathlib.Path(${JSON.stringify(baselinePath)}).read_text())
+source=${JSON.stringify(sourcePath)}
+append_code=${JSON.stringify(appendCap)}
+q={'operation':'M09','editMeshIds':['head'],'repairMaxAddedFaces':4,'repairMaxAddedVertices':1}
+def reject(edit,expected,extra=None):
+ bpy.ops.wm.open_mainfile(filepath=source,load_ui=False,use_scripts=False)
+ exec(append_code,globals())
+ exec(edit,globals())
+ bpy.context.view_layer.update()
+ try:
+  namespace['repair_checks']({**q,**(extra or {})},baseline,namespace['snapshot']())
+  raise AssertionError('Unsafe repair accepted: '+expected)
+ except RuntimeError as error:
+  assert expected in str(error),(expected,str(error))
+reject("bpy.data.objects['Head'].data.vertices[0].co.x+=0.001",'original vertex')
+reject("bpy.data.objects['Head'].data.uv_layers[0].data[0].uv.x+=0.1",'UV layer')
+reject("bpy.data.objects['Untargeted'].data.vertices[0].co.x+=0.1",'untargeted mesh')
+reject("bpy.data.objects['Head'].location.x+=0.1",'original object')
+reject("bpy.data.objects['Head']['partsmith_part_id']='body'",'custom ID')
+reject("bpy.data.objects['Head'].data.vertices[-1].co.z=100",'bounded target region')
+reject("",'budgets',{'repairMaxAddedFaces':3})
+reject("bpy.ops.object.empty_add()",'original object')
+reject("bpy.data.objects['Head'].shape_key_add(name='Basis')",'unrigged meshes')
+reject("bpy.data.objects['Head'].modifiers.new('Unexpected','SUBSURF')",'unrigged meshes')
+reject("bpy.ops.object.armature_add()",'unrigged meshes')
+reject("mesh=bpy.data.objects['Head'].data;mesh.attributes['source_vertex_id'].data[0].value=999",'attribute')
+reject("mesh=bpy.data.objects['Head'].data;bm=bmesh.new();bm.from_mesh(mesh);bm.faces.ensure_lookup_table();bm.faces[5].normal_flip();bm.to_mesh(mesh);bm.free()",'inconsistent winding')
+# Disconnected component: preserve source arrays, but use a separate triangle.
+bpy.ops.wm.open_mainfile(filepath=source,load_ui=False,use_scripts=False)
+mesh=bpy.data.objects['Head'].data;bm=bmesh.new();bm.from_mesh(mesh)
+vs=[bm.verts.new(co) for co in [(0,0,1.5),(.2,0,1.5),(0,.2,1.5)]];bm.faces.new(vs);bm.to_mesh(mesh);bm.free()
+try:
+ namespace['repair_checks']({**q,'repairMaxAddedVertices':3},baseline,namespace['snapshot']())
+ raise AssertionError('Floating repair accepted')
+except RuntimeError as error:
+ assert 'disconnected component' in str(error),str(error)
+`);
+  assert.equal(hash(original), originalHash);
+});
+
+test("actual M09 normalizes only equivalent built-in face storage and rejects material or smoothing changes in both directions", { skip: !fs.existsSync(blender), timeout: 60_000 }, t => {
+  const f = fixture(t, "M09");
+  python(f.root, loadValidator + `import bpy,json
+source_code=${JSON.stringify(missingSurfaceSource)}
+append_code=${JSON.stringify(appendCap)}
+q={'operation':'M09','editMeshIds':['head'],'repairMaxAddedFaces':4,'repairMaxAddedVertices':1}
+def storage(mesh,name,present,value=0):
+ attribute=mesh.attributes.get(name)
+ if not present:
+  if attribute: mesh.attributes.remove(attribute)
+  return
+ if not attribute: attribute=mesh.attributes.new(name,'INT' if name=='material_index' else 'BOOLEAN','FACE')
+ for item in attribute.data: item.value=value
+def check(name,before_present,after_present,source_value,result_value,expect_pass):
+ exec(source_code,globals())
+ mesh=bpy.data.objects['Head'].data
+ mesh.materials.append(bpy.data.materials.new('Second material'))
+ storage(mesh,'material_index',False);storage(mesh,'sharp_face',False)
+ storage(mesh,name,before_present,source_value)
+ baseline=namespace['snapshot']();baseline['repairContract']=namespace['repair_contract']()
+ exec(append_code,globals())
+ storage(mesh,name,after_present,result_value)
+ bpy.context.view_layer.update()
+ try:
+  checks,evidence=namespace['repair_checks'](q,baseline,namespace['snapshot']())
+ except RuntimeError as error:
+  assert not expect_pass,(name,before_present,after_present,str(error))
+  assert 'original assignments' in str(error),(name,str(error))
+ else:
+  assert expect_pass,('A semantic face-property change was accepted',name)
+  assert checks['appendOnlyRepair']
+  assert name in evidence['equivalentFaceAttributeStorageChanges']
+for name in ['material_index','sharp_face']:
+ check(name,False,True,0,0,True)
+ check(name,True,False,0,0,True)
+ check(name,False,True,0,1,False)
+ check(name,True,False,1,0,False)
+`);
+});
+
 test("actual Blender partitions two native parts and assembles their independent editable scenes without source mutation", { skip: !fs.existsSync(blender), timeout: 240_000 }, async t => {
   const f = fixture(t, "M07"), original = path.join(f.root, "original.blend");
   python(f.root, twoMeshes + `bpy.ops.wm.save_as_mainfile(filepath=${JSON.stringify(original)},compress=False)\n`);
@@ -62,6 +204,18 @@ test("actual Blender partitions two native parts and assembles their independent
     const candidate = result.candidates!.find(value => value.slot === part.slot)!;
     assert(candidate.files.some(file => file.path.endsWith(".fbx")));
     assert(candidate.files.some(file => file.path.endsWith(".glb")));
+    // The authoring process still contains the whole scene and prior part
+    // scenes. Selection alone must not leak those siblings into any GLB scene.
+    const glb = fs.readFileSync(path.join(f.root, candidate.files.find(file => file.path.endsWith(".glb"))!.path));
+    const document = JSON.parse(glb.toString("utf8", 20, 20 + glb.readUInt32LE(12)));
+    assert.equal(document.scenes.length, 1, "A standalone part must not retain the whole or sibling scenes");
+    assert.equal(document.scene, 0);
+    assert.equal(document.meshes.length, 1, "The GLB must not contain sibling mesh payloads");
+    const meshNodes = document.nodes.filter((node: any) => node.mesh !== undefined);
+    assert.equal(meshNodes.length, 1);
+    assert.equal(meshNodes[0].name, part.slot.replace(/^part-/, ""));
+    assert.deepEqual(document.scenes[0].nodes, [document.nodes.indexOf(meshNodes[0])]);
+    assert.equal(document.meshes[0].primitives.reduce((total: number, primitive: any) => total + document.accessors[primitive.indices].count / 3, 0), 12);
   }
   f.args.recoveryOnly = true; assert.deepEqual(await split(f.args), result); assert.equal(f.calls(), 1);
   f.args.recoveryOnly = false; f.args.task.id = "task-assemble"; f.args.task.taskId = "M08"; f.args.task.settings = {};

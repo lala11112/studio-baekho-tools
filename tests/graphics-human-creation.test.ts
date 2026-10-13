@@ -146,6 +146,18 @@ test('actual human controls keep the total budget, selected part status and opti
     await page.evaluate(() => (window as any).setStage('surface'));
     await page.getByRole('button', { name: 'UV 준비', exact: true }).click();
     assert.equal(await page.evaluate(() => (window as any).compiled.settings.partId), 'hair');
+    await page.evaluate(() => (window as any).setStage('assembly'));
+    await page.getByRole('button', { name: '빠진 면 보완', exact: true }).click();
+    const repair = page.getByRole('region', { name: '빠진 면 보완 범위', exact: true });
+    assert.equal(await repair.isVisible(), true);
+    assert.match(await repair.innerText(), /기존 면·정점·UV·재질 보존/);
+    assert.equal(await page.getByRole('spinbutton', { name: '추가 면 상한', exact: true }).inputValue(), '1500');
+    await page.getByRole('spinbutton', { name: '추가 면 상한', exact: true }).fill('');
+    assert.equal(await page.evaluate(() => (window as any).spec.stageSettings.assembly.values.repairMaxAddedFaces), '');
+    assert.equal(await page.evaluate(() => (window as any).compiled), null);
+    await page.getByRole('button', { name: '빠진 면 보완', exact: true }).click();
+    assert.equal(await page.evaluate(() => (window as any).spec.stageSettings.assembly.values.assemblyMode), '');
+    assert.equal(await repair.count(), 0);
     await page.evaluate(() => (window as any).setStage('rig'));
     await page.getByRole('button', { name: 'Humanoid · 사람형', exact: true }).click();
     const fingers = page.getByRole('checkbox', { name: '손가락 본 · 양손', exact: true });

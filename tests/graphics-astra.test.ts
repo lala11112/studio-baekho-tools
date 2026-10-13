@@ -57,8 +57,108 @@ async function blenderMock(_executable: string, command: string[], _signal?: Abo
   }
 }
 
+function partsRefreshFixture(t: any) {
+  const f = fixture(t, "M07"), source = f.input();
+  f.args.task.settings.requestedParts = JSON.stringify([{ id: "head", label: "Head" }, { id: "body", label: "Body" }]);
+  // Change only this fixture's validator bytes when simulating an app upgrade.
+  f.args.resources = path.join(f.root, "resources");
+  fs.mkdirSync(path.join(f.args.resources, "blender"), { recursive: true });
+  for (const name of ["graphics_astra_validate.py", "graphics_glb.py", "graphics_humanoid.py"])
+    fs.copyFileSync(path.resolve("integrations/blender", name), path.join(f.args.resources, "blender", name));
+  const modes: string[] = []; let workers = 0;
+  const execute = createGraphicsAstraExecutor({ workerFactory: () => f.worker(task => { workers++; return f.authored(task); }), runBlender: async (...args) => {
+    const q = read(args[1].at(-1)!); modes.push(q.mode);
+    if (q.mode === "prepare") return blenderMock(...args);
+    const candidates = q.requestedParts.map((part: { id: string; label: string }) => {
+      const prefix = "part-" + part.id, folder = path.join(q.output, prefix); fs.mkdirSync(folder);
+      fs.writeFileSync(path.join(folder, "asset.blend"), "isolated " + part.id);
+      fs.writeFileSync(path.join(folder, "asset.fbx"), "native " + part.id);
+      glb(path.join(folder, "asset.glb"));
+      for (const name of ["front", "side", "back"]) {
+        const png = new PNG({ width: 8, height: 8 }); png.data.fill(140);
+        fs.writeFileSync(path.join(folder, name + ".png"), PNG.sync.write(png));
+      }
+      return { slot: part.id, label: part.label, meshIds: ["mesh-" + part.id], files: ["asset.blend", "asset.fbx", "asset.glb", "front.png", "side.png", "back.png"].map(name => prefix + "/" + name) };
+    });
+    write(q.report, { identity: q.identity, nonce: q.nonce, operation: q.operation, sourceSha256: q.sourceSha256, outputSha256: hash(q.outputBlend), validatorFingerprint: q.validatorFingerprint,
+      passed: true, meshes: candidates.map((part: { slot: string }) => ({ id: "mesh-" + part.slot })), files: candidates.flatMap((part: { files: string[] }) => part.files), candidates,
+      checks: { partition: true, materials: true, skeleton: true, actionsPreserved: true } });
+  } });
+  const folder = path.join(f.root, "graphics/jobs/task-1/astra");
+  return { ...f, source, execute, folder, modes, workers: () => workers, upgrade: () => fs.appendFileSync(path.join(f.args.resources, "blender/graphics_humanoid.py"), "\n# changed fixture validator\n") };
+}
+
+test("explicit parts refresh revalidates changed validator once without authoring and reuses identical refreshed derivatives", async t => {
+  const f = partsRefreshFixture(t), originalHash = hash(f.source.file);
+  const original = await f.execute(f.args), checkpoint = path.join(f.folder, "checkpoint.json"), oldCheckpoint = fs.readFileSync(checkpoint);
+  const oldFiles = original.files.map(file => ({ path: path.join(f.root, file.path), sha256: hash(path.join(f.root, file.path)) }));
+  const dispatchHash = hash(path.join(f.folder, "dispatch.json")), preparedHash = hash(path.join(f.folder, "work/source.blend"));
+  assert.equal(f.workers(), 1); assert.deepEqual(f.modes, ["prepare", "validate"]);
+  f.args.recoveryOnly = true; f.args.refreshDerivatives = true;
+  assert.deepEqual(await f.execute(f.args), original);
+  assert.deepEqual(f.modes, ["prepare", "validate"], "The same fingerprint must skip Blender completely");
+  f.upgrade();
+  const refreshed = await f.execute(f.args);
+  assert.equal(f.workers(), 1); assert.deepEqual(f.modes, ["prepare", "validate", "validate"]);
+  assert.deepEqual(refreshed.candidates?.map(part => part.slot), ["part-head", "part-body"]);
+  assert.notDeepEqual(refreshed.candidates?.map(part => part.files), original.candidates?.map(part => part.files));
+  const archived = fs.readdirSync(f.folder).filter(name => /^checkpoint-[a-f0-9]+\.json$/.test(name));
+  assert.equal(archived.length, 1); assert.deepEqual(fs.readFileSync(path.join(f.folder, archived[0])), oldCheckpoint);
+  for (const file of oldFiles) assert.equal(hash(file.path), file.sha256, "A registered old output changed");
+  assert.equal(hash(f.source.file), originalHash); assert.equal(hash(path.join(f.folder, "dispatch.json")), dispatchHash); assert.equal(hash(path.join(f.folder, "work/source.blend")), preparedHash);
+  assert.deepEqual(await f.execute(f.args), refreshed, "Identical output identities let the engine deduplicate a repeated refresh");
+  assert.equal(f.workers(), 1); assert.deepEqual(f.modes, ["prepare", "validate", "validate"]);
+  assert.equal(fs.readdirSync(f.folder).filter(name => name.startsWith("validated-")).length, 2);
+});
+
+test("parts refresh rejects missing or corrupt completion evidence before Blender or any new authoring", async t => {
+  for (const variant of ["checkpoint-missing", "checkpoint-json", "checkpoint-identity", "registered-output", "dispatch-missing", "not-recovery"] as const) await t.test(variant, async child => {
+    const f = partsRefreshFixture(child), original = await f.execute(f.args), checkpoint = path.join(f.folder, "checkpoint.json");
+    f.args.recoveryOnly = true; f.args.refreshDerivatives = true; f.upgrade();
+    if (variant === "checkpoint-missing") fs.unlinkSync(checkpoint);
+    if (variant === "checkpoint-json") fs.writeFileSync(checkpoint, "{");
+    if (variant === "checkpoint-identity") write(checkpoint, { ...read(checkpoint), identity: "different request" });
+    if (variant === "registered-output") fs.appendFileSync(path.join(f.root, original.candidates![0].files.find(file => file.path.endsWith(".glb"))!.path), "corrupted");
+    if (variant === "dispatch-missing") fs.unlinkSync(path.join(f.folder, "dispatch.json"));
+    if (variant === "not-recovery") f.args.recoveryOnly = false;
+    await assert.rejects(f.execute(f.args));
+    assert.equal(f.workers(), 1); assert.deepEqual(f.modes, ["prepare", "validate"]);
+    assert.equal(fs.readdirSync(f.folder).filter(name => name.startsWith("validated-")).length, 1);
+  });
+});
+
 test("Astra routes only the actual catalog operation IDs", () => {
-  assert.deepEqual(graphicsAstraOperations, ["M05", "M06", "M07", "M08", "M15", "R01", "R02", "R03", "N04", "N05", "N06"]);
+  assert.deepEqual(graphicsAstraOperations, ["M05", "M06", "M07", "M08", "M09", "M15", "R01", "R02", "R03", "N04", "N05", "N06"]);
+});
+
+test("M09 rejects stale selection, absent explicit source, invalid caps and unsupported native scope before authoring", async t => {
+  for (const variant of ["source", "stale", "faces", "vertices", "blank", "boolean", "topology", "ambiguous", "unknown", "rig", "morph", "modifier"])
+    await t.test(variant, async child => {
+      const f = fixture(child, "M09"), source = f.input("model", ".blend", "part-head");
+      delete f.args.object.accepted['model:part-head'];
+      f.args.task.settings = { sourceVersionId: source.version.id };
+      if (variant === "source") delete f.args.task.settings.sourceVersionId;
+      if (variant === "stale") f.args.task.settings.meshSelectionVersionId = "stale-version";
+      if (variant === "faces") f.args.task.settings.repairMaxAddedFaces = 4001;
+      if (variant === "vertices") f.args.task.settings.repairMaxAddedVertices = -1;
+      if (variant === "blank") f.args.task.settings.repairMaxAddedVertices = "";
+      if (variant === "boolean") f.args.task.settings.repairMaxAddedVertices = false;
+      if (variant === "topology") f.args.task.settings['lock.topology'] = true;
+      if (variant === "unknown") f.args.task.settings.editMeshIds = '["unknown"]';
+      let workers = 0;
+      const execute = createGraphicsAstraExecutor({ workerFactory: () => { workers++; throw Error("Unexpected worker"); }, runBlender: async (...args) => {
+        await blenderMock(...args);
+        const q = read(args[1].at(-1)!); assert.equal(q.mode, "prepare");
+        const report = read(q.report);
+        report.repairContract = {}; report.rigs = variant === "rig" ? [{ name: 'armature' }] : [];
+        report.meshes = [{ id: "mesh-original", name: "head", ...(variant === "morph" ? { shapeKeys: "morph" } : {}), ...(variant === "modifier" ? { modifiers: [{ type: 'SUBSURF' }] } : {}) }];
+        if (variant === "ambiguous") report.meshes.push({ id: "another", name: "hair" });
+        write(q.report, report);
+      } });
+      await assert.rejects(execute(f.args), /복구|리그·모프/);
+      assert.equal(workers, 0);
+      assert.equal(fs.existsSync(path.join(f.root, "graphics/jobs/task-1/astra/dispatch.json")), false);
+    });
 });
 
 test("new model contracts reject ambiguous parts, unknown edit IDs, multi-candidate dispatch and impossible locks before any worker", async t => {

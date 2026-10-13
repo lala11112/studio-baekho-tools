@@ -76,7 +76,7 @@ const verifiedScope: Record<string, string> = {
 };
 const image = new Set(["I01", "I02", "I03", "I05", "I06", "I07", 'I08']);
 const tripo = new Set(["M01", "M02", "M03", "M10", "T01", "T03"]);
-export const graphicsAstraTasks = new Set(["M05", 'M06', 'M07', 'M08', 'M15', "R01", "R02", "R03", "N04", "N05", "N06"]);
+export const graphicsAstraTasks = new Set(["M05", 'M06', 'M07', 'M08', 'M09', 'M15', "R01", "R02", "R03", "N04", "N05", "N06"]);
 export const graphicsVideoTasks = new Set(["N02"]);
 const localScope: Record<string, string> = {
   N01: "채택한 모델·리그에서 두 측면을 2048px로 로컬 렌더합니다. 전신 여백을 계산하며 원본과 기존 디자인을 유지합니다. GPT·유료 생성 없음.",
@@ -438,10 +438,10 @@ const definitions = [
   },
   {
     id: "M09",
-    name: "메시 결함 정리",
+    name: "빠진 면 보완",
     group: "M 3D 모델 제작과 보정",
-    inputs: "모델·정리 항목",
-    output: "구멍·노멀·중복·자가 교차 등 처리 전후 검사",
+    inputs: "리깅 전 원본 파트·보완할 영역·추가 면과 정점 상한",
+    output: "기존 면·정점·UV·재질 보존 검사, 선택 메시의 빠진 면만 추가한 새 검토 버전",
   },
   {
     id: "M10",
@@ -939,7 +939,7 @@ export const graphicsCatalog: GraphicsTaskDefinition[] = [...definitions, { id: 
         : tripo.has(entry.id)
           ? "API 실행 경로가 연결되었습니다. 계정 지원·실제 생성 품질은 아직 검증되지 않았으며 제출 전 비용 승인이 필요합니다."
           : graphicsAstraTasks.has(entry.id)
-            ? "Blender + Astra가 고정한 원본을 새 버전으로 작업합니다. 뼈·웨이트·클립의 로컬 검사를 거쳐 등록하며 외형과 동작은 직접 검토하세요. 실제 제작 품질은 개별 검증이 필요합니다."
+            ? entry.id === 'M09' ? '선택한 원본 파트의 기존 면과 정점은 유지하고, 지정한 빠진 영역에만 제한된 면을 추가합니다. 리깅·변형·동작이 있는 원본은 지원하지 않습니다. 결과를 검토하고 채택한 다음 UV·텍스처를 준비하세요.' : "Blender + Astra가 고정한 원본을 새 버전으로 작업합니다. 뼈·웨이트·클립의 로컬 검사를 거쳐 등록하며 외형과 동작은 직접 검토하세요. 실제 제작 품질은 개별 검증이 필요합니다."
             : graphicsVideoTasks.has(entry.id)
               ? "선택한 측면 원본으로 Runway 720p 영상을 만듭니다. 비용은 실행 전에 표시하고 원본·프레임을 수집합니다. 새 작업 공간의 실제 생성 검증 전입니다."
               : pendingReasons[entry.id[0]]),
