@@ -398,10 +398,41 @@ export class GraphicsEngine {
       }
       case "accept": {
         const o = this.object(w, action.objectId), v = w.versions.find(v => v.id === action.versionId && v.objectId === o.id);
-        if (!v) throw Error("이 대상의 결과가 아닙니다."); for (const f of v.files) this.verified(id, f);
-        if (requiresPartSpaceRestoration(w, v)) throw Error('파트의 원래 크기·위치를 먼저 복원·검사하세요. API 원본은 별도로 보존합니다.');
-        if (requiresPartSourcePreparation(w, v)) throw Error('파트 원본의 로컬 작업 사본을 먼저 준비하세요. API 원본은 별도로 보존합니다.');
-        o.accepted[`${v.role}:${v.slot}`] = v.id;
+        if (!v) throw Error("이 대상의 결과가 아닙니다.");
+        let candidates = [v];
+        if (v.role === 'model' && v.slot === 'main') {
+          const producers = w.tasks.filter(task => task.taskId === 'M08' && task.outputVersionIds.includes(v.id));
+          if (producers.length > 1) throw Error('조립 결과의 제작 작업이 중복됩니다. 채택 상태는 유지됩니다.');
+          const producer = producers[0];
+          const hasParts = producer && (producer.outputVersionIds.length > 1 || w.versions.some(version => version.provenance.jobId === producer.id && version.slot.startsWith('part-')));
+          if (producer && hasParts) {
+            if (producer.objectId !== o.id || v.provenance.jobId !== producer.id || new Set(producer.outputVersionIds).size !== producer.outputVersionIds.length)
+              throw Error('조립 결과의 대상·제작 작업·후보 연결이 잘못됐습니다. 채택 상태는 유지됩니다.');
+            const inputs = producer.inputVersionIds.map(versionId => w.versions.find(version => version.id === versionId));
+            if (inputs.some(version => !version || version.objectId !== o.id)) throw Error('조립의 고정 입력이 누락됐거나 다른 대상입니다. 채택 상태는 유지됩니다.');
+            const slots = inputs.filter(version => version && ['model', 'material'].includes(version.role) && version.slot.startsWith('part-')).map(version => version!.slot);
+            if (slots.length < 2 || new Set(slots).size !== slots.length) throw Error('조립의 고정 파트가 누락됐거나 중복됩니다. 채택 상태는 유지됩니다.');
+            candidates = producer.outputVersionIds.map(versionId => {
+              const matches = w.versions.filter(version => version.id === versionId);
+              if (matches.length !== 1) throw Error('조립 파트 후보가 누락됐거나 중복됩니다. 채택 상태는 유지됩니다.');
+              const candidate = matches[0];
+              if (candidate.objectId !== o.id || candidate.role !== 'model' || candidate.provenance.jobId !== producer.id ||
+                  JSON.stringify(candidate.sourceVersionIds) !== JSON.stringify(producer.inputVersionIds) || !candidate.files.length)
+                throw Error('같은 작업의 정확한 조립·파트 후보가 아닙니다. 채택 상태는 유지됩니다.');
+              return candidate;
+            });
+            const expected = new Set(['main', ...slots]);
+            if (candidates.length !== expected.size || new Set(candidates.map(candidate => candidate.slot)).size !== expected.size || candidates.some(candidate => !expected.has(candidate.slot)))
+              throw Error('조립 파트 후보가 누락됐거나 중복됩니다. 채택 상태는 유지됩니다.');
+          }
+        }
+        // Verify the entire assembly before changing even one accepted slot.
+        for (const candidate of candidates) {
+          for (const file of candidate.files) this.verified(id, file);
+          if (requiresPartSpaceRestoration(w, candidate)) throw Error('파트의 원래 크기·위치를 먼저 복원·검사하세요. API 원본은 별도로 보존합니다.');
+          if (requiresPartSourcePreparation(w, candidate)) throw Error('파트 원본의 로컬 작업 사본을 먼저 준비하세요. API 원본은 별도로 보존합니다.');
+        }
+        o.accepted = { ...o.accepted, ...Object.fromEntries(candidates.map(candidate => [`${candidate.role}:${candidate.slot}`, candidate.id])) };
         // Other slots and clips remain accessible. Compatibility is checked on delivery, not by deleting history.
         return this.save(w);
       }

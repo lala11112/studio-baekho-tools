@@ -719,6 +719,10 @@ export function GraphicsStudio({
   const needsPartSpaceRestoration = Boolean(workspace && shownVersion && requiresPartSpaceRestoration(workspace, shownVersion));
   const needsPartSourcePreparation = Boolean(workspace && shownVersion && requiresPartSourcePreparation(workspace, shownVersion));
   const needsPartPreparation = needsPartSpaceRestoration || needsPartSourcePreparation;
+  const shownAssembly = shownVersion?.role === 'model' && shownVersion.slot === 'main'
+    ? objectTasks.find(task => task.taskId === 'M08' && task.outputVersionIds.includes(shownVersion.id) && task.outputVersionIds.length > 1) : undefined;
+  const assemblyParts = shownAssembly?.outputVersionIds.map(id => versions.find(version => version.id === id)).filter((version): version is AssetVersion => !!version && version.role === 'model' && version.slot.startsWith('part-'));
+  const shownAcceptanceComplete = Boolean(object && shownVersion && acceptedVersion(object, shownVersion) && (!shownAssembly || assemblyParts?.length && assemblyParts.every(version => object.accepted[`model:${version.slot}`] === version.id)));
   const headVersions = versions.filter(version => version.slot === 'part-head' && ['model', 'material'].includes(version.role) && version.files.some(file => /\.glb$/i.test(file.path)));
   const headCandidate = headVersions.find(version => version.id === shownVersion?.id);
   const acceptedHeadId = object?.accepted['model:part-head'] ?? object?.accepted['material:part-head'];
@@ -864,7 +868,7 @@ export function GraphicsStudio({
 
   function adoptVersion(version: AssetVersion) {
     if (version.slot === 'part-head' && acceptedHeadId && acceptedHeadId !== version.id) setHeadBaselineId(acceptedHeadId);
-    void run({ kind: 'accept', objectId: version.objectId, versionId: version.id }, `${roles[version.role]} / ${version.slot}에 채택했습니다. 다음 작업은 직접 실행하세요.`);
+    void run({ kind: 'accept', objectId: version.objectId, versionId: version.id }, shownAssembly && version.id === shownVersion?.id ? '이 조립 전체와 같은 작업의 파트를 함께 채택했습니다. 다음 작업은 직접 실행하세요.' : `${roles[version.role]} / ${version.slot}에 채택했습니다. 다음 작업은 직접 실행하세요.`);
   }
 
   function chooseRepairSource(source: AssetVersion, mesh?: MeshSelection) {
@@ -1927,14 +1931,14 @@ export function GraphicsStudio({
                   {shownVersion && ['model', 'material'].includes(shownVersion.role) && <div className="gs-preview-actions" data-testid="graphics-preview-actions">
                     <strong>{shownVersion.label}</strong>
                     <div>
-                      <button className="gs-primary" data-testid="graphics-accept-preview" disabled={disabled || needsPartPreparation || acceptedVersion(object, shownVersion)} onClick={() => adoptVersion(shownVersion)}>
-                        {acceptedVersion(object, shownVersion) ? '현재 채택한 모델' : needsPartSpaceRestoration ? '크기·위치 복원 후 채택' : needsPartSourcePreparation ? '작업 원본 준비 후 채택' : '이 모델 채택'}
+                      <button className="gs-primary" data-testid="graphics-accept-preview" disabled={disabled || needsPartPreparation || shownAcceptanceComplete} onClick={() => adoptVersion(shownVersion)}>
+                        {shownAcceptanceComplete ? shownAssembly ? '현재 채택한 조립·파트' : '현재 채택한 모델' : needsPartSpaceRestoration ? '크기·위치 복원 후 채택' : needsPartSourcePreparation ? '작업 원본 준비 후 채택' : shownAssembly ? '이 조립과 파트 채택' : '이 모델 채택'}
                       </button>
                       {headCandidate && headBaseline && !headComparisonOpen && <button data-testid="graphics-compare-heads" onClick={() => { setHeadBaselineId(headBaseline.id); setHeadComparisonOpen(true); setMeshSelection(null); }}>
                         {headBaseline.id === acceptedHeadId ? '채택 머리와 나란히 비교' : '머리 버전 나란히 비교'}
                       </button>}
                     </div>
-                    <small>채택은 다음 작업의 원본만 바꾸며, 제작을 실행하지 않습니다.</small>
+                    <small>{shownAssembly ? '같은 조립 작업의 전체 모델과 배치된 파트를 함께 채택합니다. 이후 파트 UV도 이 배치를 사용하며, 이전 원본은 유지됩니다.' : '채택은 다음 작업의 원본만 바꾸며, 제작을 실행하지 않습니다.'}</small>
                   </div>}
                   {shownVersion && needsPartSourcePreparation && <div className="gs-result-notes" aria-label="파트 작업 원본 준비 필요" data-testid="graphics-part-source-warning">
                     <strong>채택 전 파트 작업 원본 준비 필요</strong>
@@ -2101,15 +2105,17 @@ export function GraphicsStudio({
                       </details>
                       <button
                         data-testid="graphics-accept-version"
+                        aria-label={shownAssembly ? '상세 결과에서 조립과 파트 함께 채택' : undefined}
                         disabled={
-                          disabled || needsPartPreparation || acceptedVersion(object, shownVersion)
+                          disabled || needsPartPreparation || shownAcceptanceComplete
                         }
                         onClick={() => adoptVersion(shownVersion)}
                       >
-                        {acceptedVersion(object, shownVersion)
+                        {shownAcceptanceComplete
                           ? "현재 채택 버전"
                           : needsPartSpaceRestoration ? '크기·위치 복원 후 채택'
                           : needsPartSourcePreparation ? '작업 원본 준비 후 채택'
+                          : shownAssembly ? '이 조립과 파트 채택'
                           : `${roles[shownVersion.role]} / ${shownVersion.slot}에 채택`}
                       </button>
                     </div>
