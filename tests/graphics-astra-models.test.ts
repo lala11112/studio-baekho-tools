@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { PNG } from "pngjs";
 import { createGraphicsAstraExecutor } from "../engine/graphics-astra";
+import { preflightTripoPartSource } from "../engine/tripo-part-source";
 import type { GraphicsNativeArgs } from "../engine/graphics-native";
 import type { AssetVersion, GraphicsRole } from "../shared/graphics";
 
@@ -249,12 +250,93 @@ test("actual Blender partitions two native parts and assembles their independent
   const hashes = parts.map(part => hash(part.file)); for (const part of parts) f.adopt(part.file, "model", part.slot);
   const assembled = await f.execute(`for index,obj in enumerate(sorted([o for o in bpy.context.scene.objects if o.type=='MESH'],key=lambda o:o.name)):\n obj.location.z += index*0.5`)(f.args);
   assert.equal(assembled.role, "model"); assert.equal(assembled.slot, "main");
-  const assembledReport = read(path.join(f.root, assembled.files.find(file => file.kind === "report")!.path));
+  const assembledReport = read(path.join(f.root, assembled.candidates!.find(candidate => candidate.slot === 'main')!.files.find(file => file.kind === 'report')!.path));
   assert.equal(assembledReport.meshes.length, 2); assert.equal(assembledReport.checks.topology, true);
-  assert(assembledReport.meshes.every((mesh: any) => /^version-\d:/.test(mesh.id)));
+  assert.deepEqual(assembledReport.meshes.map((mesh: any) => mesh.id).sort(), ['blade', 'handle']);
+  assert.deepEqual(assembled.candidates?.map(candidate => candidate.slot), ['main', 'part-blade', 'part-handle']);
   assert.deepEqual(parts.map(part => hash(part.file)), hashes); assert.equal(hash(original), originalHash);
   // Independent validator rejects a duplicate surface even if requested part labels still exist.
   python(f.root, loadValidator + `import bpy,json\nbaseline=json.loads(pathlib.Path(${JSON.stringify(path.join(f.root, "graphics/jobs/task-1/astra/baseline.json"))}).read_text())\nfor obj in bpy.context.scene.objects:\n if obj.type=='MESH': obj['partsmith_part_id']=obj['partsmith_id']\nobj=bpy.data.objects['blade']\ncopy=obj.copy();copy.data=obj.data.copy();copy['partsmith_id']='duplicate'\nbpy.context.scene.collection.objects.link(copy)\ntry:\n namespace['model_checks']({'operation':'M07','requestedParts':[{'id':'blade'},{'id':'handle'}]},baseline,namespace['snapshot']())\n raise AssertionError('Duplicated original surface accepted')\nexcept RuntimeError as error:\n assert 'partition every original polygon exactly once' in str(error)\n`, original);
+});
+
+test("native M08 retains combined and positioned head/body/hair copies, then assembles locally with unchanged placement and zero worker calls", { skip: !fs.existsSync(blender), timeout: 300_000 }, async t => {
+  const f = fixture(t, 'M08');
+  python(f.root, `import bpy,pathlib
+root=pathlib.Path(${JSON.stringify(f.root)})
+for index,part in enumerate(['head','body','hair']):
+ bpy.ops.wm.read_factory_settings(use_empty=True)
+ bpy.ops.mesh.primitive_cube_add(size=1,location=(index*.3,0,index*.2))
+ obj=bpy.context.object;obj.name=part;obj['partsmith_id']='stable-'+part;obj['partsmith_part_id']=part
+ obj.scale=(.2,.3,.4)
+ material=bpy.data.materials.new('Material_'+part);material.diffuse_color=(.2+index*.2,.4,.6,1);obj.data.materials.append(material)
+ bpy.context.view_layer.update();bpy.ops.wm.save_as_mainfile(filepath=str(root/(part+'.blend')),compress=False)
+`);
+  const originals = ['head', 'body', 'hair'].map(part => ({ file: path.join(f.root, part + '.blend'), slot: 'part-' + part }));
+  for (const source of originals) f.adopt(source.file, 'model', source.slot);
+  const originalHashes = originals.map(source => hash(source.file));
+  const fitted = await f.execute("bpy.data.objects['head'].location.z += .75")(f.args);
+  assert.deepEqual(fitted.candidates?.map(candidate => candidate.slot), ['main', 'part-head', 'part-body', 'part-hair']);
+  const reportFile = fitted.files.find(file => path.basename(file.path) === 'report.json' && !/part-(head|body|hair)\//.test(file.path))!;
+  const report = read(path.join(f.root, reportFile.path));
+  assert.equal(report.checks.assemblyPartIdentity, true); assert.equal(report.checks.assemblyShapePreserved, true);
+  assert.equal(report.assemblyLayout.fitQualityVerified, false); assert.equal(report.assemblyLayout.joinQualityVerified, false);
+  for (const part of report.assemblyLayout.parts) for (const mesh of part.meshes) {
+    if (part.id === 'head') assert.notDeepEqual(mesh.sourceTransform, mesh.outputTransform);
+    else assert.deepEqual(mesh.sourceTransform, mesh.outputTransform, 'Unedited body and hair keep their original placement');
+  }
+  const main = fitted.candidates!.find(candidate => candidate.slot === 'main')!;
+  assert(main.files.some(file => file.path.endsWith('/asset.fbx')));
+  assert(!main.files.some(file => /part-(head|body|hair)\//.test(file.path)));
+  const head = fitted.candidates!.find(candidate => candidate.slot === 'part-head')!;
+  const headFbx = head.files.find(file => file.path.endsWith('.fbx'))!;
+  const headReceipt = read(path.join(f.root, head.files.find(file => file.kind === 'report')!.path));
+  assert.equal(headReceipt.nativeSourceSha256, hash(path.join(f.root, headFbx.path)));
+  assert.equal(headReceipt.faces, 6); assert.equal(headReceipt.triangles, 12);
+  const preflight = await preflightTripoPartSource({ projectRoot: f.root,
+    source: { ...headFbx, sha256: hash(path.join(f.root, headFbx.path)), bytes: fs.statSync(path.join(f.root, headFbx.path)).size },
+    objectId: f.args.object.id, sourceVersionId: 'fitted-head', slot: 'part-head', blenderPath: blender,
+    resources: path.resolve('integrations'), signal: f.args.signal });
+  assert.equal(preflight.report.stableMeshId, 'stable-head');
+  const baseline = path.join(f.root, 'graphics/jobs/task-1/astra/baseline.json');
+  python(f.root, loadValidator + `import bpy,json
+baseline=json.loads(pathlib.Path(${JSON.stringify(baseline)}).read_text())
+q={'operation':'M08','requestedParts':[{'id':part} for part in ['head','body','hair']],'assemblyPlacement':'fit'}
+head=bpy.data.objects['head'];head['partsmith_part_id']='body'
+try:
+ namespace['model_checks'](q,baseline,namespace['snapshot']());raise AssertionError('Retagged assembly part accepted')
+except RuntimeError as error:
+ assert 'part tag' in str(error),str(error)
+head['partsmith_part_id']='head'
+try:
+ namespace['model_checks']({**q,'assemblyPlacement':'keep'},baseline,namespace['snapshot']());raise AssertionError('Changed keep-placement matrix accepted')
+except RuntimeError as error:
+ assert 'keep-placement' in str(error),str(error)
+head.data.vertices[0].co.x += .00001
+try:
+ namespace['model_checks'](q,baseline,namespace['snapshot']());raise AssertionError('Assembly shape edit accepted')
+except RuntimeError as error:
+ assert 'local geometry' in str(error),str(error)
+`, path.join(f.root, fitted.files[0].path));
+  f.args.task.id = 'local-keep'; f.args.task.settings = { assemblyPlacement: 'keep' }; f.args.task.localOnly = true;
+  f.args.inputs = []; f.args.task.inputVersionIds = []; f.args.object.accepted = {};
+  for (const part of fitted.candidates!.filter(candidate => candidate.slot !== 'main')) f.adopt(path.join(f.root, part.files.find(file => file.kind === 'blend')!.path), part.slot === 'part-head' ? 'material' : 'model', part.slot);
+  let localWorkers = 0;
+  const local = createGraphicsAstraExecutor({ workerFactory: () => { localWorkers++; throw Error('Local keep must never create a worker'); } });
+  const kept = await local(f.args), folder = path.join(f.root, 'graphics/jobs/local-keep/astra');
+  assert.equal(localWorkers, 0); assert.equal(fs.existsSync(path.join(folder, 'dispatch.json')), false);
+  assert.equal(hash(path.join(folder, 'work/source.blend')), hash(path.join(folder, 'work/outputs/asset.blend')));
+  assert.deepEqual(kept.candidates?.map(candidate => candidate.slot), ['main', 'part-head', 'part-body', 'part-hair']);
+  const keepReport = read(path.join(f.root, kept.files.at(-1)!.path));
+  assert.equal(keepReport.checks.assemblyPlacementPreserved, true);
+  assert(keepReport.assemblyLayout.parts.every((part: any) => part.meshes.every((mesh: any) => JSON.stringify(mesh.sourceTransform) === JSON.stringify(mesh.outputTransform))));
+  f.args.recoveryOnly = true; assert.deepEqual(await local(f.args), kept); assert.equal(localWorkers, 0);
+  // Interrupted local validation has no Astra dispatch; recover the same prepared
+  // bytes and revalidate locally, without inventing an authoring run.
+  fs.unlinkSync(path.join(folder, 'checkpoint.json'));
+  const recovered = await local(f.args);
+  assert.equal(localWorkers, 0); assert.equal(fs.existsSync(path.join(folder, 'dispatch.json')), false);
+  assert.deepEqual(recovered.candidates?.map(candidate => candidate.slot), ['main', 'part-head', 'part-body', 'part-hair']);
+  assert.deepEqual(originals.map(source => hash(source.file)), originalHashes);
 });
 
 test("actual Blender partial edit locks all untargeted geometry and new local model starts from image-only empty scene", { skip: !fs.existsSync(blender), timeout: 180_000 }, async t => {

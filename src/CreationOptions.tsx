@@ -522,6 +522,13 @@ export function CreationOptions({
             모양을 수정합니다. 수정하지 않아도 되는 단일 모델은 리깅 또는 Unity
             단계로 이동할 수 있습니다.
           </p>
+          {settings.assemblyMode === 'assemble' && <section className="gs-human-workflow" aria-label="파트 조립 배치 방식">
+            {choice('조립 배치', 'assemblyPlacement', 'fit', [
+              ['fit', '비율·위치 맞추기 · Astra'],
+              ['keep', '기존 배치 유지 · 로컬'],
+            ])}
+            <p className="gs-fine">기존 배치 유지는 채택한 파트의 크기와 위치를 유지해 로컬에서 합칩니다. 접합선의 자연스러움을 보장하지 않으므로 전체 결과를 직접 확인하세요. 조립된 전체 모델의 채택은 파트별 형태 채택과 별개이며, 선택만으로 작업을 실행하지 않습니다.</p>
+          </section>}
           {settings.assemblyMode === 'correct' && settings.editSourceMode === 'candidate' && <section className="gs-human-workflow" aria-label="선택 결과 추가 보정">
             <strong>선택한 결과에서 이어서 보정</strong>
             <p>{activePart ? `현재 파트: ${activePart.label}. ` : ''}실행 설정에 표시된 원본의 형태와 비율을 수정합니다. 이번 단계 지시에 다듬을 위치와 유지할 부분을 적어 주세요.</p>

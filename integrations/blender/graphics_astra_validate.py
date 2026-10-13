@@ -504,7 +504,11 @@ def prepare_assembly(q):
     sources = q['sources']
     if len(sources) < 2 or len({item['versionId'] for item in sources}) != len(sources):
         raise RuntimeError('Assembly needs distinct accepted part versions')
+    all_ids, parts = set(), []
     for source in sources:
+        if not re.fullmatch(r'part-[A-Za-z0-9_-]+', source['slot']):
+            raise RuntimeError('Assembly requires exact named part slots')
+        part_id = source['slot'][5:]
         if file_hash(source['path']) != source['sha256'] or pathlib.Path(source['path']).suffix.lower() != '.blend':
             raise RuntimeError('Assembly original hash or format differs')
         with bpy.data.libraries.load(source['path'], link=False) as (available, loaded):
@@ -518,20 +522,24 @@ def prepare_assembly(q):
         if not meshes:
             raise RuntimeError('Accepted part has no original meshes')
         ids = [obj.get('partsmith_id') for obj in meshes]
-        if any(not value for value in ids) or len(set(ids)) != len(ids):
+        if any(not value for value in ids) or len(set(ids)) != len(ids) or all_ids.intersection(ids):
             raise RuntimeError('Accepted part needs unique original mesh IDs')
+        if any(obj.get('partsmith_part_id') != part_id for obj in meshes):
+            raise RuntimeError('Accepted assembly part has a missing or mismatched original part tag')
+        all_ids.update(ids)
+        parts.append({'id': part_id, 'slot': source['slot'], 'sourceVersionId': source['versionId'],
+                      'sourceSha256': source['sourceSha256'], 'meshIds': sorted(ids)})
         for obj in objects:
             if obj and obj.type in ('MESH', 'ARMATURE', 'EMPTY'):
                 bpy.context.scene.collection.objects.link(obj)
-                if obj.type == 'MESH':
-                    obj['partsmith_id'] = source['versionId'] + ':' + obj['partsmith_id']
-                    obj['partsmith_part_id'] = source['slot']
         for action in loaded.actions:
             if action:
                 action.use_fake_user = True
         bpy.data.scenes.remove(part_scene)
     bpy.context.view_layer.update()
     evidence = snapshot()
+    evidence['assemblyParts'] = parts
+    evidence['assemblyContract'] = assembly_snapshot()
     bpy.ops.wm.save_as_mainfile(filepath=q['outputBlend'], compress=False)
     for source in sources:
         if file_hash(source['path']) != source['sha256']:
@@ -714,13 +722,13 @@ def preview(q, export_model=True):
     bpy.context.view_layer.objects.active = meshes[0]
     glb_images = []
     if export_model:
-        if q['operation'] == 'M09' or q['operation'] == 'M05' and q.get('candidateRevision') is True:
+        if q['operation'] == 'M09' or q['operation'] == 'M05' and q.get('candidateRevision') is True or q['operation'] == 'M08' and not q.get('partPreview'):
             bpy.ops.export_scene.fbx(filepath=str(out / 'asset.fbx'), use_selection=True,
-                object_types={'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y', apply_unit_scale=True,
+                object_types={'MESH', 'EMPTY', 'ARMATURE'} if q['operation'] == 'M08' else {'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y', apply_unit_scale=True,
                 apply_scale_options='FBX_SCALE_UNITS', use_mesh_modifiers=False, use_triangles=False,
-                use_custom_props=True, add_leaf_bones=False, bake_anim=False, path_mode='COPY', embed_textures=True)
+                use_custom_props=True, add_leaf_bones=False, bake_anim=q['operation'] == 'M08', path_mode='COPY', embed_textures=True)
             files.append('asset.fbx')
-        glb_images = export_packed_glb(out / 'asset.glb', use_selection=True, use_active_scene=True, export_animations=True)
+        glb_images = export_packed_glb(out / 'asset.glb', use_selection=True, use_active_scene=True, export_animations=True, export_extras=True)
         files.append('asset.glb')
     # Native preview cameras/lights are temporary and never alter the authored scene file.
     for obj in list(scene.objects):
@@ -805,12 +813,112 @@ def model_checks(q, baseline, current):
             checks['partialEdit'] = bool(targets) and targets.issubset(old) and any(old[key]['positions'] != new[key]['positions'] or old[key]['transform'] != new[key]['transform'] for key in targets)
             if not checks['partialEdit'] or any(old[key]['positions'] != new[key]['positions'] or old[key]['transform'] != new[key]['transform'] for key in old if key not in targets):
                 raise RuntimeError('Partial edit must change the named meshes only and preserve all untargeted positions/transforms')
-        elif operation == 'M08' and any(old[key]['positions'] != new[key]['positions'] for key in old):
-            raise RuntimeError('Part assembly supports object transforms only; original vertex positions changed')
+        elif operation == 'M08':
+            assembly_checks(q, baseline)
+            checks['assemblyPartIdentity'] = checks['assemblyShapePreserved'] = True
+            if q.get('assemblyPlacement') == 'keep':
+                checks['assemblyPlacementPreserved'] = True
     for lock, check in [('topology', 'topology'), ('materials', 'materials'), ('rig', 'skeleton')]:
         if q.get('locks', {}).get(lock) is True and not checks[check]:
             raise RuntimeError('Explicit structural lock failed: ' + lock)
     return checks
+
+
+def assembly_snapshot():
+    """Exact native shape and placement; separate from visual/fit judgments."""
+    def props(owner):
+        return json.loads(json.dumps({key: value.to_list() if hasattr(value, 'to_list') else value.to_dict() if hasattr(value, 'to_dict') else value for key, value in owner.items()}, allow_nan=False, sort_keys=True))
+    def exact(values):
+        result = [float(value) for value in values]
+        if not all(math.isfinite(value) for value in result):
+            raise RuntimeError('Assembly contains non-finite geometry or transforms')
+        return result
+    objects, meshes = [], {}
+    for obj in sorted(bpy.context.scene.objects, key=lambda item: item.name):
+        if obj.type in ('CAMERA', 'LIGHT'):
+            continue
+        objects.append({'name': obj.name, 'type': obj.type, 'parent': obj.parent.name if obj.parent else None,
+                        'parentType': obj.parent_type, 'properties': props(obj),
+                        'transform': [exact(row) for row in obj.matrix_world],
+                        'parentInverse': [exact(row) for row in obj.matrix_parent_inverse]})
+        if obj.type != 'MESH':
+            continue
+        mesh = obj.data
+        shape = {'positions': [exact(vertex.co) for vertex in mesh.vertices], 'polygons': [list(face.vertices) for face in mesh.polygons],
+                 'edges': [list(edge.vertices) for edge in mesh.edges],
+                 'uv': [[layer.name, [exact(item.uv) for item in layer.data], layer.active_render] for layer in mesh.uv_layers],
+                 'activeUV': mesh.uv_layers.active_index, 'materials': [slot.material.name if slot.material else None for slot in obj.material_slots],
+                 'faceMaterials': [face.material_index for face in mesh.polygons], 'smooth': [face.use_smooth for face in mesh.polygons],
+                 'properties': props(mesh), 'customNormals': mesh.has_custom_normals,
+                 'normals': [exact(item.vector) for item in mesh.corner_normals]}
+        points = [exact(obj.matrix_world @ vertex.co) for vertex in mesh.vertices]
+        meshes[obj['partsmith_id']] = {'partId': obj.get('partsmith_part_id'), 'shape': shape, 'shapeSha256': digest(shape),
+            'transform': [exact(row) for row in obj.matrix_world], 'worldPositions': points,
+            'worldBounds': [[min(point[axis] for point in points) for axis in range(3)], [max(point[axis] for point in points) for axis in range(3)]]}
+    return {'objects': objects, 'meshes': meshes}
+
+
+def assembly_checks(q, baseline):
+    original, parts, actual = baseline.get('assemblyContract'), baseline.get('assemblyParts'), assembly_snapshot()
+    if not original or not parts or {part['id'] for part in parts} != {part['id'] for part in q['requestedParts']}:
+        raise RuntimeError('Assembly baseline lacks its exact requested part identities')
+    if set(original['meshes']) != set(actual['meshes']):
+        raise RuntimeError('Assembly changed the exact original mesh ID set')
+    for part in parts:
+        if sorted(key for key, mesh in actual['meshes'].items() if mesh['partId'] == part['id']) != part['meshIds']:
+            raise RuntimeError('Assembly changed a requested part tag or its exact original mesh IDs')
+    for key, mesh in original['meshes'].items():
+        if mesh['shape'] != actual['meshes'][key]['shape']:
+            raise RuntimeError('Assembly changed original local geometry, UV, materials or normals')
+    def identities(value):
+        return [{key: item for key, item in obj.items() if key != 'transform'} for obj in value['objects']]
+    if identities(original) != identities(actual):
+        raise RuntimeError('Assembly changed an original object, hierarchy or custom identity')
+    if q.get('assemblyPlacement') == 'keep' and original != actual:
+        raise RuntimeError('Local keep-placement assembly changed an original object matrix or shape')
+    return actual
+
+
+def verify_assembly_parts(q, candidates, actual):
+    evidence = []
+    for candidate in candidates:
+        folder = pathlib.Path(q['output']) / ('part-' + candidate['slot'])
+        paths = [folder / 'asset.blend', folder / 'asset.fbx']
+        hashes = [file_hash(file) for file in paths]
+        expected = {key: actual['meshes'][key] for key in candidate['meshIds']}
+        bpy.ops.wm.open_mainfile(filepath=str(paths[0]), load_ui=False, use_scripts=False)
+        if assembly_snapshot()['meshes'] != expected:
+            raise RuntimeError('Standalone assembly BLEND changed a part shape, UV, identity or placement')
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        bpy.ops.import_scene.fbx(filepath=str(paths[1]), use_image_search=False)
+        exported = assembly_snapshot()['meshes']
+        if set(exported) != set(expected):
+            raise RuntimeError('Standalone assembly FBX lost exact original mesh IDs')
+        deviation, tolerance = 0.0, 1e-7
+        for key, source in expected.items():
+            result = exported[key]
+            if result['partId'] != source['partId'] or any(result['shape'][field] != source['shape'][field] for field in ('polygons', 'uv', 'faceMaterials')) or len(result['worldPositions']) != len(source['worldPositions']):
+                raise RuntimeError('Standalone assembly FBX changed part tags, indexed polygons, UV or assignments')
+            tolerance = max(tolerance, math.dist(*source['worldBounds']) * 2e-6)
+            deviation = max(deviation, max(math.dist(a, b) for a, b in zip(source['worldPositions'], result['worldPositions'])))
+        if deviation > tolerance or hashes != [file_hash(file) for file in paths]:
+            raise RuntimeError('Standalone assembly FBX placement or immutable native output changed')
+        triangle_count = 0
+        for obj in bpy.context.scene.objects:
+            if obj.type == 'MESH':
+                obj.data.calc_loop_triangles()
+                triangle_count += len(obj.data.loop_triangles)
+        receipt = {'schemaVersion': 1, 'passed': True, 'operation': 'M08', 'partId': candidate['slot'],
+            'meshIds': candidate['meshIds'], 'nativeBlendExact': True, 'nativeSourceSha256': file_hash(paths[1]),
+            'vertices': sum(len(mesh['shape']['positions']) for mesh in expected.values()),
+            'faces': sum(len(mesh['shape']['polygons']) for mesh in expected.values()),
+            'triangles': triangle_count,
+            'fbxMaxWorldDeviation': deviation, 'fbxTolerance': tolerance,
+            'fitQualityVerified': False, 'joinQualityVerified': False}
+        save_json(folder / 'report.json', receipt)
+        candidate['files'].append('part-' + candidate['slot'] + '/report.json')
+        evidence.append(receipt)
+    return evidence
 
 
 def part_previews(q, current):
@@ -834,7 +942,7 @@ def part_previews(q, current):
         bpy.context.window.scene = scene
         try:
             bpy.data.libraries.write(str(folder / 'asset.blend'), {scene, *bpy.data.actions}, fake_user=True, compress=False)
-            part_files, part_images = preview({**q, 'output': str(folder)})
+            part_files, part_images = preview({**q, 'output': str(folder), 'partPreview': True})
             bpy.ops.object.select_all(action='DESELECT')
             for obj in members:
                 obj.select_set(True)
@@ -842,6 +950,7 @@ def part_previews(q, current):
             bpy.ops.export_scene.fbx(filepath=str(folder / 'asset.fbx'), use_selection=True,
                 object_types={'ARMATURE', 'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y', apply_unit_scale=True,
                 apply_scale_options='FBX_SCALE_UNITS', add_leaf_bones=False, bake_anim=True,
+                use_custom_props=True, use_mesh_modifiers=False, use_triangles=False,
                 bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False, bake_anim_simplify_factor=0.0,
                 path_mode='COPY', embed_textures=True)
             paths = [('part-' + part['id'] + '/' + file) for file in ['asset.blend', 'asset.fbx', *part_files]]
@@ -936,6 +1045,23 @@ def validate(q):
     candidates = []
     if q['operation'] == 'M07':
         files, glb_images, candidates = part_previews(q, current)
+    elif q['operation'] == 'M08':
+        actual = assembly_checks(q, baseline)
+        files, glb_images = preview(q)
+        main_files = list(files)
+        part_files, part_images, candidates = part_previews(q, current)
+        files += part_files; glb_images += part_images
+        evidence['mainFiles'] = main_files
+        export_evidence = verify_assembly_parts(q, candidates, actual)
+        files += ['part-' + candidate['slot'] + '/report.json' for candidate in candidates]
+        evidence['assemblyLayout'] = {'placementMode': q.get('assemblyPlacement', 'fit'),
+            'parts': [{'id': part['id'], 'sourceVersionId': part['sourceVersionId'], 'sourceSha256': part['sourceSha256'],
+                'meshes': [{'id': key, 'shapeSha256': actual['meshes'][key]['shapeSha256'],
+                    'sourceTransform': baseline['assemblyContract']['meshes'][key]['transform'],
+                    'outputTransform': actual['meshes'][key]['transform'], 'worldBounds': actual['meshes'][key]['worldBounds']}
+                    for key in part['meshIds']]} for part in baseline['assemblyParts']],
+            'partExports': export_evidence,
+            'fitQualityVerified': False, 'joinQualityVerified': False}
     elif q['operation'] == 'M09':
         # Same framing for honest source/result comparison; reopen each native file
         # so temporary preview lights/cameras never contaminate the saved output.

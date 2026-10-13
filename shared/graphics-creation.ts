@@ -300,6 +300,7 @@ export function creationSelectionProblem(spec: CreationSpec, stage: CreationStag
   if (['design', 'model', 'surface', 'assembly'].includes(stage) && spec.attributes.composition === '') return '모델 구성 선택이 필요합니다. 이미지 또는 모델 단계에서 선택하세요.';
   if (stage === 'surface' && spec.attributes.composition === 'parts' && !spec.parts.some(part => part.id === spec.activePartId && part.enabled)) return 'UV·텍스처를 적용할 파트를 선택하세요.';
   if (stage === 'assembly' && s.assemblyMode === 'repair') return missingSurfaceRepairProblem(spec, s);
+  if (stage === 'assembly' && s.assemblyMode === 'assemble' && s.assemblyPlacement !== undefined && !['fit', 'keep'].includes(String(s.assemblyPlacement))) return '조립할 때 배치를 맞출지 기존 배치를 유지할지 선택하세요.';
   if (stage === 'assembly' && s.assemblyMode === 'correct') return modelRevisionProblem(spec, s);
   if (stage === 'model') {
     const part = creationCompositionStrategy(spec) === 'independent-parts' ? spec.parts.find(p => p.id === spec.activePartId && p.enabled) : undefined;

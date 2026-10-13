@@ -11,6 +11,8 @@ export type AssetVersion = {
   preview?: string; warnings: string[];
   /** Local, hash-verified restoration after a service normalizes an individual part. */
   partSpace?: { schemaVersion: 1; sourceVersionId: string; providerVersionId: string; reportPath: string };
+  /** Separate native working copy with stable part/mesh IDs; provider bytes remain immutable. */
+  partSource?: { schemaVersion: 1; providerVersionId: string; reportPath: string };
 };
 export type UnityTargetProfile = {
   id: string; projectPath: string; unityVersion: string;
@@ -52,6 +54,7 @@ export type GraphicsTask = {
   completedExecutions?: string[];
   derivativeRefreshRequested?: boolean;
   partSpaceRecoveryVersionId?: string;
+  partSourceRecoveryVersionId?: string;
   objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted" | "creation">;
   targetProfile?: UnityTargetProfile;
   deliveryId?: string;
@@ -112,12 +115,18 @@ export function requiresPartSpaceRestoration(workspace: GraphicsWorkspace, versi
     workspace.tasks.some(task => ['T01', 'T03'].includes(task.taskId) && !!task.settings.partId && task.outputVersionIds.includes(version.id));
 }
 
+export function requiresPartSourcePreparation(workspace: GraphicsWorkspace, version: AssetVersion): boolean {
+  return !version.partSource && version.provenance.type === 'tripo' && version.slot.startsWith('part-') &&
+    workspace.tasks.some(task => ['M01', 'M02', 'M03'].includes(task.taskId) && !!task.settings.partId && task.outputVersionIds.includes(version.id));
+}
+
 export type GraphicsAction =
   | { kind: "create-object"; name: string; objectKind: GraphicsKind; creation?: CreationSpec }
   | { kind: "update-object"; objectId: string; patch: Partial<Pick<GraphicsObject, "name" | "selectedTasks" | "instruction" | "settings" | "references" | "creation">> }
   | { kind: "import"; objectId: string; role: GraphicsRole; clipName?: string }
   | { kind: "accept"; objectId: string; versionId: string }
   | { kind: 'restore-part-space'; versionId: string }
+  | { kind: 'prepare-part-source'; versionId: string }
   | { kind: "prepare"; objectId: string; taskId: string }
   | { kind: "approve" | "cancel" | "recover" | "refresh-parts"; taskId: string }
   | { kind: "runtime-approval"; taskId: string; approvalId: string; answer: WorkbenchRuntimeAnswer }

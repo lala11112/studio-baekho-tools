@@ -9,8 +9,9 @@ import { workbenchUsage } from "../shared/workbench-usage";
 import type { Workbench, WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from "../shared/workbench";
 import type { Generation, Quote } from "../shared/types";
 import type { AssetVersion, GraphicsAction, GraphicsFile, GraphicsObject, GraphicsRole, GraphicsTask, GraphicsWorkspace, UnityClipSettings } from "../shared/graphics";
-import { isGraphicsClipName, graphicsLegacyUnlinkProblem, requiresPartSpaceRestoration } from "../shared/graphics";
+import { isGraphicsClipName, graphicsLegacyUnlinkProblem, requiresPartSpaceRestoration, requiresPartSourcePreparation } from "../shared/graphics";
 import { restoreTripoPartPreservation } from './tripo-part-preservation';
+import { prepareTripoPartSource, preflightTripoPartSource } from './tripo-part-source';
 import { compileCreation, validateCreation, creationCompositionStrategy } from "../shared/graphics-creation";
 import { freezeUnityRigContract } from '../shared/graphics-rig';
 import { DEFAULT_MODEL_FACE_LIMIT, requireModelGeometry } from '../shared/graphics-model-geometry';
@@ -64,6 +65,8 @@ type Options = {
   procedural?: typeof executeGraphicsNative;
   prepareUnity?: typeof prepareUnityDelivery;
   restorePartSpace?: typeof restoreTripoPartPreservation;
+  preparePartSource?: typeof prepareTripoPartSource;
+  preflightPartSource?: typeof preflightTripoPartSource;
   legacyActive?: (id: string) => boolean;
   probe?: () => Promise<NonNullable<GraphicsWorkspace["connections"]>>;
 };
@@ -85,8 +88,8 @@ export class GraphicsEngine {
       let changed = false;
       for (const t of w.tasks.filter(t => t.status === "running")) {
         this.closeRuntimeApproval(t, "interrupted");
-        if (t.partSpaceRecoveryVersionId) {
-          t.status = 'failed'; t.message = '파트 크기·위치 복원이 중단됐습니다. 저장된 API 결과만 복구하며 새 제출은 하지 않습니다.';
+        if (t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId) {
+          t.status = 'failed'; t.message = '파트 로컬 처리가 중단됐습니다. 저장된 API 결과만 복구하며 새 제출은 하지 않습니다.';
           changed = true; continue;
         }
         if (t.taskId === "X05" && t.deliveryId && w.deliveries.some(d => d.id === t.deliveryId && d.status === "queued")) continue;
@@ -257,7 +260,25 @@ export class GraphicsEngine {
     } else if (taskId === 'M08') {
       const parts = o.creation?.parts.filter(part => part.enabled) ?? [];
       if (parts.length < 2) throw Error('조립할 파츠를 두 개 이상 설정하세요.');
-      values = parts.map(part => { const v = w.versions.find(v => v.id === o.accepted[`model:part-${part.id}`] && v.objectId === o.id && v.slot === `part-${part.id}` && v.role === 'model'); if (!v) throw Error(`${part.label} 모델을 먼저 채택하세요.`); return v; });
+      values = parts.map(part => {
+        const slot = `part-${part.id}`;
+        const model = w.versions.find(v => v.id === o.accepted[`model:${slot}`] && v.objectId === o.id && v.slot === slot && v.role === 'model');
+        if (!model) throw Error(`${part.label} 모델을 먼저 채택하세요.`);
+        const material = w.versions.find(v => v.id === o.accepted[`material:${slot}`] && v.objectId === o.id && v.slot === slot && v.role === 'material');
+        if (!material) return model;
+        const descendsFrom = (version: AssetVersion, wanted: string, materialOnly: boolean, seen = new Set<string>()): boolean => {
+          if (version.id === wanted) return true;
+          if (seen.has(version.id) || version.objectId !== o.id || version.slot !== slot || !['model', 'material'].includes(version.role)) return false;
+          if (materialOnly && version.role === 'model') return false;
+          const next = new Set(seen); next.add(version.id);
+          return version.sourceVersionIds.some(id => { const source = w.versions.find(v => v.id === id); return !!source && descendsFrom(source, wanted, materialOnly, next); });
+        };
+        // The latest accepted material must refer to this exact selected shape.
+        // A later assembled model already contains its ancestor's material.
+        if (descendsFrom(model, material.id, false)) return model;
+        if (descendsFrom(material, model.id, true)) return material;
+        throw Error(`${part.label}의 채택 재질이 현재 채택 모델과 다른 형상을 참조합니다. 같은 모델에서 만든 재질과 모델을 선택한 뒤 조립하세요.`);
+      });
       const whole = w.versions.find(v => v.id === o.accepted['design:main']); if (whole) values.push(whole);
     } else if (graphicsAstraTasks.has(taskId)) {
       const source = taskId === "N06" ? acceptedClip("animation") : ["R03", "N04", "N05"].includes(taskId) ? rig : mesh;
@@ -379,6 +400,7 @@ export class GraphicsEngine {
         const o = this.object(w, action.objectId), v = w.versions.find(v => v.id === action.versionId && v.objectId === o.id);
         if (!v) throw Error("이 대상의 결과가 아닙니다."); for (const f of v.files) this.verified(id, f);
         if (requiresPartSpaceRestoration(w, v)) throw Error('파트의 원래 크기·위치를 먼저 복원·검사하세요. API 원본은 별도로 보존합니다.');
+        if (requiresPartSourcePreparation(w, v)) throw Error('파트 원본의 로컬 작업 사본을 먼저 준비하세요. API 원본은 별도로 보존합니다.');
         o.accepted[`${v.role}:${v.slot}`] = v.id;
         // Other slots and clips remain accessible. Compatibility is checked on delivery, not by deleting history.
         return this.save(w);
@@ -415,6 +437,7 @@ export class GraphicsEngine {
       case "approve": return this.approve(id, action.taskId);
       case "recover": return this.recover(id, action.taskId);
       case 'restore-part-space': return this.restorePartSpace(id, action.versionId);
+      case 'prepare-part-source': return this.preparePartSource(id, action.versionId);
       case "refresh-parts": return this.refreshParts(id, action.taskId);
       case "runtime-approval": {
         const task = w.tasks.find(value => value.id === action.taskId), pending = this.pendingApprovals.get(action.taskId);
@@ -440,7 +463,7 @@ export class GraphicsEngine {
         if (t.status === "review") throw Error("완료한 결과는 취소하지 않습니다. 다른 버전을 채택할 수 있습니다.");
         this.closeRuntimeApproval(t, "cancelled");
         this.active.get(t.id)?.controller.abort();
-        if (!t.partSpaceRecoveryVersionId) for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
+        if (!t.partSpaceRecoveryVersionId && !t.partSourceRecoveryVersionId) for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
         if (t.deliveryId && t.targetProfile) {
           const index = w.deliveries.findIndex(d => d.id === t.deliveryId);
           if (index >= 0) {
@@ -450,7 +473,7 @@ export class GraphicsEngine {
             }
           }
         }
-        t.status = "cancelled"; t.message = t.partSpaceRecoveryVersionId ? '로컬 크기·위치 복원을 중지했습니다. 기존 API 결과는 유지합니다.' : "사용자가 중지했습니다. 이미 제출한 원격 작업의 과금 취소를 뜻하지는 않습니다."; t.updatedAt = now();
+        t.status = "cancelled"; t.message = t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId ? '파트 로컬 처리를 중지했습니다. 기존 API 결과는 유지합니다.' : "사용자가 중지했습니다. 이미 제출한 원격 작업의 과금 취소를 뜻하지는 않습니다."; t.updatedAt = now();
         return this.save(w);
       }
       case "import": throw Error("앱 파일 선택 창을 사용하세요.");
@@ -470,6 +493,7 @@ export class GraphicsEngine {
     if (w.tasks.some(t => t.objectId === o.id && ["awaiting_approval", "running", "submission_unknown"].includes(t.status))) throw Error("이 대상의 기존 작업을 확인하거나 취소한 뒤 새 작업을 준비하세요.");
     const inputs = this.inputs(w, o, taskId);
     if (inputs.some(version => requiresPartSpaceRestoration(w, version))) throw Error('API 파트 결과의 원래 크기·위치 복원을 먼저 완료하세요. 원본은 유지됩니다.');
+    if (inputs.some(version => requiresPartSourcePreparation(w, version))) throw Error('API 파트 원본의 로컬 작업 사본 준비를 먼저 완료하세요. 원본은 유지됩니다.');
     if (['M06', 'M09'].includes(taskId) && o.settings.meshSelectionVersionId !== undefined && inputs[0]?.id !== o.settings.meshSelectionVersionId)
       throw Error('메시를 선택한 원본과 현재 채택 모델이 다릅니다. 현재 모델에서 부품을 다시 선택하세요.');
     const count = Number(o.settings.count ?? 1);
@@ -500,6 +524,7 @@ export class GraphicsEngine {
     if (!["I01", "I02", "I03", "I05", "I06", "I07", 'I08', "M01", "M02", "M03", 'M04', 'M15', 'T03', 'N02', 'N04', 'N05', 'N06'].includes(taskId)) snapshot.settings.count = 1;
     if (taskId === "N02") snapshot.settings.motionSourceView ??= "left";
     const t: GraphicsTask = { ...snapshot, id: uid(), createdAt: now(), updatedAt: now(), status: "awaiting_approval", requestHash: hash(JSON.stringify(snapshot)), outputVersionIds: [], backendJobIds: [], localOnly: definition.executor === "local", message: "요청을 저장했습니다. 실행 전까지 작업자·유료 서비스 호출은 없습니다." };
+    if (taskId === 'M08' && t.settings.assemblyPlacement === 'keep') t.localOnly = true;
     t.objectSnapshot = { name: o.name, kind: o.kind, references: structuredClone(o.references), accepted: structuredClone(o.accepted), ...(o.creation ? { creation: structuredClone(o.creation) } : {}) };
     if (taskId === "X05") { t.targetProfile = structuredClone(w.target); t.unityClipSettings = freezeUnityClipSettings(w, inputs); t.unityRigContract = freezeUnityRigContract(w, inputs); }
     t.requestHash = hash(JSON.stringify({ ...snapshot, object: t.objectSnapshot, target: t.targetProfile, ...(t.unityClipSettings ? { unityClipSettings: t.unityClipSettings } : {}), ...(t.unityRigContract ? { unityRigContract: t.unityRigContract } : {}) }));
@@ -574,6 +599,18 @@ export class GraphicsEngine {
       const controller = new AbortController();
       this.active.set(t.id, { projectId: id, controller });
       try {
+        if (['T01', 'T03'].includes(t.taskId) && t.settings.partId) {
+          const source = inputs[0], sourceFile = source?.files.find(file => /\.fbx$/i.test(file.path));
+          if (!sourceFile || source.slot !== `part-${t.settings.partId}`) throw Error('파트 UV·텍스처에는 같은 파트의 원본 FBX와 식별자가 필요합니다. 업로드·제출하지 않았습니다.');
+          if (requiresPartSourcePreparation(w, source) || requiresPartSpaceRestoration(w, source)) throw Error('파트 작업 사본·크기 복원을 먼저 완료하세요. 업로드·제출하지 않았습니다.');
+          t.message = '유료 제출 전 파트 원본·식별자·복구 가능 구조를 로컬에서 검사합니다.'; this.save(w);
+          await (this.options.preflightPartSource ?? preflightTripoPartSource)({ projectRoot: this.store.directory(id), source: sourceFile,
+            objectId: source.objectId, sourceVersionId: source.id, slot: source.slot, blenderPath: this.store.settings.blenderPath,
+            resources: this.options.resources, signal: controller.signal });
+          controller.signal.throwIfAborted();
+          const currentTask = this.get(id).tasks.find(value => value.id === taskId);
+          if (currentTask?.status !== 'awaiting_approval') throw Error('실행 확인이 취소됐습니다. 업로드·제출하지 않았습니다.');
+        }
         // Account metadata is host code; insufficient/unknown balance never consumes a quote or uploads files.
         const account = await this.engine.tripo.balance();
         w = this.get(id); t = w.tasks.find(task => task.id === taskId);
@@ -593,6 +630,13 @@ export class GraphicsEngine {
         try { t.backendJobIds = this.engine.approve(q.id, false).map(j => j.id); }
         catch (error) { t.status = "submission_unknown"; t.message = String(error); }
         return this.save(w);
+      } catch (error) {
+        const current = this.get(id), pending = current.tasks.find(value => value.id === taskId);
+        if (pending?.status === 'awaiting_approval') {
+          pending.message = `실행 전 확인 보류 · ${error instanceof Error ? error.message : String(error)} · 업로드·유료 제출 없음`;
+          pending.updatedAt = now(); this.save(current);
+        }
+        throw error;
       } finally { this.active.delete(taskId); }
     }
     if (graphicsVideoTasks.has(t.taskId)) {
@@ -726,6 +770,49 @@ export class GraphicsEngine {
     t.message = "저장된 분리 장면으로 미리보기를 갱신합니다. GPT·유료 생성 없음.";
     this.save(w); this.launch(id, taskId, true); return this.get(id);
   }
+  private preparePartSource(id: string, versionId: string) {
+    const w = this.get(id), provider = w.versions.find(version => version.id === versionId);
+    if (!provider || !requiresPartSourcePreparation(w, provider)) throw Error('로컬 작업 사본이 필요한 API 파트 원본이 아닙니다.');
+    const task = w.tasks.find(value => value.outputVersionIds.includes(versionId));
+    if (!task || !['review', 'failed', ...(task.partSourceRecoveryVersionId ? ['cancelled'] : [])].includes(task.status)) throw Error('완료된 API 파트만 준비할 수 있습니다.');
+    if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error('다른 제작이 실행 중입니다.');
+    const existing = w.versions.find(version => version.partSource?.providerVersionId === provider.id);
+    if (existing) { for (const file of existing.files) this.verified(id, file); return w; }
+    const source = provider.files.find(file => /\.fbx$/i.test(file.path));
+    if (!source) throw Error('파트 작업 사본에는 원본 FBX가 필요합니다.');
+    for (const file of provider.files) this.verified(id, file);
+    const controller = new AbortController(); this.active.set(task.id, { projectId: id, controller });
+    task.partSourceRecoveryVersionId = provider.id; task.status = 'running'; task.updatedAt = now();
+    task.message = '원본은 보존하고 안정적인 파트·메시 식별자를 가진 작업 사본을 로컬에서 준비합니다. 새 GPT·API 제출 없음.'; this.save(w);
+    void (this.options.preparePartSource ?? prepareTripoPartSource)({ projectRoot: this.store.directory(id), source,
+      objectId: provider.objectId, sourceVersionId: provider.id, slot: provider.slot,
+      blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal: controller.signal,
+      onProgress: message => {
+        if (controller.signal.aborted) return;
+        const current = this.get(id), running = current.tasks.find(value => value.id === task.id);
+        if (running?.status === 'running') { running.message = message; running.updatedAt = now(); this.save(current); }
+      },
+    }).then(result => {
+      controller.signal.throwIfAborted();
+      const current = this.get(id), running = current.tasks.find(value => value.id === task.id)!;
+      if (running.status !== 'running' || running.partSourceRecoveryVersionId !== provider.id) throw Error('파트 준비 상태가 변경됐습니다.');
+      for (const file of provider.files) this.verified(id, file);
+      const files = result.files.map(file => this.file(id, file.path, file.kind)), report = files.find(file => /\.json$/i.test(file.path));
+      if (!report || !['.blend', '.fbx', '.glb'].every(extension => files.some(file => file.path.toLowerCase().endsWith(extension)))) throw Error('파트 작업 원본·미리보기·검사 기록이 없습니다.');
+      const version: AssetVersion = { id: uid(), objectId: provider.objectId, role: provider.role, slot: provider.slot,
+        label: `${provider.label} · 파트 작업 사본`, files, createdAt: now(), sourceVersionIds: [provider.id],
+        provenance: { ...provider.provenance }, warnings: ['API 원본의 형태·UV·재질·위치를 보존한 작업 사본입니다. 파일 검사는 얼굴 형태나 접합 품질의 합격을 뜻하지 않습니다.'],
+        partSource: { schemaVersion: 1, providerVersionId: provider.id, reportPath: report.path } };
+      current.versions.push(version); running.outputVersionIds.push(version.id);
+      running.status = 'review'; delete running.partSourceRecoveryVersionId; running.updatedAt = now();
+      running.message = '파트 작업 사본 파일 검사 완료 · 외형 검토와 사용자 채택을 기다립니다.'; this.save(current);
+    }).catch(error => {
+      const current = this.get(id), running = current.tasks.find(value => value.id === task.id);
+      if (running && running.status !== 'cancelled') { running.status = 'failed'; running.updatedAt = now();
+        running.message = `파트 작업 사본 준비 보류 · ${error instanceof Error ? error.message : String(error)} · 원본 유지, 새 유료 제출 없음`; this.save(current); }
+    }).finally(() => { this.active.delete(task.id); });
+    return this.get(id);
+  }
   private restorePartSpace(id: string, versionId: string) {
     const w = this.get(id), provider = w.versions.find(version => version.id === versionId);
     if (!provider || !requiresPartSpaceRestoration(w, provider)) throw Error('크기·위치 검사가 필요한 API 파트 결과가 아닙니다.');
@@ -781,6 +868,7 @@ export class GraphicsEngine {
     const w = this.get(id), t = w.tasks.find(t => t.id === taskId);
     if (!t || !["failed", "submission_unknown"].includes(t.status)) throw Error("복구할 중단 작업이 없습니다.");
     if (t.partSpaceRecoveryVersionId) return this.restorePartSpace(id, t.partSpaceRecoveryVersionId);
+    if (t.partSourceRecoveryVersionId) return this.preparePartSource(id, t.partSourceRecoveryVersionId);
     if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error("다른 제작이 실행 중입니다.");
     if (t.taskId === "X05" && !t.objectSnapshot?.accepted && !t.deliveryId) throw Error("이전 Unity 요청에 고정된 채택 기록이 없습니다. 새 전달 요청을 준비하세요. 원본은 보존됩니다.");
     if (t.quoteId) {
@@ -838,7 +926,8 @@ export class GraphicsEngine {
       let changed = false;
       const p = this.store.project(w.projectId);
       const restoreVersions: string[] = [];
-      for (const t of w.tasks.filter(t => t.status === "running" && t.quoteId && !t.partSpaceRecoveryVersionId)) {
+      const prepareVersions: string[] = [];
+      for (const t of w.tasks.filter(t => t.status === "running" && t.quoteId && !t.partSpaceRecoveryVersionId && !t.partSourceRecoveryVersionId)) {
         const jobs = p.jobs.filter(j => j.quoteId === t.quoteId);
         if (!jobs.length) continue;
         if (jobs.some(j => ["queued", "submitting", "running"].includes(j.status))) continue;
@@ -893,6 +982,7 @@ export class GraphicsEngine {
         t.status = jobs.some(j => j.status === "submission_unknown") ? "submission_unknown" : jobs.every(j => j.status === "success") && t.outputVersionIds.length ? "review" : "failed";
         t.message = t.status === "review" ? "API 원본을 수집했습니다. 외형·UV·재질을 검토한 뒤 채택하세요." : jobs.map(j => j.message ?? j.status).join(" · "); t.updatedAt = now(); changed = true;
         if (t.status === 'review') restoreVersions.push(...newVersions.filter(version => requiresPartSpaceRestoration(w, version)).map(version => version.id));
+        if (t.status === 'review') prepareVersions.push(...newVersions.filter(version => requiresPartSourcePreparation(w, version)).map(version => version.id));
       }
       for (let i = 0; i < w.deliveries.length; i++) {
         const d = w.deliveries[i];
@@ -906,6 +996,14 @@ export class GraphicsEngine {
         }
       }
       if (changed) this.save(w);
+      if (prepareVersions.length === 1) {
+        try { this.preparePartSource(w.projectId, prepareVersions[0]); }
+        catch (error) {
+          const current = this.get(w.projectId), task = current.tasks.find(task => task.outputVersionIds.includes(prepareVersions[0]));
+          if (task) { task.status = 'failed'; task.partSourceRecoveryVersionId = prepareVersions[0];
+            task.message = `파트 작업 사본 준비 필요 · ${error instanceof Error ? error.message : String(error)}`; this.save(current); }
+        }
+      }
       // Continue the approved task with local normalization only. Startup/review
       // browsing never transforms old results or replays a remote submission.
       if (restoreVersions.length === 1) {
