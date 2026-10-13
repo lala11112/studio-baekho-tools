@@ -212,6 +212,9 @@ test("T03 changed reference bytes block upload and part selection never falls ba
     const state = f.graphics.get(f.project.id), model = state.versions.find(version => version.id === f.original.id)!;
     model.slot = "part-head"; state.objects[0].accepted["model:part-head"] = model.id; delete state.objects[0].accepted["model:main"];
     state.objects[0].settings.partId = "head"; f.store.put("graphics", f.project.id, state);
+    await assert.rejects(f.prepare("T03"), /파츠에 채택한 디자인 이미지가 없습니다/);
+    assert.equal(f.calls.uploads.length, 0); assert.equal(f.calls.submits.length, 0);
+    state.objects[0].settings.textureReference = 'text'; f.store.put('graphics', f.project.id, state);
     const task = await f.prepare("T03"); assert.deepEqual(task.inputVersionIds, [model.id]);
     assert.equal(f.store.get<Quote>("quote", task.quoteId!)!.request.sourceIds, undefined);
   });

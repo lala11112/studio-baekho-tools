@@ -8,6 +8,7 @@ import { prepareGraphicsMotionFrames } from "./graphics-motion-frames";
 import type { GraphicsNativeArgs, GraphicsNativeResult } from "./graphics-native";
 import type { AssetVersion, GraphicsRole } from "../shared/graphics";
 import { isGraphicsClipName } from "../shared/graphics";
+import { rigContractForProducer } from "../shared/graphics-rig";
 import type { ProductionRun, ProductionStage } from "../shared/production";
 
 export const graphicsAstraOperations = ["M05", "M06", "M07", "M08", "M15", "R01", "R02", "R03", "N04", "N05", "N06"] as const;
@@ -135,7 +136,7 @@ function selectInputs(args: GraphicsNativeArgs, root: string) {
     }
   }
   const sources = operation === "M08" ? candidates.map(candidate => preferred(files.filter(file => file.version.id === candidate.id))) : [source];
-  if (sources.some(file => !file || !/\.blend$/i.test(file.path)) && operation === "M08") throw Error("파츠 조립에는 각 채택 파츠의 편집 가능한 .blend가 필요합니다.");
+  if (sources.some(file => !file) && operation === "M08") throw Error("파츠 조립에는 각 채택 파츠의 원본 BLEND·FBX·GLB가 필요합니다.");
   return { files, source, sources: sources as Input[], animation, clipName, actionName, fps, duration, motionFiles };
 }
 
@@ -172,6 +173,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     const root = fs.realpathSync(args.projectRoot), task = args.task, selected = selectInputs(args, root), contract = modelingContract(args);
     const { source, sources, files, animation, clipName, actionName, fps, duration, motionFiles } = selected;
     const rigFeatures = requestedRigFeatures(task.settings);
+    const rigContract = task.taskId === "R01" ? rigContractForProducer(task, task.id) : undefined;
     const folder = path.resolve(root, "graphics/jobs", task.id, "astra"), work = path.join(folder, "work");
     directory(root, folder); directory(root, work);
     const identity = hash(JSON.stringify({ schemaVersion: 1, taskId: task.id, operation: task.taskId, requestHash: task.requestHash, settings: task.settings, instruction: task.instruction, object: task.objectSnapshot ?? args.object, inputs: files.map(file => ({ versionId: file.version.id, role: file.version.role, slot: file.version.slot, path: file.path, sha256: file.sha256, bytes: file.bytes })), source: source.version.id }));
@@ -185,9 +187,9 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     }
     if (args.recoveryOnly && !fs.existsSync(dispatchPath)) throw Error("저장된 Astra 실행 기록이 없습니다. 복구에서 새 모델 호출을 시작하지 않습니다.");
     if (!args.blenderPath || !fs.existsSync(args.blenderPath)) throw Error("설정된 Blender 실행 파일을 확인하세요.");
-    const script = path.join(args.resources, "blender/graphics_astra_validate.py"), glbHelper = path.join(args.resources, "blender/graphics_glb.py");
-    if (!fs.existsSync(script) || !fs.existsSync(glbHelper)) throw Error("Astra 원본·장면 검증 스크립트가 없습니다.");
-    const validatorFingerprint = hash(hashFile(script) + hashFile(glbHelper));
+    const script = path.join(args.resources, "blender/graphics_astra_validate.py"), glbHelper = path.join(args.resources, "blender/graphics_glb.py"), humanoidHelper = path.join(args.resources, "blender/graphics_humanoid.py");
+    if (!fs.existsSync(script) || !fs.existsSync(glbHelper) || !fs.existsSync(humanoidHelper)) throw Error("Astra 원본·장면 검증 스크립트가 없습니다.");
+    const validatorFingerprint = hash(hashFile(script) + hashFile(glbHelper) + hashFile(humanoidHelper));
     const invoke = async (request: unknown, name: string, specRoot = folder) => {
       const spec = path.join(specRoot, name + ".json"); write(spec, request);
       await (dependencies.runBlender ?? runBlender)(args.blenderPath, ["--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1", "--python", script, "--", spec], args.signal);
@@ -212,22 +214,23 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
       });
       const preparedBlend = path.join(work, "source.blend"), baseline = path.join(folder, "baseline.json");
       const nonce = randomUUID();
-      const originalCopy = copies.find(copy => copy.sourcePath === source.path)!;
-      if (task.taskId === "M08") {
-        await invoke({ mode: "prepare-assembly", identity, nonce, operation: task.taskId, sourceSha256: source.sha256,
-          sources: sources.map(input => ({ path: copies.find(copy => copy.sourcePath === input.path)!.localPath, sha256: input.sha256, versionId: input.version.id, slot: input.version.slot })),
-          outputBlend: preparedBlend, report: baseline }, "prepare-request");
-      } else if (/\.fbx$/i.test(originalCopy.localPath)) {
+      const prepareSource = async (input: Input, outputBlend: string, report: string, name: string, prepareNonce = nonce) => {
+        const originalCopy = copies.find(copy => copy.sourcePath === input.path && copy.versionId === input.version.id)!;
+        const request = { mode: "prepare", identity, nonce: prepareNonce, operation: task.taskId, sourceSha256: input.sha256, outputBlend, report, actionName };
+        if (!/\.(fbx|glb)$/i.test(originalCopy.localPath)) {
+          await invoke({ ...request, source: originalCopy.localPath }, name);
+          return;
+        }
         // Blender's FBX importer can fail on Windows paths readable by Node.
-        // Keep import, embedded texture extraction, packing and native save in a
-        // short private directory, then copy the prepared outputs back unchanged.
+        // Keep native import, texture extraction, packing and save in a short
+        // private directory. The same path handles API parts before assembly.
         const staging = fs.mkdtempSync(path.join(os.tmpdir(), "ps-ga-fbx-"));
-        const importFile = path.join(staging, "input.fbx"), stagedBlend = path.join(staging, "source.blend"), stagedReport = path.join(staging, "baseline.json");
+        const importFile = path.join(staging, "input" + path.extname(input.path).toLowerCase()), stagedBlend = path.join(staging, "source.blend"), stagedReport = path.join(staging, "baseline.json");
         try {
           fs.copyFileSync(originalCopy.localPath, importFile, fs.constants.COPYFILE_EXCL);
-          const versionRoot = path.join(work, "inputs", String(versionIds.indexOf(source.version.id) + 1));
+          const versionRoot = path.join(work, "inputs", String(versionIds.indexOf(input.version.id) + 1));
           const companions: { localPath: string; sha256: string; bytes: number }[] = [];
-          for (const copy of copies.filter(copy => copy.versionId === source.version.id && copy.sourcePath !== source.path)) {
+          for (const copy of copies.filter(copy => copy.versionId === input.version.id && copy.sourcePath !== input.path)) {
             const rel = path.relative(versionRoot, copy.localPath);
             if (!inside(versionRoot, copy.localPath)) throw Error("FBX 동반 파일이 고정 입력 폴더 밖입니다.");
             const destination = path.join(staging, "companions", rel);
@@ -235,23 +238,42 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
             fs.copyFileSync(copy.localPath, destination, fs.constants.COPYFILE_EXCL);
             companions.push({ localPath: destination, sha256: copy.sha256, bytes: copy.bytes });
           }
-          await invoke({ mode: "prepare", identity, nonce, operation: task.taskId, source: importFile, sourceSha256: source.sha256, importRoot: staging, outputBlend: stagedBlend, report: stagedReport, actionName }, "prepare-request", staging);
-          unchanged([{ localPath: importFile, sha256: source.sha256, bytes: source.bytes }, ...companions]);
-          fs.copyFileSync(stagedBlend, preparedBlend); fs.copyFileSync(stagedReport, baseline);
+          await invoke({ ...request, source: importFile, importRoot: staging, outputBlend: stagedBlend, report: stagedReport }, name, staging);
+          unchanged([{ localPath: importFile, sha256: input.sha256, bytes: input.bytes }, ...companions]);
+          fs.copyFileSync(stagedBlend, outputBlend); fs.copyFileSync(stagedReport, report);
         } finally {
           const real = fs.realpathSync(staging);
           if (path.dirname(real) !== fs.realpathSync(os.tmpdir()) || !path.basename(real).startsWith("ps-ga-fbx-")) throw Error("임시 FBX 폴더 정리 경로가 잘못됐습니다.");
           fs.rmSync(real, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
         }
-      } else await invoke({ mode: "prepare", identity, nonce, operation: task.taskId, source: originalCopy.localPath, sourceSha256: source.sha256, outputBlend: preparedBlend, report: baseline, actionName }, "prepare-request");
+      };
+      const assemblySources: { path: string; sha256: string; bytes: number; versionId: string; slot: string; sourcePath: string; sourceSha256: string; report: string; reportSha256: string; reportBytes: number }[] = [];
+      if (task.taskId === "M08") {
+        const preparedParts = path.join(work, "assembly-inputs"); directory(root, preparedParts);
+        for (const [index, input] of sources.entries()) {
+          const blend = path.join(preparedParts, `${index + 1}.blend`), reportPath = path.join(preparedParts, `${index + 1}.json`), partNonce = randomUUID();
+          args.onProgress(`${input.version.slot} 원본을 로컬 Blender 사본으로 준비합니다. 생성 서비스 호출 없음.`);
+          await prepareSource(input, blend, reportPath, `prepare-part-${index + 1}`, partNonce);
+          const part = read(reportPath);
+          if (part.identity !== identity || part.nonce !== partNonce || part.sourceSha256 !== input.sha256 || !part.meshes?.length) throw Error("조립 파츠의 로컬 원본 준비 증거가 잘못됐습니다.");
+          fileWithin(work, blend); fileWithin(work, reportPath);
+          assemblySources.push({ path: blend, sha256: hashFile(blend), bytes: fs.statSync(blend).size, versionId: input.version.id, slot: input.version.slot,
+            sourcePath: input.path, sourceSha256: input.sha256, report: reportPath, reportSha256: hashFile(reportPath), reportBytes: fs.statSync(reportPath).size });
+        }
+        await invoke({ mode: "prepare-assembly", identity, nonce, operation: task.taskId, sourceSha256: source.sha256,
+          sources: assemblySources, outputBlend: preparedBlend, report: baseline }, "prepare-request");
+      } else await prepareSource(source, preparedBlend, baseline, "prepare-request");
       const report = read(baseline);
       if (report.identity !== identity || report.nonce !== nonce || report.sourceSha256 !== source.sha256 || (task.taskId !== "M15" && !report.meshes?.length)) throw Error("Blender 원본 준비 증거가 잘못됐습니다.");
       fileWithin(work, preparedBlend);
-      write(preparedPath, { identity, copies, preparedBlend, preparedSha256: hashFile(preparedBlend), preparedBytes: fs.statSync(preparedBlend).size, baseline, baselineSha256: hashFile(baseline) });
+      write(preparedPath, { identity, copies, assemblySources, preparedBlend, preparedSha256: hashFile(preparedBlend), preparedBytes: fs.statSync(preparedBlend).size, baseline, baselineSha256: hashFile(baseline) });
     }
     const prepared = read(preparedPath);
     if (prepared.identity !== identity) throw Error("Blender 준비 요청이 다릅니다.");
-    const protectedFiles = [...files, ...prepared.copies, { localPath: fileWithin(work, prepared.preparedBlend), sha256: prepared.preparedSha256, bytes: prepared.preparedBytes }];
+    const protectedFiles = [...files, ...prepared.copies, ...(prepared.assemblySources ?? []).flatMap((part: any) => [
+      { localPath: fileWithin(work, part.path), sha256: part.sha256, bytes: part.bytes },
+      { localPath: fileWithin(work, part.report), sha256: part.reportSha256, bytes: part.reportBytes },
+    ]), { localPath: fileWithin(work, prepared.preparedBlend), sha256: prepared.preparedSha256, bytes: prepared.preparedBytes }];
     unchanged(protectedFiles);
     if (hashFile(fileWithin(folder, prepared.baseline)) !== prepared.baselineSha256) throw Error("원본 Blender 검사 기록이 변경됐습니다.");
     const baseline = read(prepared.baseline);
@@ -317,7 +339,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
         M07: `PART SEPARATION: partition every original polygon exactly once into these requested parts: ${JSON.stringify(contract.requestedParts)}. Assign each output MESH custom property partsmith_part_id to exactly one requested id, and retain a unique partsmith_id. Do not duplicate, omit, triangulate, remesh or move any surface. Retain world-space positions, per-corner UVs, materials and skin weights, original rigs and actions. Host exports separate editable BLEND/FBX/GLB for each part from this one authored scene.`,
         M08: "PART ASSEMBLY: arrange ALL supplied accepted parts in the prepared scene using object/root transforms only. Preserve mesh IDs, vertices, topology, UV, materials, packed texture originals, rigs and actions. Do not fuse, remesh, substitute, delete or regenerate parts. Inspect the whole-appearance references for proportions; report uncertain alignment. Produce one combined editable scene.",
         M15: "NEW LOCAL MODEL: author exactly one independent editable Blender model using the accepted design images and compiled request. The prepared scene is intentionally empty. Create actual finite mesh geometry with unique partsmith_id on each mesh, coherent UV/material assignments and packed file textures if used. Bake non-armature modifiers into the new mesh; shape keys are not supported in this initial model contract. Do not use a prior generated model or copy another candidate. Semantic similarity, style, silhouette and requested quality require human visual review; do not claim they are machine verified.",
-        R01: "Create an anatomically appropriate humanoid skeleton and skin the supplied character. Use canonical bones pelvis, spine, chest, neck, head, upper_arm.L/R, forearm.L/R, hand.L/R, thigh.L/R, shin.L/R, foot.L/R. Use a connected hierarchy and valid normalized deform weights. Include real joint pose checks; appearance/Humanoid compatibility still requires review.",
+        R01: `Create exactly one anatomically appropriate humanoid armature and skin ALL supplied character meshes with normalized deform weights. Canonical host-owned Unity mapping: ${JSON.stringify(rigContract)}. Use pelvis as the root of the mapped human hierarchy; parent each joint to its anatomically correct upstream joint, with nondegenerate segments and plausible rest placement. ${rigContract?.fingers ? "Author all 30 mapped thumb/index/middle/ring/little .01/.02/.03.L/.R finger deform bones. Every mapped non-root bone including every finger segment requires direct vertex influence and measurable individual FK response; labels or zero-weight bones do not qualify." : "Finger controls were not requested."} Preserve all head/body/hair meshes, their stable IDs and partsmith_part_id slots; part-hair and hair denote the hair part. ${rigContract?.hairBinding === "head" ? "Bind every hair-part vertex rigidly with weight 1 to canonical head. Do not add hair or facial deform controls." : "Add the explicitly requested hair controls with measurable weighted deformation."} Keep a connected hierarchy suitable for the explicit Humanoid mapping. Include real joint pose checks; anatomical quality and actual Unity Avatar validity still require independent review.`,
         R02: "Create an anatomically appropriate animal/nonhuman Generic skeleton using the actual supplied shape and requested species/limbs/wings. Do not impose a humanoid preset. Use a hierarchy with at least 3 nondegenerate bones, valid normalized deform weights and actual per-mesh joint pose checks.",
         R03: "Edit skinning/weights of the existing accepted rig only. Preserve the exact original bone names, hierarchy, rest matrices, mesh topology/positions, UVs, textures, materials and actions. Normalize every mesh vertex's valid deform-bone weights and inspect actual deformation; never replace the skeleton.",
         N04: "Author the named 3D action from the accepted ORIGINAL VIDEO AND decoded frames. ALL native frames, in their native resolution and chronological order, are attached. Inspect the continuous pose/contact progression using every attached frame and the native timestamp index, not just the prior 0/1/2-second thumbnails. Preserve visual identity, native geometry, skeleton, weights, armature modifier settings, materials, UV and every other action. Never use a preset sine motion as a substitute for the requested reference behavior. Unknown timing/contact/occluded motion must be reported honestly.",
@@ -329,6 +351,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
         "No browser production, paid/cloud service, image generation, video generation, Tripo, remote upload, API key or external account operation. No separate asset regeneration except the explicitly requested NEW LOCAL MODEL operation M15. Keep all existing integrations enabled. Do not inspect credentials or unrelated projects. Only author this task's local output.",
         `Operation: ${task.taskId}. Object kind: ${args.object.kind}. Blender: ${JSON.stringify(args.blenderPath)}. Open ${JSON.stringify(prepared.preparedBlend)} with load_ui=False,use_scripts=False. Original/source copies are immutable. Save ONE new editable, uncompressed .blend ONLY to ${JSON.stringify(outputBlend)}. Never save over source.blend or any input file. Retain packed original textures at full resolution and original partsmith_id on every mesh. No external linked libraries/textures.`,
         modes[task.taskId],
+        ...(rigContract ? ["Unity Humanoid transform names must be unambiguous. No scene object display name may equal a mapped canonical bone name (for example a mesh named head conflicts with the head bone). Prefix mesh/object display names when needed, for example Part_head/Part_body/Part_hair; preserve every partsmith_id, partsmith_part_id, geometry, material and transform."] : []),
         `Independent candidate variationSeed: ${JSON.stringify(task.settings.variationSeed ?? null)}; candidateIndex: ${JSON.stringify(task.settings.candidateIndex ?? null)}. For a candidate batch, create a distinct authored interpretation of this same request within all preservation constraints. Do not duplicate another candidate's scene or merely rename/re-save identical geometry/actions. No borrowing prior candidate outputs. If the allowed edit has no meaningful independent variation, report needs_input rather than claim multiple originals.`,
         `Structural lock flags: ${JSON.stringify(contract.locks)}. These are hard host checks only when explicitly true; operation-specific preservation requirements above still apply. For R01/R02 set armature.data.bones[name]["partsmith_feature"] (not PoseBone properties) to ears, tail, hair, cloth, wings or accessories on the corresponding deform bones. Required features: ${JSON.stringify(rigFeatures)}. rigClothing and legacy rigCloth both request cloth controls; rigAccessories requests independent equipment/accessory controls. Every required feature needs non-root deform bones, direct normalized vertex influence and measurable FK pose response. IK/CopyTransforms must not completely override the tagged deform bone's rotation during host pose tests.`,
         `Frozen settings: ${JSON.stringify(task.settings)}. Clip: ${JSON.stringify(clipName)}; exact action name: ${JSON.stringify(actionName)}; FPS: ${fps}; duration seconds: ${duration}; use frames 1..${1 + Math.round(duration * fps)} inclusive. For animation, both action and scene ranges must match these exact endpoints, with actual keys at both ends and render fps explicitly set. No F-curve modifiers, including CYCLES: bake motion and loops into keys within that range. Loop setting: ${Boolean(task.settings.loop)}. Preserve pose bone rotation modes.`,
@@ -372,7 +395,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     const reportPath = path.join(validation, "report.json"), nonce = randomUUID();
     args.onProgress("실제 Blender에서 원본 계보·메시·웨이트·액션·변형을 검사하고 미리보기를 만듭니다.");
     await invoke({ mode: "validate", identity, nonce, validatorFingerprint, operation: task.taskId, sourceSha256: source.sha256, sourceBlend: prepared.preparedBlend, outputBlend: blend, baseline: prepared.baseline, output: validation, report: reportPath, actionName, clipName, fps, duration, loop: Boolean(task.settings.loop), ...contract,
-      rigFeatures }, "validate-request");
+      rigFeatures, ...(rigContract ? { rigContract } : {}) }, "validate-request");
     unchanged(protectedFiles);
     if (hashFile(prepared.baseline) !== prepared.baselineSha256) throw Error("원본 Blender 검사 기록이 변경됐습니다.");
     const report = read(reportPath);
@@ -381,6 +404,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     const required = task.taskId === "M15" ? ["newGeometry"] : task.taskId === "M07" ? ["partition", "materials", "skeleton", "actionsPreserved"] : ["meshLineage", "topology", "materials", "actionsPreserved", ...(!modelOperation ? ["weights", "deformation"] : []), ...(animation ? ["skeleton", "clipRange", "motion", "skinPreserved", "armatureModifiersPreserved", "animationDependencies", "animationSkeletonPreserved"] : []), ...(task.taskId === "M06" ? ["partialEdit"] : [])];
     if (required.some(check => report.checks?.[check] !== true)) throw Error("Blender 원본 보존·변형·액션 검사가 통과하지 않았습니다.");
     if (["R01", "R02"].includes(task.taskId) && rigFeatures.length && (report.checks?.rigFeatures !== true || rigFeatures.some(feature => !report.rigFeatures?.[feature]?.length))) throw Error("요청한 부속 관절의 웨이트·실제 변형 검사가 없습니다.");
+    if (rigContract && (report.checks?.humanoid !== true || JSON.stringify(report.humanoid?.contract) !== JSON.stringify(rigContract) || report.humanoid?.armatureCount !== 1 || report.humanoid?.jointEvidence?.length !== rigContract.humanBones.length - 1)) throw Error("요청한 Humanoid 본 매핑·관절별 실제 변형 검사가 없습니다.");
     if (Object.entries(contract.locks).some(([lock, enabled]) => enabled && report.checks?.[{ topology: "topology", materials: "materials", rig: "skeleton" }[lock]!] !== true)) throw Error("명시한 구조 잠금 검사가 통과하지 않았습니다.");
     const outputFiles: GraphicsNativeResult["files"] = [{ path: relative(root, blend), kind: "blend" }];
     for (const item of report.files) {

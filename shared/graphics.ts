@@ -23,6 +23,7 @@ export type UnityDelivery = {
   status: "queued" | "imported" | "failed" | "conflict";
   files: GraphicsFile[]; guid?: string; prefabPath?: string; userPrefabPath?: string;
   warnings: string[]; errors: string[]; playbackVerified: boolean;
+  rig?: import('./graphics-rig').UnityRigReceipt;
 };
 export type GraphicsObject = {
   id: string; name: string; kind: GraphicsKind; createdAt: string;
@@ -51,6 +52,7 @@ export type GraphicsTask = {
   targetProfile?: UnityTargetProfile;
   deliveryId?: string;
   unityClipSettings?: UnityClipSettings[];
+  unityRigContract?: import('./graphics-rig').UnityRigContract;
   paidApproval?: { requestHash: string; provider: string; credits: number; approvedAt: string };
   /** A live tool permission/question, distinct from the frozen service-cost approval. */
   runtimeApproval?: WorkbenchRuntimeApproval & { requestedAt: string; executionId: string };

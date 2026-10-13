@@ -43,7 +43,7 @@ import { CreationOptions } from "./CreationOptions";
 import { CreationSubjectChooser } from './CreationSubjectChooser';
 import { GraphicsStoragePanel } from './GraphicsStoragePanel';
 import { modelProductionGeometry, modelProductionLabel } from '../shared/graphics-provenance';
-import { creationForSubject, creationSubjects } from '../shared/graphics-creation';
+import { creationForSubject, creationSubjects, creationCompositionStrategy } from '../shared/graphics-creation';
 import { normalizePhysicalSize, physicalSizeSummary, type PhysicalSize } from '../shared/graphics-size';
 import { GraphicsSizePanel } from './GraphicsSizePanel';
 import type { ModelMeasurement, MeshSelection } from './viewport-inspection';
@@ -690,6 +690,13 @@ export function GraphicsStudio({
     [];
   const objectTasks =
     workspace?.tasks.filter((task) => task.objectId === objectId) ?? [];
+  const partStatus = Object.fromEntries(creation.parts.filter(part => part.enabled).map(part => {
+    const design = versions.find(version => version.id === object?.accepted[`design:part-${part.id}`]);
+    const model = versions.find(version => version.id === object?.accepted[`model:part-${part.id}`]);
+    const producer = model && objectTasks.find(task => task.outputVersionIds.includes(model.id));
+    const modelStatus = !model ? '모델 미채택' : producer?.taskId === 'T03' ? '텍스처 채택' : producer?.taskId === 'T01' || producer?.taskId === 'T02' ? 'UV 채택' : '모델 채택';
+    return [part.id, `${design ? '참조 채택' : '참조 미채택'} · ${modelStatus}`];
+  }));
   const mediaGroups = candidateGroups(versions, objectTasks);
   const latestMediaGroup = ["design", "animation"].includes(stage)
     ? mediaGroups
@@ -2036,6 +2043,7 @@ export function GraphicsStudio({
                     spec={creation}
                     stage={stage}
                     settings={settings}
+                    partStatus={partStatus}
                     disabled={disabled}
                     onChange={changeCreation}
                     onSetting={setting}
@@ -2081,9 +2089,8 @@ export function GraphicsStudio({
                             {texturePart
                               ? `${texturePart.label} 파츠에`
                               : "현재 오브젝트에"}{" "}
-                            채택한 디자인 이미지가 없어 설명만 전송합니다.
-                            이미지의 색과 무늬를 참고하려면 해당 디자인을 먼저
-                            채택하세요.
+                            채택한 디자인 이미지가 없습니다.
+                            {texturePart ? ' 파츠 참조를 채택하거나 입력을 설명만 사용으로 변경하세요. 전체 이미지를 대신 사용하지 않습니다.' : ' 설명만 전송합니다. 이미지의 색과 무늬를 참고하려면 디자인을 먼저 채택하세요.'}
                           </span>
                         )}
                       </div>
@@ -2505,7 +2512,7 @@ export function GraphicsStudio({
                     {multipleOutputs &&
                       !(
                         stage === "model" &&
-                        creation.attributes.composition === "parts"
+                        creationCompositionStrategy(creation) === "independent-parts"
                       ) && (
                         <label>
                           {taskId === "I07" ? "방향별 후보 개수" : "후보 개수"}

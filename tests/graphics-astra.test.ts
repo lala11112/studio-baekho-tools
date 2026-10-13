@@ -341,7 +341,7 @@ test("actual Blender independently checks native edited blend, weighted rig and 
   assert.equal(result.slot, nativeActionName); assert(report.actions.some((action: { name: string }) => action.name === nativeActionName));
   assert(report.files.includes("asset.glb")); assert.equal(report.unityPlaybackVerified, false);
   assert(Array.isArray(report.glbImages));
-  assert.equal(report.validatorFingerprint, createHash("sha256").update(hash(path.resolve("integrations/blender/graphics_astra_validate.py")) + hash(path.resolve("integrations/blender/graphics_glb.py"))).digest("hex"));
+  assert.equal(report.validatorFingerprint, createHash("sha256").update(hash(path.resolve("integrations/blender/graphics_astra_validate.py")) + hash(path.resolve("integrations/blender/graphics_glb.py")) + hash(path.resolve("integrations/blender/graphics_humanoid.py"))).digest("hex"));
   const nativeGlb = fs.readFileSync(path.join(f.root, result.files.find(file => file.kind === "model")!.path));
   const gltf = JSON.parse(nativeGlb.toString("utf8", 20, 20 + nativeGlb.readUInt32LE(12)).trim());
   assert((gltf.images ?? []).every((image: { uri?: string }) => image.uri === undefined));

@@ -1,0 +1,10 @@
+.gs-human-workflow {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border, #dfe3e8);
+  border-radius: 8px;
+  background: var(--surface-subtle, #f6f7f9);
+  overflow-wrap: anywhere;
+}
+.gs-human-workflow p { margin: 6px 0 0; line-height: 1.5; }
+.gs-part-status { margin: 4px 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }

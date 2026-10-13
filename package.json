@@ -1,6 +1,6 @@
 {
   "name": "partsmith",
-  "version": "0.7.0-preview.13",
+  "version": "0.7.0-preview.14",
   "private": true,
   "description": "Local character production workbench for Unity",
   "author": "Partsmith",
@@ -59,7 +59,11 @@
       {
         "from": "integrations",
         "to": "integrations",
-        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
       },
       {
         "from": "node_modules/ffmpeg-static",

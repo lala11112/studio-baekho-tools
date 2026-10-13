@@ -3,7 +3,9 @@ import {
   creationOptions,
   creationSubjects,
   creationLocks,
-  humanParts,
+  creationCompositionStrategy,
+  isWholeThenSplitCreation,
+  setHumanPartsCreation,
   toggleCreationChoice,
   changeCreationSubject,
   isBiologicalSubject,
@@ -14,6 +16,7 @@ import {
   type CreationStage,
 } from "../shared/graphics-creation";
 import { ModelGeometrySettings } from './ModelGeometrySettings';
+import './human-parts-workflow.css';
 
 type Value = string | number | boolean;
 type Props = {
@@ -22,6 +25,7 @@ type Props = {
   stage: CreationStage;
   settings: Record<string, Value>;
   disabled: boolean;
+  partStatus?: Record<string, string>;
   onChange: (next: CreationSpec) => void;
   onSetting: (key: string, value: Value) => void;
 };
@@ -75,16 +79,31 @@ export function CreationOptions({
   stage,
   settings,
   disabled,
+  partStatus,
   onChange,
   onSetting,
 }: Props) {
-  const activeModelPart = spec.attributes.composition === 'parts' ? spec.parts.find(part => part.id === spec.activePartId && part.enabled) : undefined;
+  const strategy = creationCompositionStrategy(spec), splitWhole = isWholeThenSplitCreation(spec);
+  const activeModelPart = strategy === 'independent-parts' ? spec.parts.find(part => part.id === spec.activePartId && part.enabled) : undefined;
+  const activePart = spec.parts.find(part => part.id === spec.activePartId && part.enabled);
   const attr = (key: string, value: Value) =>
     onChange({ ...spec, attributes: { ...spec.attributes, [key]: value } });
   const options = creationOptions.filter(
     (option) => optionAppliesToSubject(option, spec.subject),
   );
   const biological = isBiologicalSubject(spec.subject);
+  const composition = (label: string) => <Choices label={label}
+    value={spec.attributes.composition === 'parts' ? strategy : spec.attributes.composition ?? 'whole'}
+    values={[
+      ['whole', '하나의 모델'],
+      ...(spec.subject === 'human' ? [['whole-then-split', '전체 제작 후 3파트 분리']] as [string, string][] : []),
+      ['independent-parts', '파트별 독립 제작'],
+    ]}
+    onChange={value => {
+      if (value === 'whole-then-split' || value === 'independent-parts') {
+        onChange(spec.subject === 'human' ? setHumanPartsCreation(spec, value) : { ...spec, attributes: { ...spec.attributes, composition: 'parts', compositionStrategy: value } });
+      } else attr('composition', value);
+    }} disabled={disabled} />;
   const choice = (
     label: string,
     key: string,
@@ -123,6 +142,13 @@ export function CreationOptions({
       data-testid="graphics-creation-options"
     >
       <h2>{stageQuestions[stage]}</h2>
+      {splitWhole && <section className="gs-human-workflow" aria-label="인간형 파트 제작 순서">
+        <strong>전체 제작 후 3파트 분리</strong>
+        <p>전체 무텍스처 모델 → 머리 / 몸통 / 머리카락 분리 → 파트별 UV·4K 텍스처 → 조립 → Humanoid → Unity</p>
+        <p className="gs-fine">몸통에는 팔·손·손가락·다리·발과 의상이 포함됩니다. 분리된 파트는 원본의 실제 면 수를 이어받습니다.</p>
+        {stage === 'model' && <p className="gs-fine">현재 파트 선택과 관계없이 전체 모델을 제작합니다. 아래 목표 면 수는 세 파트의 합계입니다.</p>}
+        {stage === 'surface' && <p className="gs-fine">현재 파트: {activePart?.label ?? '선택 필요'}. 이 파트의 채택 모델에만 UV·텍스처를 적용합니다.</p>}
+      </section>}
       {stage === "design" && (
         <>
           <label>
@@ -168,16 +194,7 @@ export function CreationOptions({
             ["multiview", "멀티뷰"],
             ["parts", "파트별 이미지"],
           ])}
-          <Choices
-            label="완성 모델 구성"
-            value={spec.attributes.composition ?? "whole"}
-            values={[
-              ["whole", "하나의 모델"],
-              ["parts", "파트별 제작"],
-            ]}
-            onChange={(value) => attr("composition", value)}
-            disabled={disabled}
-          />
+          {composition('완성 모델 구성')}
           <details>
             <summary>세부 외형 · 구도 옵션</summary>
             {attributeOptions(true)}
@@ -255,7 +272,7 @@ export function CreationOptions({
             ["local", "규칙형 로컬 모델"],
             ["astra", "Blender + Astra"],
           ])}
-          {(spec.attributes.composition !== 'parts' || activeModelPart) && <ModelGeometrySettings
+          {(strategy !== 'independent-parts' || activeModelPart) && <ModelGeometrySettings
             settings={{ ...settings, ...(activeModelPart ? { faceLimit: activeModelPart.faceLimit } : {}) }} disabled={disabled}
             partLabel={activeModelPart?.label} onChange={(change, adjustToSelection) => {
               const result = updateCreationModelGeometry(spec, change, adjustToSelection);
@@ -270,16 +287,7 @@ export function CreationOptions({
             표현 스타일과 실제 면 수는 따로 설정합니다. 목표 면 수와 생성된 실제
             면 수를 비교합니다.
           </p>
-          <Choices
-            label="모델 구성"
-            value={spec.attributes.composition ?? "whole"}
-            values={[
-              ["whole", "하나의 모델"],
-              ["parts", "파트별 제작"],
-            ]}
-            onChange={(value) => attr("composition", value)}
-            disabled={disabled}
-          />
+          {composition('모델 구성')}
         </>
       )}
       {(stage === "design" || stage === "model") &&
@@ -287,35 +295,24 @@ export function CreationOptions({
           <button
             type="button"
             disabled={disabled}
-            onClick={() =>
-              onChange({
-                ...spec,
-                attributes: { ...spec.attributes, composition: "parts" },
-                parts: humanParts().map((part) => ({
-                  ...part,
-                  ...spec.parts.find((item) => item.id === part.id),
-                  enabled: true,
-                })),
-                activePartId: "head",
-              })
-            }
+            onClick={() => onChange(setHumanPartsCreation(spec, 'whole-then-split'))}
           >
-            인간 3파트 설정 · 머리 / 몸통 / 머리카락
+            인간 3파트 설정 · 전체 제작 후 분리
           </button>
         )}
-      {(stage === "design" || stage === "model" || stage === "surface") &&
+      {(stage === "design" || stage === "model" || stage === "surface" || stage === "assembly") &&
         spec.attributes.composition === "parts" && (
           <div className="gs-parts">
             <h3>제작할 파트</h3>
             <p className="gs-fine">
-              파트마다 이미지를 확인하고 모델을 제작합니다. 각 파트의 기존
-              결과는 보존합니다.
+              {splitWhole ? '전체 채택 모델에서 아래 파트를 분리합니다. 텍스처용 파트 참조는 이미지 단계의 ‘파트별 이미지’ 또는 파트 이미지 가져오기로 직접 준비하고 채택하세요.' : '파트마다 이미지를 확인하고 모델을 제작합니다. 각 파트의 기존 결과는 보존합니다.'}
             </p>
             {spec.parts.map((part) => (
               <div className="gs-part" key={part.id}>
                 <label>
                   <input
                     type="checkbox"
+                    disabled={disabled}
                     checked={part.enabled}
                     onChange={(event) =>
                       onChange({
@@ -339,17 +336,20 @@ export function CreationOptions({
                 <button
                   type="button"
                   aria-pressed={spec.activePartId === part.id}
-                  disabled={!part.enabled}
+                  disabled={disabled || !part.enabled}
                   onClick={() => onChange({ ...spec, activePartId: part.id })}
                 >
                   {spec.activePartId === part.id ? "현재 파트" : "이 파트 설정"}
                 </button>
+                {partStatus?.[part.id] && <p className="gs-part-status">{partStatus[part.id]}</p>}
+                {splitWhole && <p className="gs-fine">면 수: 전체 모델 분리 결과의 실제 면 수 유지</p>}
                 {spec.activePartId === part.id && (
                   <>
                     <label>
                       파트 이름
                       <input
                         value={part.label}
+                        disabled={disabled}
                         maxLength={60}
                         onChange={(event) =>
                           onChange({
@@ -368,6 +368,8 @@ export function CreationOptions({
                       <textarea
                         rows={2}
                         value={part.instruction}
+                        maxLength={12000}
+                        disabled={disabled}
                         onChange={(event) =>
                           onChange({
                             ...spec,
@@ -380,7 +382,7 @@ export function CreationOptions({
                         }
                       />
                     </label>
-                    {stage === "model" && (
+                    {stage === "model" && !splitWhole && (
                       <div className="gs-settings-grid">
                         <label>
                           파트 모델 후보 수
@@ -388,6 +390,7 @@ export function CreationOptions({
                             type="number"
                             min={1}
                             max={4}
+                            disabled={disabled}
                             value={part.count}
                             onChange={(event) =>
                               onChange({
@@ -424,7 +427,7 @@ export function CreationOptions({
                       label: `추가 파트 ${spec.parts.length + 1}`,
                       enabled: true,
                       instruction: "",
-                      faceLimit: 5000,
+                      faceLimit: splitWhole ? '' : 5000,
                       count: 1,
                     },
                   ],
@@ -458,6 +461,9 @@ export function CreationOptions({
               ["auto", "채택 이미지 사용"],
               ["text", "설명만 사용"],
             ])}
+          {spec.attributes.composition === 'parts' && settings.surfaceOperation !== 'uv' && settings.textureMode !== 'local' && <p className="gs-fine">
+            ‘채택 이미지 사용’에는 현재 파트의 채택 이미지가 필요합니다. 전체 전신 이미지를 파트 참조로 자동 사용하지 않습니다. 파트 이미지를 준비하거나 ‘설명만 사용’을 직접 선택하세요.
+          </p>}
           <p className="gs-fine">
             {settings.textureMode === "local"
               ? "로컬 기본 재질은 선택한 수치 그대로 1개를 만듭니다. 동일한 설정의 복제 후보는 만들지 않습니다."
@@ -548,6 +554,11 @@ export function CreationOptions({
             뼈대와 변형을 확인합니다. 정적인 오브젝트는 이 단계를 건너뛸 수
             있습니다.
           </p>
+          {spec.subject === 'human' && settings.rigType === 'humanoid' && <>
+            <label><input type="checkbox" aria-label="손가락 본 · 양손" checked={settings.rigFingers !== false} disabled={disabled}
+              onChange={event => onSetting('rigFingers', event.target.checked)} />손가락 본 · 양손</label>
+            <p className="gs-fine">몸통·팔다리는 기본 리깅 대상입니다. 머리카락 보조 본을 끄면 머리카락은 Head 본에 연결됩니다. 표정·물리는 포함하지 않습니다.</p>
+          </>}
         </>
       )}
       {stage === "animation" && (

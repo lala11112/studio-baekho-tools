@@ -22,6 +22,7 @@ import type {
 import {
   defaultCreation,
   humanParts,
+  setHumanPartsCreation,
   type CreationSpec,
 } from "../shared/graphics-creation";
 import { runwayEstimate } from "../shared/runway";
@@ -232,6 +233,26 @@ test("creation choices, imports, adoption and preparing a frozen request dispatc
   assert.deepEqual(f.state().tasks[0], frozen);
   assert.equal(f.calls.length, 0);
   assert.equal(f.apiCalls, 0);
+});
+
+test('whole-then-split prepares one whole model, preserves import slot, and never sends whole design as a missing part texture reference', async t => {
+  const f = await fixture(t, 'character'), whole = f.seed('design');
+  await f.accept(whole);
+  await f.setCreation(c => { Object.assign(c, setHumanPartsCreation(c, 'whole-then-split')); c.stageSettings.model!.values.count = 1; });
+  const model = await f.prepare('M01');
+  assert.deepEqual(model.inputVersionIds, [whole.id]);
+  assert.equal(model.settings.partId, undefined);
+  assert.equal(model.settings.faceLimit, 5000);
+  assert.equal(model.settings.quad, true);
+  assert.equal(model.cost?.credits, 100);
+  await f.action({ kind: 'cancel', taskId: model.id });
+  const wholeModel = f.seed('model');
+  const imported = f.graphics.importFiles(f.project.id, f.objectId, 'model', [f.store.file(f.project.id, wholeModel.files[0].path)]).versions.at(-1)!;
+  assert.equal(imported.slot, 'main');
+  const head = f.seed('model', 'part-head'); await f.accept(head);
+  await assert.rejects(f.prepare('T03'), /파츠에 채택한 디자인 이미지가 없습니다/);
+  assert.equal(f.state().objects[0].accepted['design:main'], whole.id);
+  assert.equal(f.calls.length, 0); assert.equal(f.apiCalls, 0);
 });
 
 test("M06 mesh selection is tied to the selected source version and remains frozen across later form edits", async t => {

@@ -16,6 +16,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from graphics_size import MARKER as SIZE_ROOT_MARKER
 from graphics_glb import export_packed_glb
+from graphics_humanoid import inspect_humanoid
 
 
 def digest(value):
@@ -689,9 +690,10 @@ def validate(q):
         if not rigs or any(len(rig['bones']) < 3 or not any(bone['parent'] for bone in rig['bones']) or any(bone['length'] < 1e-7 for bone in rig['bones']) for rig in rigs):
             raise RuntimeError('Missing, degenerate or unparented skeleton')
         if q['operation'] == 'R01':
-            required = {'pelvis', 'spine', 'chest', 'neck', 'head'} | {name + '.' + side for name in ('upper_arm', 'forearm', 'hand', 'thigh', 'shin', 'foot') for side in ('L', 'R')}
-            if not any(required.issubset({bone['name'] for bone in rig['bones']}) for rig in rigs):
-                raise RuntimeError('Requested humanoid joint mapping is incomplete')
+            if not q.get('rigContract') or q['rigContract'].get('rigType') != 'humanoid':
+                raise RuntimeError('R01 requires its frozen canonical Humanoid contract')
+            evidence['humanoid'] = inspect_humanoid(q['rigContract'], test_pose=True)
+            checks['humanoid'] = True
         checks['weights'] = all(mesh['armatures'] and mesh['weightedVertices'] == mesh['vertices'] and mesh['invalidWeightVertices'] == 0 for mesh in current['meshes'])
         if not checks['weights']:
             raise RuntimeError('Missing armature, unweighted vertices or invalid/non-normalized deform weights')

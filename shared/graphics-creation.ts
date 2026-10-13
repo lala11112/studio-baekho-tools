@@ -10,6 +10,7 @@ export function toggleCreationChoice(current: string | number | boolean | undefi
   return String(current) === selected ? '' : selected;
 }
 export type PartSpec = { id: string; label: string; enabled: boolean; instruction: string; faceLimit: number | ''; count: number };
+export type PartsCompositionStrategy = 'whole-then-split' | 'independent-parts';
 export type CreationSpec = {
   schemaVersion: 1; subject: string; attributes: CreationValues; instruction: string; locks: string[];
   stageSettings: Partial<Record<CreationStage, { instruction: string; values: CreationValues }>>;
@@ -99,9 +100,31 @@ export const creationLocks = [
 ];
 export const humanParts = (): PartSpec[] => [
   { id: 'head', label: '머리', enabled: true, instruction: '얼굴·귀·목 연결부. 머리카락 제외.', faceLimit: 5000, count: 1 },
-  { id: 'body', label: '몸통', enabled: true, instruction: '몸통·팔·손·다리·발. 머리와 머리카락 제외.', faceLimit: 5000, count: 1 },
+  { id: 'body', label: '몸통', enabled: true, instruction: '몸통·팔·손·손가락·다리·발과 의상. 머리와 머리카락 제외.', faceLimit: 5000, count: 1 },
   { id: 'hair', label: '머리카락', enabled: true, instruction: '채택한 헤어스타일 전체. 두피·얼굴·몸 제외.', faceLimit: 5000, count: 1 },
 ];
+/** Absence retains the original independent-part workflow; reading never migrates saved data. */
+export function creationCompositionStrategy(spec: CreationSpec): PartsCompositionStrategy | undefined {
+  if (spec.attributes.composition !== 'parts') return undefined;
+  return spec.attributes.compositionStrategy === 'whole-then-split' ? 'whole-then-split' : 'independent-parts';
+}
+export const isWholeThenSplitCreation = (spec: CreationSpec): boolean => creationCompositionStrategy(spec) === 'whole-then-split';
+/** Explicit recipe selection changes only the editable specification, never results or execution. */
+export function setHumanPartsCreation(spec: CreationSpec, strategy: PartsCompositionStrategy): CreationSpec {
+  const next = structuredClone(spec);
+  next.attributes = { ...next.attributes, composition: 'parts', compositionStrategy: strategy };
+  const defaults = humanParts().map(part => ({ ...part, faceLimit: strategy === 'whole-then-split' ? '' as const : part.faceLimit }));
+  next.parts = [...defaults.map(part => ({ ...part, ...next.parts.find(saved => saved.id === part.id), enabled: true })), ...next.parts.filter(part => !defaults.some(item => item.id === part.id))];
+  if (!next.activePartId || !next.parts.some(part => part.id === next.activePartId && part.enabled)) next.activePartId = 'head';
+  return next;
+}
+/** Whole generation and split/assembly operate on main; surface operations use the explicit selected part. */
+export function creationPartForTask(spec: CreationSpec, taskId: string): PartSpec | undefined {
+  if (spec.attributes.composition !== 'parts' || !spec.activePartId || ['I01', 'I02', 'M07', 'M08'].includes(taskId)) return undefined;
+  const stage = stageForTask(taskId);
+  if (!['design', 'model', 'surface', 'assembly'].includes(stage) || stage === 'model' && isWholeThenSplitCreation(spec)) return undefined;
+  return spec.parts.find(part => part.id === spec.activePartId && part.enabled);
+}
 const stageDefaults: Record<CreationStage, CreationValues> = {
   design: { count: 2, designMode: 'new', direction: 'front', framing: 'full', pose: 'natural', background: 'solid', perspective: 'orthographic', margin: 'full', multiview: false, viewFront: true, viewBack: true, viewLeft: true, viewRight: true },
   model: { count: 1, modelMethod: 'tripo', model: DEFAULT_TRIPO_MODEL, inputMode: 'image', faceLimit: DEFAULT_MODEL_FACE_LIMIT, quad: true, scale: 1, symmetry: true },
@@ -172,7 +195,7 @@ export function creationSettings(object: GraphicsObject, stage: CreationStage): 
 }
 function stageValues(spec: CreationSpec, stage: CreationStage): CreationValues {
   const saved = spec.stageSettings[stage]?.values;
-  return { ...stageDefaults[stage], ...(stage === 'model' && saved?.model === 'P1-20260311' ? { quad: false } : {}), ...saved };
+  return { ...stageDefaults[stage], ...(stage === 'model' && saved?.model === 'P1-20260311' ? { quad: false } : {}), ...(stage === 'rig' && spec.subject === 'human' && saved?.rigType === 'humanoid' ? { rigFingers: true } : {}), ...saved };
 }
 /** Batch provider/topology changes and their visible face-target adjustments in one draft update. */
 export function updateCreationModelGeometry(spec: CreationSpec, change: CreationValues, adjustToSelection = false): { spec: CreationSpec; notice?: string } {
@@ -181,14 +204,14 @@ export function updateCreationModelGeometry(spec: CreationSpec, change: Creation
   if (adjustToSelection) {
     const result = changeModelGeometry(current, change);
     stage.values = { ...stage.values, ...result.patch };
-    if (result.notice && spec.attributes.composition !== 'parts') notices.push(result.notice);
-    next.parts = next.parts.map(part => {
+    if (result.notice && creationCompositionStrategy(spec) !== 'independent-parts') notices.push(result.notice);
+    if (!isWholeThenSplitCreation(spec)) next.parts = next.parts.map(part => {
       const result = changeModelGeometry({ ...current, faceLimit: part.faceLimit }, change);
       if (result.notice) notices.push(`${part.label}: ${result.notice}`);
       return result.patch.faceLimit !== undefined ? { ...part, faceLimit: result.patch.faceLimit as number | '' } : part;
     });
     if (!notices.length && result.notice) notices.push(result.notice);
-  } else if (spec.attributes.composition === 'parts' && spec.activePartId && change.faceLimit !== undefined) {
+  } else if (creationCompositionStrategy(spec) === 'independent-parts' && spec.activePartId && change.faceLimit !== undefined) {
     next.parts = next.parts.map(part => part.id === spec.activePartId ? { ...part, faceLimit: change.faceLimit as number | '' } : part);
     stage.values = { ...stage.values, ...Object.fromEntries(Object.entries(change).filter(([key]) => key !== 'faceLimit')) };
   } else stage.values = { ...stage.values, ...change };
@@ -206,7 +229,7 @@ export function creationSelectionProblem(spec: CreationSpec, stage: CreationStag
   const required = [stageRouteChoice[stage]];
   if (stage === 'model') {
     if (s.modelMethod !== 'local') required.push(['inputMode', '모델에 사용할 이미지']);
-    if (spec.attributes.composition !== 'parts') required.push(['faceLimit', '목표 면 수']);
+    if (creationCompositionStrategy(spec) !== 'independent-parts') required.push(['faceLimit', '목표 면 수']);
   } else if (stage === 'surface') {
     if (s.surfaceOperation === 'uv') required.push(['uvMode', 'UV 방식']);
     else { required.push(['textureMode', '표면 제작 방식']); if (s.textureMode !== 'local') required.push(['textureReference', '텍스처 참조']); }
@@ -214,8 +237,9 @@ export function creationSelectionProblem(spec: CreationSpec, stage: CreationStag
   const missing = required.find(([key]) => s[key] === '');
   if (missing) return `${missing[1]} 선택이 필요합니다.`;
   if (['design', 'model', 'surface', 'assembly'].includes(stage) && spec.attributes.composition === '') return '모델 구성 선택이 필요합니다. 이미지 또는 모델 단계에서 선택하세요.';
+  if (stage === 'surface' && spec.attributes.composition === 'parts' && !spec.parts.some(part => part.id === spec.activePartId && part.enabled)) return 'UV·텍스처를 적용할 파트를 선택하세요.';
   if (stage === 'model') {
-    const part = spec.attributes.composition === 'parts' ? spec.parts.find(p => p.id === spec.activePartId && p.enabled) : undefined;
+    const part = creationCompositionStrategy(spec) === 'independent-parts' ? spec.parts.find(p => p.id === spec.activePartId && p.enabled) : undefined;
     return modelGeometryProblem({ ...s, ...(part ? { faceLimit: part.faceLimit } : {}) });
   }
   return undefined;
@@ -283,6 +307,7 @@ export function compileCreation(object: GraphicsObject, taskId: string): { setti
   // A05 uses the common size contract only, not the Unity delivery route/collider/compression choices.
   const selectionProblem = taskId === 'A05' ? undefined : creationSelectionProblem(spec, stage);
   if (selectionProblem) throw Error(selectionProblem);
+  if (taskId === 'M07' && spec.subject === 'human' && isWholeThenSplitCreation(spec) && ['head', 'body', 'hair'].some(id => !spec.parts.some(part => part.id === id && part.enabled))) throw Error('전체 모델 분리에는 머리·몸통·머리카락 세 파트를 모두 선택하세요.');
   // Cleared optional descriptions must not become default wording in the frozen request.
   for (const key of ['direction', 'framing', 'pose', 'background', 'perspective', 'margin', 'motionPreset'])
     if (settings[key] === '') delete settings[key];
@@ -290,8 +315,12 @@ export function compileCreation(object: GraphicsObject, taskId: string): { setti
     delete settings.pose;
     if (['upper', 'face'].includes(String(settings.framing))) delete settings.framing;
   }
-  const part = spec.attributes.composition === 'parts' && spec.activePartId ? spec.parts.find(p => p.id === spec.activePartId && p.enabled) : undefined;
+  const part = creationPartForTask(spec, taskId);
   settings.subject = spec.subject;
+  if (stage === 'rig') {
+    if (taskId === 'R01' && spec.subject === 'human') settings.rigFingers = settings.rigFingers !== false;
+    else delete settings.rigFingers;
+  }
   if (stage !== 'design' && spec.physicalSize !== undefined) settings.physicalSize = JSON.stringify(normalizePhysicalSize(spec.physicalSize));
   if (stage === 'design') settings.imageSchedule = 'parallel-native-4';
   for (const [key, value] of Object.entries(applicableAttributes(spec))) if (value !== '') settings[`attr.${key}`] = value;
@@ -300,12 +329,14 @@ export function compileCreation(object: GraphicsObject, taskId: string): { setti
   const free = [spec.instruction, spec.stageSettings[stage]?.instruction, ...Object.entries(applicableAttributes(spec)).filter(([k]) => k.startsWith('custom.')).map(([, v]) => String(v))].filter(Boolean).join('\n');
   settings.freeInstruction = (['T02','T05'].includes(taskId) ? spec.stageSettings[stage]?.instruction ?? '' : free).slice(0, 12000);
   settings.requestedParts = JSON.stringify(spec.parts.filter(p => p.enabled));
-  const partWork = part && !['I01','I02','M07','M08'].includes(taskId) && ['design','model','surface','assembly'].includes(stage);
+  const partWork = part;
   if (partWork) { settings.partId = part.id; settings.partLabel = part.label; if (stage === 'model') { settings.count = part.count; settings.faceLimit = part.faceLimit; } }
   if (['M01', 'M02', 'M03', 'M04', 'M15'].includes(taskId)) Object.assign(settings, requireModelGeometry(settings, taskId));
   const descriptions = [...summarizeCreation(spec), spec.instruction, spec.stageSettings[stage]?.instruction].filter(Boolean);
   if (stage === 'design') for (const [key, labels] of Object.entries(imageLabels)) if (settings[key] !== undefined) descriptions.push(`${key}: ${labels[String(settings[key])] ?? String(settings[key])}`);
   if (partWork) descriptions.push(`제작 대상 파츠만: ${part.label}. ${part.instruction}. 전체 디자인의 비율·색·스타일을 유지하고 다른 파츠는 생성하지 마세요.`);
+  if (isWholeThenSplitCreation(spec) && stage === 'model') descriptions.push('분리 전 전체 모델을 한 번에 제작합니다. 목표 면 수는 머리·몸통(팔다리·손가락·의상 포함)·머리카락 전체의 합계이며 파트마다 새로 적용하지 않습니다. 후속 단계에서 세 파트로 분리한 뒤 각 파트의 UV와 텍스처를 준비합니다.');
+  if (taskId === 'R01' && spec.subject === 'human') descriptions.push(`몸통과 팔다리는 Unity Humanoid용으로 리깅합니다. ${settings.rigFingers ? '양손 손가락 본을 포함합니다.' : '선택적 손가락 본은 만들지 않습니다.'}${settings.rigHair !== true ? ' 머리카락은 Head 본을 따라 움직이며 별도 머리카락 보조 본을 만들지 않습니다.' : ''} 표정과 물리는 이 요청에 포함하지 않습니다.`);
   if (locks.length) descriptions.push(`유지할 특징: ${locks.map(id => creationLocks.find(l => l.id === id)!.label).join(', ')}. 변경 지시와 충돌하면 무시하지 말고 원인을 보고하세요. 외형 보존을 자동 검증했다고 주장하지 마세요.`);
   if (stage === 'animation') descriptions.push([settings.motionPreset ? `동작: ${settings.motionPreset}` : '', settings.rootMotion ? '이동 동작' : '제자리', settings.loop ? '반복' : '단발'].filter(Boolean).join(', '));
   return { settings, instruction: descriptions.join('\n'), spec };

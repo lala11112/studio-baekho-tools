@@ -18,7 +18,13 @@ namespace Partsmith.Graphics {
   public DeliveryOptimization optimization;
   public ClipSettings[] clipSettings;
   public PhysicalSizeSettings physicalSize;
+  public RigContract rigContract;
  }
+ [Serializable] public class HumanBinding { public string boneName,humanName; }
+ [Serializable] public class RigContract { public int schemaVersion;public string versionId,producerVersionId,producerTaskId,rigType,hairBinding;public bool fingers;public string[] requiredParts;public HumanBinding[] humanBones; }
+ [Serializable] public class RigPart { public string meshName,meshId,partId,armatureName;public int vertices,boneCount;public bool normalizedWeights; }
+ [Serializable] public class RigManifest { public int schemaVersion,armatureCount;public string armatureName,sourceSha256;public RigContract contract;public RigPart[] parts; }
+ [Serializable] public class ImportedRig { public string rigType,versionId,sourceSha256;public bool avatarValid,avatarHuman;public HumanBinding[] humanBones;public RigPart[] parts; }
  [Serializable] public class MeterVector { public float x,y,z; }
  [Serializable] public class PhysicalSizeSettings { public string mode,axis,pivot;public float lengthMeters;public MeterVector dimensionsMeters; }
  [Serializable] public class PhysicalSizeManifest { public int schemaVersion;public string sourceSha256,basis,unitStatus;public PhysicalSizeSettings settings;public MeterVector dimensionsMeters;public bool originalPreserved; }
@@ -34,6 +40,7 @@ namespace Partsmith.Graphics {
   public bool playbackVerified; public string[] clips,warnings,errors;
   public ImportedClip[] clipSettings;
   public PhysicalSizeManifest physicalSize;
+  public ImportedRig rig;
  }
  [Serializable] public class ManagedManifest { public string objectId,profileFingerprint,converterVersion,structure,requestId,pipeline,unityVersion; public FileEntry[] files; }
  [Serializable] public class MaterialTexture { public string path,sha256; public int width,height; }
@@ -89,6 +96,8 @@ namespace Partsmith.Graphics {
     if(Path.GetFullPath(q.resultPath)!=Safe("Library/PartsmithGraphicsResults/"+q.requestId+".json"))throw new Exception("Unsafe result path");
     if(q.files==null||q.files.Length==0||q.files.Select(f=>f.destination).Distinct().Count()!=q.files.Length)throw new Exception("Missing or duplicate delivery files");
     if(q.mode!="model"&&q.mode!="sprite"||q.rigType!="generic"&&q.rigType!="humanoid")throw new Exception("Unsupported import mode");
+    if(q.rigType=="humanoid"&&(q.mode!="model"||q.rigContract?.rigType!="humanoid"))throw new Exception("Humanoid requires a frozen canonical rig contract");
+    if(q.rigContract!=null&&q.rigContract.rigType!=q.rigType)throw new Conflict("Rig type differs from frozen producer contract");
     q.optimization=q.optimization??new DeliveryOptimization();
     if(!new[]{0,256,512,1024,2048,4096,8192,16384}.Contains(q.optimization.deliveryTextureSize)||!new[]{"none","normal"}.Contains(q.optimization.deliveryCompression)||!new[]{"none","box","mesh","convex"}.Contains(q.optimization.collider)||float.IsNaN(q.optimization.lodRatio)||q.optimization.lodRatio<.05f||q.optimization.lodRatio>.95f)throw new Exception("Unsupported frozen optimization settings");
     if(q.mode=="sprite"&&(q.optimization.lodEnabled||q.optimization.collider!="none"))throw new Exception("3D optimization cannot be inferred for a sprite");
@@ -231,9 +240,31 @@ namespace Partsmith.Graphics {
    // Re-read source materials on updates; existing remaps otherwise hide changed source values.
    foreach(var entry in importer.GetExternalObjectMap().ToArray())importer.RemoveRemap(entry.Key);
    // Static meshes do not require an Avatar. Skeleton-bearing models use the explicitly chosen mode.
+   // Read source rest transforms, not a previous Human import's Avatar-adjusted pose on reimport.
+   if(q.rigType=="humanoid"){importer.animationType=ModelImporterAnimationType.Generic;importer.avatarSetup=ModelImporterAvatarSetup.NoAvatar;importer.SaveAndReimport();}
    var initial=AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);bool skinned=initial&&initial.GetComponentsInChildren<SkinnedMeshRenderer>(true).Any(s=>s.bones.Length>0);
+   if(q.rigType=="humanoid"&&!skinned)throw new Exception("Requested Humanoid has no skin; Generic fallback is forbidden");
    importer.animationType=skinned?(q.rigType=="humanoid"?ModelImporterAnimationType.Human:ModelImporterAnimationType.Generic):ModelImporterAnimationType.Generic;
    importer.avatarSetup=skinned?ModelImporterAvatarSetup.CreateFromThisModel:ModelImporterAvatarSetup.NoAvatar;
+   if(q.rigType=="humanoid"){
+    var rig=ReadRigManifest(q);
+    var allTransforms=initial.GetComponentsInChildren<Transform>(true);
+    if(q.rigContract.humanBones.Any(binding=>allTransforms.Count(t=>t.name==binding.boneName)!=1))throw new Exception("Mapped Humanoid bone names must be unique across all object and bone transforms");
+    var skinBones=initial.GetComponentsInChildren<SkinnedMeshRenderer>(true).SelectMany(s=>s.bones).Where(b=>b).Distinct().ToArray();
+    var skeleton=new HashSet<Transform>();
+    foreach(var bone in skinBones){var ancestor=bone;while(ancestor){skeleton.Add(ancestor);if(ancestor==initial.transform)break;ancestor=ancestor.parent;}}
+    var transforms=skeleton.ToArray();
+    if(transforms.Select(t=>t.name).Distinct().Count()!=transforms.Length)throw new Exception("Humanoid transform names are ambiguous");
+    importer.humanDescription=new HumanDescription{
+     human=q.rigContract.humanBones.Select(binding=>{
+      if(transforms.Count(t=>t.name==binding.boneName)!=1||!Enum.TryParse<HumanBodyBones>(binding.humanName,out var human)||human==HumanBodyBones.LastBone)throw new Exception("Missing canonical HumanDescription mapping: "+binding.boneName);
+      return new HumanBone{boneName=binding.boneName,humanName=HumanTrait.BoneName[(int)human],limit=new HumanLimit{useDefaultValues=true}};
+     }).ToArray(),
+     skeleton=transforms.Select(t=>new SkeletonBone{name=t.name,position=t.localPosition,rotation=t.localRotation,scale=t.localScale}).ToArray(),
+     upperArmTwist=.5f,lowerArmTwist=.5f,upperLegTwist=.5f,lowerLegTwist=.5f,armStretch=.05f,legStretch=.05f,feetSpacing=0,hasTranslationDoF=false
+    };
+    importer.skinWeights=ModelImporterSkinWeights.Custom;importer.maxBonesPerVertex=32;importer.minBoneWeight=0;
+   }
    ApplyClipSettings(importer,initial,q,animation);
    importer.SaveAndReimport();Folder(texturePath);importer.ExtractTextures(texturePath);AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
    foreach(var file in Directory.GetFiles(Safe(texturePath)).Where(f=>new[]{".png",".jpg",".jpeg",".tga"}.Contains(Path.GetExtension(f).ToLowerInvariant())))Texture(Relative(file),false,100,"color",q.optimization);
@@ -262,6 +293,7 @@ namespace Partsmith.Graphics {
    r.clipSettings=VerifyClipSettings(importer,clips,animation);
    var avatar=AssetDatabase.LoadAllAssetsAtPath(modelPath).OfType<Avatar>().FirstOrDefault();
    if(skinned&&(!avatar||!avatar.isValid||q.rigType=="humanoid"&&!avatar.isHuman))throw new Exception("Requested rig Avatar failed validation");
+   if(q.rigType=="humanoid")r.rig=VerifyHumanoid(q,model,importer,avatar);
    AnimatorController controller=null;
    if(clips.Length>0){
     string controllerPath=q.destination+"/Generated/Asset.controller";controller=AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath)??AnimatorController.CreateAnimatorControllerAtPath(controllerPath);
@@ -280,6 +312,39 @@ namespace Partsmith.Graphics {
    }finally{EditorSceneManager.ClosePreviewScene(scene);}
    warnings.Add("Supported opaque Principled materials use source-node base color, tangent normal and explicit metallic R / smoothness A packing. Unsupported graphs use a warned base-color fallback. Appearance still requires visual review.");
    if(q.clipSettings?.Length>0)warnings.Add("Frozen clip loop/root-motion import settings and source FPS were checked. No Play Mode, loop-seam or runtime movement quality was verified.");
+  }
+  static RigManifest ReadRigManifest(DeliveryRequest q){
+   var file=q.files.SingleOrDefault(f=>f.destination==q.destination+"/Generated/rig.json");
+   if(file==null)throw new Conflict("Humanoid has no hash-bound source rig manifest");
+   ValidateFile(Safe(file.destination),file.sha256);
+   var rig=JsonUtility.FromJson<RigManifest>(File.ReadAllText(Safe(file.destination)));
+   if(rig?.schemaVersion!=1||rig.armatureCount!=1||string.IsNullOrEmpty(rig.armatureName)||string.IsNullOrEmpty(rig.sourceSha256)||rig.parts==null||rig.parts.Length==0||rig.contract==null||JsonUtility.ToJson(rig.contract)!=JsonUtility.ToJson(q.rigContract)||q.rigContract.humanBones==null||q.rigContract.humanBones.Length<17)throw new Conflict("Humanoid source inventory or contract differs");
+   if(q.rigContract.humanBones.Select(b=>b.boneName).Distinct().Count()!=q.rigContract.humanBones.Length||q.rigContract.humanBones.Select(b=>b.humanName).Distinct().Count()!=q.rigContract.humanBones.Length)throw new Conflict("Duplicate Humanoid bone mapping");
+   return rig;
+  }
+  static ImportedRig VerifyHumanoid(DeliveryRequest q,GameObject model,ModelImporter importer,Avatar avatar){
+   var evidence=ReadRigManifest(q);
+   if(importer.animationType!=ModelImporterAnimationType.Human||!avatar||!avatar.isValid||!avatar.isHuman)throw new Exception("Humanoid Avatar validity/human checks failed");
+   foreach(var binding in q.rigContract.humanBones){
+    var human=(HumanBodyBones)Enum.Parse(typeof(HumanBodyBones),binding.humanName);
+    if(!importer.humanDescription.human.Any(b=>b.boneName==binding.boneName&&b.humanName==HumanTrait.BoneName[(int)human]))throw new Exception("Imported HumanDescription differs from canonical mapping");
+   }
+   var skins=model.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+   if(skins.Length!=evidence.parts.Length||model.GetComponentsInChildren<MeshRenderer>(true).Length>0)throw new Exception("Humanoid part renderer inventory differs from source");
+   var parts=new List<RigPart>();
+   foreach(var part in evidence.parts){
+    var matches=skins.Where(s=>s.name==part.meshName).ToArray();
+    if(matches.Length!=1||!matches[0].sharedMesh||matches[0].bones.Length<1||matches[0].bones.Any(b=>!b))throw new Exception("Humanoid part skin/bone references missing: "+part.meshName);
+    var skin=matches[0];var mesh=skin.sharedMesh;
+    if(mesh.vertexCount<part.vertices)throw new Exception("Humanoid source vertices missing: "+part.meshName);
+    var counts=mesh.GetBonesPerVertex();var weights=mesh.GetAllBoneWeights();int cursor=0;
+    try{
+     if(counts.Length!=mesh.vertexCount)throw new Exception("Humanoid skin weights are inaccessible");
+     foreach(var count in counts){float total=0;for(int index=0;index<count;index++){var weight=weights[cursor++];if(float.IsNaN(weight.weight)||float.IsInfinity(weight.weight)||weight.weight<0||weight.boneIndex<0||weight.boneIndex>=skin.bones.Length)throw new Exception("Invalid imported Humanoid weight");total+=weight.weight;if(part.partId=="hair"&&q.rigContract.hairBinding=="head"&&weight.weight>.000001f&&skin.bones[weight.boneIndex].name!="head")throw new Exception("Hair no longer follows Head exclusively");}if(Math.Abs(total-1)>.001f)throw new Exception("Imported Humanoid weights are not normalized");}
+    }finally{counts.Dispose();weights.Dispose();}
+    parts.Add(new RigPart{meshName=part.meshName,meshId=part.meshId,partId=part.partId,armatureName=part.armatureName,vertices=mesh.vertexCount,boneCount=skin.bones.Length,normalizedWeights=true});
+   }
+   return new ImportedRig{rigType="humanoid",versionId=q.rigContract.versionId,sourceSha256=evidence.sourceSha256,avatarValid=avatar.isValid,avatarHuman=avatar.isHuman,humanBones=q.rigContract.humanBones,parts=parts.ToArray()};
   }
   static void ValidatePhysicalSize(DeliveryRequest q,PhysicalSizeManifest evidence){
    if(evidence?.schemaVersion!=1||!evidence.originalPreserved||evidence.dimensionsMeters==null||evidence.settings==null||string.IsNullOrEmpty(evidence.sourceSha256)||JsonUtility.ToJson(evidence.settings)!=JsonUtility.ToJson(q.physicalSize))throw new Conflict("Physical size settings differ from the immutable source measurement");

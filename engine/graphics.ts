@@ -10,7 +10,8 @@ import type { Workbench, WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from
 import type { Generation, Quote } from "../shared/types";
 import type { AssetVersion, GraphicsAction, GraphicsFile, GraphicsObject, GraphicsRole, GraphicsTask, GraphicsWorkspace, UnityClipSettings } from "../shared/graphics";
 import { isGraphicsClipName, graphicsLegacyUnlinkProblem } from "../shared/graphics";
-import { compileCreation, validateCreation } from "../shared/graphics-creation";
+import { compileCreation, validateCreation, creationCompositionStrategy } from "../shared/graphics-creation";
+import { freezeUnityRigContract } from '../shared/graphics-rig';
 import { DEFAULT_MODEL_FACE_LIMIT, requireModelGeometry } from '../shared/graphics-model-geometry';
 import { executeGraphicsProcedural, proceduralProblem } from "./graphics-procedural";
 import { executeGraphicsNative } from "./graphics-native";
@@ -222,6 +223,7 @@ export class GraphicsEngine {
         const mode = o.settings.textureReference ?? "auto";
         if (mode !== "auto" && mode !== "text") throw Error("텍스처 참조는 채택 디자인 또는 설명만 사용 중 선택하세요.");
         // Match the model's selected slot; a part must not silently inherit the whole design.
+        if (mode === "auto" && o.settings.partId && !design) throw Error('이 파츠에 채택한 디자인 이미지가 없습니다. 파츠 참조를 채택하거나 텍스처 입력을 설명만 사용으로 변경하세요.');
         if (mode === "auto" && design) values.push(design);
       }
     } else if (taskId === 'M08') {
@@ -298,7 +300,7 @@ export class GraphicsEngine {
         this.store.write(id, rel, fs.readFileSync(source));
         return this.file(id, rel, role === "animation" ? "blend" : image.test(name) ? "image" : model.test(name) ? "model" : /\.(mp4|webm)$/i.test(name) ? "video" : "companion");
       });
-      const part = o.creation?.attributes.composition === 'parts' && o.creation.activePartId && (role === 'model' || role === 'design' && o.creation.stageSettings.design?.values.designMode === 'parts') ? o.creation.activePartId : undefined;
+      const part = o.creation?.attributes.composition === 'parts' && o.creation.activePartId && (role === 'model' && creationCompositionStrategy(o.creation) === 'independent-parts' || role === 'design' && o.creation.stageSettings.design?.values.designMode === 'parts') ? o.creation.activePartId : undefined;
       w.versions.push({ id: versionId, objectId: o.id, role, slot: role === "animation" ? clipName! : part ? `part-${part}` : "main", label: path.basename(group[0]), files,
         createdAt: now(), sourceVersionIds: [], provenance: { type: "import" }, warnings: [],
         preview: files.find(f => image.test(f.path))?.path });
@@ -432,7 +434,7 @@ export class GraphicsEngine {
     if (["A01", "A02", "A03"].includes(taskId)) throw Error("자료 가져오기·대상 추가·참고 연결 버튼을 사용하세요.");
     if (compiled && ['sprite', 'ui', 'vfx'].includes(o.kind)) throw Error('2D·게임 UI·이펙트는 이번 3D 제작 범위 밖입니다. 기존 자료는 보존됩니다.');
     if (compiled && taskId.startsWith('R') && o.settings.rigType === 'none') throw Error('리깅 없음이 선택돼 있습니다. 다음 단계로 이동하거나 리그 유형을 선택하세요.');
-    if (compiled && ['M01','M02','M04','M15'].includes(taskId) && o.creation?.attributes.composition === 'parts' && !o.settings.partId) throw Error('파츠별 제작에서는 제작할 파츠와 해당 채택 이미지를 선택하세요.');
+    if (compiled && ['M01','M02','M04','M15'].includes(taskId) && o.creation && creationCompositionStrategy(o.creation) === 'independent-parts' && !o.settings.partId) throw Error('파츠별 제작에서는 제작할 파츠와 해당 채택 이미지를 선택하세요.');
     if (graphicsProceduralTasks.has(taskId)) { const problem = proceduralProblem({ ...o.settings, count: 1 }, taskId); if (problem) throw Error(problem); }
     if (w.tasks.some(t => t.objectId === o.id && ["awaiting_approval", "running", "submission_unknown"].includes(t.status))) throw Error("이 대상의 기존 작업을 확인하거나 취소한 뒤 새 작업을 준비하세요.");
     const inputs = this.inputs(w, o, taskId);
@@ -466,8 +468,8 @@ export class GraphicsEngine {
     if (taskId === "N02") snapshot.settings.motionSourceView ??= "left";
     const t: GraphicsTask = { ...snapshot, id: uid(), createdAt: now(), updatedAt: now(), status: "awaiting_approval", requestHash: hash(JSON.stringify(snapshot)), outputVersionIds: [], backendJobIds: [], localOnly: definition.executor === "local", message: "요청을 저장했습니다. 실행 전까지 작업자·유료 서비스 호출은 없습니다." };
     t.objectSnapshot = { name: o.name, kind: o.kind, references: structuredClone(o.references), accepted: structuredClone(o.accepted), ...(o.creation ? { creation: structuredClone(o.creation) } : {}) };
-    if (taskId === "X05") { t.targetProfile = structuredClone(w.target); t.unityClipSettings = freezeUnityClipSettings(w, inputs); }
-    t.requestHash = hash(JSON.stringify({ ...snapshot, object: t.objectSnapshot, target: t.targetProfile, ...(t.unityClipSettings ? { unityClipSettings: t.unityClipSettings } : {}) }));
+    if (taskId === "X05") { t.targetProfile = structuredClone(w.target); t.unityClipSettings = freezeUnityClipSettings(w, inputs); t.unityRigContract = freezeUnityRigContract(w, inputs); }
+    t.requestHash = hash(JSON.stringify({ ...snapshot, object: t.objectSnapshot, target: t.targetProfile, ...(t.unityClipSettings ? { unityClipSettings: t.unityClipSettings } : {}), ...(t.unityRigContract ? { unityRigContract: t.unityRigContract } : {}) }));
     if (API.has(taskId)) {
       const q = this.apiQuote(w, o, t, inputs); t.quoteId = q.id;
       t.cost = { provider: "Tripo API", credits: q.estimatedCredits, basis: q.costSource, expiresAt: q.expiresAt };
@@ -614,7 +616,7 @@ export class GraphicsEngine {
     const o = { ...this.object(w, t.objectId), ...t.objectSnapshot }, inputs = t.inputVersionIds.map(vid => w.versions.find(v => v.id === vid)!);
     if (t.taskId === "X05") {
       if (!t.targetProfile) throw Error("고정된 Unity 프로젝트 설정이 없습니다.");
-      const delivery = await this.unity({ projectRoot: this.store.directory(id), object: { ...o, settings: t.settings }, versions: inputs, clipSettings: t.unityClipSettings, profile: t.targetProfile, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal });
+      const delivery = await this.unity({ projectRoot: this.store.directory(id), object: { ...o, settings: t.settings }, versions: inputs, clipSettings: t.unityClipSettings, rigContract: t.unityRigContract, profile: t.targetProfile, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal });
       w = this.get(id); if (signal.aborted) return;
       const priorIndex = w.deliveries.findIndex(d => d.id === delivery.id);
       if (priorIndex < 0) w.deliveries.push(delivery); else w.deliveries[priorIndex] = delivery;

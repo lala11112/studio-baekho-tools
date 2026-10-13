@@ -260,6 +260,11 @@ structure = {'meshes': sorted([signature(o) for o in meshes], key=lambda m:m['na
              'bones': [{'name':b.name,'parent':b.parent.name if b.parent else None,
                         'bind':[round(v,6) for row in b.matrix_local for v in row]}
                        for rig in rigs for b in rig.data.bones]}
+if q.get('rigContract', {}).get('rigType') == 'humanoid':
+    from graphics_humanoid import inspect_humanoid
+    rig_evidence = inspect_humanoid(q['rigContract'])
+    rig_evidence['sourceSha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+    (out/'rig.json').write_text(json.dumps(rig_evidence, ensure_ascii=False), encoding='utf8')
 clips = sorted(a.name for a in bpy.data.actions if a.frame_range[1] > a.frame_range[0])
 clip_settings=q.get('clipSettings',[])
 clip_evidence=[]
