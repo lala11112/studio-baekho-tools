@@ -275,11 +275,11 @@ export function App() {
             <Boxes size={24} />
           </div>
           <span>
-            partsmith<small>CHARACTER WORKBENCH</small>
+            partsmith<small>Unity 그래픽 제작</small>
           </span>
         </button>
         <div className="workspace-label">
-          개인 작업 공간 <Badge>LOCAL</Badge>
+          작업 공간 <Badge>로컬</Badge>
         </div>
         <button
           className={`nav ${tab === "home" ? "selected" : ""}`}
@@ -332,7 +332,7 @@ export function App() {
             />
           </button>
           <div className="version">
-            PROTOTYPE <span>v{appVersion}</span>
+            개발 버전 <span>v{appVersion}</span>
           </div>
         </div>
       </aside>
@@ -361,8 +361,8 @@ export function App() {
             >
               <FolderOpen size={17} />
             </button>
-            <button className="avatar" onClick={() => setTab("settings")}>
-              M
+            <button className="avatar" aria-label="연결 설정 열기" title="연결 설정" onClick={() => setTab("settings")}>
+              <Settings size={16} />
             </button>
           </div>
         </header>
@@ -390,29 +390,24 @@ export function App() {
           <main className="home page">
             <div className="page-heading">
               <div>
-                <div className="eyebrow">YOUR CREATIVE WORKSPACE</div>
-                <h1>아이디어에서, 플레이 가능한 캐릭터로.</h1>
-                <p>이미지를 고르고, 파츠를 다듬고, 동작을 완성하세요.</p>
+                <h1>프로젝트</h1>
+                <p>Unity에 사용할 오브젝트와 제작 결과를 프로젝트별로 관리하세요.</p>
               </div>
               <button className="primary" onClick={() => setCreate(true)}>
                 <Plus size={17} /> 새 프로젝트
               </button>
             </div>
-            <div className="hero-card">
+            <section className="hero-card" aria-label="제작 흐름 안내">
               <div>
-                <Badge tone="green">CHARACTER WORKBENCH</Badge>
-                <h2>
-                  원하는 모습을 고르고.
-                  <br />
-                  단계마다 내 손으로.
-                </h2>
+                <h2>오브젝트 제작 흐름</h2>
                 <p>
-                  이미지와 모델 후보를 비교하고, 필요한 곳을 명령으로
-                  수정하세요.
-                  <br />
-                  설정 · 실행 · 선택 · 수정. 다음 단계는 준비됐을 때.
+                  만들 대상을 선택하고, 결과를 비교·채택한 뒤 필요한 작업을 이어가세요.
                 </p>
-                <button
+                <div className="hero-flow" aria-label="제작 순서">
+                  <span>이미지</span><ChevronRight size={13} /><span>모델·재질</span><ChevronRight size={13} /><span>필요한 리깅·동작</span><ChevronRight size={13} /><span>Unity 전달</span>
+                </div>
+              </div>
+              <button
                   onClick={() => {
                     setDemo(true);
                     setName("마네킹 연결 테스트");
@@ -421,20 +416,7 @@ export function App() {
                 >
                   로컬 데모로 시작 <ArrowUpRight size={17} />
                 </button>
-              </div>
-              <div className="hero-graphic">
-                <div className="orbit orbit-one" />
-                <div className="orbit orbit-two" />
-                <Boxes size={112} strokeWidth={0.75} />
-                <span className="float-label l1">01 / BODY</span>
-                <span className="float-label l2">02 / HEAD</span>
-                <span className="float-label l3">03 / HAIR</span>
-              </div>
-              <div className="hero-flow">
-                이미지 <ChevronRight /> 파츠 <ChevronRight /> 조립{" "}
-                <ChevronRight /> Unity
-              </div>
-            </div>
+            </section>
             <div className="section-title">
               <h2>
                 내 프로젝트 <small>{state.projects.length}</small>
@@ -533,15 +515,13 @@ export function App() {
                 );
               })}
               <button className="new-project" onClick={() => setCreate(true)}>
-                <Plus size={28} />
-                <span>새로운 캐릭터 만들기</span>
-                <small>몸체 · 머리 · 헤어부터 시작</small>
+                <Plus size={24} />
+                <span>새 프로젝트</span>
+                <small>캐릭터 · 사물 · 환경 오브젝트</small>
               </button>
             </div>
             <div className="footnote">
-              <CircleHelp size={16} /> 이미지 생성 도구 · Tripo Studio · Blender
-              + Astra를 단계별로 연결합니다. 사용자가 결과를 채택한 뒤 다음
-              작업을 실행합니다.
+              <CircleHelp size={16} /> 각 단계는 실행 버튼을 누를 때 시작합니다. 원본과 채택 결과는 프로젝트에 보관합니다.
             </div>
           </main>
         )}
@@ -1912,17 +1892,15 @@ function SettingsPanel({
     <main className="page settings-page">
       <div className="page-heading">
         <div>
-          <div className="eyebrow">CONNECTED, ON YOUR TERMS</div>
-          <h1>도구를 연결하세요.</h1>
+          <h1>연결 설정</h1>
           <p>제작 파일은 로컬에, API 키는 운영체제 보안 저장소에 보관합니다.</p>
         </div>
-        <ShieldCheck size={38} strokeWidth={1} />
       </div>
       <div className="settings-grid">
         <section className="surface">
           <div className="section-title">
             <h2>
-              <Sparkles size={21} /> Tripo API
+              <Sparkles size={18} /> Tripo API
             </h2>
             <Badge tone={state.key.configured ? "green" : "amber"}>
               {state.key.configured ? "키 설정됨" : "미연결"}
@@ -2032,9 +2010,9 @@ function SettingsPanel({
         <section className="surface">
           <div className="section-title">
             <h2>
-              <Link size={21} /> 로컬 도구
+              <Link size={18} /> 로컬 도구
             </h2>
-            <Badge>WINDOWS</Badge>
+            <Badge>Windows</Badge>
           </div>
           {(
             [

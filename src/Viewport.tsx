@@ -494,25 +494,43 @@ export function Viewport({
         <span className="viewport-label">
           <span className="status-dot" />{" "}
           {previewId ? "모델 검수" : "조립 미리보기"}{" "}
-          <small> PERSPECTIVE</small>
+          <small>원근 보기</small>
         </span>
-        <div className="segmented">
-          {boneCount > 0 && <button data-testid="viewport-skeleton-toggle" aria-pressed={showSkeleton} onClick={() => setShowSkeleton(!showSkeleton)} title="실제 리그의 뼈와 관절 표시">뼈대 {showSkeleton ? "ON" : "OFF"} · {boneCount}</button>}
-          <button onClick={() => view(0, 0, 1)}>정면</button>
-          <button onClick={() => view(1, 0, 0)}>측면</button>
-          <button onClick={() => view(0, 0, -1)}>후면</button>
-          <button title="시점 초기화" onClick={() => view(3, 1.35, 4.7)}>
-            <RotateCcw size={14} />
-          </button>
+        <div className="inspection-control-group inspection-camera" role="group" aria-label="카메라 시점">
+          <span className="inspection-control-label">시점</span>
+          <div className="inspection-control-actions">
+            <button onClick={() => view(0, 0, 1)}>정면</button>
+            <button onClick={() => view(1, 0, 0)}>측면</button>
+            <button onClick={() => view(0, 0, -1)}>후면</button>
+            <button title="시점 초기화" aria-label="시점 초기화" onClick={() => view(3, 1.35, 4.7)}>
+              <RotateCcw size={14} />
+            </button>
+          </div>
         </div>
       </div>
       {meshList.length > 0 && <div className="inspection-toolbar">
-        <button aria-pressed={!solid} onClick={() => setSolid(false)}>재질 보기</button>
-        <button aria-pressed={solid} onClick={() => setSolid(true)}>단색 보기</button>
-        <button data-testid="viewport-wire-toggle" aria-pressed={wire} onClick={() => setWire(!wire)}>메시 선 {wire ? "ON" : "OFF"}</button>
-        <button data-testid="viewport-native-topology" aria-pressed={wireMode === 'native'} disabled={!nativeVersionId || topologyLoading || topology?.status === 'unavailable' || !!topologyError} onClick={() => void originalEdges()}>원본 면 선</button>
-        <button data-testid="viewport-game-topology" aria-pressed={wireMode === 'game'} onClick={() => { setWireMode('game'); setWire(true); }}>게임용 삼각형 선</button>
-        <button aria-pressed={guides} onClick={() => setGuides(!guides)}>치수·기준자 {guides ? "ON" : "OFF"}</button>
+        <div className="inspection-control-group" role="group" aria-label="표면 표시">
+          <span className="inspection-control-label">표면</span>
+          <div className="inspection-control-actions">
+            <button aria-pressed={!solid} onClick={() => setSolid(false)}>재질 보기</button>
+            <button aria-pressed={solid} onClick={() => setSolid(true)}>단색 보기</button>
+          </div>
+        </div>
+        <div className="inspection-control-group" role="group" aria-label="메시 선 표시">
+          <span className="inspection-control-label">메시</span>
+          <div className="inspection-control-actions">
+            <button data-testid="viewport-wire-toggle" aria-pressed={wire} onClick={() => setWire(!wire)}>메시 선 {wire ? "ON" : "OFF"}</button>
+            <button data-testid="viewport-native-topology" aria-pressed={wireMode === 'native'} disabled={!nativeVersionId || topologyLoading || topology?.status === 'unavailable' || !!topologyError} onClick={() => void originalEdges()}>원본 면 선</button>
+            <button data-testid="viewport-game-topology" aria-pressed={wireMode === 'game'} onClick={() => { setWireMode('game'); setWire(true); }}>게임용 삼각형 선</button>
+          </div>
+        </div>
+        <div className="inspection-control-group" role="group" aria-label="보조 표시">
+          <span className="inspection-control-label">보조</span>
+          <div className="inspection-control-actions">
+            {boneCount > 0 && <button data-testid="viewport-skeleton-toggle" aria-pressed={showSkeleton} onClick={() => setShowSkeleton(!showSkeleton)} title="실제 리그의 뼈와 관절 표시">뼈대 {showSkeleton ? "ON" : "OFF"} · {boneCount}</button>}
+            <button aria-pressed={guides} onClick={() => setGuides(!guides)}>치수·기준자 {guides ? "ON" : "OFF"}</button>
+          </div>
+        </div>
       </div>}
       {(topologyLoading || unavailable || topology?.status === 'ready') && <div className="topology-status" data-testid="viewport-topology-status" data-state={topologyLoading ? 'loading' : unavailable ? 'unavailable' : nativeLoaded ? 'ready' : 'loading'} role="status">
         {topologyLoading ? '원본 면 검사 중 · 로컬 처리 · 추가 생성 비용 없음' : unavailable ? `${unavailable} 게임용 삼각형 선을 표시합니다.` : counts ? `원본 면: 사각형 ${counts.quads.toLocaleString()} · 삼각형 ${counts.triangles.toLocaleString()} · 다각형 ${counts.ngons.toLocaleString()}` : '원본 면 미리보기 불러오는 중'}

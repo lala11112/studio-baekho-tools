@@ -1175,10 +1175,7 @@ export function GraphicsStudio({
       <header className="gs-header">
         <div>
           <h1>Unity 오브젝트 제작실</h1>
-          <p>
-            {project.name} <ChevronRight size={13} />{" "}
-            {object?.name ?? "새 오브젝트"}
-          </p>
+          <p title={`${project.name} · ${object?.name ?? '새 오브젝트'}`}>{object?.name ?? project.name}</p>
         </div>
         <div className="gs-header-actions">
           <details className="gs-aux-menu">
@@ -1293,14 +1290,7 @@ export function GraphicsStudio({
                 </button>
               ))}
             </nav>
-            <div className="gs-execution-summary" aria-label="실행 설정 요약">
-              <span><b>대상</b> {creationSubjects.find(item => item.id === creation.subject)?.label ?? object.name}</span>
-              <span><b>도구·모델</b> {activeTask.executor === 'tripo' && stage !== 'model' ? `Tripo API · ${activeTask.name}` : activeTask.executor === 'tripo' ? `Tripo · ${catalog.model.find(model => model.id === String(settings.model ?? 'P2-20260801'))?.label ?? settings.model}` : activeTask.executor === 'astra' ? 'Blender + Astra' : activeTask.executor === 'local' ? '로컬 처리' : activeTask.executor === 'runway' ? 'Runway' : activeTask.executor === 'codex-image' ? 'Codex 이미지' : '설정 확인'}</span>
-              <span><b>후보</b> {String(settings.count ?? 1)}개</span>
-              {stage === 'model' && <span><b>목표 면 수</b> {Number(settings.faceLimit ?? 10000).toLocaleString()}</span>}
-              <span><b>목표 크기</b> {physicalSizeSummary(creation.physicalSize)}</span>
-              <span><b>예상 비용</b> {activeTask.executor === 'local' ? '무료 · GPT 0회' : '준비 후 비용 카드 확인'}</span>
-            </div>
+            <div className="gs-execution-card">
             <div className="gs-creation-execute" aria-label="현재 단계 실행">
               <div>
                 <strong>{activeTask.name}</strong>
@@ -1333,6 +1323,15 @@ export function GraphicsStudio({
               >
                 {pending ? "요청 확인 중…" : prepareLabel}
               </button>
+            </div>
+            <div className="gs-execution-summary" aria-label="실행 설정 요약">
+              <span><b>대상</b> {creationSubjects.find(item => item.id === creation.subject)?.label ?? object.name}</span>
+              <span><b>도구·모델</b> {activeTask.executor === 'tripo' && stage !== 'model' ? `Tripo API · ${activeTask.name}` : activeTask.executor === 'tripo' ? `Tripo · ${catalog.model.find(model => model.id === String(settings.model ?? 'P2-20260801'))?.label ?? settings.model}` : activeTask.executor === 'astra' ? 'Blender + Astra' : activeTask.executor === 'local' ? '로컬 처리' : activeTask.executor === 'runway' ? 'Runway' : activeTask.executor === 'codex-image' ? 'Codex 이미지' : '설정 확인'}</span>
+              <span><b>후보</b> {String(settings.count ?? 1)}개</span>
+              {stage === 'model' && <span><b>목표 면 수</b> {Number(settings.faceLimit ?? 5000).toLocaleString()}</span>}
+              <span><b>목표 크기</b> {physicalSizeSummary(creation.physicalSize)}</span>
+              <span><b>예상 비용</b> {activeTask.executor === 'local' ? '무료 · GPT 0회' : '준비 후 비용 카드 확인'}</span>
+            </div>
             </div>
 
             {visibleTasks.length > 0 && (
@@ -1899,11 +1898,10 @@ export function GraphicsStudio({
                           onMeasure={setNativeMeasurement}
                         />
                       )}
-                      {shownVersion.warnings.map((warning, index) => (
-                        <p className="gs-warning" key={index}>
-                          {warning}
-                        </p>
-                      ))}
+                      {shownVersion.warnings.length > 0 && <div className="gs-result-notes" aria-label="결과 검토 사항">
+                        <strong>검토할 사항</strong>
+                        <ul>{shownVersion.warnings.map((warning, index) => <li className="gs-warning" key={index}>{warning}</li>)}</ul>
+                      </div>}
                       <div className="gs-file-actions">
                         <button
                           disabled={disabled}
