@@ -1,8 +1,8 @@
 {
   "name": "partsmith",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
-  "description": "Studio Baekho workspace for graphics production, combat tools and background music",
+  "description": "Studio Baekho workspace for graphics, SainGeom items, background music and combat tools",
   "author": "Studio Baekho",
   "license": "UNLICENSED",
   "type": "module",

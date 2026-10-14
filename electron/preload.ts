@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { Command } from "../shared/types";
 import type { StudioBounds, StudioTarget, StudioNativeTool } from "../shared/studio";
 import type { BgmInput } from "../shared/bgm";
+import type { FourTigerItemsApi } from "../shared/four-tiger-items";
 async function bgmCall(name: string, argument?: unknown) {
   const result = await ipcRenderer.invoke(`bgm:${name}`, argument);
   if (!result.ok) throw new Error(result.error);
@@ -15,6 +16,8 @@ contextBridge.exposeInMainWorld("bgm", Object.freeze({
   select: (id: string) => bgmCall("select", id),
   export: (id: string) => bgmCall("export", id),
 }));
+const itemMethods: (keyof FourTigerItemsApi)[] = ['list','create','read','patchItem','reviewItems','updatePolicies','adoptPolicies','acknowledgeDescription','repairReferenceIds','updateIconStyle','generateIcons','cancelPending','reconcile','abandonUnknown','selectIcon','readIcon','validate','exportPackage','probe','restorePrevious'];
+contextBridge.exposeInMainWorld('fourTigerItems',Object.freeze(Object.fromEntries(itemMethods.map(method=>[method,async(input:unknown)=>{const result=await ipcRenderer.invoke(`four-tiger-items:${method}`,input);if(!result.ok)throw Object.assign(new Error(result.error),{code:result.code});return result.value;}]))));
 contextBridge.exposeInMainWorld("studio", Object.freeze({
   summary: () => ipcRenderer.invoke("studio:summary"),
   showCombat: (bounds: StudioBounds, target?: StudioTarget) => ipcRenderer.invoke("studio:show-combat", bounds, target),

@@ -25,6 +25,7 @@ import {
 import { App } from "./App";
 import { BgmWorkshop } from "./BgmWorkshop";
 import "./bgm.css";
+import { FourTigerItems } from "./FourTigerItems";
 import type {
   StudioBounds,
   StudioEntry,
@@ -66,8 +67,15 @@ const toolNames: Record<StudioTool, string> = {
   combat: "타격감 찾기",
   "hit-timing": "타격 타이밍",
   bgm: "BGM 만들기",
+  "four-tiger-items": "사인검 아이템",
 };
-const toolOrder = ["modeling", "combat", "hit-timing", "bgm"] as const;
+const toolOrder = [
+  "modeling",
+  "four-tiger-items",
+  "bgm",
+  "combat",
+  "hit-timing",
+] as const;
 const toolCopy: Record<
   StudioTool,
   {
@@ -78,6 +86,13 @@ const toolCopy: Record<
     output: string;
   }
 > = {
+  "four-tiger-items": {
+    category: "ITEM WORKSHOP",
+    description: "20개 아이템과 아이콘을 만들고 검토.",
+    flow: "초안 → 아이콘·편집 → 채택·출력",
+    input: "입력: 사인검 기획·효과·아이콘 요청",
+    output: "결과: 검토한 아이템 JSON·PNG",
+  },
   modeling: {
     category: "ASSET CREATION",
     description: "아이디어에서 게임에 쓸 3D 에셋까지.",
@@ -143,6 +158,8 @@ function ToolIcon({ tool, size = 19 }: { tool: StudioTool; size?: number }) {
     <Clock3 size={size} aria-hidden="true" />
   ) : tool === "bgm" ? (
     <Music2 size={size} aria-hidden="true" />
+  ) : tool === "four-tiger-items" ? (
+    <Layers3 size={size} aria-hidden="true" />
   ) : (
     <Swords size={size} aria-hidden="true" />
   );
@@ -226,6 +243,16 @@ function ToolArt({ tool }: { tool: StudioTool }) {
             strokeLinecap="round"
           />
         </svg>
+      </div>
+    );
+  if (tool === "four-tiger-items")
+    return (
+      <div
+        className="bkh-tool-art"
+        aria-hidden="true"
+        style={{ display: "grid", placeItems: "center", color: "#6d8268" }}
+      >
+        <Layers3 size={88} strokeWidth={1} />
       </div>
     );
   if (tool === "hit-timing")
@@ -574,6 +601,11 @@ export function StudioShell() {
     useState<StudioNativeTool | null>(null);
   const [modelingMounted, setModelingMounted] = useState(false);
   const [bgmMounted, setBgmMounted] = useState(false);
+  const [itemsMounted, setItemsMounted] = useState(false);
+  const [itemsNavigation, setItemsNavigation] = useState<{
+    key: number;
+    projectId?: string;
+  }>({ key: 0 });
   const [modelingNavigation, setModelingNavigation] =
     useState<ModelingNavigation>({ key: 0, tab: "home" });
   const [nativeNavigation, setNativeNavigation] = useState<{
@@ -664,6 +696,12 @@ export function StudioShell() {
         }
       } else if (target.tool === "bgm") {
         setBgmMounted(true);
+      } else if (target.tool === "four-tiger-items") {
+        setItemsMounted(true);
+        setItemsNavigation((previous) => ({
+          key: previous.key + 1,
+          projectId: target.projectId,
+        }));
       } else {
         setNativeError("");
         setNativeNavigation((previous) => ({ key: previous.key + 1, target }));
@@ -766,17 +804,19 @@ export function StudioShell() {
     ? {
         title: toolNames[activeTool],
         subtitle:
-          activeTool === "bgm"
-            ? "장르와 감정을 고르고, 장면에 어울리는 음악을 찾아보세요."
-            : activeTool === "modeling"
-              ? "이미지부터 모델링, 리깅, Unity 연결까지"
-              : activeTool === "hit-timing"
-                ? summary?.hitTimer.projectName
-                  ? `Unity 프로젝트 · ${summary.hitTimer.projectName}`
-                  : "애니메이션의 공격 판정 구간을 제안하고 검토"
-                : summary?.combat.projectName
-                  ? `Unity 프로젝트 · ${summary.combat.projectName}`
-                  : "Unity 프로젝트를 연결하고 원하는 타격감을 찾아보세요.",
+          activeTool === "four-tiger-items"
+            ? "아이템 초안 · 아이콘 제작 · 검토와 데이터 출력"
+            : activeTool === "bgm"
+              ? "장르와 감정을 고르고, 장면에 어울리는 음악을 찾아보세요."
+              : activeTool === "modeling"
+                ? "이미지부터 모델링, 리깅, Unity 연결까지"
+                : activeTool === "hit-timing"
+                  ? summary?.hitTimer.projectName
+                    ? `Unity 프로젝트 · ${summary.hitTimer.projectName}`
+                    : "애니메이션의 공격 판정 구간을 제안하고 검토"
+                  : summary?.combat.projectName
+                    ? `Unity 프로젝트 · ${summary.combat.projectName}`
+                    : "Unity 프로젝트를 연결하고 원하는 타격감을 찾아보세요.",
       }
     : pageCopy[page];
 
@@ -822,17 +862,20 @@ export function StudioShell() {
           ))}
         </nav>
         <div className="bkh-bgm-shortcut">
-          <p className="bkh-nav-label">MUSIC</p>
-          <button
-            data-testid="nav-bgm"
-            className={`bkh-nav-item${activeTool === "bgm" ? " bkh-nav-item-active" : ""}`}
-            aria-current={activeTool === "bgm" ? "page" : undefined}
-            disabled={!bridge}
-            onClick={() => open({ tool: "bgm" })}
-          >
-            <Music2 size={19} strokeWidth={1.7} />
-            <span>BGM 만들기</span>
-          </button>
+          <p className="bkh-nav-label">CREATE</p>
+          {(["modeling", "four-tiger-items", "bgm"] as const).map((tool) => (
+            <button
+              key={tool}
+              data-testid={`nav-${tool}`}
+              className={`bkh-nav-item${activeTool === tool ? " bkh-nav-item-active" : ""}`}
+              aria-current={activeTool === tool ? "page" : undefined}
+              disabled={!bridge}
+              onClick={() => open({ tool })}
+            >
+              <ToolIcon tool={tool} />
+              <span>{toolNames[tool]}</span>
+            </button>
+          ))}
         </div>
         <div className="bkh-sidebar-bottom">
           {activeTool && (
@@ -1358,6 +1401,18 @@ export function StudioShell() {
                               : "불러오는 중…")}
                         </code>
                       </div>
+                      <div className="bkh-storage-row">
+                        <span className="bkh-storage-label">
+                          <Layers3 size={16} />
+                          사인검 아이템
+                        </span>
+                        <code className="bkh-storage-path">
+                          {summary?.storage.fourTigerItems ||
+                            (summaryError
+                              ? "저장 위치를 확인하지 못했습니다."
+                              : "불러오는 중…")}
+                        </code>
+                      </div>
                     </section>
                     {summary?.combat.error && (
                       <div className="bkh-setting-warning">
@@ -1407,6 +1462,21 @@ export function StudioShell() {
                 aria-hidden={activeTool !== "bgm"}
               >
                 <BgmWorkshop active={activeTool === "bgm"} />
+              </div>
+            )}
+            {itemsMounted && (
+              <div
+                data-testid="workspace-four-tiger-items"
+                className="bkh-modeling"
+                style={{
+                  display: activeTool === "four-tiger-items" ? "block" : "none",
+                }}
+                aria-hidden={activeTool !== "four-tiger-items"}
+              >
+                <FourTigerItems
+                  active={activeTool === "four-tiger-items"}
+                  navigation={itemsNavigation}
+                />
               </div>
             )}
             {nativeTool && (

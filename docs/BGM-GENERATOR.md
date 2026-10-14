@@ -1,8 +1,8 @@
 # BGM 생성기
 
-`codex/bgm-generator`는 BGM 기능을 보관하는 독립 브랜치입니다. 실제 통합 앱은 `integration/baekho-bgm`에 있으며 최신 Auto-3D-Tool(57a6aee), 기존 Combat Lab·AutoHitTimer 및 BGM을 한 창에서 엽니다. 원본 기능 브랜치와 main은 변경하지 않습니다.
+`codex/bgm-generator`는 BGM 기능을 보관하는 독립 브랜치입니다. 실제 통합 앱은 `integration/baekho-bgm`에 있으며 최신 Auto-3D-Tool(7fbb5b9), 사인검 아이템 생성기, 기존 Combat Lab·AutoHitTimer 및 BGM을 한 창에서 엽니다. 원본 기능 브랜치와 main은 변경하지 않습니다.
 
-제공된 통합본은 **백호툴 - 3D·BGM 통합** 바탕화면 바로가기 또는 `Launch-Baekho.vbs`로 실행합니다. 전용 `Data` 폴더를 사용하고 기존 앱·데이터와 분리합니다. `App` 안 실행 파일을 직접 열면 기존 공용 데이터 경로를 사용하므로 제공된 실행기를 사용하세요. 기존 데이터 사본은 `OriginalDataSnapshot`에 보관합니다.
+제공된 통합본은 **백호툴 - 통합 작업실** 바탕화면 바로가기 또는 `Launch-Baekho.vbs`로 실행합니다. 전용 `Data` 폴더를 사용하고 기존 앱·데이터와 분리합니다. `App` 안 실행 파일을 직접 열면 기존 공용 데이터 경로를 사용하므로 제공된 실행기를 사용하세요. 기존 데이터 사본은 `OriginalDataSnapshot`에 보관합니다.
 
 ## 사용
 

@@ -5,6 +5,7 @@ import type { ProductionRun } from "../shared/production";
 import type { AssetVersion, GraphicsTask, GraphicsWorkspace } from "../shared/graphics";
 import { findGraphicsTask } from "../shared/graphics-catalog";
 import type { StudioEntry, StudioSummary } from "../shared/studio";
+import type { ProjectSummary } from "../shared/four-tiger-items";
 
 export interface CombatSummary {
   projectName: string;
@@ -21,7 +22,8 @@ export interface SummaryInput {
   graphicsWorkspaces?: GraphicsWorkspace[];
   combat: CombatSummary;
   hitTimer?: HitTimerSummary;
-  storage: Pick<StudioSummary["storage"], "modeling" | "combat"> & { hitTimer?: string };
+  itemProjects?: ProjectSummary[];
+  storage: Pick<StudioSummary["storage"], "modeling" | "combat"> & { hitTimer?: string; fourTigerItems?: string };
   warnings?: string[];
 }
 export interface HitTimerSummary {
@@ -82,6 +84,14 @@ const kindLabel: Record<string, string> = { image: "이미지 생성", edit: "�
 /** A projection of existing records only; never starts work or mutates a tool's data. */
 export function buildStudioSummary(input: SummaryInput): StudioSummary {
   const projects: StudioEntry[] = [], runs: StudioEntry[] = [], results: StudioEntry[] = [];
+  for(const p of input.itemProjects??[]){
+    const base={tool:'four-tiger-items' as const,projectName:p.name,updatedAt:p.updatedAt,target:{tool:'four-tiger-items' as const,projectId:p.projectId}};
+    projects.push({...base,id:`items:${p.projectId}`,title:p.name,detail:`초안 ${p.total}개 · 채택 ${p.adopted}개`,status:p.readError?'복구 필요':'이어서 작업',tone:p.readError?'error':'neutral'});
+    // These are saved queue records, not evidence that this process resumed a worker.
+    if(p.validatedIcons||p.pendingJobs||p.failedJobs)runs.push({...base,id:`items:${p.projectId}:icons`,title:'아이콘 생성',detail:`아이콘 ${p.validatedIcons}/${p.total} · 채택 ${p.adopted}개`,status:p.pendingJobs?'생성 대기 · 저장 상태 확인 필요':p.failedJobs?'결과 확인 필요':'검토 대기',tone:'review'});
+    if(p.validatedIcons)results.push({...base,id:`items:${p.projectId}:drafts`,title:'아이템 검토',detail:`아이콘 ${p.validatedIcons}개 · 채택 ${p.adopted}개`,status:p.adopted===20?'채택됨':'검토 대기',tone:p.adopted===20?'success':'review'});
+    for(const out of p.exports)results.push({...base,id:`items:${out.exportId}`,title:out.kind==='release'?'Unity 데이터 출력':'초안 보관',detail:`revision ${out.revision} · JSON/PNG`,status:out.kind==='release'?'채택본 저장':'초안 저장',tone:out.kind==='release'?'success':'review',updatedAt:out.createdAt});
+  }
   for (const p of input.projects) {
     const benches = input.workbenches.filter(w => w.projectId === p.id);
     const graphics = (input.graphicsWorkspaces ?? []).filter(w => w.projectId === p.id);
@@ -177,5 +187,5 @@ export function buildStudioSummary(input: SummaryInput): StudioSummary {
     if (job.frameCount || job.hitCount || job.analysisStatus || job.savedAssetCount || job.pendingSave)
       results.push({ ...entry, id: `${entry.id}:result`, detail: job.savedAssetCount ? `저장된 에셋 ${job.savedAssetCount}개 · 원래 작업에서 확인` : entry.detail, target: { ...entry.target, tab: job.status === "saved" && !job.pendingSave ? "save" : "hits" } });
   }
-  return { version: input.version, projects: recent(projects), runs: recent(runs), results: recent(results), combat: { projectName: c.projectName, projectPath: c.projectPath, connected: !!c.connection.connected, running: !!c.connection.running, generating: c.generating, error: c.connection.error ?? "" }, hitTimer: { projectName: h.projectName, projectPath: h.projectPath, connected: h.connected, busy: h.busy, error: h.error, experimental: true }, storage: { ...input.storage, hitTimer: input.storage.hitTimer ?? "" }, warnings: [...(input.warnings ?? [])] };
+  return { version: input.version, projects: recent(projects), runs: recent(runs), results: recent(results), combat: { projectName: c.projectName, projectPath: c.projectPath, connected: !!c.connection.connected, running: !!c.connection.running, generating: c.generating, error: c.connection.error ?? "" }, hitTimer: { projectName: h.projectName, projectPath: h.projectPath, connected: h.connected, busy: h.busy, error: h.error, experimental: true }, storage: { ...input.storage, hitTimer: input.storage.hitTimer ?? "", fourTigerItems:input.storage.fourTigerItems??'' }, warnings: [...(input.warnings ?? [])] };
 }

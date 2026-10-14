@@ -37,6 +37,9 @@ import { Vault } from "./vault";
 import { catalog } from "../shared/catalog";
 import { installStudioHost } from "./studio-host";
 import { installBgmHost } from "./bgm-host";
+import { FourTigerItemsService } from '../engine/four-tiger-items/service';
+import { CodexFourTigerIconRunner } from '../engine/four-tiger-items/icon-runner';
+import { installFourTigerItemsIpc } from './four-tiger-items-ipc';
 import type { Command, Project, Quote } from "../shared/types";
 protocol.registerSchemesAsPrivileged([
   { scheme: "bgm-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
@@ -846,9 +849,13 @@ app.whenReady().then(async () => {
     }
   });
   installBgmHost(win, root);
+  const itemService = new FourTigerItemsService(root, new CodexFourTigerIconRunner());
+  const disposeItems = installFourTigerItemsIpc(win, itemService);
   const host = installStudioHost({
     window: win,
     root,
+    itemProjects: () => itemService.list(),
+    itemsBusy: () => itemService.hasActiveWork(),
     modeling: () => ({ projects: store.projects(), workbenches: workbench.list(), productionRuns: production.list(), graphicsWorkspaces: graphics.list() }),
     modelingBusy: () => store.projects().some(p =>
       graphics.isActive(p.id) || engine.isProjectActive(p.id) ||
@@ -875,7 +882,12 @@ app.whenReady().then(async () => {
     graphics.shutdown();
     studio.close();
     chatgpt.close();
-    void host.shutdown().catch(() => { console.error("백호툴 종료 중 일부 작업을 정리하지 못했습니다. 다음 실행에서 저장 상태를 확인하세요."); }).finally(() => {
+    disposeItems();
+    void Promise.allSettled([host.shutdown(), itemService.shutdown()]).then(results => {
+      if (results.some(result => result.status === "rejected")) {
+        console.error("백호툴 종료 중 일부 작업을 정리하지 못했습니다. 다음 실행에서 저장 상태를 확인하세요.");
+      }
+    }).finally(() => {
       shutdownComplete = true;
       app.quit();
     });

@@ -5,8 +5,8 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
-// This harness has no generation mode. It reads the original three-track proof,
-// copies only its BGM folder, and uses a fresh app profile with empty credentials.
+// This harness has no generation mode. It copies existing BGM and item proof
+// folders into a fresh app profile, keeping all source data read-only.
 const root = process.cwd();
 const option = (name) => {
   const index = process.argv.indexOf(name);
@@ -16,6 +16,10 @@ const option = (name) => {
 };
 const packaged = option("--packaged");
 const source = option("--source-bgm") ?? path.resolve(root, "../bgm-app/artifacts/runtime/bgm-live-2026-10-14/profile/bgm");
+const liveItemRoot = "D:/Downloads/SainGeomItemWorkshop/Data/four-tiger-items";
+const itemSourceRoot = option("--source-items") ?? (fs.existsSync(liveItemRoot) ? path.resolve(liveItemRoot) : path.join(root, "examples/saingeom-items"));
+const itemProjectId = "93190cd9-a826-4b58-b257-cf4ba077b827";
+const itemSource = path.join(itemSourceRoot, itemProjectId);
 const mode = packaged ? "packaged" : "development";
 const runtimeParent = path.join(root, "artifacts/runtime");
 fs.mkdirSync(runtimeParent, { recursive: true });
@@ -50,6 +54,19 @@ function copyDirectory(sourceDirectory, destination) {
   }
 }
 const originalFiles = snapshot(source);
+const originalItemFiles = snapshot(itemSource);
+const originalItems = JSON.parse(fs.readFileSync(path.join(itemSource, "draft.json"), "utf8"));
+assert.equal(originalItems.projectId, itemProjectId);
+assert.equal(originalItems.items.length, 20, "Expected the existing twenty-item draft");
+assert.ok(originalItems.items.every((item) => item.selectedIconVersion && item.icons.some((icon) => icon.versionId === item.selectedIconVersion)), "All twenty existing items must retain their selected icons");
+for (const item of originalItems.items) {
+  const icon = item.icons.find((version) => version.versionId === item.selectedIconVersion);
+  for (const [file, expected] of [[icon.sourcePath, icon.sourceSha256], [icon.thumbnailPath, icon.thumbnailSha256]]) {
+    const resolved = path.resolve(itemSource, file);
+    assert.ok(!path.relative(itemSource, resolved).startsWith(".."), "Icon must stay inside its source project");
+    assert.equal(digest(resolved), expected, "Existing item icon hash must match the saved draft");
+  }
+}
 const originalLedger = JSON.parse(fs.readFileSync(path.join(source, "ledger.json"), "utf8"));
 assert.equal(originalLedger.candidates.length, 3, "Expected the three existing proof tracks");
 assert.ok(originalLedger.candidates.every((candidate) => candidate.status === "ready"));
@@ -57,6 +74,8 @@ assert.equal(originalLedger.totalReservedUsd, 0.12);
 fs.mkdirSync(profile, { recursive: true });
 copyDirectory(source, path.join(profile, "bgm"));
 assert.deepEqual(snapshot(path.join(profile, "bgm")), originalFiles);
+copyDirectory(itemSource, path.join(profile, "four-tiger-items", itemProjectId));
+assert.deepEqual(snapshot(path.join(profile, "four-tiger-items", itemProjectId)), originalItemFiles);
 const env = { ...process.env, FAL_KEY: "", TRIPO_API_KEY: "", TRIPO_KEY: "", OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "", BAEKHO_DATA: profile, PARTSMITH_DATA: profile };
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.PARTSMITH_DEV;
@@ -68,6 +87,7 @@ const checks = [];
 const playback = [];
 const exports = [];
 const networkAttempts = [];
+const itemExports = [];
 async function until(action, message, timeout = 20_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -102,6 +122,13 @@ async function launch() {
       ipcMain.handle(`bgm:${name}`, () => {
         globalThis.__integrationNetworkAttempts.push({ transport: "blocked-ipc", action: name });
         throw new Error("Only saved BGM state, selection and export are allowed in this test.");
+      });
+    }
+    for (const name of ["generateIcons", "reconcile", "cancelPending", "abandonUnknown"]) {
+      ipcMain.removeHandler(`four-tiger-items:${name}`);
+      ipcMain.handle(`four-tiger-items:${name}`, () => {
+        globalThis.__integrationNetworkAttempts.push({ transport: "blocked-item-ipc", action: name });
+        throw new Error("Only saved item previews, selection and local export are allowed in this test.");
       });
     }
   });
@@ -153,6 +180,57 @@ async function exportTrack(candidate, suffix) {
   exports.push({ id: candidate.id, suffix, file: path.relative(runtime, file), bytes: fs.statSync(file).size, sha256: digest(file) });
 }
 function stableCandidates(state) { return state.candidates.map(({ id, requestId, status, prompt }) => ({ id, requestId, status, prompt })); }
+async function verifyItems(suffix) {
+  await home();
+  await page.getByTestId("tool-four-tiger-items").click();
+  await page.locator('section[data-testid="workspace-four-tiger-items"]').waitFor();
+  const picker = page.locator(".fti-toolbar > label select");
+  await until(() => picker.locator(`option[value="${itemProjectId}"]`).count(), "existing twenty-item project listed");
+  await picker.selectOption(itemProjectId);
+  await page.getByTestId(`item-${originalItems.items[0].itemId}`).waitFor();
+  assert.equal(await page.locator(".fti-card").count(), 20);
+  await until(() => page.locator(".fti-card .fti-icon img").evaluateAll((images) => images.length === 20 && images.every((image) => image.complete && image.naturalWidth === 256 && image.naturalHeight === 256)), "all twenty existing item icons decoded");
+  const before = await page.evaluate((projectId) => window.fourTigerItems.read({ projectId }), itemProjectId);
+  assert.deepEqual(before.items, originalItems.items, "Existing item content and reviews must be preserved");
+  assert.deepEqual(before.jobs, originalItems.jobs, "Item preview must not create or resume generation jobs");
+  for (const item of originalItems.items) {
+    await page.getByTestId(`item-${item.itemId}`).locator(".fti-card-open").click();
+    await until(() => page.locator(".fti-editor .fti-section-title h2").textContent().then((name) => name === item.name), "selected item editor");
+    await until(() => page.locator(".fti-editor .fti-previews").first().locator("img").evaluateAll((images) => images.length === 2 && images.every((image) => image.complete && image.naturalWidth === 256)), "selected item 64px and 128px previews");
+    assert.equal(await page.getByLabel("아이콘 버전", { exact: true }).inputValue(), item.selectedIconVersion);
+  }
+  const selectedItem = originalItems.items[originalItems.items.length - 1];
+  await home();
+  await page.getByTestId("tool-four-tiger-items").click();
+  assert.equal(await page.locator(".fti-editor .fti-section-title h2").textContent(), selectedItem.name);
+  // The originals remain drafts; exporting must not silently adopt them.
+  assert.equal(await page.getByTestId("export-release").isEnabled(), false);
+  await page.getByTestId("export-draft").click();
+  await page.getByTestId("export-result").waitFor();
+  const directory = (await page.getByTestId("export-result").locator("code").textContent()).trim();
+  const expectedParent = path.join(profile, "four-tiger-items", itemProjectId, "review-bundle");
+  assert.ok(path.resolve(directory).startsWith(expectedParent + path.sep), "Item export must stay in the isolated profile");
+  const catalogPath = path.join(directory, "saingeom-items.v1.json");
+  const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
+  const manifest = JSON.parse(fs.readFileSync(path.join(directory, "manifest.json"), "utf8"));
+  assert.equal(catalog.contentStatus, "draft");
+  assert.equal(catalog.items.length, 20);
+  assert.equal(manifest.kind, "draft");
+  for (const file of manifest.files) assert.equal(digest(path.join(directory, file.path)), file.sha256);
+  for (const item of catalog.items) {
+    const original = originalItems.items.find((candidate) => candidate.candidateKey === item.candidateKey);
+    const icon = original.icons.find((version) => version.versionId === original.selectedIconVersion);
+    assert.equal(digest(path.join(directory, item.iconPath)), icon.thumbnailSha256);
+    assert.equal(item.review.state, original.review.state);
+  }
+  const after = await page.evaluate((projectId) => window.fourTigerItems.read({ projectId }), itemProjectId);
+  assert.deepEqual(after.items, originalItems.items);
+  assert.deepEqual(after.jobs, originalItems.jobs);
+  itemExports.push({ suffix, projectId: itemProjectId, directory: path.relative(runtime, directory), itemCount: catalog.items.length, iconCount: fs.readdirSync(path.join(directory, "icons")).length, contentStatus: catalog.contentStatus, catalogSha256: digest(catalogPath), originalRevision: originalItems.revision, exportRevision: catalog.contentRevision });
+  await page.locator(".four-tiger-items").evaluate((element) => { element.scrollTop = 0; });
+  await page.locator(".fti-editor").evaluate((element) => { element.scrollTop = 0; });
+  await capture(`items-${suffix}`);
+}
 async function verifyNoJobs() {
   const state = await page.evaluate(() => window.desktop.call({ type: "state" }));
   assert.ok((state.graphicsWorkspaces ?? []).every((workspace) => !workspace.tasks?.length), "Navigation must not create graphics generation tasks");
@@ -162,9 +240,12 @@ async function verifyNoJobs() {
 let failure;
 try {
   await launch();
-  for (const id of ["modeling", "combat", "hit-timing", "bgm"]) await page.getByTestId(`tool-${id}`).waitFor();
-  checks.push("all four tool cards are available");
+  for (const id of ["modeling", "combat", "hit-timing", "bgm", "four-tiger-items"]) await page.getByTestId(`tool-${id}`).waitFor();
+  checks.push("all five tool cards are available, including the existing item workshop");
   await capture("home");
+  await verifyItems("initial");
+  checks.push("twenty original item icons load; every item preview/select works; Unity JSON/PNG draft export preserves reviews and hashes");
+  await home();
 
   const modelProject = await page.evaluate(() => window.desktop.call({ type: "project.create", name: "통합 검증 — 생성 없는 그래픽 작업", demo: false }));
   modelProjectId = modelProject.id;
@@ -229,6 +310,9 @@ try {
   await close();
 
   await launch();
+  await verifyItems("restart");
+  checks.push("restart preserves twenty original item drafts and icons; a second verified Unity JSON/PNG draft export succeeds");
+  await home();
   await page.getByTestId("tool-modeling").click();
   await page.locator(".ps-project-picker select").selectOption(modelProjectId);
   await page.getByTestId("graphics-studio").waitFor();
@@ -258,9 +342,11 @@ try {
   await close();
   try { assert.deepEqual(snapshot(source), originalFiles, "Original BGM proof must remain byte-identical"); checks.push("original BGM ledger, journals and MP3 files remain byte-identical"); }
   catch (error) { failure ??= error; }
-  const evidence = { ok: !failure, mode, checkedAt: new Date().toISOString(), runtime, profile, sourceBgm: source, originalFileCount: originalFiles.length, modelProjectId, generatedCount: 0, reservedUsdBefore: originalLedger.totalReservedUsd, checks, playback, exports, rendererErrors: errors, networkAttempts, ...(failure ? { error: String(failure.stack ?? failure) } : {}) };
+  try { assert.deepEqual(snapshot(itemSource), originalItemFiles, "Original item project must remain byte-identical"); checks.push("original item draft, history and all icon files remain byte-identical"); }
+  catch (error) { failure ??= error; }
+  const evidence = { ok: !failure, mode, checkedAt: new Date().toISOString(), executablePath: packaged ?? electronPath, runtime, profile, sourceBgm: source, originalFileCount: originalFiles.length, sourceItems: itemSource, originalItemFileCount: originalItemFiles.length, itemProjectId, itemExports, modelProjectId, generatedCount: 0, generatedIconCount: 0, reservedUsdBefore: originalLedger.totalReservedUsd, checks, playback, exports, rendererErrors: errors, networkAttempts, ...(failure ? { error: String(failure.stack ?? failure) } : {}) };
   json(path.join(runtime, "verification.json"), evidence);
   json(path.join(root, `artifacts/baekho-bgm-${mode}-smoke.json`), evidence);
-  console.log(JSON.stringify({ ok: evidence.ok, mode, checks: checks.length, evidence: path.join(runtime, "verification.json"), generatedCount: 0, exports: exports.length, rendererErrors: errors, networkAttempts }, null, 2));
+  console.log(JSON.stringify({ ok: evidence.ok, mode, checks: checks.length, evidence: path.join(runtime, "verification.json"), generatedCount: 0, generatedIconCount: 0, exports: exports.length, itemExports: itemExports.length, rendererErrors: errors, networkAttempts }, null, 2));
 }
 if (failure) throw failure;

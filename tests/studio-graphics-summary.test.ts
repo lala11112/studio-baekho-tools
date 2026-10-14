@@ -135,3 +135,20 @@ test("cancelling tracking after paid approval retains a remote-state review warn
   assert.equal(result.tone, "review");
   assert.match(result.status, /원격 상태 확인/);
 });
+
+test("graphics and item snapshots coexist without mixing project targets or draft adoption", () => {
+  const graphics = workspace();
+  graphics.tasks = [task()];
+  const data = { ...input([graphics]), itemProjects: [{ projectId: "hero", name: "Item drafts", revision: 72,
+    updatedAt, total: 20, validatedIcons: 20, adopted: 0, pendingJobs: 0, failedJobs: 2,
+    exports: [{ exportId: "draft-export", kind: "draft" as const, revision: 71, relativeDirectory: "review-bundle/draft-export", createdAt: updatedAt }],
+    readError: null }] };
+  const before = JSON.stringify(data);
+  const summary = buildStudioSummary(data);
+  assert.deepEqual(summary.projects.filter(entry => entry.target.projectId === "hero").map(entry => entry.tool).sort(), ["four-tiger-items", "modeling"]);
+  assert.equal(summary.runs.find(entry => entry.tool === "modeling")?.target.tab, "graphics");
+  const itemResults = summary.results.filter(entry => entry.tool === "four-tiger-items");
+  assert.equal(itemResults.length, 2);
+  assert.ok(itemResults.every(entry => entry.tone === "review" && entry.target.projectId === "hero" && !entry.target.tab));
+  assert.equal(JSON.stringify(data), before);
+});

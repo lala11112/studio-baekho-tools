@@ -60,6 +60,16 @@ test("unknown statuses stay unknown and cannot be shown as success", () => {
 
 const hitJob = (patch: Partial<HitTimerSummary["jobs"][number]> = {}): HitTimerSummary["jobs"][number] => ({ id: "job1", clipName: "베기", status: "draft", analysisStatus: "", reviewed: false, pendingSave: false, hitCount: 0, frameCount: 0, savedAssetCount: 0, createdUtc: "2026-10-10T00:00:00Z", error: "", ...patch });
 const withHit = (jobs: HitTimerSummary["jobs"]) => ({ ...input(), hitTimer: { projectName: "사인검", projectPath: "C:/sword", connected: false, busy: false, error: "", jobs } });
+
+test('SainGeom saved queue progress never implies live generation or adoption and preserves input',()=>{
+  const data={...input(),itemProjects:[{projectId:'items',name:'아이템 초안',revision:8,updatedAt:'2026-10-12T00:00:00Z',total:20,validatedIcons:7,adopted:0,pendingJobs:13,failedJobs:0,exports:[],readError:null}]};
+  const before=JSON.stringify(data);const s=buildStudioSummary(data);
+  assert.equal(s.projects.find(p=>p.tool==='four-tiger-items')?.target.projectId,'items');
+  assert.match(s.runs.find(r=>r.tool==='four-tiger-items')?.detail??'',/7\/20/);
+  assert.equal(s.runs.find(r=>r.tool==='four-tiger-items')?.tone,'review');
+  assert.ok(s.results.filter(r=>r.tool==='four-tiger-items').every(r=>r.tone!=='success'));
+  assert.equal(JSON.stringify(data),before);
+});
 test("AutoHitTimer unfinished analysis and human review never imply saved output", () => {
   const s = buildStudioSummary(withHit([hitJob(), hitJob({ id: "u", status: "review", analysisStatus: "uncertain", frameCount: 10 }), hitJob({ id: "n", status: "review", analysisStatus: "no-hit" }), hitJob({ id: "r", status: "review", analysisStatus: "hits", reviewed: true, hitCount: 2 })]));
   const hitResults = s.results.filter(r => r.tool === "hit-timing");
