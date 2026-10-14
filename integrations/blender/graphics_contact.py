@@ -203,7 +203,8 @@ def render_views(source, output, camera=None, masks=None, framing=None, prefix='
             neck, hair = set(mask['allowed']['neck']), set(mask['allowed']['innerHair'])
             colors = obj.data.color_attributes.new(name='ContactReviewOnly', type='FLOAT_COLOR', domain='CORNER')
             for loop in obj.data.loops:
-                name = 'neck' if loop.vertex_index in neck else 'innerHair' if loop.vertex_index in hair else 'protected'
+                added = masks.get('schemaVersion') == 2 and loop.vertex_index >= mask['vertexCount']
+                name = 'neck' if loop.vertex_index in neck or added and mask['partId'] == 'head' else 'innerHair' if loop.vertex_index in hair or added and mask['partId'] == 'hair' else 'protected'
                 colors.data[loop.index].color = palette[name].diffuse_color
             obj.data.color_attributes.active_color = colors
     scene.render.engine = 'BLENDER_WORKBENCH'
@@ -302,21 +303,28 @@ def export_scene(folder):
 
 
 def repair(q):
+    reconstruct = q.get('mode') == 'reconstruct'
     baseline, regions = load(q['baseline']), load(q['regions'])
     if file_hash(q['regions']) != q['regionsSha256']:
         raise RuntimeError('Frozen contact region file changed')
     # Revalidate the complete mask contract, not just a worker-supplied ready bit.
-    proposal = {**regions, 'status': 'ready'}
-    verified = validate_proposal(proposal, baseline)
-    if verified != regions:
-        raise RuntimeError('Frozen contact regions contain altered validation fields')
+    if not reconstruct:
+        proposal = {**regions, 'status': 'ready'}
+        verified = validate_proposal(proposal, baseline)
+        if verified != regions:
+            raise RuntimeError('Frozen contact regions contain altered validation fields')
     open_scene(q['sourceBlend'], baseline['sourceSha256'])
     before = exact_contract()
     if before != baseline['contract']:
         raise RuntimeError('Repair baseline changed')
     output_hash = file_hash(q['outputBlend'])
     open_scene(q['outputBlend'])
-    after = exact_contract(); checks = validate_repair(before, after, regions)
+    after = exact_contract()
+    if reconstruct:
+        from graphics_contact_reconstruct import validate_reconstruction
+        checks = validate_reconstruction(before, after, regions)
+    else:
+        checks = validate_repair(before, after, regions)
     if q.get('validateOnly'):
         save_json(q['report'], {'passed': True, 'checks': checks}); return
     out = pathlib.Path(q['output']); out.mkdir(parents=True, exist_ok=True)
@@ -344,7 +352,7 @@ def repair(q):
             'files': ['part-' + part + '/' + file for file in files]})
     exports = verify_assembly_parts({'output': str(out)}, candidates, after['assembly'])
     for receipt in exports:
-        receipt['operation'] = 'M06'; receipt['contactPhase'] = 'repair'
+        receipt['operation'] = 'M06'; receipt['contactPhase'] = 'reconstruct' if reconstruct else 'repair'
         save_json(out / ('part-' + receipt['partId']) / 'report.json', receipt)
     for candidate in candidates:
         folder = out / ('part-' + candidate['slot'])
@@ -357,14 +365,21 @@ def repair(q):
     if file_hash(q['sourceBlend']) != baseline['sourceSha256'] or file_hash(q['outputBlend']) != output_hash:
         raise RuntimeError('Read-only export changed native source or output')
     files = main_files + ['regions.json'] + [v['file'] for v in before_views + after_views + overlays] + [file for p in candidates for file in p['files']]
-    save_json(q['report'], {'schemaVersion': 1, 'identity': q['identity'], 'phase': 'repair', 'status': 'repaired',
+    warnings = ['몸통·보호 영역·기존 면과 UV 보존 검사를 통과했습니다. 목·헤어 변화와 추가 면은 전후 화면에서 검토하세요.',
+        '헤어 외곽의 작은 변화가 허용된 보정입니다. 새 면의 UV·텍스처와 접합 외형은 아직 채택되지 않았습니다.'] if reconstruct else ['보호 영역·구조 보존 검사를 통과했습니다. 접합 품질은 전후 화면에서 검토하세요.']
+    save_json(q['report'], {'schemaVersion': 1, 'identity': q['identity'], 'phase': 'reconstruct' if reconstruct else 'repair', 'status': 'repaired',
         'sourceSha256': baseline['sourceSha256'], 'outputSha256': output_hash, 'checks': checks, 'passed': True,
         'sourceVersionId': baseline['sourceVersionId'], 'partVersionIds': baseline['partVersionIds'],
-        'allowedVertexCount': regions['allowedVertexCount'], 'warnings': ['보호 영역·구조 보존 검사를 통과했습니다. 접합 품질은 전후 화면에서 검토하세요.'],
+        'allowedVertexCount': regions['allowedVertexCount'], 'warnings': warnings,
+        'modifiedUVRequiresReview': bool(reconstruct and checks.get('addedFaces')),
         'mainFiles': main_files + ['regions.json'], 'regions': 'regions.json', 'candidates': candidates, 'views': before_views, 'afterViews': after_views, 'overlays': overlays,
         'framing': framing, 'files': files, 'nativePartExports': exports, 'visualQualityVerified': False})
 
 
 if __name__ == '__main__':
+    from graphics_contact_reconstruct import prepare_reconstruction
+    from graphics_contact_compat import prepare_compatibility
     q = load(sys.argv[sys.argv.index('--') + 1])
-    {'prepare': prepare, 'analyze': analyze, 'repair': repair}[q['mode']](q)
+    {'prepare': prepare, 'analyze': analyze, 'repair': repair,
+     'reconstruction-scope': prepare_reconstruction, 'reconstruct': repair,
+     'procedure-compat-prepare': prepare_compatibility}[q['mode']](q)

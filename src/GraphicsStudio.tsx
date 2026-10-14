@@ -724,12 +724,21 @@ export function GraphicsStudio({
   const contactReviewActive = Boolean(shownContact && stage === 'assembly');
   const shownContactTask = shownContact && shownVersion
     ? objectTasks.find(task => task.id === shownVersion.provenance.jobId && task.taskId === 'M06' && task.outputVersionIds.includes(shownVersion.id)) : undefined;
-  const contactResultForTask = (task: GraphicsTask) => versions.find(version => version.contact && version.provenance.jobId === task.id && task.outputVersionIds.includes(version.id))?.contact;
+  const contactProcedureRecoveryAvailable = Boolean(shownContactTask?.status === 'review' &&
+    shownContactTask.settings.contactPhase === 'reconstruct' && !shownContactTask.contactProcedureRecoveryRequested &&
+    !shownContactTask.outputVersionIds.some(id => versions.some(version => version.id === id && version.contact?.phase === 'reconstruct' && version.contact.status === 'repaired')));
+  const contactVersionForTask = (task: GraphicsTask) => {
+    const results = task.outputVersionIds.map(id => versions.find(version => version.id === id)).filter((version): version is AssetVersion =>
+      Boolean(version?.contact && version.provenance.jobId === task.id && version.contact.phase === task.settings.contactPhase));
+    // A saved failure remains inspectable after local recovery, but is not the task's current result.
+    return [...results].reverse().find(version => version.slot === 'main' && version.contact?.status === 'repaired') ?? results.at(-1);
+  };
+  const contactResultForTask = (task: GraphicsTask) => contactVersionForTask(task)?.contact;
   const contactPartProducer = shownVersion?.slot.startsWith('part-')
-    ? objectTasks.find(task => task.taskId === 'M06' && task.settings.contactPhase === 'repair' && task.outputVersionIds.includes(shownVersion.id)) : undefined;
-  const contactPartMain = contactPartProducer?.outputVersionIds.map(id => versions.find(version => version.id === id)).find(version => version?.slot === 'main' && version.contact?.phase === 'repair');
+    ? objectTasks.find(task => task.taskId === 'M06' && ['repair', 'reconstruct'].includes(String(task.settings.contactPhase)) && task.outputVersionIds.includes(shownVersion.id)) : undefined;
+  const contactPartMain = contactPartProducer?.outputVersionIds.map(id => versions.find(version => version.id === id)).find(version => version?.slot === 'main' && version.contact && ['repair', 'reconstruct'].includes(version.contact.phase));
   const shownAssembly = shownVersion?.role === 'model' && shownVersion.slot === 'main'
-    ? objectTasks.find(task => (task.taskId === 'M08' || task.taskId === 'M06' && task.settings.contactPhase === 'repair') && task.outputVersionIds.includes(shownVersion.id) && task.outputVersionIds.length > 1) : undefined;
+    ? objectTasks.find(task => (task.taskId === 'M08' || task.taskId === 'M06' && ['repair', 'reconstruct'].includes(String(task.settings.contactPhase))) && task.outputVersionIds.includes(shownVersion.id) && task.outputVersionIds.length > 1) : undefined;
   const assemblyParts = shownAssembly?.outputVersionIds.map(id => versions.find(version => version.id === id)).filter((version): version is AssetVersion => !!version && version.role === 'model' && version.slot.startsWith('part-'));
   const canInspectContact = shownAssembly?.taskId === 'M08' && ['part-head', 'part-body', 'part-hair'].every(slot => assemblyParts?.some(version => version.slot === slot));
   const shownAcceptanceComplete = Boolean(object && shownVersion && acceptedVersion(object, shownVersion) && (!shownAssembly || assemblyParts?.length && assemblyParts.every(version => object.accepted[`model:${version.slot}`] === version.id)));
@@ -845,10 +854,17 @@ export function GraphicsStudio({
     // A later cancelled/failed request must not hide an already registered result.
     if (task.status === 'review' && task.outputVersionIds.some(id => versions.some(version => version.id === id))) latestResultByOperation.set(operation, task);
   }
-  const visibleTasks = [...new Map([...latestTaskByOperation.values(), ...latestResultByOperation.values(), ...(contactReviewActive && shownContactTask ? [shownContactTask] : [])].map(task => [task.id, task])).values()]
+  const isShownContactContinuation = (task: GraphicsTask) => Boolean(contactReviewActive && shownVersion &&
+    task.taskId === 'M06' && ['repair', 'reconstruct'].includes(String(task.settings.contactPhase)) &&
+    task.settings.contactAnalysisVersionId === shownVersion.id);
+  const contactContinuations = new Map<string, GraphicsTask>();
+  for (const task of [...objectTasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    if (isShownContactContinuation(task)) contactContinuations.set(String(task.settings.contactPhase), task);
+  }
+  const visibleTasks = [...new Map([...latestTaskByOperation.values(), ...latestResultByOperation.values(), ...contactContinuations.values(), ...(contactReviewActive && shownContactTask ? [shownContactTask] : [])].map(task => [task.id, task])).values()]
     .filter(
       (task) =>
-        (contactReviewActive ? task.id === shownContactTask?.id : task.taskId === taskId) ||
+        (contactReviewActive ? task.id === shownContactTask?.id || isShownContactContinuation(task) : task.taskId === taskId) ||
         ["running", "submission_unknown", "awaiting_approval"].includes(
           task.status,
         ),
@@ -872,7 +888,8 @@ export function GraphicsStudio({
 
   function showTaskResult(task: GraphicsTask) {
     const results = task.outputVersionIds.map(id => versions.find(version => version.id === id)).filter((version): version is AssetVersion => !!version);
-    const result = [...results].reverse().find(version => version.partSpace || version.partSource) ?? results[0];
+    const contactResult = task.settings.contactPhase ? contactVersionForTask(task) : undefined;
+    const result = contactResult ?? [...results].reverse().find(version => version.partSpace || version.partSource) ?? results[0];
     if (result) showVersion(result);
     document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }
@@ -889,14 +906,14 @@ export function GraphicsStudio({
 
   function adoptVersion(version: AssetVersion) {
     if (version.contact?.phase === 'analyze' || version.contact?.status === 'blocked') return;
-    if (version.slot.startsWith('part-') && objectTasks.some(task => task.taskId === 'M06' && task.settings.contactPhase === 'repair' && task.outputVersionIds.includes(version.id))) return;
+    if (version.slot.startsWith('part-') && objectTasks.some(task => task.taskId === 'M06' && ['repair', 'reconstruct'].includes(String(task.settings.contactPhase)) && task.outputVersionIds.includes(version.id))) return;
     if (version.slot === 'part-head' && acceptedHeadId && acceptedHeadId !== version.id) setHeadBaselineId(acceptedHeadId);
     void run({ kind: 'accept', objectId: version.objectId, versionId: version.id }, shownAssembly && version.id === shownVersion?.id ? '이 조립 전체와 같은 작업의 파트를 함께 채택했습니다. 다음 작업은 직접 실행하세요.' : `${roles[version.role]} / ${version.slot}에 채택했습니다. 다음 작업은 직접 실행하세요.`);
   }
 
-  async function prepareContact(source: AssetVersion, phase: 'analyze' | 'repair') {
+  async function prepareContact(source: AssetVersion, phase: 'analyze' | 'repair' | 'reconstruct') {
     if (disabled || active) return;
-    const prepared = await run({ kind: 'prepare-contact', versionId: source.id, phase }, `${phase === 'analyze' ? '접합 영역 분석' : '허용 영역 보정'}의 입력·사용량 카드를 준비했습니다. 기존 결과와 채택 상태는 유지됩니다.`);
+    const prepared = await run({ kind: 'prepare-contact', versionId: source.id, phase }, `${phase === 'analyze' ? '접합 영역 분석' : phase === 'reconstruct' ? '목·헤어 구조 보정' : '허용 영역 보정'}의 입력·사용량 카드를 준비했습니다. 기존 결과와 채택 상태는 유지됩니다.`);
     if (prepared) { setStage('assembly'); setTaskId('M06'); setHeadComparisonOpen(false); }
   }
 
@@ -1381,7 +1398,7 @@ export function GraphicsStudio({
             </nav>
             {shownContact && contactReviewActive ? <div className="gs-execution-card gs-contact-current" data-testid="graphics-contact-current">
               <div className="gs-creation-execute"><div>
-                <strong>{shownContact.status === 'blocked' ? shownContact.phase === 'analyze' ? '영역 분석 완료 · 보정 불가' : '보정 중단 · 범위 제한' : shownContact.phase === 'analyze' ? '수정 영역 검토' : '접합 보정 결과 검토'}</strong>
+                <strong>{shownContact.status === 'blocked' ? shownContact.phase === 'analyze' ? '영역 분석 완료 · 보정 불가' : '보정 중단 · 범위 제한' : shownContact.phase === 'analyze' ? '수정 영역 검토' : shownContact.phase === 'reconstruct' ? '목·헤어 구조 보정 결과 검토' : '접합 보정 결과 검토'}</strong>
                 <small>{shownContact.status === 'blocked' ? '보호 영역을 유지한 채 수정할 범위를 확정하지 못했습니다. 원본과 채택 상태는 그대로입니다.' : '아래 비교 화면에서 이번 결과를 확인하세요. 새 작업은 자동으로 시작하지 않습니다.'}</small>
               </div><button type="button" onClick={() => document.querySelector('[data-testid="graphics-contact-heading"]')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>검토 내용 보기</button></div>
             </div> : <div className="gs-execution-card">
@@ -1461,7 +1478,7 @@ export function GraphicsStudio({
                         {task.settings.clipName
                           ? `${task.settings.clipName} · `
                           : task.settings.partLabel || task.settings.partId ? `${task.settings.partLabel ?? task.settings.partId} · ` : ""}
-                        {task.settings.contactPhase ? task.settings.contactPhase === 'analyze' ? '목·헤어 접합 영역 분석' : '목·헤어 접합 보정' : findGraphicsTask(task.taskId)?.name ?? task.taskId} ·{" "}
+                        {task.settings.contactPhase ? task.settings.contactPhase === 'analyze' ? '목·헤어 접합 영역 분석' : task.settings.contactPhase === 'reconstruct' ? '목·헤어 구조 보정' : '목·헤어 접합 보정' : findGraphicsTask(task.taskId)?.name ?? task.taskId} ·{" "}
                         {task.runtimeApproval && task.status === "running"
                           ? "사용자 확인 대기"
                           : task.partSourceRecoveryVersionId && task.status === 'running' ? '로컬 파트 작업 원본 준비 중'
@@ -1474,7 +1491,7 @@ export function GraphicsStudio({
                           : task.status === 'cancelled' && task.paidApproval ? '추적 중지 · 원격 상태 확인 필요'
                           : taskStatuses[task.status]}
                       </strong>
-                      <p>{contactResultForTask(task)?.status === 'blocked' ? contactResultForTask(task)?.warnings[0] || '보호 영역과 수정 범위를 확정하지 못해 중단했습니다. 기존 조립·파트와 채택 상태는 유지됩니다.' : task.status === 'review' && task.settings.contactPhase === 'analyze' ? '분석한 수정 영역을 먼저 확인하세요. 이 결과는 모델 채택 대상이 아닙니다.' : task.message || "작업 상태를 확인하고 있습니다."}</p>
+                      <p>{contactResultForTask(task)?.status === 'blocked' ? contactResultForTask(task)?.warnings[0] || '보호 영역과 수정 범위를 확정하지 못해 중단했습니다. 기존 조립·파트와 채택 상태는 유지됩니다.' : task.status === 'review' && contactResultForTask(task)?.status === 'repaired' ? '수정 후보의 보존 검사를 통과했습니다. 외형은 전후 비교에서 검토한 뒤 채택하세요. 이전 중단 진단과 원본은 유지됩니다.' : task.status === 'review' && task.settings.contactPhase === 'analyze' ? '분석한 수정 영역을 먼저 확인하세요. 이 결과는 모델 채택 대상이 아닙니다.' : task.message || "작업 상태를 확인하고 있습니다."}</p>
                       {task.status === 'cancelled' && task.paidApproval && !task.partSpaceRecoveryVersionId && !task.partSourceRecoveryVersionId && <p className="gs-warning">유료 실행이 승인된 요청입니다. 추적 중지는 원격 처리나 과금 취소를 뜻하지 않습니다. 이전에 완료된 결과는 별도로 유지됩니다.</p>}
                       {task.errorCode && <code>{task.errorCode}</code>}
                       {task.runtimeApproval && task.status === "running" && (
@@ -1535,9 +1552,11 @@ export function GraphicsStudio({
                       )}
                       {task.status === "review" && task.outputVersionIds.some(id => versions.some(version => version.id === id)) && (
                         <button
+                          className={isShownContactContinuation(task) ? 'gs-primary' : undefined}
+                          data-testid={`graphics-task-result-${task.id}`}
                           onClick={() => showTaskResult(task)}
                         >
-                          완료 · 결과 보기
+                          {isShownContactContinuation(task) ? contactResultForTask(task)?.status === 'blocked' ? '중단 이유 보기' : '새 보정 결과 보기' : '완료 · 결과 보기'}
                         </button>
                       )}
                       {task.status === "review" && task.taskId === "M07" && (
@@ -1994,7 +2013,10 @@ export function GraphicsStudio({
                     </button>
                   </div>}
                   {shownVersion && shownContact ? <GraphicsContactReview key={shownVersion.id} projectId={project.id} version={shownVersion} disabled={disabled || active} accepted={shownAcceptanceComplete} sourceAvailable={versions.some(version => version.id === shownContact.sourceVersionId)}
+                    procedureRecoveryAvailable={contactProcedureRecoveryAvailable}
                     onPrepareRepair={() => void prepareContact(shownVersion, 'repair')}
+                    onPrepareReconstruct={() => void prepareContact(shownVersion, 'reconstruct')}
+                    onRecoverProcedure={() => { if (shownContactTask) void run({ kind: 'recover-contact-procedure', taskId: shownContactTask.id }, '저장된 보정 절차의 로컬 호환 복구를 요청했습니다. 추가 GPT 호출 없이 같은 작업의 결과를 확인합니다.'); }}
                     onKeepSource={() => { const source = versions.find(version => version.id === shownContact.sourceVersionId); if (source) showVersion(source); setNotice('기존 조립 결과로 돌아왔습니다. 채택 상태와 파일은 변경하지 않았습니다.'); }}
                     onAccept={() => adoptVersion(shownVersion)} onImage={(path, label) => setFocusedImage({ path, label })} /> : <div className={`gs-preview${headComparisonOpen && headCandidate && headBaseline ? ' gs-preview-comparison' : ''}`} data-testid="graphics-preview">
                     {headComparisonOpen && headCandidate && headBaseline

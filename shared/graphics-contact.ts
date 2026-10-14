@@ -1,7 +1,7 @@
 /** Saved, app-owned contact review. All paths are registered project-relative files. */
 export type GraphicsContactReview = {
   schemaVersion: 1;
-  phase: 'analyze' | 'repair';
+  phase: 'analyze' | 'repair' | 'reconstruct';
   status: 'ready' | 'blocked' | 'repaired';
   sourceVersionId: string;
   partVersionIds: string[];
@@ -15,7 +15,7 @@ export type GraphicsContactReview = {
 
 /** Rendering and continuation must use only registered, immutable evidence. */
 export function validateContactReview(value: GraphicsContactReview, registeredPaths: string[]): void {
-  if (!value || value.schemaVersion !== 1 || !['analyze', 'repair'].includes(value.phase) ||
+  if (!value || value.schemaVersion !== 1 || !['analyze', 'repair', 'reconstruct'].includes(value.phase) ||
       !(value.phase === 'analyze' ? ['ready', 'blocked'] : ['repaired', 'blocked']).includes(value.status) ||
       typeof value.sourceVersionId !== 'string' || !value.sourceVersionId ||
       !Array.isArray(value.partVersionIds) || value.partVersionIds.length !== 3 || new Set(value.partVersionIds).size !== 3 ||

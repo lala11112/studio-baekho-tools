@@ -55,6 +55,8 @@ export type GraphicsTask = {
   /** Durable, independently registered candidate executions; never repeat them on recovery. */
   completedExecutions?: string[];
   derivativeRefreshRequested?: boolean;
+  /** Explicit one-use local compatibility recovery of an already-authored contact procedure; never author again. */
+  contactProcedureRecoveryRequested?: boolean;
   partSpaceRecoveryVersionId?: string;
   partSourceRecoveryVersionId?: string;
   objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted" | "creation">;
@@ -123,7 +125,8 @@ export function requiresPartSourcePreparation(workspace: GraphicsWorkspace, vers
 }
 
 export type GraphicsAction =
-  | { kind: 'prepare-contact'; versionId: string; phase: 'analyze' | 'repair' }
+  | { kind: 'prepare-contact'; versionId: string; phase: 'analyze' | 'repair' | 'reconstruct' }
+  | { kind: 'recover-contact-procedure'; taskId: string }
   | { kind: "create-object"; name: string; objectKind: GraphicsKind; creation?: CreationSpec }
   | { kind: "update-object"; objectId: string; patch: Partial<Pick<GraphicsObject, "name" | "selectedTasks" | "instruction" | "settings" | "references" | "creation">> }
   | { kind: "import"; objectId: string; role: GraphicsRole; clipName?: string }
