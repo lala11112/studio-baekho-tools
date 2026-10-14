@@ -13,6 +13,8 @@ export type AssetVersion = {
   partSpace?: { schemaVersion: 1; sourceVersionId: string; providerVersionId: string; reportPath: string };
   /** Separate native working copy with stable part/mesh IDs; provider bytes remain immutable. */
   partSource?: { schemaVersion: 1; providerVersionId: string; reportPath: string };
+  /** Explicit local recovery reuses existing material pixels; it does not generate texture detail. */
+  surfaceRepair?: { schemaVersion: 1; providerVersionId: string; repairVersionId: string; originalVersionId: string; reportPath: string };
   /** Analysis is review-only; repaired main and placed parts are adopted atomically. */
   contact?: import('./graphics-contact').GraphicsContactReview;
 };
@@ -59,6 +61,7 @@ export type GraphicsTask = {
   contactProcedureRecoveryRequested?: boolean;
   partSpaceRecoveryVersionId?: string;
   partSourceRecoveryVersionId?: string;
+  surfaceRecoveryVersionId?: string;
   objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted" | "creation">;
   targetProfile?: UnityTargetProfile;
   deliveryId?: string;
@@ -124,6 +127,21 @@ export function requiresPartSourcePreparation(workspace: GraphicsWorkspace, vers
     workspace.tasks.some(task => ['M01', 'M02', 'M03'].includes(task.taskId) && !!task.settings.partId && task.outputVersionIds.includes(version.id));
 }
 
+/** Only the exact append-only repair -> raw texture branch is eligible for this bounded recovery. */
+export function surfaceRepairSources(workspace: GraphicsWorkspace, provider: AssetVersion): { repair: AssetVersion; original: AssetVersion } | undefined {
+  if (provider.surfaceRepair || provider.provenance.type !== 'tripo' || provider.role !== 'model' || provider.slot !== 'main') return undefined;
+  const producers = workspace.tasks.filter(task => task.taskId === 'T03' && task.objectId === provider.objectId && task.outputVersionIds.includes(provider.id));
+  if (producers.length !== 1) return undefined;
+  const texture = producers[0];
+  const repair = workspace.versions.find(version => version.id === texture.inputVersionIds[0]);
+  if (!repair || repair.objectId !== provider.objectId || repair.slot !== provider.slot || repair.role !== 'model' || !provider.sourceVersionIds.includes(repair.id)) return undefined;
+  const repairs = workspace.tasks.filter(task => task.taskId === 'M09' && task.status === 'review' && task.objectId === repair.objectId && task.outputVersionIds.includes(repair.id));
+  if (repairs.length !== 1) return undefined;
+  const original = workspace.versions.find(version => version.id === repairs[0].inputVersionIds[0]);
+  if (!original || original.objectId !== provider.objectId || original.slot !== provider.slot || original.role !== 'model' || !repair.sourceVersionIds.includes(original.id)) return undefined;
+  return { repair, original };
+}
+
 export type GraphicsAction =
   | { kind: 'prepare-contact'; versionId: string; phase: 'analyze' | 'repair' | 'reconstruct' }
   | { kind: 'recover-contact-procedure'; taskId: string }
@@ -133,6 +151,7 @@ export type GraphicsAction =
   | { kind: "accept"; objectId: string; versionId: string }
   | { kind: 'restore-part-space'; versionId: string }
   | { kind: 'prepare-part-source'; versionId: string }
+  | { kind: 'repair-surface-uv'; versionId: string }
   | { kind: "prepare"; objectId: string; taskId: string }
   | { kind: "approve" | "cancel" | "recover" | "refresh-parts"; taskId: string }
   | { kind: "runtime-approval"; taskId: string; approvalId: string; answer: WorkbenchRuntimeAnswer }

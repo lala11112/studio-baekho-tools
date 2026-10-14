@@ -9,9 +9,11 @@ import { workbenchUsage } from "../shared/workbench-usage";
 import type { Workbench, WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from "../shared/workbench";
 import type { Generation, Quote } from "../shared/types";
 import type { AssetVersion, GraphicsAction, GraphicsFile, GraphicsObject, GraphicsRole, GraphicsTask, GraphicsWorkspace, UnityClipSettings } from "../shared/graphics";
-import { isGraphicsClipName, graphicsLegacyUnlinkProblem, requiresPartSpaceRestoration, requiresPartSourcePreparation } from "../shared/graphics";
+import { isGraphicsClipName, graphicsLegacyUnlinkProblem, requiresPartSpaceRestoration, requiresPartSourcePreparation, surfaceRepairSources } from "../shared/graphics";
 import { restoreTripoPartPreservation } from './tripo-part-preservation';
 import { prepareTripoPartSource, preflightTripoPartSource } from './tripo-part-source';
+import { inspectGraphicsSurface } from './graphics-surface-preflight';
+import { repairGraphicsSurface } from './graphics-surface-repair';
 import { compileCreation, validateCreation, creationCompositionStrategy } from "../shared/graphics-creation";
 import { freezeUnityRigContract } from '../shared/graphics-rig';
 import { DEFAULT_MODEL_FACE_LIMIT, requireModelGeometry } from '../shared/graphics-model-geometry';
@@ -68,12 +70,15 @@ type Options = {
   restorePartSpace?: typeof restoreTripoPartPreservation;
   preparePartSource?: typeof prepareTripoPartSource;
   preflightPartSource?: typeof preflightTripoPartSource;
+  inspectSurface?: typeof inspectGraphicsSurface;
+  repairSurface?: typeof repairGraphicsSurface;
   legacyActive?: (id: string) => boolean;
   probe?: () => Promise<NonNullable<GraphicsWorkspace["connections"]>>;
 };
 
 /** Object workspace is an adapter over the existing submission journal, not another paid-job engine. */
 export class GraphicsEngine {
+  private preparing = new Set<string>();
   private active = new Map<string, { projectId: string; controller: AbortController }>();
   private pendingApprovals = new Map<string, { projectId: string; approvalId: string; resolve: (answer: WorkbenchRuntimeAnswer) => void }>();
   private approvalQueues = new Map<string, Promise<void>>();
@@ -89,8 +94,8 @@ export class GraphicsEngine {
       let changed = false;
       for (const t of w.tasks.filter(t => t.status === "running")) {
         this.closeRuntimeApproval(t, "interrupted");
-        if (t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId) {
-          t.status = 'failed'; t.message = '파트 로컬 처리가 중단됐습니다. 저장된 API 결과만 복구하며 새 제출은 하지 않습니다.';
+        if (t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId || t.surfaceRecoveryVersionId) {
+          t.status = 'failed'; t.message = '로컬 처리가 중단됐습니다. 저장된 API 결과만 복구하며 새 제출은 하지 않습니다.';
           changed = true; continue;
         }
         if (t.taskId === "X05" && t.deliveryId && w.deliveries.some(d => d.id === t.deliveryId && d.status === "queued")) continue;
@@ -499,6 +504,7 @@ export class GraphicsEngine {
       case "recover": return this.recover(id, action.taskId);
       case 'restore-part-space': return this.restorePartSpace(id, action.versionId);
       case 'prepare-part-source': return this.preparePartSource(id, action.versionId);
+      case 'repair-surface-uv': return this.repairSurface(id, action.versionId);
       case "refresh-parts": return this.refreshParts(id, action.taskId);
       case "runtime-approval": {
         const task = w.tasks.find(value => value.id === action.taskId), pending = this.pendingApprovals.get(action.taskId);
@@ -524,7 +530,7 @@ export class GraphicsEngine {
         if (t.status === "review") throw Error("완료한 결과는 취소하지 않습니다. 다른 버전을 채택할 수 있습니다.");
         this.closeRuntimeApproval(t, "cancelled");
         this.active.get(t.id)?.controller.abort();
-        if (!t.partSpaceRecoveryVersionId && !t.partSourceRecoveryVersionId) for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
+        if (!t.partSpaceRecoveryVersionId && !t.partSourceRecoveryVersionId && !t.surfaceRecoveryVersionId) for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
         if (t.deliveryId && t.targetProfile) {
           const index = w.deliveries.findIndex(d => d.id === t.deliveryId);
           if (index >= 0) {
@@ -534,7 +540,7 @@ export class GraphicsEngine {
             }
           }
         }
-        t.status = "cancelled"; t.message = t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId ? '파트 로컬 처리를 중지했습니다. 기존 API 결과는 유지합니다.' : "사용자가 중지했습니다. 이미 제출한 원격 작업의 과금 취소를 뜻하지는 않습니다."; t.updatedAt = now();
+        t.status = "cancelled"; t.message = t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId || t.surfaceRecoveryVersionId ? '로컬 처리를 중지했습니다. 기존 API 결과는 유지합니다.' : "사용자가 중지했습니다. 이미 제출한 원격 작업의 과금 취소를 뜻하지는 않습니다."; t.updatedAt = now();
         return this.save(w);
       }
       case "import": throw Error("앱 파일 선택 창을 사용하세요.");
@@ -611,8 +617,28 @@ export class GraphicsEngine {
       cost: { provider: 'Codex', credits: null, basis: `추가 Tripo·fal 비용 없음 · Blender + gpt-6-astra ${phase === 'analyze' ? '영역 분석' : phase === 'reconstruct' ? '목·헤어 국소 면 보정 (저장 진단 재사용)' : '영역 보정'} 최대 1회 · 자동 재시도 없음. GPT 사용량은 발생하며 모델·추론 설정은 유지합니다.` } };
     w.tasks.push(task); return this.save(w);
   }
-  private prepare(id: string, objectId: string, taskId: string) {
-    const w = this.get(id), stored = this.object(w, objectId), definition = findGraphicsTask(taskId);
+  private async requireTextureSurface(id: string, source: AssetVersion, signal: AbortSignal) {
+    // Inspect the same first native file selected by apiQuote, not a different preview.
+    const file = source.files.find(file => /\.(fbx|glb|obj|stl)$/i.test(file.path));
+    if (!file) throw Error('텍스처 입력에는 FBX/GLB/OBJ/STL 원본이 필요합니다.');
+    this.verified(id, file);
+    const result = await (this.options.inspectSurface ?? inspectGraphicsSurface)({
+      projectRoot: this.store.directory(id), source: file, sourceVersionId: source.id,
+      blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal,
+    });
+    signal.throwIfAborted(); this.verified(id, file);
+    if (!result.report.ready) throw Error(`텍스처 준비 불가 · ${source.label}: ${result.report.reason} UV 작업 결과를 확인·채택한 뒤 텍스처를 준비하세요. 업로드·유료 제출은 하지 않았습니다.`);
+  }
+  private async prepare(id: string, objectId: string, taskId: string) {
+    const key = `${id}:${objectId}`;
+    if (this.preparing.has(key)) throw Error('같은 오브젝트의 입력을 확인 중입니다. 잠시 기다려 주세요.');
+    this.preparing.add(key);
+    try { return await this.prepareChecked(id, objectId, taskId); }
+    finally { this.preparing.delete(key); }
+  }
+  private async prepareChecked(id: string, objectId: string, taskId: string) {
+    let w = this.get(id);
+    const stored = this.object(w, objectId), definition = findGraphicsTask(taskId);
     const compiled = stored.creation ? compileCreation(stored, taskId) : undefined;
     const base = compiled ? { ...stored, settings: compiled.settings, instruction: compiled.instruction, creation: compiled.spec } : stored;
     if (taskId === 'M06' && base.settings.contactPhase !== undefined) throw Error('접합 검토 버튼에서 정확한 조립 후보를 선택하세요.');
@@ -642,6 +668,15 @@ export class GraphicsEngine {
     if (taskId === "X05") {
       const issues = getGraphicsCompatibility(o, w.versions);
       if (issues.length) throw Error(issues.join(" · "));
+    }
+    if (taskId === 'T03') {
+      await this.requireTextureSurface(id, inputs[0], new AbortController().signal);
+      // Another object may change while the local inspection runs. Never overwrite it
+      // or prepare against a source/setting selection that the user changed meanwhile.
+      w = this.get(id);
+      if (JSON.stringify(this.object(w, objectId)) !== JSON.stringify(stored)) throw Error('검사 중 원본 또는 설정이 변경됐습니다. 현재 선택으로 다시 준비하세요.');
+      if (w.tasks.some(task => task.objectId === objectId && ['awaiting_approval', 'running', 'submission_unknown'].includes(task.status)))
+        throw Error('이 대상의 기존 작업을 먼저 확인하세요.');
     }
     const snapshot = { taskId, objectId, inputVersionIds: inputs.map(v => v.id), settings: { ...o.settings }, instruction: o.instruction };
     if (graphicsAstraTasks.has(taskId) && taskId !== 'M08') snapshot.settings.sourceVersionId = inputs[0].id;
@@ -732,6 +767,13 @@ export class GraphicsEngine {
       const controller = new AbortController();
       this.active.set(t.id, { projectId: id, controller });
       try {
+        if (t.taskId === 'T03') {
+          t.message = '텍스처 입력의 모든 면에 유효한 UV가 있는지 로컬에서 확인합니다.'; this.save(w);
+          await this.requireTextureSurface(id, inputs[0], controller.signal);
+          const latest = this.get(id), current = latest.tasks.find(value => value.id === taskId);
+          if (current?.status !== 'awaiting_approval') throw Error('실행 확인이 취소됐습니다. 업로드·제출하지 않았습니다.');
+          w = latest; t = current;
+        }
         if (['T01', 'T03'].includes(t.taskId) && t.settings.partId) {
           const source = inputs[0], sourceFile = source?.files.find(file => /\.fbx$/i.test(file.path));
           if (!sourceFile || source.slot !== `part-${t.settings.partId}`) throw Error('파트 UV·텍스처에는 같은 파트의 원본 FBX와 식별자가 필요합니다. 업로드·제출하지 않았습니다.');
@@ -1067,12 +1109,74 @@ export class GraphicsEngine {
     }).finally(() => { this.active.delete(task.id); });
     return this.get(id);
   }
+  private repairSurface(id: string, versionId: string) {
+    const w = this.get(id), provider = w.versions.find(version => version.id === versionId);
+    const lineage = provider && surfaceRepairSources(w, provider);
+    if (!provider || !lineage) throw Error('보완 원본과 연결된 저장 텍스처 결과를 선택하세요.');
+    const task = w.tasks.find(task => task.taskId === 'T03' && task.objectId === provider.objectId && task.outputVersionIds.includes(versionId))!;
+    if (!['review', 'failed', ...(task.surfaceRecoveryVersionId === provider.id ? ['cancelled'] : [])].includes(task.status)) throw Error('완료된 텍스처 결과만 복구할 수 있습니다.');
+    if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error('다른 제작이 실행 중입니다.');
+    const existing = w.versions.find(version => version.surfaceRepair?.providerVersionId === provider.id);
+    if (existing) { for (const file of existing.files) this.verified(id, file); return w; }
+    const { repair, original } = lineage;
+    const versions = [provider, repair, original];
+    const files = versions.map(version => version.files.find(file => /\.fbx$/i.test(file.path)));
+    if (files.some(file => !file)) throw Error('기존 재질 복구에는 텍스처·보완·보완 전 원본의 FBX가 필요합니다.');
+    for (const version of versions) for (const file of version.files) this.verified(id, file);
+    const controller = new AbortController();
+    this.active.set(task.id, { projectId: id, controller });
+    task.surfaceRecoveryVersionId = provider.id; task.status = 'running'; task.updatedAt = now();
+    task.message = '저장된 금속·색상 무늬로 빈 면의 UV를 로컬에서 복구합니다. 추가 API 비용·제작 GPT 호출 없음.';
+    this.save(w);
+    void (this.options.repairSurface ?? repairGraphicsSurface)({
+      projectRoot: this.store.directory(id), source: files[0]!, sourceVersionId: provider.id,
+      repairSource: files[1]!, repairVersionId: repair.id, originalSource: files[2]!, originalVersionId: original.id,
+      mode: 'reuse-planar-material', blenderPath: this.store.settings.blenderPath,
+      resources: this.options.resources, signal: controller.signal,
+      onProgress: message => {
+        if (controller.signal.aborted) return;
+        const current = this.get(id), running = current.tasks.find(value => value.id === task.id);
+        if (running?.status === 'running' && running.surfaceRecoveryVersionId === provider.id) { running.message = message; running.updatedAt = now(); this.save(current); }
+      },
+    }).then(result => {
+      controller.signal.throwIfAborted();
+      const current = this.get(id), running = current.tasks.find(value => value.id === task.id)!;
+      if (running.status !== 'running' || running.surfaceRecoveryVersionId !== provider.id) throw Error('재질 복구 상태가 변경됐습니다.');
+      for (const version of versions) for (const file of version.files) this.verified(id, file);
+      const report = result.report;
+      if (report.passed !== true || report.sourceVersionId !== provider.id || report.sourceSha256 !== files[0]!.sha256 ||
+          report.repairVersionId !== repair.id || report.repairSourceSha256 !== files[1]!.sha256 ||
+          report.originalVersionId !== original.id || report.originalSourceSha256 !== files[2]!.sha256 ||
+          report.localOnly !== true || report.modelTurns !== 0 || report.paidSubmissions !== 0 || !Array.isArray(report.warnings) ||
+          report.uniqueUvLayout !== false || report.visualQualityVerified !== false ||
+          ['staticOnly', 'appendOnlyAncestry', 'uniformCorrespondence', 'geometryPreserved', 'originalUVPreserved', 'onlyAddedDegenerateUVChanged', 'materialsAndImagesPreserved', 'allFacesHaveUV', 'fbxRoundTrip'].some(key => report.checks?.[key] !== true))
+        throw Error('재질 복구의 고정 원본·검사 기록이 다릅니다.');
+      for (const file of result.files) this.verified(id, file);
+      const output = result.files.map(file => this.file(id, file.path, file.kind)), reportFile = output.find(file => /\.json$/i.test(file.path));
+      if (!reportFile || !['.blend', '.fbx', '.glb'].every(extension => output.some(file => file.path.toLowerCase().endsWith(extension)))) throw Error('재질 복구 원본·미리보기·검사 기록이 없습니다.');
+      if (reportFile.bytes > 16 * 1024 * 1024 || JSON.stringify(JSON.parse(fs.readFileSync(this.store.file(id, reportFile.path), 'utf8'))) !== JSON.stringify(report)) throw Error('저장된 재질 복구 검사 기록이 다릅니다.');
+      const version: AssetVersion = { id: uid(), objectId: provider.objectId, role: provider.role, slot: provider.slot,
+        label: `${provider.label} · 빈 면 재질 복구`, files: output, createdAt: now(), sourceVersionIds: versions.map(version => version.id),
+        provenance: { type: 'local' }, warnings: report.warnings,
+        surfaceRepair: { schemaVersion: 1, providerVersionId: provider.id, repairVersionId: repair.id, originalVersionId: original.id, reportPath: reportFile.path } };
+      current.versions.push(version); running.outputVersionIds.push(version.id);
+      running.status = 'review'; delete running.surfaceRecoveryVersionId; running.updatedAt = now();
+      running.message = '기존 재질로 빈 면 UV 복구 완료 · 파일 보존 검사 통과. 공유한 무늬와 경계를 확인하고 수정본을 채택하세요. 추가 생성 비용 없음.';
+      this.save(current);
+    }).catch(error => {
+      const current = this.get(id), running = current.tasks.find(value => value.id === task.id);
+      if (running && running.status !== 'cancelled') { running.status = 'failed'; running.updatedAt = now();
+        running.message = `기존 재질 복구 보류 · ${error instanceof Error ? error.message : String(error)} · 원본 유지, 새 유료 제출 없음`; this.save(current); }
+    }).finally(() => this.active.delete(task.id));
+    return this.get(id);
+  }
   async recover(id: string, taskId: string) {
     const w = this.get(id), t = w.tasks.find(t => t.id === taskId);
     if (!t || !["failed", "submission_unknown"].includes(t.status)) throw Error("복구할 중단 작업이 없습니다.");
     if (t.contactProcedureRecoveryRequested) return this.recoverContactProcedure(id, taskId);
     if (t.partSpaceRecoveryVersionId) return this.restorePartSpace(id, t.partSpaceRecoveryVersionId);
     if (t.partSourceRecoveryVersionId) return this.preparePartSource(id, t.partSourceRecoveryVersionId);
+    if (t.surfaceRecoveryVersionId) return this.repairSurface(id, t.surfaceRecoveryVersionId);
     if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error("다른 제작이 실행 중입니다.");
     if (t.taskId === "X05" && !t.objectSnapshot?.accepted && !t.deliveryId) throw Error("이전 Unity 요청에 고정된 채택 기록이 없습니다. 새 전달 요청을 준비하세요. 원본은 보존됩니다.");
     if (t.quoteId) {
@@ -1131,7 +1235,7 @@ export class GraphicsEngine {
       const p = this.store.project(w.projectId);
       const restoreVersions: string[] = [];
       const prepareVersions: string[] = [];
-      for (const t of w.tasks.filter(t => t.status === "running" && t.quoteId && !t.partSpaceRecoveryVersionId && !t.partSourceRecoveryVersionId)) {
+      for (const t of w.tasks.filter(t => t.status === "running" && t.quoteId && !t.partSpaceRecoveryVersionId && !t.partSourceRecoveryVersionId && !t.surfaceRecoveryVersionId)) {
         const jobs = p.jobs.filter(j => j.quoteId === t.quoteId);
         if (!jobs.length) continue;
         if (jobs.some(j => ["queued", "submitting", "running"].includes(j.status))) continue;
