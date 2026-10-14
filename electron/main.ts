@@ -1,12 +1,12 @@
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { ScanResult } from '../src/shared/types';
 import { CodexService } from './services/codex';
 import { createPageTrustChecker } from './services/page-trust';
 import { scanUnityProject } from './services/unity-project';
-import { atomicWrite, createExportBundle, readProject, serializeProject } from './services/projects';
+import { atomicWrite, createExportBundle, createProjectCollection, readProject, serializeProject } from './services/projects';
 
 let window: BrowserWindow | null = null;
 let currentScan: ScanResult | null = null;
@@ -59,8 +59,16 @@ function registerHandlers(): void {
     if (result.canceled || !result.filePaths[0]) return ai.getStatus();
     return ai.selectExecutable(result.filePaths[0]);
   }));
-  handle('baekho:generate-image', settings => ai.generateImage(settings));
-  handle('baekho:extract-layout', (settings, dataUrl) => ai.extractLayout(settings, dataUrl));
+  handle('baekho:generate-image', (settings, region, catalog) => ai.generateImage(settings, region, catalog));
+  handle('baekho:extract-layout', (settings, dataUrl, region, catalog) => ai.extractLayout(settings, dataUrl, region, catalog));
+  handle('baekho:import-prop-catalog', () => nativeAction(async () => {
+    const result=await dialog.showOpenDialog(window!,{title:'Unity 소품 크기 정보 불러오기',filters:[{name:'Baekho prop catalog',extensions:['json']}],properties:['openFile']});
+    if(result.canceled||!result.filePaths[0])return null;
+    if((await stat(result.filePaths[0])).size>2*1024*1024)throw new Error('소품 크기 카탈로그는 2 MiB 이하로 선택하세요.');
+    const source=await readFile(result.filePaths[0],'utf8');
+    if(source.length>2*1024*1024)throw new Error('소품 카탈로그는 2MiB 이하로 만들어 주세요.');
+    return JSON.parse(source);
+  }));
   handle('baekho:cancel-generation', () => ai.cancel());
   handle('baekho:scan-project', () => nativeAction(async () => {
     const result = await dialog.showOpenDialog(window!, { title: 'Unity 프로젝트 폴더 선택', properties: ['openDirectory'] });
@@ -80,6 +88,16 @@ function registerHandlers(): void {
     await atomicWrite(result.filePath, serialized);
     return result.filePath;
   }));
+  handle('baekho:save-projects', value => nativeAction(async () => {
+    const collection = createProjectCollection(value);
+    const result = await dialog.showSaveDialog(window!, {
+      title: '선택한 Baekho 맵 후보 저장', defaultPath: 'BaekhoMapCandidates.zip',
+      filters: [{ name: 'Baekho project collection', extensions: ['zip'] }], properties: ['showOverwriteConfirmation'],
+    });
+    if (result.canceled || !result.filePath) return null;
+    await atomicWrite(result.filePath, collection);
+    return result.filePath;
+  }));
   handle('baekho:open-project', () => nativeAction(async () => {
     const result = await dialog.showOpenDialog(window!, {
       title: 'Baekho 프로젝트 열기', filters: [{ name: 'Baekho project', extensions: ['json'] }], properties: ['openFile'],
@@ -89,12 +107,40 @@ function registerHandlers(): void {
     currentScan = null;
     return project;
   }));
+  handle('baekho:open-comparison-project', () => nativeAction(async () => {
+    const result = await dialog.showOpenDialog(window!, {
+      title: '연결해서 확인할 맵 선택', filters: [{ name: 'Baekho project', extensions: ['json'] }], properties: ['openFile'],
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    return readProject(result.filePaths[0]);
+  }));
+  let recoveryWrites = Promise.resolve();
+  handle('baekho:save-recovery', value => {
+    const serialized = serializeProject(value);
+    const directory = path.join(app.getPath('userData'), 'recovery');
+    const pending = recoveryWrites.catch(() => undefined).then(async () => {
+      await mkdir(directory, { recursive: true });
+      await atomicWrite(path.join(directory, 'latest.baekho.json'), serialized);
+    });
+    recoveryWrites = pending;
+    return pending;
+  });
+  handle('baekho:load-recovery', async () => {
+    try { return await readProject(path.join(app.getPath('userData'), 'recovery', 'latest.baekho.json')); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+  });
   handle('baekho:export-bundle', value => nativeAction(async () => {
     const importerPath = path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'unity-importer/Editor/BaekhoMapImporter.cs');
     const importer = await readFile(importerPath, 'utf8').catch(() => { throw new Error('Unity 가져오기 스크립트가 없습니다. 앱 설치 또는 빌드를 확인해 주세요.'); });
     const runtimePath = path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'unity-importer/Runtime/BaekhoMapConnection.cs');
     const runtimeScript = await readFile(runtimePath, 'utf8').catch(() => { throw new Error('Unity 연결문 런타임 스크립트가 없습니다. 앱 설치 또는 빌드를 확인해 주세요.'); });
-    const bundle = await createExportBundle(value, currentScan, importer, runtimeScript);
+    const markerPath = path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'unity-importer/Runtime/BaekhoGameplayMarker.cs');
+    const markerScript = await readFile(markerPath, 'utf8').catch(() => { throw new Error('Unity 게임 지점 스크립트를 찾지 못했습니다.'); });
+    const fixturePath = path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'unity-importer/Runtime/BaekhoMapFixture.cs');
+    const fixtureScript = await readFile(fixturePath, 'utf8').catch(() => { throw new Error('Unity 배치물 스크립트를 찾지 못했습니다.'); });
+    const catalogPath=path.join(app.isPackaged?process.resourcesPath:app.getAppPath(),'unity-importer/Editor/BaekhoPropCatalog.cs');
+    const catalogScript=await readFile(catalogPath,'utf8');
+    const bundle = await createExportBundle(value, currentScan, importer, runtimeScript, markerScript, fixtureScript,catalogScript);
     const result = await dialog.showSaveDialog(window!, {
       title: 'Unity 프리팹 제작 번들 내보내기', defaultPath: 'BaekhoMap.zip',
       filters: [{ name: 'Unity import bundle', extensions: ['zip'] }], properties: ['showOverwriteConfirmation'],
@@ -121,8 +167,8 @@ function createWindow(): void {
     if (!window || window.isDestroyed()) return;
     const response = dialog.showMessageBoxSync(window, {
       type: 'warning', title: 'Baekho Map Forge', buttons: ['취소', '닫기'], defaultId: 0, cancelId: 0,
-      message: '저장되지 않은 변경 사항이나 진행 중인 작업이 있습니다.',
-      detail: '닫으면 저장하지 않은 내용이 사라지고 진행 중인 AI 요청이 취소됩니다.',
+      message: '저장되지 않은 맵·후보 또는 진행 중인 작업이 있습니다.',
+      detail: '닫으면 저장하지 않은 편집 내용과 맵 후보가 사라지고 진행 중인 AI 요청이 취소됩니다. 보관할 후보는 후보 비교에서 선택한 맵 저장으로 저장하세요.',
     });
     // Electron's preventDefault overrides the renderer's unload prevention.
     if (response === 1) event.preventDefault();

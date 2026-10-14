@@ -128,6 +128,11 @@ try {
   page.on('pageerror', error => rendererErrors.push(error.message));
   await page.waitForSelector('#preview canvas', { timeout: 30000 });
   await page.waitForFunction(() => typeof window.baekho?.getCodexStatus === 'function', undefined, { timeout: 15000 });
+  assert.equal(await page.evaluate(() => typeof window.baekho?.saveProjects), 'function');
+  await page.locator('[data-view="variants"]').click();
+  assert.equal(await page.locator('.variant-gallery-empty').isVisible(), true);
+  await page.locator('[data-view="3d"]').click();
+  await page.locator('#preview canvas').waitFor();
   report.pageUrl = page.url();
   report.previewVersion = await page.locator('header.topbar .pill').innerText();
   const status = await page.evaluate(async () => {

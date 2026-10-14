@@ -1,7 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import type { GridMap } from './shared/types';
-import { connectionPose, doorRotation, FLOOR_THICKNESS_RATIO } from './shared/map';
+import type { AssetBinding, Cell, FixtureRole, GridMap, Vec3 } from './shared/types';
+import { connectionAt, connectionPose, doorRotation, FLOOR_THICKNESS_RATIO } from './shared/map';
+import { fixturePosition, markerPosition } from './shared/features';
+import type { ModuleTransform, RegionRect } from './shared/editing';
+import { propPosition } from './shared/props';
+import type { LevelDesignReport } from './shared/level-design';
+import { floorSlabBounds, resolvedStructureFill, resolvedCliffFace } from './shared/structures';
 
 export interface PreviewState {
   position: { x: number; y: number; z: number };
@@ -11,6 +16,23 @@ export interface PreviewState {
 export interface PreviewOptions {
   selected?: { x: number; row: number } | null;
   onSelect?: (x: number, row: number) => void;
+  onFixtureSelect?: (id: string) => void;
+  onMarkerSelect?: (id: string) => void;
+  onPropSelect?: (id: string) => void;
+  selectedFixture?: string | null;
+  selectedMarker?: string | null;
+  selectedProp?: string | null;
+  region?: RegionRect | null;
+  showCeilings?: boolean;
+  showDeadzone?: boolean;
+  bindings?: AssetBinding[];
+  designReport?: LevelDesignReport;
+  showConnectionLabels?: boolean;
+  showFixtures?: boolean;
+  showMarkers?: boolean;
+  showCharacter?: boolean;
+  characterHeight?: number;
+  comparison?: { map: GridMap; transform: ModuleTransform; bindings?: AssetBinding[] };
   state?: PreviewState;
 }
 export interface PreviewHandle { dispose: () => void; getState: () => PreviewState }
@@ -25,11 +47,11 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
   host.appendChild(renderer.domElement);
   const scene = new THREE.Scene();
   const cell = map.cellSize;
-  const connections = map.connections.filter(connection => Number.isInteger(connection.x) && Number.isInteger(connection.row)
-    && connection.x >= 0 && connection.row >= 0 && connection.x < map.width && connection.row < map.height
-    && map.rows[connection.row][connection.x] === 'D' && [0, 90, 180, 270].includes(connection.direction)
+  const validConnections = (source: GridMap) => source.connections.filter(connection => Number.isInteger(connection.x) && Number.isInteger(connection.row)
+    && connection.x >= 0 && connection.row >= 0 && connection.x < source.width && connection.row < source.height
+    && source.rows[connection.row][connection.x] === 'D' && [0, 90, 180, 270].includes(connection.direction)
     && Number.isFinite(connection.width) && connection.width > 0 && Number.isFinite(connection.height) && connection.height > 0);
-  const connectionByCell = new Map(connections.map(connection => [`${connection.x}:${connection.row}`, connection]));
+  const connections = validConnections(map);
   renderer.domElement.setAttribute('aria-label', `높이와 계단을 편집할 수 있는 3D 맵. 셀 또는 연결문을 클릭해 선택하세요.${connections.length ? ` 외부 연결: ${connections.map(connection => `${connection.id} ${connection.label}`).join(', ')}.` : ''}`);
   const connectionKey = connections.length ? document.createElement('div') : null;
   if (connectionKey) {
@@ -40,11 +62,19 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
   }
   const span = Math.max(map.width, map.height) * cell;
   const elevations = map.elevations.flat();
-  const minimum = Math.min(0, ...elevations);
+  const minimum = Math.min(0, ...elevations, ...(map.cliffs ?? []).map(cliff => map.elevations[cliff.row][cliff.x] - cliff.depth),
+    ...(map.pitBottoms ?? []).map(bottom => bottom.y - bottom.thickness), ...(map.structureFills ?? []).map(fill => fill.position.y - fill.size.y / 2));
   const maximum = Math.max(0, ...elevations, ...map.ramps.map(ramp => map.elevations[ramp.row][ramp.x] + ramp.rise),
-    ...connections.map(connection => map.elevations[connection.row][connection.x] + connection.height + cell * 0.6));
+    ...(map.ceilings ?? []).map(ceiling => ceiling.undersideY + cell * FLOOR_THICKNESS_RATIO),
+    ...(map.wallHeights ?? []).map(wall => map.elevations[wall.row][wall.x] + wall.height),
+    ...connections.map(connection => map.elevations[connection.row][connection.x] + connection.height + cell * 0.6),
+    ...(map.structureFills ?? []).map(fill => fill.position.y + fill.size.y / 2),
+    ...(map.propInstances ?? []).map(prop => propPosition(map,prop,options.bindings?.find(b=>b.id===prop.bindingId)).y + prop.size.y));
   const verticalSpan = maximum - minimum;
-  const extent = Math.max(span + (connections.length ? cell * 2 : 0), verticalSpan * 1.3, cell * 8);
+  const comparison = options.comparison;
+  const comparisonSpan = comparison ? Math.max(comparison.map.width, comparison.map.height) * comparison.map.cellSize
+    + Math.max(Math.abs(comparison.transform.position.x), Math.abs(comparison.transform.position.z), Math.abs(comparison.transform.position.y)) * 2 : 0;
+  const extent = Math.max(span + (connections.length ? cell * 2 : 0), comparisonSpan, verticalSpan * 1.3, cell * 8);
   const groundY = minimum - cell * 0.2;
   const focusY = minimum + verticalSpan / 2;
   const camera = new THREE.OrthographicCamera(-extent, extent, extent, -extent, 0.01, extent * 20);
@@ -85,7 +115,15 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
     floor: material(0xd6d4c8), wall: material(0x667166), door: material(0xcb9f53),
     prop: material(0xb77756), connection: material(0x268d86), selectedConnection: material(0x2679dd),
     terrain: material(0xa4ad9d), stair: material(0xb69768),
+    bridge: material(0x8d7254), ceiling: material(0xc2b995), cliff: material(0x817967),
+    fixture: material(0x8d6b53), water: material(0x4d9fbd), hazard: material(0xd57b3b),
+    light: material(0xf9cf6c), character: material(0x3979c9),
+    lightHousing: material(0x596365), lightSurface: material(0xfff8e7), selectedLightSurface: material(0x86c2ff),
+    deadzone: material(0xd74a60),
   };
+  palette.deadzone.transparent = true; palette.deadzone.opacity = .28; palette.deadzone.depthWrite = false;
+  palette.lightSurface.emissive.set(0xffefc4); palette.lightSurface.emissiveIntensity = 1.2;
+  palette.selectedLightSurface.emissive.set(0x469bff); palette.selectedLightSurface.emissiveIntensity = 0.8;
   const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
   geometries.add(boxGeometry);
   const arrowShape = new THREE.Shape();
@@ -95,7 +133,7 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
   arrowShape.closePath();
   const arrowGeometry = new THREE.ExtrudeGeometry(arrowShape, { depth: cell * 0.035, bevelEnabled: false });
   geometries.add(arrowGeometry);
-  const box = (x: number, y: number, z: number, sx: number, sy: number, sz: number,
+  const addBox = (x: number, y: number, z: number, sx: number, sy: number, sz: number,
     mat: THREE.Material, cellIndex?: { x: number; row: number }, parent: THREE.Object3D = scene): THREE.Mesh => {
     const mesh = new THREE.Mesh(boxGeometry, mat);
     mesh.position.set(x, y, z);
@@ -106,11 +144,11 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
     parent.add(mesh);
     return mesh;
   };
-  const labelTexture = (id: string, label: string, selected: boolean): THREE.CanvasTexture => {
+  const labelTexture = (id: string, label: string, selected: boolean, accent = '#247e78'): THREE.CanvasTexture => {
     const canvas = document.createElement('canvas');
     canvas.width = 384; canvas.height = 136;
     const context = canvas.getContext('2d')!;
-    const color = selected ? '#2679dd' : '#247e78';
+    const color = selected ? '#2679dd' : accent;
     context.fillStyle = '#fbfdf7';
     context.beginPath(); context.roundRect(2, 2, 380, 132, 14); context.fill();
     context.strokeStyle = color; context.lineWidth = 3; context.stroke();
@@ -132,8 +170,17 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
     textures.add(texture);
     return texture;
   };
-  const ramps = new Map(map.ramps.map(ramp => [`${ramp.x}:${ramp.row}`, ramp]));
   const cellTops = new Map<string, number>();
+  const propMaterials = new Map<string, THREE.Material>();
+  const drawMap = (map: GridMap, parent: THREE.Object3D, interactive: boolean, bindings: AssetBinding[] = []) => {
+  const cell = map.cellSize;
+  const localGround = Math.min(0, ...map.elevations.flat()) - cell * 0.2;
+  const connectionByCell = new Map(validConnections(map).map(connection => [`${connection.x}:${connection.row}`, connection]));
+  const ramps = new Map(map.ramps.map(ramp => [`${ramp.x}:${ramp.row}`, ramp]));
+  const explicitPropCells = new Set((map.propInstances ?? []).flatMap(p=>p.cells).map(c=>`${c.x}:${c.row}`));
+  const box = (x: number, y: number, z: number, sx: number, sy: number, sz: number,
+    mat: THREE.Material, cellIndex?: { x: number; row: number }, target: THREE.Object3D = parent) =>
+    addBox(x, y, z, sx, sy, sz, mat, interactive ? cellIndex : undefined, target);
   for (let row = 0; row < map.height; row++) {
     for (let x = 0; x < map.width; x++) {
       const tile = map.rows[row]?.[x];
@@ -144,16 +191,26 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
       const index = { x, row };
       let top = y;
       // Supports visualize cliffs; the exported geometry comes from the user's mapped prefabs.
-      const supportHeight = y - groundY - cell * 0.12;
-      if (supportHeight > cell * 0.04) {
-        box(px, groundY + supportHeight / 2, pz, cell * 0.94, supportHeight, cell * 0.94, palette.terrain, index);
+      const supportHeight = y - localGround - cell * 0.12;
+      if (map.version !== 5 && tile !== 'B' && supportHeight > cell * 0.04) {
+        box(px, localGround + supportHeight / 2, pz, cell * 0.94, supportHeight, cell * 0.94, palette.terrain, index);
       }
-      box(px, y - cell * FLOOR_THICKNESS_RATIO / 2, pz, cell * 0.96, cell * FLOOR_THICKNESS_RATIO, cell * 0.96, palette.floor, index);
+      const slab = floorSlabBounds(map,index,bindings);
+      if(slab)box(px+slab.offset.x,slab.top-slab.thickness/2,pz+slab.offset.z,cell*.96,slab.thickness,cell*.96,palette.floor,index);
+      else if(tile==='B')box(px,y-cell*FLOOR_THICKNESS_RATIO/2,pz,cell*.96,cell*FLOOR_THICKNESS_RATIO,cell*.96,palette.bridge,index);
+      if (tile === 'B') {
+        const direction = map.bridges?.find(bridge => bridge.x === x && bridge.row === row)?.direction ?? 0;
+        const horizontal = direction === 90 || direction === 270;
+        for (let plank = -3; plank <= 3; plank++) box(px + (horizontal ? plank * cell * 0.13 : 0), y + cell * 0.012,
+          pz + (horizontal ? 0 : plank * cell * 0.13), horizontal ? cell * 0.1 : cell * 0.95, cell * 0.024,
+          horizontal ? cell * 0.95 : cell * 0.1, palette.stair, index);
+      }
       if (tile === '#') {
-        top += cell * 0.95;
-        box(px, y + cell * 0.475, pz, cell * 0.96, cell * 0.95, cell * 0.96, palette.wall, index);
+        const wallHeight = map.wallHeights?.find(wall => wall.x === x && wall.row === row)?.height ?? cell * 0.95;
+        top += wallHeight;
+        box(px, y + wallHeight / 2, pz, cell * 0.96, wallHeight, cell * 0.96, palette.wall, index);
       }
-      if (tile === 'P') {
+      if (tile === 'P' && !explicitPropCells.has(`${x}:${row}`)) {
         top += cell * 0.6;
         box(px, y + cell * 0.26, pz, cell * 0.62, cell * 0.52, cell * 0.62, palette.prop, index);
         box(px, y + cell * 0.56, pz, cell * 0.7, cell * 0.08, cell * 0.7, palette.prop, index);
@@ -166,8 +223,8 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
           port.name = `connection:${connection.id}`;
           port.position.copy(pose.position);
           port.rotation.y = THREE.MathUtils.degToRad(pose.rotation.y);
-          scene.add(port);
-          const selected = options.selected?.x === x && options.selected.row === row;
+          parent.add(port);
+          const selected = interactive && !!options.selected && connectionAt(map, options.selected.x, options.selected.row)?.id === connection.id;
           const frameMaterial = selected ? palette.selectedConnection : palette.connection;
           const thickness = Math.min(cell * 0.1, connection.width * 0.16, connection.height * 0.12);
           const depth = cell * 0.14;
@@ -183,8 +240,9 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
           arrow.position.set(0, cell * 0.13, cell * 0.62);
           arrow.rotation.x = Math.PI / 2;
           arrow.userData.cell = index;
-          pickable.push(arrow);
+          if (interactive) pickable.push(arrow);
           port.add(arrow);
+          if (interactive && options.showConnectionLabels !== false) {
           const labelMaterial = new THREE.SpriteMaterial({ map: labelTexture(connection.id, connection.label, selected),
             transparent: true, depthTest: false, depthWrite: false });
           materials.add(labelMaterial);
@@ -196,8 +254,9 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
           label.userData.cell = index;
           connectionLabels.push(label);
           port.add(label);
+          }
           top = y + connection.height + thickness;
-        } else {
+        } else if (!connectionAt(map, x, row)) {
           top += cell;
           const horizontal = doorRotation(map, row, x) === 90;
           for (const side of [-cell * 0.37, cell * 0.37]) {
@@ -215,16 +274,191 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
           const staircase = new THREE.Group();
           staircase.position.set(px, y, pz);
           staircase.rotation.y = THREE.MathUtils.degToRad(ramp.direction);
-          scene.add(staircase);
+          parent.add(staircase);
+          if (ramp.kind === 'slope') {
+            const half = cell * 0.48, wide = cell * 0.44;
+            const geometry = new THREE.BufferGeometry();
+            const vertices = new Float32Array([
+              -wide, 0, -half, wide, 0, -half, wide, ramp.rise, half,
+              -wide, 0, -half, wide, ramp.rise, half, -wide, ramp.rise, half,
+              -wide, 0, -half, -wide, ramp.rise, half, -wide, 0, half,
+              wide, 0, -half, wide, 0, half, wide, ramp.rise, half,
+              -wide, 0, half, -wide, ramp.rise, half, wide, ramp.rise, half,
+              -wide, 0, half, wide, ramp.rise, half, wide, 0, half,
+            ]);
+            for (let triangle = 0; triangle < vertices.length; triangle += 9) for (let axis = 0; axis < 3; axis++) {
+              const second = vertices[triangle + 3 + axis];
+              vertices[triangle + 3 + axis] = vertices[triangle + 6 + axis]; vertices[triangle + 6 + axis] = second;
+            }
+            geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+            geometry.computeVertexNormals(); geometries.add(geometry);
+            const slope = new THREE.Mesh(geometry, palette.stair);
+            slope.castShadow = true; slope.receiveShadow = true; slope.userData.cell = index;
+            if (interactive) pickable.push(slope);
+            staircase.add(slope);
+          } else {
           const count = Math.max(3, Math.min(16, Math.ceil(ramp.rise / (cell * 0.12))));
           for (let step = 0; step < count; step++) {
             const height = ramp.rise * (step + 1) / count;
             box(0, height / 2, -cell * 0.48 + (step + 0.5) * cell * 0.96 / count,
               cell * 0.88, height, cell * 0.96 / count, palette.stair, index, staircase);
           }
+          }
         }
       }
-      cellTops.set(`${x}:${row}`, top);
+      if (interactive) cellTops.set(`${x}:${row}`, top);
+    }
+  }
+  for (const cliff of map.cliffs ?? []) {
+    if (map.structureFills?.some(fill => fill.purpose === 'pitSide' && fill.x === cliff.x && fill.row === cliff.row && fill.direction === cliff.direction)) continue;
+    const geometry=resolvedCliffFace(map,cliff,bindings);if(!geometry)continue;
+    const face = new THREE.Group();
+    face.position.set(geometry.position.x,geometry.position.y,geometry.position.z);
+    face.rotation.y = THREE.MathUtils.degToRad(cliff.direction);
+    parent.add(face);
+    box(0,0,0,geometry.size.x,geometry.size.y,geometry.size.z,palette.cliff,cliff,face);
+  }
+  for (const fill of map.structureFills ?? []) {
+    const geometry=resolvedStructureFill(map,fill,bindings);if(!geometry)continue;
+    // Apply the same visual cell inset as ordinary walls.
+    const inset = fill.purpose === 'doorTop' ? .96 : 1;
+    const mesh = box(geometry.position.x,geometry.position.y,geometry.position.z,geometry.size.x*inset,geometry.size.y,geometry.size.z*inset,
+      fill.role === 'cliff' ? palette.cliff : palette.wall,fill);
+    mesh.name = `structure:${fill.id}`;
+    if (interactive) cellTops.set(`${fill.x}:${fill.row}`,Math.max(cellTops.get(`${fill.x}:${fill.row}`)??-Infinity,geometry.position.y+geometry.size.y/2));
+  }
+  for (const bottom of map.pitBottoms ?? []) {
+    if (bottom.kind === 'deadzone' && options.showDeadzone === false) continue;
+    const mesh = box((bottom.x-(map.width-1)/2)*cell,bottom.y-bottom.thickness/2,((map.height-1)/2-bottom.row)*cell,
+      cell,bottom.thickness,cell,bottom.kind==='deadzone'?palette.deadzone:palette.floor,bottom);
+    mesh.name = `pit-bottom:${bottom.kind}:${bottom.x}:${bottom.row}`;
+    if (bottom.kind==='deadzone') { mesh.castShadow=false;mesh.receiveShadow=false; }
+  }
+  if (options.showCeilings) for (const ceiling of map.ceilings ?? []) {
+    box((ceiling.x - (map.width - 1) / 2) * cell, ceiling.undersideY + cell * FLOOR_THICKNESS_RATIO / 2,
+      ((map.height - 1) / 2 - ceiling.row) * cell, cell * 0.96, cell * FLOOR_THICKNESS_RATIO, cell * 0.96, palette.ceiling, ceiling);
+  }
+  const icons: Record<FixtureRole, string> = { light: '빛', railing: '난간', column: '기둥', arch: '아치', water: '물', hazard: '위험', trap: '함정',
+    gate: '문', switch: '스위치', secretDoor: '비밀문', rest: '휴식', merchant: '상인', altar: '제단', decoration: '장식' };
+  const addIcon = (id: string, label: string, position: Vec3, selected: boolean, userData: Record<string, unknown>, scale = 0.6, accent?: string) => {
+    const labelMaterial = new THREE.SpriteMaterial({ map: labelTexture(label, id, selected, accent), transparent: true, depthTest: true });
+    materials.add(labelMaterial);
+    const sprite = new THREE.Sprite(labelMaterial);
+    sprite.position.copy(position); sprite.scale.set(cell * scale, cell * scale * 136 / 384, 1);
+    sprite.userData = userData;
+    if (interactive) pickable.push(sprite);
+    parent.add(sprite);
+  };
+  for (const prop of map.propInstances ?? []) {
+    const binding=bindings.find(b=>b.id===prop.bindingId),position=propPosition(map,prop,binding);
+    const selected=interactive&&(options.selectedProp===prop.id||!!options.selected&&prop.cells.some(c=>c.x===options.selected!.x&&c.row===options.selected!.row));
+    if(!propMaterials.has(prop.category)) {
+      let hash=0;for(const c of prop.category)hash=(Math.imul(hash,31)+c.charCodeAt(0))>>>0;
+      const color=new THREE.Color().setHSL((hash%360)/360,.28,.52);
+      propMaterials.set(prop.category,material(color.getHex()));
+    }
+    const mesh=box(position.x,position.y+prop.size.y/2,position.z,prop.size.x,prop.size.y,prop.size.z,
+      selected?palette.selectedConnection:propMaterials.get(prop.category)!,prop);
+    mesh.name=`prop:${prop.id}`;mesh.userData.propId=prop.id;
+    if(interactive)for(const c of prop.cells)cellTops.set(`${c.x}:${c.row}`,position.y+prop.size.y);
+    // Large catalogs use selection labels to avoid thousands of canvas textures.
+    if(selected||(map.propInstances?.length??0)<=40) addIcon(`${prop.category} · ${prop.size.x.toFixed(1)} × ${prop.size.y.toFixed(1)} × ${prop.size.z.toFixed(1)}m`,
+      binding?.label??prop.bindingId,{...position,y:position.y+prop.size.y+cell*.18},selected,{propId:prop.id,cell:{x:prop.x,row:prop.row}},selected?1.5:1.1,'#8a5a3e');
+  }
+  if (options.showFixtures !== false) for (const fixture of map.fixtures ?? []) {
+    const position = fixturePosition(map, fixture);
+    const group = new THREE.Group(); group.name = `fixture:${fixture.id}`;
+    group.position.copy(position); group.rotation.y = THREE.MathUtils.degToRad(fixture.direction); parent.add(group);
+    const selected = interactive && options.selectedFixture === fixture.id;
+    const mat = selected ? palette.selectedConnection : fixture.role === 'light' ? palette.light : fixture.role === 'water' ? palette.water
+      : fixture.role === 'hazard' || fixture.role === 'trap' ? palette.hazard : palette.fixture;
+    const part = (x: number, y: number, z: number, sx: number, sy: number, sz: number, partMaterial: THREE.Material = mat) => {
+      const mesh = box(x, y, z, sx, sy, sz, partMaterial, undefined, group);
+      mesh.userData.fixtureId = fixture.id;
+      if (interactive) pickable.push(mesh);
+    };
+    let iconHeight = cell * 0.72;
+    if (fixture.role === 'water' || fixture.role === 'hazard' || fixture.role === 'trap') {
+      part(0, cell * 0.025, 0, cell * 0.84, cell * 0.05, cell * 0.84); iconHeight = cell * 0.22;
+    } else if (fixture.role === 'railing') {
+      for (const side of [-1, 1]) part(side * cell * 0.4, cell * 0.28, 0, cell * 0.06, cell * 0.56, cell * 0.06);
+      part(0, cell * 0.5, 0, cell * 0.88, cell * 0.07, cell * 0.07);
+    } else if (fixture.role === 'arch' || fixture.role === 'gate' || fixture.role === 'secretDoor') {
+      for (const side of [-1, 1]) part(side * cell * 0.38, cell * 0.56, 0, cell * 0.15, cell * 1.12, cell * 0.17);
+      part(0, cell * 1.05, 0, cell * 0.92, cell * 0.18, cell * 0.17); iconHeight = cell * 1.3;
+      if (fixture.role !== 'arch') part(0, cell * 0.5, 0, cell * 0.6, cell * 0.95, cell * 0.08);
+    } else if (fixture.role === 'column') {
+      part(0, cell * 0.65, 0, cell * 0.3, cell * 1.3, cell * 0.3); iconHeight = cell * 1.5;
+    } else if (fixture.role === 'light') {
+      const housing = selected ? palette.selectedConnection : palette.lightHousing;
+      const surface = selected ? palette.selectedLightSurface : palette.lightSurface;
+      if (fixture.anchor === 'ceiling') {
+        // The fixture root is the ceiling underside. Fluorescent strips face down into the room.
+        part(0, -cell * 0.025, 0, cell * 0.76, cell * 0.05, cell * 0.25, housing);
+        for (const side of [-1, 1]) part(0, -cell * 0.062, side * cell * 0.065,
+          cell * 0.66, cell * 0.024, cell * 0.055, surface);
+        iconHeight = cell * 0.18;
+      } else if (fixture.anchor === 'wall') {
+        // Local +Z follows fixture.direction, placing the luminous face in front of the wall.
+        part(0, 0, cell * 0.027, cell * 0.55, cell * 0.37, cell * 0.054, housing);
+        part(0, 0, cell * 0.06, cell * 0.47, cell * 0.29, cell * 0.014, surface);
+        iconHeight = cell * 0.3;
+      } else {
+        part(0, 0, 0, cell * 0.18, cell * 0.26, cell * 0.18); iconHeight = cell * 0.3;
+      }
+    } else {
+      part(0, cell * 0.22, 0, cell * 0.45, cell * 0.44, cell * 0.45);
+    }
+    const icon = fixture.role === 'light' ? fixture.anchor === 'ceiling' ? '✦ 형광등' : fixture.anchor === 'wall' ? '✦ 발광판' : '✦ 조명' : icons[fixture.role];
+    addIcon(fixture.id, icon, { ...position, y: position.y + iconHeight }, selected, { fixtureId: fixture.id }, 0.6,
+      fixture.role === 'light' ? '#a77323' : undefined);
+  }
+  if (options.showMarkers !== false) for (const marker of map.markers ?? []) {
+    const position = markerPosition(map, marker);
+    addIcon(marker.id, `${{ enemy: '적', reward: '보상', event: '이벤트' }[marker.kind]} · ${marker.label}`,
+      { ...position, y: position.y + cell * 0.85 }, interactive && options.selectedMarker === marker.id, { markerId: marker.id }, 0.95);
+  }
+  };
+  drawMap(map, scene, true,options.bindings);
+  const designLegend = options.designReport ? document.createElement('div') : null;
+  if (options.designReport) {
+    const report=options.designReport;
+    const overlay=(cells:Cell[],color:number,order:number)=>{
+      const unique=[...new Map(cells.filter(c=>c.x>=0&&c.row>=0&&c.x<map.width&&c.row<map.height).map(c=>[`${c.x}:${c.row}`,c])).values()];
+      if(!unique.length)return;
+      const mat=new THREE.MeshBasicMaterial({color,transparent:true,opacity:.4,depthWrite:false,depthTest:false});materials.add(mat);
+      const mesh=new THREE.InstancedMesh(boxGeometry,mat,unique.length),matrix=new THREE.Matrix4();
+      unique.forEach((c,i)=>{
+        const ramp=map.ramps.find(r=>r.x===c.x&&r.row===c.row);
+        matrix.compose(new THREE.Vector3((c.x-(map.width-1)/2)*cell,map.elevations[c.row][c.x]+(ramp?.rise??0)/2+cell*.025,((map.height-1)/2-c.row)*cell),new THREE.Quaternion(),new THREE.Vector3(cell*.9,cell*.02,cell*.9));mesh.setMatrixAt(i,matrix);
+      });mesh.renderOrder=order;mesh.name=`design-overlay:${order}`;scene.add(mesh);
+    };
+    overlay(report.reservedEntryCells,0x3b8ddb,30);overlay(report.combatCells,0x2dac87,31);overlay(report.hazardCells,0xed952c,32);
+    overlay(report.issues.flatMap(i=>i.cells??[]),0xd74057,34);
+    const lineMat=new THREE.LineBasicMaterial({color:0x8460bd,depthTest:false});materials.add(lineMat);
+    const choiceMat=new THREE.LineBasicMaterial({color:0x007c85,depthTest:false});materials.add(choiceMat);
+    const choices=report.obstacleChoices??[];
+    const routes=[...report.routes.map(route=>({route,choice:false})),...choices.flatMap(choice=>choice.routes.map(route=>({route,choice:true})))];
+    for(const {route,choice} of routes)if(route.length>1){
+      const geometry=new THREE.BufferGeometry().setFromPoints(route.map(c=>new THREE.Vector3((c.x-(map.width-1)/2)*cell,map.elevations[c.row][c.x]+cell*.08,((map.height-1)/2-c.row)*cell)));
+      geometries.add(geometry);const line=new THREE.Line(geometry,choice?choiceMat:lineMat);line.renderOrder=choice?36:35;line.name=choice?'design-obstacle-route':'design-route';scene.add(line);
+    }
+    if(designLegend){designLegend.className='preview-design-key';designLegend.style.cssText='position:absolute;left:12px;bottom:50px;padding:8px 10px;background:rgba(255,255,255,.94);border-radius:8px;font-size:11px;pointer-events:none;max-width:calc(100% - 24px)';designLegend.textContent=`${report.recipe.label} · 파랑 진입 / 초록 회피 / 보라 경로 / 청록 소품 우회 ${choices.length} / 주황 위험 / 빨강 문제 · 통행 ${report.walkableArea.toFixed(1)}m²`;host.appendChild(designLegend);}
+  }
+  if (comparison) {
+    const group = new THREE.Group(); group.name = 'comparison-module';
+    group.position.copy(comparison.transform.position); group.rotation.y = THREE.MathUtils.degToRad(comparison.transform.rotationY);
+    scene.add(group); drawMap(comparison.map, group, false,comparison.bindings);
+  }
+  if (options.showCharacter) {
+    const point = options.selected && map.rows[options.selected.row]?.[options.selected.x] !== '_' ? options.selected
+      : map.rows.flatMap((row, rowIndex) => [...row].map((tile, x) => ({ tile, x, row: rowIndex }))).find(point => '.DRB'.includes(point.tile));
+    if (point) {
+      const height = Math.max(0.2, Math.min(10, options.characterHeight ?? map.headroom ?? 1.8)), radius = Math.min(height * 0.18, cell * 0.3);
+      const geometry = new THREE.CapsuleGeometry(radius, Math.max(0, height - radius * 2), 8, 12); geometries.add(geometry);
+      const capsule = new THREE.Mesh(geometry, palette.character);
+      capsule.position.set((point.x - (map.width - 1) / 2) * cell, map.elevations[point.row][point.x] + height / 2, ((map.height - 1) / 2 - point.row) * cell);
+      capsule.castShadow = true; scene.add(capsule);
     }
   }
   const grid = new THREE.GridHelper(span + cell * 6, Math.max(map.width, map.height) + 6, 0xb3bfaf, 0xd0d8cb);
@@ -247,6 +481,17 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
       ((map.height - 1) / 2 - selected.row) * cell);
     outline.scale.set(cell, height, cell);
     outline.renderOrder = 100;
+    scene.add(outline);
+  }
+  if (options.region) {
+    const region = options.region;
+    const geometry = new THREE.EdgesGeometry(boxGeometry);
+    const lineMaterial = new THREE.LineBasicMaterial({ color: 0xd68c27, depthTest: false, transparent: true });
+    geometries.add(geometry); materials.add(lineMaterial);
+    const outline = new THREE.LineSegments(geometry, lineMaterial);
+    outline.position.set((region.x + (region.width - 1) / 2 - (map.width - 1) / 2) * cell, minimum + cell * 0.035,
+      ((map.height - 1) / 2 - region.row - (region.height - 1) / 2) * cell);
+    outline.scale.set(region.width * cell, cell * 0.07, region.height * cell); outline.renderOrder = 101;
     scene.add(outline);
   }
 
@@ -282,7 +527,7 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
   const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   let down: { x: number; y: number; pointerId: number; moved: boolean } | null = null;
   const pointerDown = (event: PointerEvent) => {
-    if (event.button === 0 && options.onSelect) down = { x: event.clientX, y: event.clientY, pointerId: event.pointerId, moved: false };
+    if (event.button === 0 && (options.onSelect || options.onFixtureSelect || options.onMarkerSelect || options.onPropSelect)) down = { x: event.clientX, y: event.clientY, pointerId: event.pointerId, moved: false };
   };
   const pointerMove = (event: PointerEvent) => {
     if (down && event.pointerId === down.pointerId && Math.hypot(event.clientX - down.x, event.clientY - down.y) >= 5) down.moved = true;
@@ -300,8 +545,16 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
     // Labels are drawn above geometry, so their click target follows that same visual priority.
     const hit = raycaster.intersectObjects(connectionLabels, false)[0] ?? raycaster.intersectObjects(pickable, false)[0];
     if (hit) {
-      const cellIndex = hit.object.userData.cell as { x: number; row: number };
-      options.onSelect?.(cellIndex.x, cellIndex.row);
+      if (hit.object.userData.fixtureId) { options.onFixtureSelect?.(hit.object.userData.fixtureId as string); return; }
+      if (hit.object.userData.markerId) { options.onMarkerSelect?.(hit.object.userData.markerId as string); return; }
+      if (hit.object.userData.propId) {
+        const prop=map.propInstances?.find(p=>p.id===hit.object.userData.propId);
+        if(options.onPropSelect)options.onPropSelect(hit.object.userData.propId as string);
+        else if(prop){const x=Math.floor(hit.point.x/cell+map.width/2),row=Math.floor(map.height/2-hit.point.z/cell);const chosen=prop.cells.find(c=>c.x===x&&c.row===row)??prop;options.onSelect?.(chosen.x,chosen.row);}
+        return;
+      }
+      const cellIndex = hit.object.userData.cell as { x: number; row: number } | undefined;
+      if (cellIndex) options.onSelect?.(cellIndex.x, cellIndex.row);
       return;
     }
     const intersection = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
@@ -375,6 +628,7 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
       renderer.forceContextLoss();
       renderer.domElement.remove();
       connectionKey?.remove();
+      designLegend?.remove();
     },
   };
 }

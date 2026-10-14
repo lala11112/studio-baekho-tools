@@ -9,9 +9,12 @@ import { CodexService, validatedLoginUrl } from '../electron/services/codex';
 import type { CodexRpc, RpcObject } from '../electron/services/codex-transport';
 import { atomicWrite, createExportBundle, normalizeProject, readProject, serializeProject } from '../electron/services/projects';
 import { scanUnityProject, verifyBindingProvenance } from '../electron/services/unity-project';
-import { decodePngDataUrl, validateSettings } from '../electron/services/validation';
+import { decodePngDataUrl, validateGenerationRegion, validateSettings } from '../electron/services/validation';
 import { DEFAULT_SETTINGS } from '../src/shared/map';
+import { DEFAULT_DESIGNER } from '../src/shared/features';
 import type { AssetBinding, AssetRole, GenerationSettings, GridMap, ProjectFile } from '../src/shared/types';
+
+const v4Map = (map: GridMap): GridMap => ({ ...map, version: 4, ceilings: [], wallHeights: [], bridges: [], cliffs: [], fixtures: [], markers: [], lockedCells: [], zones: [] });
 
 const PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
 const PNG = `data:image/png;base64,${PNG_BASE64}`;
@@ -122,7 +125,7 @@ test('Codex generates native PNG then vision structured JSON using ephemeral iso
   assert.equal(image, PNG);
   fake.layout(MAP);
   const result = await client.extractLayout(SETTINGS, image);
-  assert.deepEqual(result, MAP);
+  assert.deepEqual(result, v4Map(MAP));
   const threadRequests = fake.requests.filter(request => request.method === 'thread/start');
   assert.equal(threadRequests.length, 2);
   for (const { params } of threadRequests) {
@@ -142,7 +145,7 @@ test('Codex generates native PNG then vision structured JSON using ephemeral iso
   assert.equal(layoutInput[1].url, PNG);
   assert.equal(layoutInput[1].type, 'image');
   assert.ok(turns[1].params.outputSchema);
-  assert.match(String(layoutInput[0].text), /version must be 3/);
+  assert.match(String(layoutInput[0].text), /version must be 4/);
   assert.ok(!JSON.stringify(turns).includes('Assets/'));
   assert.ok(!JSON.stringify(turns).includes('must-not-be-forwarded'));
   assert.deepEqual(await readdir(path.join(root, 'codex', 'jobs')), []);
@@ -163,11 +166,50 @@ test('vision extraction preserves a raised platform and rejects a stair that can
   const { client, fake } = await codexFixture(t);
   const raised = raisedProject().map;
   fake.layout(raised);
-  assert.deepEqual(await client.extractLayout(SETTINGS, PNG), raised);
+  assert.deepEqual(await client.extractLayout(SETTINGS, PNG), v4Map(raised));
   const mismatch = structuredClone(raised);
   mismatch.ramps[0].rise = 1;
   fake.layout(mismatch);
   await assert.rejects(client.extractLayout(SETTINGS, PNG), /검증을 통과하지 못했습니다/);
+});
+
+test('designer extraction appends deterministic ceiling and content layers after validated AI geography',async t=>{
+  const {client,fake}=await codexFixture(t);
+  const settings={...SETTINGS,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,ceilings:true,lights:true,enemies:true,rewards:true,enemyCount:3,rewardCount:2,fixtureDensity:2}};
+  fake.layout({...MAP,version:4,bridges:[]});const result=await client.extractLayout(settings,PNG);
+  assert.equal(result.version,4);assert.deepEqual(result.rows,MAP.rows);assert.deepEqual(result.elevations,MAP.elevations);
+  assert.ok(result.ceilings?.length);assert.equal(new Set(result.ceilings!.map(c=>c.undersideY)).size,1);
+  assert.equal(result.fixtures?.filter(f=>f.role==='light').length,1);assert.equal(result.markers?.filter(m=>m.kind==='enemy').length,3);assert.equal(result.markers?.filter(m=>m.kind==='reward').length,2);
+  const output=fake.requests.find(r=>r.method==='turn/start')!.params.outputSchema as {properties:{version:{enum:number[]}}};assert.deepEqual(output.properties.version.enum,[4]);
+});
+
+test('designer conditions fail visibly when AI omits requested structure instead of flattening or inventing it',async t=>{
+  const {client,fake}=await codexFixture(t);fake.layout({...MAP,version:4,bridges:[]});
+  await assert.rejects(client.extractLayout({...SETTINGS,designer:{...DEFAULT_DESIGNER,elevation:true,props:false}},PNG),/높이 지형/);
+  fake.layout({...MAP,version:4,bridges:[]});
+  await assert.rejects(client.extractLayout({...SETTINGS,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,bridges:true}},PNG),/다리/);
+  fake.layout({...MAP,version:4,bridges:[],markers:[{id:'injected',label:'Injected',kind:'enemy',contentKey:'',x:1,row:1,direction:0,offset:{x:0,y:0,z:0}}]});
+  await assert.rejects(client.extractLayout({...SETTINGS,designer:{...DEFAULT_DESIGNER,elevation:false,props:false}},PNG),/허용되지 않는 추가 콘텐츠/);
+});
+
+test('region requests validate bounds before calling Codex and explicitly scope image/layout prompts',async t=>{
+  const {client,fake}=await codexFixture(t),region={x:4,row:4,width:3,height:3};
+  assert.equal(validateGenerationRegion(undefined,SETTINGS),undefined);
+  assert.deepEqual(validateGenerationRegion(region,SETTINGS),region);
+  for(const invalid of [null,{},[],{...region,x:-1},{...region,width:5},{...region,row:1.5},{...region,height:0},{...region,unexpected:true}]){
+    await assert.rejects(client.generateImage(SETTINGS,invalid),/재생성 영역/);
+    await assert.rejects(client.extractLayout(SETTINGS,PNG,invalid),/재생성 영역/);
+  }
+  assert.equal(fake.requests.length,0);
+  const settings={...SETTINGS,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,ceilings:true,enemies:true,enemyCount:100}};
+  await client.generateImage(settings,region);
+  const geography=structuredClone(MAP);geography.rows[1]='#.P....#';fake.layout(geography);
+  const result=await client.extractLayout(settings,PNG,region);
+  assert.deepEqual(result.rows,geography.rows,'outside props do not violate a local off toggle');
+  assert.equal(result.ceilings,undefined);assert.equal(result.markers,undefined,'region extraction does not allocate whole-map content before merging');
+  for(const request of fake.requests.filter(r=>r.method==='turn/start'))assert.match(String((request.params.input as {text?:string}[])[0].text),/ALL feature toggles and requested counts below apply ONLY to this selected editable region/);
+  fake.layout({...geography,markers:[{id:'injected',label:'Injected',kind:'enemy',contentKey:'',x:1,row:1,direction:0,offset:{x:0,y:0,z:0}}]});
+  await assert.rejects(client.extractLayout(settings,PNG,region),/허용되지 않는 추가 콘텐츠/);
 });
 
 test('Codex requires managed ChatGPT login and native image support', async t => {
@@ -378,7 +420,7 @@ test('native project persistence rejects credentials and preserves editable unfi
   assert.throws(() => normalizeProject({ ...incomplete, settings: { ...SETTINGS, apiKey: 'secret' } }), /settings/);
   const filePath = path.join(root, 'Map.baekho.json');
   await atomicWrite(filePath, serialized);
-  assert.deepEqual(await readProject(filePath), incomplete);
+  assert.deepEqual(await readProject(filePath), { ...incomplete, map:v4Map(incomplete.map) });
   await writeFile(filePath, 'not JSON');
   await assert.rejects(readProject(filePath), /프로젝트 JSON/);
 });
@@ -389,7 +431,7 @@ test('v2 project persistence preserves editable heights, ramp direction, rise an
   const filePath = path.join(root, 'Raised.baekho.json');
   await atomicWrite(filePath, serializeProject(original));
   const reopened = await readProject(filePath);
-  assert.deepEqual(reopened, original);
+  assert.deepEqual(reopened, { ...original, map:v4Map(original.map) });
   assert.equal(reopened.map.elevations[1][4], 2);
   assert.deepEqual(reopened.map.ramps, [{ x: 3, row: 1, direction: 90, rise: 2 }]);
   assert.equal(reopened.settings.elevationStep, SETTINGS.elevationStep);
@@ -403,7 +445,7 @@ test('legacy flat project migration initializes v2 heights and settings before s
   const { connections: _connections, assetOverrides: _overrides, elevations: _elevations, ramps: _ramps, maxStepHeight: _mapMaxStepHeight, ...legacyMap } = MAP;
   const { elevationStep: _elevationStep, maxStepHeight: _settingsMaxStepHeight, ...legacySettings } = SETTINGS;
   const migrated = normalizeProject({ ...project(), map: { ...legacyMap, version: 1 }, settings: legacySettings });
-  assert.equal(migrated.map.version, 3);
+  assert.equal(migrated.map.version, 4);
   assert.deepEqual(migrated.map.elevations, Array.from({ length: 8 }, () => Array(8).fill(0)));
   assert.deepEqual(migrated.map.ramps, []);
   assert.equal(migrated.map.maxStepHeight, 0.4);
@@ -425,10 +467,10 @@ test('atomic save replaces only the selected file and cleans staging files', asy
 test('ZIP contains validated manifest, importer, blueprint and instructions, without source prefabs', async t => {
   const root = await fixture(t);
   const scan = await scanUnityProject(root);
-  const files = unzipSync(await createExportBundle(project(), scan, '// importer fixture', '// runtime fixture'));
-  assert.deepEqual(Object.keys(files).sort(), ['Map.baekhomap.json', 'README.txt', 'Unity/Editor/BaekhoMapImporter.cs', 'Unity/Runtime/BaekhoMapConnection.cs', 'blueprint.png'].sort());
+  const files = unzipSync(await createExportBundle(project(), scan, '// importer fixture', '// runtime fixture', '// marker fixture', '// fixture metadata'));
+  assert.deepEqual(Object.keys(files).sort(), ['Map.baekhomap.json', 'README.txt', 'Unity/Editor/BaekhoMapImporter.cs', 'Unity/Runtime/BaekhoMapConnection.cs', 'Unity/Runtime/BaekhoGameplayMarker.cs', 'Unity/Runtime/BaekhoMapFixture.cs', 'blueprint.png'].sort());
   const manifest = JSON.parse(strFromU8(files['Map.baekhomap.json']));
-  assert.equal(manifest.schemaVersion, 3);
+  assert.equal(manifest.schemaVersion, 4);
   assert.equal(manifest.placements.some((placement: { role: string }) => ['spawn','exit'].includes(placement.role)), false);
   assert.equal(manifest.connections.length, 1);
   assert.equal(manifest.connections[0].id, 'north');
@@ -447,7 +489,7 @@ test('ZIP contains validated manifest, importer, blueprint and instructions, wit
   assert.ok(!strFromU8(files['Map.baekhomap.json']).includes('prefab contents'));
   const incomplete = project();
   incomplete.map.connections = [];
-  await assert.rejects(createExportBundle(incomplete, scan, '// importer', '// runtime'), /맵 오류/);
+  await assert.rejects(createExportBundle(incomplete, scan, '// importer', '// runtime', '// marker fixture', '// fixture metadata'), /맵 오류/);
 });
 
 test('v2 export retains real elevations and stair placement rotation with explicit geometry instructions', async t => {
@@ -455,7 +497,7 @@ test('v2 export retains real elevations and stair placement rotation with explic
   await writeFile(path.join(root, 'Assets/stair.prefab'), 'local stair geometry');
   await writeFile(path.join(root, 'Assets/stair.prefab.meta'), `guid: ${'c'.repeat(32)}`);
   const scan = await scanUnityProject(root);
-  const files = unzipSync(await createExportBundle(raisedProject(), scan, '// importer fixture', '// runtime fixture'));
+  const files = unzipSync(await createExportBundle(raisedProject(), scan, '// importer fixture', '// runtime fixture', '// marker fixture', '// fixture metadata'));
   const manifest = JSON.parse(strFromU8(files['Map.baekhomap.json']));
   const stair = manifest.placements.find((placement: { role: string }) => placement.role === 'stair');
   assert.equal(stair.rotation.y, 90);
@@ -493,8 +535,10 @@ test('export requires runtime component and emits selected cell asset transforms
   const root=await fixture(t),scan=await scanUnityProject(root),input=project();
   input.bindings.push({...input.bindings[0],id:'floor-variant',label:'Floor variant',offset:{x:1,y:2,z:3}});
   input.map.assetOverrides=[{x:1,row:1,role:'floor',bindingId:'floor-variant'}];
-  await assert.rejects(createExportBundle(input,scan,'// importer',''),/런타임 스크립트/);
-  const bundle=unzipSync(await createExportBundle(input,scan,'// importer','// runtime'));
+  await assert.rejects(createExportBundle(input,scan,'// importer','','// marker fixture','// fixture metadata'),/런타임 스크립트/);
+  await assert.rejects(createExportBundle(input,scan,'// importer','// runtime','','// fixture metadata'),/런타임 스크립트/);
+  await assert.rejects(createExportBundle(input,scan,'// importer','// runtime','// marker fixture',''),/런타임 스크립트/);
+  const bundle=unzipSync(await createExportBundle(input,scan,'// importer','// runtime','// marker fixture','// fixture metadata'));
   const manifest=JSON.parse(strFromU8(bundle['Map.baekhomap.json']));
   assert.deepEqual(manifest.placements.find((item:{id:string})=>item.id==='floor-1-1').position,{x:-4,y:2,z:8});
   assert.deepEqual(manifest.connections[0].position,{x:-5,y:0,z:8});

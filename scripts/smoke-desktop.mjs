@@ -6,6 +6,8 @@ import { unzipSync, strFromU8 } from 'fflate';
 
 const output = resolve('.local/desktop-smoke');
 await mkdir(output, { recursive: true });
+const userData = resolve('.local/desktop-smoke-user', `run-${Date.now()}`);
+await mkdir(userData, { recursive: true });
 const fixture = resolve(output, 'TestUnity');
 await mkdir(resolve(fixture, 'Assets/Modules'), { recursive: true });
 await mkdir(resolve(fixture, 'ProjectSettings'), { recursive: true });
@@ -17,10 +19,11 @@ const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.OPENAI_API_KEY;
 delete env.BAEKHO_DEV_URL;
-const app = await electron.launch({ args: ['.'], env });
+const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env });
 const errors = [];
 try {
   const page = await app.firstWindow();
+  await app.evaluate(({ app }, directory) => app.setPath('userData', directory), userData);
   page.on('pageerror', error => errors.push(error.message));
   await page.waitForSelector('#preview canvas');
   await page.locator('button[data-action="codex"]').click();
@@ -150,7 +153,7 @@ try {
   assert.equal(project.map.assetOverrides[0].bindingId,floor2);
   assert.equal(project.bindings.find(binding=>binding.id===floor2).scale.y,0.5);
   assert.ok(!/[SE]/.test(project.map.rows.join("")));
-  assert.equal(project.map.version, 3);
+  assert.equal(project.map.version, 4);
   assert.ok(project.map.elevations.flat().some(y=>y>0));
   assert.ok(project.map.ramps.length>0);
   const zipPath = resolve(output, 'bundle.zip');
@@ -161,7 +164,7 @@ try {
   assert.ok(zip['Unity/Editor/BaekhoMapImporter.cs']);
   assert.ok(zip['Unity/Runtime/BaekhoMapConnection.cs']);
   const manifest=JSON.parse(strFromU8(zip['Map.baekhomap.json']));
-  assert.equal(manifest.schemaVersion,3);
+  assert.equal(manifest.schemaVersion,4);
   assert.equal(manifest.connections.length,4);
   assert.equal(manifest.connections.find(c=>c.id==='north').kind,'cave');
   assert.equal(manifest.connections.find(c=>c.id==='north').width,1.5);
@@ -181,6 +184,8 @@ try {
   const legacyPath = resolve(output, 'legacy-api.baekho.json');
   const legacy = structuredClone(project);
   legacy.map.version=2;
+  for(const key of ['ceilings','wallHeights','bridges','cliffs','fixtures','markers','lockedCells','zones','headroom'])delete legacy.map[key];
+  delete legacy.settings.designer;
   delete legacy.map.connections;delete legacy.map.assetOverrides;delete legacy.settings.connectionCount;
   for(const binding of legacy.bindings){delete binding.id;delete binding.label;}
   delete legacy.settings.codexModel;
@@ -200,7 +205,7 @@ try {
   await page.locator('[data-view="3d"]').click();
   await page.screenshot({ path: resolve(output, '03-connected.png') });
   assert.deepEqual(errors, []);
-  console.log('PASS desktop smoke: isolated bridge, height editing, 4 editable exterior ports, add/remove/undo, 7 asset bindings and explicit cell override, floor thickness edit/save/export, binding delete/undo restoration, v3 save/reopen, schema3 ZIP with sockets + runtime component, legacy migration, zero renderer errors.');
+  console.log('PASS desktop smoke: isolated bridge, height editing, 4 editable exterior ports, add/remove/undo, 7 asset bindings and explicit cell override, floor thickness edit/save/export, binding delete/undo restoration, v4 save/reopen, schema4 ZIP with sockets + runtime component, legacy migration, zero renderer errors.');
 } finally {
   await app.evaluate(({BrowserWindow,dialog}) => { dialog.showMessageBoxSync = () => 1; BrowserWindow.getAllWindows().forEach(w => w.destroy()); }).catch(() => {});
   await app.close();

@@ -1,12 +1,15 @@
 import { lstat, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
-import { MAP_JSON_SCHEMA, validateMap } from '../../src/shared/map';
+import { MAP_JSON_SCHEMA, validateMap, parseBindings } from '../../src/shared/map';
+import { propCatalogPrompt } from '../../src/shared/props';
+import { analyzeLevelDesign } from '../../src/shared/level-design';
+import { applyGeneratedFeatures, generationConditionIssues } from '../../src/shared/features';
 import type { CodexModelInfo, CodexStatus, GenerationSettings, GridMap } from '../../src/shared/types';
 import { CodexTransport } from './codex-transport';
 import type { CodexRpc, RpcObject } from './codex-transport';
 import { atomicWrite } from './projects';
 import { imagePrompt, layoutPrompt } from './prompts';
-import { decodePngDataUrl, MAX_IMAGE_BYTES, validateSettings } from './validation';
+import { decodePngDataUrl, MAX_IMAGE_BYTES, validateGenerationRegion, validateSettings } from './validation';
 import { discoverCodex, inspectRuntime } from './codex-runtime';
 import type { CodexRuntime } from './codex-runtime';
 export { discoverCodex } from './codex-runtime';
@@ -254,11 +257,13 @@ export class CodexService {
     });
   }
 
-  async generateImage(input: unknown): Promise<string> {
+  async generateImage(input: unknown, regionInput?: unknown, catalogInput?: unknown): Promise<string> {
     const settings = validateSettings(input);
+    const region=validateGenerationRegion(regionInput,settings);
+    const catalog=catalogInput===undefined?undefined:parseBindings(catalogInput);
     return this.runJob(settings, async (client, job, directory) => {
       const startedAt = Date.now();
-      const items = await this.turn(client, job, { input: [{ type: 'text', text: `Use the native image_generation tool now to generate exactly ONE opaque PNG image. Do not draw with code or return SVG/text as an image. Do not create additional variants.\n\n${imagePrompt(settings)}` }] });
+      const items = await this.turn(client, job, { input: [{ type: 'text', text: `Use the native image_generation tool now to generate exactly ONE opaque PNG image. Do not draw with code or return SVG/text as an image. Do not create additional variants.\n\n${imagePrompt(settings,region)}\n${catalog?propCatalogPrompt(catalog):''}` }] });
       const generated = items.filter(item => item.type === 'imageGeneration');
       const image = generated.find(item => item.status === 'completed' && !item.failure);
       if (!image) {
@@ -284,12 +289,14 @@ export class CodexService {
     });
   }
 
-  async extractLayout(input: unknown, imageDataUrl: unknown): Promise<GridMap> {
+  async extractLayout(input: unknown, imageDataUrl: unknown, regionInput?: unknown, catalogInput?: unknown): Promise<GridMap> {
     const settings = validateSettings(input);
+    const region=validateGenerationRegion(regionInput,settings);
+    const catalog=catalogInput===undefined?undefined:parseBindings(catalogInput);
     decodePngDataUrl(imageDataUrl);
     return this.runJob(settings, async (client, job) => {
       const items = await this.turn(client, job, {
-        input: [{ type: 'text', text: `${layoutPrompt(settings)}\nDo not use any tools. Inspect the attached image directly and return only the schema-conforming map JSON.` }, { type: 'image', url: imageDataUrl, detail: 'high' }],
+        input: [{ type: 'text', text: `${layoutPrompt(settings,region)}\n${catalog?propCatalogPrompt(catalog):''}\nDo not use any tools. Inspect the attached image directly and return only the schema-conforming map JSON.` }, { type: 'image', url: imageDataUrl, detail: 'high' }],
         outputSchema: MAP_JSON_SCHEMA,
       });
       const messages = items.filter(item => item.type === 'agentMessage' && typeof item.text === 'string');
@@ -303,11 +310,18 @@ export class CodexService {
       if (map.width !== settings.width || map.height !== settings.height || map.cellSize !== settings.cellSize || map.maxStepHeight !== settings.maxStepHeight) throw new Error('Codex 배치도 크기 또는 이동 단차가 요청한 설정과 다릅니다. 같은 설계도에서 다시 분석해 주세요.');
       if (map.connections.length !== settings.connectionCount) throw new Error('Codex 배치도의 연결문 수가 요청한 설정과 다릅니다. 같은 설계도에서 다시 분석해 주세요.');
       if (map.assetOverrides.length) throw new Error('AI 배치도는 셀 에셋 지정을 포함할 수 없습니다. 에셋은 앱에서 연결해 주세요.');
-      return {
-        version: 3, name: map.name, width: map.width, height: map.height, cellSize: map.cellSize, rows: [...map.rows],
+      if (map.structureSettings||['ceilings','wallHeights','cliffs','fixtures','markers','lockedCells','zones','pitBottoms','structureFills','propInstances'].some(key => (map as unknown as Record<string,unknown[]>)[key]?.length)) throw new Error('AI 배치도에 허용되지 않는 추가 콘텐츠가 있습니다. 다시 분석해 주세요.');
+      const geography:GridMap = {
+        version: 4, name: map.name, width: map.width, height: map.height, cellSize: map.cellSize, rows: [...map.rows],
         elevations: map.elevations.map(row => [...row]), ramps: map.ramps.map(ramp => ({ ...ramp })), maxStepHeight: map.maxStepHeight,
-        connections: map.connections.map(connection => ({ ...connection })), assetOverrides: [],
+        connections: map.connections.map(connection => ({ ...connection })), assetOverrides: [], bridges:(map.bridges??[]).map(b=>({...b})),
       };
+      // The caller merges protected cells first, then applies and checks region-local features.
+      if(region)return geography;
+      const generated = applyGeneratedFeatures(geography, settings,undefined,catalog);
+      const conditionErrors=[...validateMap(generated),...generationConditionIssues(generated,settings),...(settings.levelDesign?analyzeLevelDesign(generated,settings).issues:[])].filter(issue=>issue.severity==='error');
+      if(conditionErrors.length)throw new Error(`생성 조건을 만족하지 못했습니다: ${conditionErrors.slice(0,3).map(issue=>issue.message).join(' ')} 설계도는 유지됩니다. 다시 분석해 주세요.`);
+      return generated;
     });
   }
 }

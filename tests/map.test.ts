@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildManifest, connectionPose, resolveBinding, MAX_BINDINGS, cellElevation, createDemoMap, DEFAULT_SETTINGS, doorRotation, edgeHeight, MAP_JSON_SCHEMA, parseProjectFile, validateMap } from '../src/shared/map';
+import { buildManifest, connectionPose, connectionCells, connectionAt, maximumConnectionWidth, updateConnectionGeometry, resolveBinding, MAX_BINDINGS, cellElevation, createDemoMap, DEFAULT_SETTINGS, doorRotation, edgeHeight, MAP_JSON_SCHEMA, parseProjectFile, validateMap } from '../src/shared/map';
 import type { AssetBinding, AssetRole, GridMap, ProjectFile } from '../src/shared/types';
+
+const v4Map = (map: GridMap): GridMap => ({ ...map, version: 4, ceilings: [], wallHeights: [], bridges: [], cliffs: [], fixtures: [], markers: [], lockedCells: [], zones: [] });
 
 const roles: AssetRole[] = ['floor', 'wall', 'door', 'prop', 'stair'];
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
@@ -60,7 +62,7 @@ test('demo map is deterministic, connected, and contains every supported glyph',
 test('schema has a strict root with every field required', () => {
   assert.equal(MAP_JSON_SCHEMA.additionalProperties, false);
   assert.deepEqual([...MAP_JSON_SCHEMA.required].sort(), Object.keys(MAP_JSON_SCHEMA.properties).sort());
-  assert.deepEqual(MAP_JSON_SCHEMA.properties.version.enum, [3]);
+  assert.deepEqual(MAP_JSON_SCHEMA.properties.version.enum, [4]);
   assert.equal(MAP_JSON_SCHEMA.properties.ramps.items.additionalProperties, false);
   assert.deepEqual([...MAP_JSON_SCHEMA.properties.ramps.items.required].sort(), Object.keys(MAP_JSON_SCHEMA.properties.ramps.items.properties).sort());
 });
@@ -344,7 +346,7 @@ test('project parsing permits unfinished markers, disconnected edits, and missin
   map.rows[1] = '_..P..__';
   const input = project(map);
   assert.ok(validateMap(input.map).length > 0);
-  assert.deepEqual(parseProjectFile(input), input);
+  assert.deepEqual(parseProjectFile(input), { ...input, map:v4Map(input.map) });
   assert.equal(parseProjectFile({ ...input, map: { ...map, name: '' } }).map.name, '');
 });
 
@@ -355,7 +357,7 @@ test('legacy projects migrate to independent v2 zero heights and default height 
   const input = { formatVersion: 1, map: legacyMap, settings: legacySettings, bindings: [] };
   const parsed = parseProjectFile(input);
   assert.equal(parsed.formatVersion, 1);
-  assert.equal(parsed.map.version, 3);
+  assert.equal(parsed.map.version, 4);
   assert.deepEqual(parsed.map.elevations, Array.from({ length: 8 }, () => Array(8).fill(0)));
   assert.deepEqual(parsed.map.ramps, []);
   assert.equal(parsed.map.maxStepHeight, 0.4);
@@ -379,7 +381,7 @@ test('API-era v2 settings migrate to the Codex runtime default without losing ma
     bindings: [{ ...binding('stair'), stairNativeRise: 1.5 }],
   };
   const parsed = parseProjectFile(input);
-  assert.deepEqual(parsed.map, input.map);
+  assert.deepEqual(parsed.map, v4Map(input.map));
   assert.equal(parsed.blueprintDataUrl, PNG);
   assert.equal(parsed.bindings[0].stairNativeRise, 1.5);
   assert.equal(parsed.settings.codexModel, '');
@@ -401,7 +403,7 @@ test('API-era v1 maps migrate both flat geometry and model settings in a single 
     bindings: [],
   };
   const parsed = parseProjectFile(input);
-  assert.equal(parsed.map.version, 3);
+  assert.equal(parsed.map.version, 4);
   assert.deepEqual(parsed.map.elevations, flat.elevations);
   assert.deepEqual(parsed.map.ramps, []);
   assert.equal(parsed.settings.codexModel, '');
@@ -525,7 +527,7 @@ test('outside flood fill accepts boundary ports but rejects an enclosed courtyar
 test('connection fields, duplicate IDs and duplicate doorway coordinates are rejected structurally', () => {
   const map = corridor();
   for (const invalid of [{id:''},{id:'with space'},{id:'x'.repeat(81)},{label:''},{label:'x'.repeat(81)},{label:'bad\nlabel'},
-    {kind:'../path'},{kind:'x'.repeat(41)},{width:0.249},{width:2.01},{height:0.249},{height:20.01},{height:Infinity},
+    {kind:'../path'},{kind:'x'.repeat(41)},{width:0.249},{width:40.01},{height:0.249},{height:20.01},{height:Infinity},
     {x:8},{row:-1},{direction:45},{unexpected:true}]) {
     const changed = { ...map, connections:[{...map.connections[0],...invalid}] };
     assert.ok(validateMap(changed).length,JSON.stringify(invalid));
@@ -534,6 +536,90 @@ test('connection fields, duplicate IDs and duplicate doorway coordinates are rej
   for (const size of [0.25,20]) assert.doesNotThrow(() => parseProjectFile(project({...map,connections:[{...map.connections[0],height:size}]})));
   assert.ok(mapError({...map,connections:[map.connections[0],{...map.connections[0],x:5}]},'ID'));
   assert.ok(mapError({...map,connections:[map.connections[0],{...map.connections[0],id:'other'}]},'좌표'));
+});
+
+function roomWithPort(direction: 0 | 90 | 180 | 270): GridMap {
+  const map = smallMap(['________', '_######_', '_#....#_', '_#....#_', '_#....#_', '_#....#_', '_######_', '________']);
+  const anchor = direction === 0 ? { x: 2, row: 1 } : direction === 180 ? { x: 2, row: 6 } : direction === 90 ? { x: 6, row: 2 } : { x: 1, row: 2 };
+  map.connections = [{ ...map.connections[0], ...anchor, direction, id: 'port', width: 2 }];
+  map.rows[anchor.row] = map.rows[anchor.row].slice(0, anchor.x) + 'D' + map.rows[anchor.row].slice(anchor.x + 1);
+  return map;
+}
+
+test('wide openings carve all cells, center sockets and emit one measured door in every direction', () => {
+  for (const direction of [0,90,180,270] as const) {
+    const before = roomWithPort(direction), oldPose = connectionPose(before, before.connections[0]);
+    const map = updateConnectionGeometry(before, 'port', { width: 5.5 });
+    assert.deepEqual(validateMap(map), []);
+    const cells = connectionCells(map, map.connections[0]);
+    assert.equal(cells.length, 3);
+    assert.equal(connectionAt(map, cells[2].x, cells[2].row)?.id, 'port');
+    assert.equal(maximumConnectionWidth(map, map.connections[0]), 12);
+    for (const cell of cells) assert.equal(map.rows[cell.row][cell.x], 'D');
+    const pose = connectionPose(map, map.connections[0]);
+    assert.deepEqual(pose.position, { ...oldPose.position,
+      ...(direction === 0 || direction === 180 ? { x: oldPose.position.x + 2 } : { z: oldPose.position.z - 2 }) });
+    const manifest = buildManifest(map, ['floor','wall','door'].map(role => binding(role as AssetRole)));
+    const doors = manifest.placements.filter(item => item.role === 'door');
+    assert.equal(doors.length, 1); assert.equal(doors[0].fitWidth, 5.5);
+    assert.deepEqual(doors[0].position, pose.position);
+    assert.equal(manifest.connections[0].width, 5.5);
+    const restored = updateConnectionGeometry(map, 'port', { width: 2 });
+    assert.equal(restored.rows[cells[1].row][cells[1].x], '#');
+    assert.equal(restored.rows[cells[2].row][cells[2].x], '#');
+    assert.deepEqual(connectionPose(restored, restored.connections[0]), oldPose);
+    assert.deepEqual(before.rows, roomWithPort(direction).rows, 'editing is immutable');
+  }
+});
+
+test('wide openings reject blocked lanes, uneven height, boundaries, overlaps, ceilings and locked cells atomically', () => {
+  const original = roomWithPort(0);
+  for (const modify of [
+    (m: GridMap) => { m.lockedCells = [{ x: 3, row: 1 }]; },
+    (m: GridMap) => { m.elevations[1][3] = 2; },
+    (m: GridMap) => { m.rows[2] = '_#.#..#_'; },
+    (m: GridMap) => { m.rows[0] = '___#____'; },
+    (m: GridMap) => { m.ceilings = [{ x: 3, row: 1, undersideY: 2.5 }]; },
+    (m: GridMap) => { m.connections.push({ ...m.connections[0], id: 'other', x: 3 }); m.rows[1] = '_#DD###_'; },
+    (m: GridMap) => { m.fixtures = [{ id:'lamp', role:'light', x:3, row:1, direction:0, anchor:'wall', offset:{x:0,y:0,z:0} }]; },
+  ]) {
+    const map = structuredClone(original); modify(map); const snapshot = structuredClone(map);
+    assert.throws(() => updateConnectionGeometry(map, 'port', { width: 4 }));
+    assert.deepEqual(map, snapshot);
+  }
+  assert.throws(() => updateConnectionGeometry(original, 'port', { width: 40 }));
+  const map = updateConnectionGeometry(original, 'port', { width: 4 });
+  map.rows[1] = '_#D####_'; assert.ok(mapError(map, '전체 개구부'));
+});
+
+test('legacy narrow port transforms remain unchanged and never request width fitting', () => {
+  const map = roomWithPort(0), bindingDoor = { ...binding('door'), scale:{ x:3, y:2, z:1 } };
+  const old = buildManifest(map, [binding('floor'), binding('wall'), bindingDoor]).placements.find(p => p.role === 'door')!;
+  assert.equal(old.fitWidth, undefined); assert.equal(old.scale.x, 3);
+  assert.deepEqual(connectionPose(map, map.connections[0]).position, { x:-3, y:0, z:6 });
+});
+
+test('light anchor bindings persist, auto-select matching types and reject incompatible explicit overrides', () => {
+  const map = roomWithPort(0);
+  map.ceilings = [{ x:2, row:2, undersideY:4 }];
+  map.fixtures = [
+    { id:'overhead',role:'light',anchor:'ceiling',x:2,row:2,direction:0,offset:{x:0,y:0,z:0} },
+    { id:'wallpanel',role:'light',anchor:'wall',x:1,row:2,direction:90,offset:{x:0,y:0,z:0} },
+  ];
+  const generic: AssetBinding = { ...binding('prop'), id:'light-generic', role:'light' };
+  const ceiling: AssetBinding = { ...generic,id:'light-ceiling',lightAnchor:'ceiling',prefabGuid:'c'.repeat(32) };
+  const wall: AssetBinding = { ...generic,id:'light-wall',lightAnchor:'wall',prefabGuid:'d'.repeat(32) };
+  const bindings = [binding('floor'),binding('wall'),binding('door'),{...binding('floor'),id:'roof',role:'ceiling' as const},generic,ceiling,wall];
+  const saved = parseProjectFile({ ...project(map), bindings });
+  assert.equal(saved.bindings.find(b=>b.id===ceiling.id)?.lightAnchor,'ceiling');
+  const manifest = buildManifest(map,bindings);
+  assert.equal(manifest.placements.find(p=>p.id==='fixture-overhead')?.prefabGuid,ceiling.prefabGuid);
+  assert.equal(manifest.placements.find(p=>p.id==='fixture-wallpanel')?.prefabGuid,wall.prefabGuid);
+  map.fixtures[0].bindingId=wall.id;
+  assert.throws(()=>parseProjectFile({...project(map),bindings}),/부착 기준/);
+  assert.throws(()=>buildManifest(map,bindings),/부착 기준/);
+  assert.throws(()=>parseProjectFile({...project(),bindings:[{...binding('floor'),lightAnchor:'ceiling'}]}),/lightAnchor/);
+  assert.throws(()=>parseProjectFile({...project(),bindings:[{...generic,lightAnchor:'floor'}]}),/lightAnchor/);
 });
 
 test('manual modules permit 17 and up to 1600 ports while AI settings remain capped at 16', () => {
@@ -550,7 +636,7 @@ test('manual modules permit 17 and up to 1600 ports while AI settings remain cap
 test('all four connection poses use the outward edge and ignore prefab offsets and rotation corrections', () => {
   const map = createDemoMap(), door = {...binding('door'),offset:{x:7,y:8,z:9},rotationY:13};
   const manifest = buildManifest(map,roles.map(role=>role==='door'?door:binding(role)));
-  assert.equal(manifest.schemaVersion,3);
+  assert.equal(manifest.schemaVersion,4);
   assert.deepEqual(manifest.connections.map(item=>item.rotation.y).sort((a,b)=>a-b),[0,90,180,270]);
   for (const c of map.connections) {
     const pose=connectionPose(map,c),exported=manifest.connections.find(item=>item.id===c.id)!;

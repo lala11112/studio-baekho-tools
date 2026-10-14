@@ -1,36 +1,18 @@
-import type { GenerationSettings, ProjectFile } from '../../src/shared/types';
+import type { GenerationRegion, GenerationSettings, ProjectFile } from '../../src/shared/types';
+import { parseGenerationSettings } from '../../src/shared/features';
+import { parseBindings } from '../../src/shared/map';
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+export const validateSettings = parseGenerationSettings;
 
-export function validateSettings(value: unknown): GenerationSettings {
-  if (!value || typeof value !== 'object') throw new Error('생성 설정이 올바르지 않습니다.');
-  const settings = value as Record<string, unknown>;
-  if (typeof settings.prompt !== 'string' || !settings.prompt.trim() || settings.prompt.length > 6000) {
-    throw new Error('맵 설명은 1~6,000자로 입력해 주세요.');
-  }
-  for (const key of ['width', 'height'] as const) {
-    if (!Number.isInteger(settings[key]) || Number(settings[key]) < 8 || Number(settings[key]) > 40) {
-      throw new Error('가로와 세로는 8~40 사이의 정수여야 합니다.');
-    }
-  }
-  if (typeof settings.cellSize !== 'number' || !Number.isFinite(settings.cellSize) || settings.cellSize < 0.25 || settings.cellSize > 10) {
-    throw new Error('한 칸의 크기는 0.25~10m 사이여야 합니다.');
-  }
-  if (typeof settings.elevationStep !== 'number' || !Number.isFinite(settings.elevationStep) || settings.elevationStep < 0.25 || settings.elevationStep > 10) {
-    throw new Error('높이 단계는 0.25~10m 사이여야 합니다.');
-  }
-  if (typeof settings.maxStepHeight !== 'number' || !Number.isFinite(settings.maxStepHeight) || settings.maxStepHeight < 0.05 || settings.maxStepHeight > 1) {
-    throw new Error('캐릭터가 바로 오를 수 있는 단차는 0.05~1m 사이여야 합니다.');
-  }
-  if (typeof settings.codexModel !== 'string' || (settings.codexModel !== '' && !MODEL_ID.test(settings.codexModel))) throw new Error('Codex 모델 ID를 확인해 주세요.');
-  if (!Number.isInteger(settings.connectionCount) || Number(settings.connectionCount) < 1 || Number(settings.connectionCount) > 16) throw new Error('연결문 수는 1~16 사이의 정수여야 합니다.');
-  return {
-    prompt: settings.prompt.trim(), width: settings.width as number, height: settings.height as number,
-    cellSize: settings.cellSize, elevationStep: settings.elevationStep, maxStepHeight: settings.maxStepHeight,
-    codexModel: settings.codexModel, connectionCount: settings.connectionCount as number,
-  };
+/** Region is request context, independent of saved generation preferences. */
+export function validateGenerationRegion(value: unknown, settings: GenerationSettings): GenerationRegion | undefined {
+  if(value===undefined)return undefined;
+  if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('재생성 영역이 올바르지 않습니다.');
+  const r=value as Record<string,unknown>;
+  if(Object.keys(r).some(key=>!['x','row','width','height'].includes(key))||![r.x,r.row,r.width,r.height].every(n=>typeof n==='number'&&Number.isInteger(n))||Number(r.x)<0||Number(r.row)<0||Number(r.width)<1||Number(r.height)<1||Number(r.x)+Number(r.width)>settings.width||Number(r.row)+Number(r.height)>settings.height)throw new Error('재생성 영역은 생성 맵 내부의 정수 좌표여야 합니다.');
+  return{x:Number(r.x),row:Number(r.row),width:Number(r.width),height:Number(r.height)};
 }
 
 export function decodePngDataUrl(value: unknown): Buffer {
@@ -54,14 +36,26 @@ export function publicProject(project: ProjectFile): ProjectFile {
   const result: ProjectFile = {
     formatVersion: 1,
     map: {
-      version: 3, name: project.map.name, width: project.map.width, height: project.map.height,
+      version: project.map.version===5?5:4, name: project.map.name, width: project.map.width, height: project.map.height,
       cellSize: project.map.cellSize, rows: [...project.map.rows],
       elevations: project.map.elevations.map(row => [...row]),
-      ramps: project.map.ramps.map(ramp => ({ x: ramp.x, row: ramp.row, direction: ramp.direction, rise: ramp.rise })),
+      ramps: project.map.ramps.map(ramp => ({ x: ramp.x, row: ramp.row, direction: ramp.direction, rise: ramp.rise, ...(ramp.kind ? {kind:ramp.kind} : {}) })),
       maxStepHeight: project.map.maxStepHeight,
       connections: project.map.connections.map(connection => ({ id: connection.id, label: connection.label, x: connection.x, row: connection.row,
         direction: connection.direction, width: connection.width, height: connection.height, kind: connection.kind })),
       assetOverrides: project.map.assetOverrides.map(override => ({ x: override.x, row: override.row, role: override.role, bindingId: override.bindingId })),
+      ceilings:(project.map.ceilings??[]).map(c=>({x:c.x,row:c.row,undersideY:c.undersideY,...(c.heightMode?{heightMode:c.heightMode}:{})})),
+      wallHeights:(project.map.wallHeights??[]).map(w=>({x:w.x,row:w.row,height:w.height,...(w.heightMode?{heightMode:w.heightMode}:{})})),
+      bridges:(project.map.bridges??[]).map(b=>({x:b.x,row:b.row,direction:b.direction})),
+      cliffs:(project.map.cliffs??[]).map(c=>({x:c.x,row:c.row,direction:c.direction,depth:c.depth})),
+      fixtures:(project.map.fixtures??[]).map(f=>({id:f.id,role:f.role,x:f.x,row:f.row,direction:f.direction,offset:{x:f.offset.x,y:f.offset.y,z:f.offset.z},...(f.anchor?{anchor:f.anchor}:{}),...(f.bindingId?{bindingId:f.bindingId}:{}),...(f.linkedId?{linkedId:f.linkedId}:{})})),
+      markers:(project.map.markers??[]).map(m=>({id:m.id,label:m.label,kind:m.kind,contentKey:m.contentKey,x:m.x,row:m.row,direction:m.direction,offset:{x:m.offset.x,y:m.offset.y,z:m.offset.z}})),
+      lockedCells:(project.map.lockedCells??[]).map(c=>({x:c.x,row:c.row})), zones:(project.map.zones??[]).map(z=>({x:z.x,row:z.row,kind:z.kind})),
+      ...(project.map.headroom===undefined?{}:{headroom:project.map.headroom}),
+      ...(project.map.structureSettings?{structureSettings:structuredClone(project.map.structureSettings)}:{}),
+      ...(project.map.pitBottoms?{pitBottoms:structuredClone(project.map.pitBottoms)}:{}),
+      ...(project.map.structureFills?{structureFills:structuredClone(project.map.structureFills)}:{}),
+      ...(project.map.propInstances?{propInstances:structuredClone(project.map.propInstances)}:{}),
     },
     settings: validateSettings(project.settings),
     bindings: project.bindings.map(binding => ({
@@ -69,11 +63,15 @@ export function publicProject(project: ProjectFile): ProjectFile {
       scale: { x: binding.scale.x, y: binding.scale.y, z: binding.scale.z },
       offset: { x: binding.offset.x, y: binding.offset.y, z: binding.offset.z }, rotationY: binding.rotationY,
       ...(binding.stairNativeRise === undefined ? {} : { stairNativeRise: binding.stairNativeRise }),
+      ...(binding.lightAnchor === undefined ? {} : { lightAnchor: binding.lightAnchor }),
+      ...(binding.prop===undefined?{}:{prop:structuredClone(binding.prop)}),
     })),
   };
   if (project.blueprintDataUrl !== undefined) {
     decodePngDataUrl(project.blueprintDataUrl);
     result.blueprintDataUrl = project.blueprintDataUrl;
   }
+  if(project.generationDraft!==undefined){decodePngDataUrl(project.generationDraft.imageDataUrl);result.generationDraft={imageDataUrl:project.generationDraft.imageDataUrl,settings:validateSettings(project.generationDraft.settings),...(project.generationDraft.region?{region:{x:project.generationDraft.region.x,row:project.generationDraft.region.row,width:project.generationDraft.region.width,height:project.generationDraft.region.height}}:{})};}
+  if(project.generationDraft?.catalog!==undefined)result.generationDraft!.catalog=parseBindings(project.generationDraft.catalog);
   return result;
 }

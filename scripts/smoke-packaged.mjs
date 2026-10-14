@@ -11,8 +11,14 @@ const executablePath = path.join(root, 'release', 'win-unpacked', 'Baekho Map Fo
 const portable = path.join(root, 'release', `Baekho-Map-Forge-${version}-Windows.exe`);
 const importer = path.join('unity-importer', 'Editor', 'BaekhoMapImporter.cs');
 assert.equal(await readFile(path.join(root, 'release', 'win-unpacked', 'resources', importer), 'utf8'), await readFile(path.join(root, importer), 'utf8'));
+const catalog = path.join('unity-importer', 'Editor', 'BaekhoPropCatalog.cs');
+assert.equal(await readFile(path.join(root, 'release', 'win-unpacked', 'resources', catalog), 'utf8'), await readFile(path.join(root, catalog), 'utf8'));
 const connectionScript = path.join('unity-importer', 'Runtime', 'BaekhoMapConnection.cs');
 assert.equal(await readFile(path.join(root, 'release', 'win-unpacked', 'resources', connectionScript), 'utf8'), await readFile(path.join(root, connectionScript), 'utf8'));
+for (const name of ['BaekhoGameplayMarker', 'BaekhoMapFixture']) {
+  const source = path.join('unity-importer', 'Runtime', `${name}.cs`);
+  assert.equal(await readFile(path.join(root, 'release', 'win-unpacked', 'resources', source), 'utf8'), await readFile(path.join(root, source), 'utf8'));
+}
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.OPENAI_API_KEY;
@@ -27,6 +33,12 @@ try {
   assert.equal(await page.evaluate(() => typeof window.require), 'undefined');
   assert.equal(await page.evaluate(() => typeof window.process), 'undefined');
   assert.equal(await page.evaluate(() => typeof window.baekho?.exportBundle), 'function');
+  assert.equal(await page.evaluate(() => typeof window.baekho?.saveProjects), 'function');
+  await page.locator('[data-view="variants"]').click();
+  assert.equal(await page.locator('.variant-gallery-empty').isVisible(), true);
+  assert.equal(await page.locator('#variantCount option').count(), 7);
+  await page.locator('[data-view="3d"]').click();
+  await page.locator('#preview canvas').waitFor();
   assert.equal(await page.evaluate(() => typeof window.baekho?.setApiKey), 'undefined');
   const codexStatus = await page.evaluate(() => window.baekho.getCodexStatus());
   assert.equal(codexStatus.state, 'ready', `Codex connection must succeed: ${codexStatus.message}`);

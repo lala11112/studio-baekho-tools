@@ -20,6 +20,16 @@ public static class BaekhoImporterSmoke
         public float cellSize;
         public AppPlacement[] placements;
         public AppConnection[] connections;
+        public AppMarker[] markers;
+    }
+    [Serializable] private sealed class AppMarker
+    {
+        public string id;
+        public string label;
+        public string kind;
+        public string contentKey;
+        public Vector3 position;
+        public Vector3 rotation;
     }
     [Serializable] private sealed class AppConnection
     {
@@ -39,10 +49,26 @@ public static class BaekhoImporterSmoke
         public Vector3 position;
         public Vector3 rotation;
         public Vector3 scale;
+        public string surface;
+        public float fitHeight;
+        public float fitWidth;
+        public Vector3 fitSize;
+        public bool centerXZ;
+        public string linkedId;
     }
 
     // End-to-end entry: input must be emitted by the real JS createExportBundle pipeline.
     public static void RunAppExport()
+    {
+        VerifyAppExport(true);
+    }
+
+    public static void RunFeatureExport()
+    {
+        VerifyAppExport(false);
+    }
+
+    private static void VerifyAppExport(bool checkDemo)
     {
         try
         {
@@ -56,25 +82,69 @@ public static class BaekhoImporterSmoke
             int roots = active.rootCount;
             string output = BaekhoMapImporter.BuildFromPath(input);
             GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(output);
-            Assert(prefab != null && prefab.transform.childCount == manifest.placements.Length + (manifest.schemaVersion >= 2 ? 1 : 0),
+            Assert(prefab != null && prefab.transform.childCount == manifest.placements.Length + (manifest.schemaVersion >= 2 ? 1 : 0) +
+                (manifest.schemaVersion >= 4 ? 1 : 0),
                 "every JS placement becomes one prefab child alongside an optional Connections group");
             foreach (AppPlacement placement in manifest.placements)
             {
                 Transform child = prefab.transform.Find(placement.role + "_" + placement.id);
                 Assert(child != null, "JS placement name: " + placement.id);
-                bool surfaceAligned = manifest.schemaVersion == 3 && placement.role != "stair";
-                Assert(Mathf.Abs(child.localPosition.x - placement.position.x) < 0.0001f &&
+                if (placement.fitSize != Vector3.zero)
+                {
+                    Bounds bounds = GeometryBounds(child);
+                    Assert((bounds.size - placement.fitSize).magnitude < .001f && (bounds.center - placement.position).magnitude < .001f,
+                        "JS v5 fill dimensions and measured center: " + placement.id);
+                    Assert(AssetDatabase.AssetPathToGUID(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(child.gameObject)) == placement.prefabGuid,
+                        "JS fitted structure keeps source GUID: " + placement.id);
+                    continue;
+                }
+                if (placement.centerXZ)
+                {
+                    Bounds bounds = GeometryBounds(child, true);
+                    Assert(Mathf.Abs(bounds.center.x - placement.position.x) < .001f && Mathf.Abs(bounds.center.z - placement.position.z) < .001f && Mathf.Abs(bounds.min.y - placement.position.y) < .001f,
+                        "JS measured prop centers complete renderer/collider envelope: " + placement.id);
+                    Assert(child.localScale == placement.scale, "JS measured prop preserves authored scale: " + placement.id);
+                    Assert(AssetDatabase.AssetPathToGUID(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(child.gameObject)) == placement.prefabGuid,
+                        "JS measured prop keeps original prefab reference: " + placement.id);
+                    continue;
+                }
+                if (manifest.schemaVersion >= 4 && (placement.role == "stair" || placement.role == "slope") && placement.surface == "bottom")
+                {
+                    Bounds bounds = GeometryBounds(child);
+                    Assert(Mathf.Abs(bounds.min.y - placement.position.y) < .001f && Mathf.Abs(bounds.center.x - placement.position.x) < .001f && Mathf.Abs(bounds.center.z - placement.position.z) < .001f,
+                        "JS stairs meet bottom-center anchor: " + placement.id);
+                    Assert(child.localScale == placement.scale && Quaternion.Angle(child.localRotation, Quaternion.Euler(placement.rotation)) < .01f,
+                        "JS stairs preserve calibrated rise and authored rotation: " + placement.id);
+                    Assert(AssetDatabase.AssetPathToGUID(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(child.gameObject)) == placement.prefabGuid,
+                        "JS stairs preserve source GUID: " + placement.id);
+                    continue;
+                }
+                bool surfaceAligned = manifest.schemaVersion >= 3 && placement.role != "stair" && placement.role != "slope" &&
+                    placement.surface != "pivot" && (placement.role != "light" || !string.IsNullOrEmpty(placement.surface));
+                Assert((placement.fitWidth > 0 || (Mathf.Abs(child.localPosition.x - placement.position.x) < 0.0001f &&
                     Mathf.Abs(child.localPosition.z - placement.position.z) < 0.0001f &&
-                    Mathf.Abs(child.localScale.x - placement.scale.x) < 0.0001f &&
+                    Mathf.Abs(child.localScale.x - placement.scale.x) < 0.0001f)) &&
                     Mathf.Abs(child.localScale.z - placement.scale.z) < 0.0001f &&
                     Quaternion.Angle(child.localRotation, Quaternion.Euler(placement.rotation)) < 0.01f,
                     "JS horizontal transforms and rotation: " + placement.id);
                 if (surfaceAligned)
                 {
                     Bounds bounds = GeometryBounds(child);
-                    Assert(Mathf.Abs((placement.role == "floor" ? bounds.max.y : bounds.min.y) - placement.position.y) < 0.001f,
+                    if (placement.fitWidth > 0)
+                    {
+                        bool widthX = Mathf.RoundToInt(placement.rotation.y) % 180 == 0;
+                        Assert(Mathf.Abs((widthX ? bounds.size.x : bounds.size.z) - placement.fitWidth) < 0.001f &&
+                            Mathf.Abs((widthX ? bounds.center.x - placement.position.x : bounds.center.z - placement.position.z)) < 0.001f,
+                            "JS wide door geometry width and center match its opening: " + placement.id);
+                    }
+                    bool top = placement.surface == "top" || (string.IsNullOrEmpty(placement.surface) &&
+                        (placement.role == "floor" || placement.role == "bridge"));
+                    Assert(Mathf.Abs((top ? bounds.max.y : bounds.min.y) - placement.position.y) < 0.001f,
                         "JS geometry meets intended surface: " + placement.id);
-                    if (placement.role == "floor" && bounds.size.y > 0)
+                    if (placement.fitHeight > 0)
+                        Assert(Mathf.Abs(bounds.size.y - placement.fitHeight) < 0.001f,
+                            "JS fitted vertical height: " + placement.id);
+                    else if ((placement.role == "floor" || placement.role == "ceiling") && bounds.size.y > 0)
                         Assert(Mathf.Abs(bounds.size.y - manifest.cellSize * 0.12f * placement.scale.y) < 0.001f,
                             "JS floor has calibrated thin geometry: " + placement.id);
                     else Assert(child.localScale.y == placement.scale.y, "JS object height is preserved: " + placement.id);
@@ -84,10 +154,34 @@ public static class BaekhoImporterSmoke
                 if (!string.IsNullOrEmpty(placement.prefabGuid))
                     Assert(AssetDatabase.AssetPathToGUID(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(child.gameObject)) == placement.prefabGuid,
                         "JS source GUID remains nested: " + placement.id);
+                if (manifest.schemaVersion >= 4 && child.GetComponent<BaekhoMapFixture>() != null)
+                {
+                    var fixture = child.GetComponent<BaekhoMapFixture>();
+                    Assert(fixture.id == placement.id && fixture.role == placement.role &&
+                        fixture.linkedId == (placement.linkedId ?? ""), "JS fixture metadata and links preserved: " + placement.id);
+                }
             }
+            int terrainContacts = 0;
+            foreach (AppPlacement placement in manifest.placements)
+            {
+                bool fill = placement.id.StartsWith("fill-heightGap-") || placement.id.StartsWith("fill-pitSide-");
+                bool cliff = placement.id.StartsWith("cliff-");
+                if (!fill && !cliff) continue;
+                string[] parts = placement.id.Split('-');
+                int start = fill ? 2 : 1;
+                Transform floor = prefab.transform.Find("floor_floor-" + parts[start] + "-" + parts[start + 1]);
+                if (floor == null) continue;
+                Transform face = prefab.transform.Find(placement.role + "_" + placement.id);
+                Assert(Mathf.Abs(GeometryBounds(face).max.y - GeometryBounds(floor).min.y) < .001f,
+                    "independent native face top touches actual calibrated floor underside without overlap or gap: " + placement.id);
+                terrainContacts++;
+            }
+            if (manifest.schemaVersion >= 4) Assert(terrainContacts > 0, "app integration exercised native floor-to-support contact");
+            if (checkDemo)
+            {
             Transform highFloor = prefab.transform.Find("floor_floor-10-12");
             Assert(highFloor != null && highFloor.localPosition.x == 5 && highFloor.localPosition.z == -9 &&
-                Mathf.Abs((manifest.schemaVersion == 3 ? GeometryBounds(highFloor).max.y : highFloor.localPosition.y) - 2) < 0.001f,
+                Mathf.Abs((manifest.schemaVersion >= 3 ? GeometryBounds(highFloor).max.y : highFloor.localPosition.y) - 2) < 0.001f,
                 "demo raised floor at x10 row12 has surface Y2");
             foreach (string id in new[] { "stair-11-10", "stair-8-13" })
             {
@@ -100,6 +194,7 @@ public static class BaekhoImporterSmoke
             Assert(Quaternion.Angle(prefab.transform.Find("stair_stair-11-10").localRotation, Quaternion.Euler(0, 180, 0)) < 0.01f &&
                 Quaternion.Angle(prefab.transform.Find("stair_stair-8-13").localRotation, Quaternion.Euler(0, 90, 0)) < 0.01f,
                 "both demo staircase ascent directions survive export");
+            }
             if (manifest.schemaVersion == 1)
                 Assert(prefab.transform.Find("spawn_spawn-2-2").localPosition.y == 0 &&
                     prefab.transform.Find("exit_exit-13-13").localPosition.y == 2, "JS legacy spawn and exit retain separate elevations");
@@ -121,11 +216,27 @@ public static class BaekhoImporterSmoke
                 Assert(prefab.transform.Find("spawn_spawn-2-2") == null && prefab.transform.Find("exit_exit-13-13") == null,
                     "schema2/3 contain sockets instead of legacy markers");
             }
+            if (manifest.schemaVersion >= 4)
+            {
+                Assert(prefab.GetComponentsInChildren<BaekhoGameplayMarker>().Length == manifest.markers.Length,
+                    "every JS gameplay marker is saved");
+                foreach (AppMarker marker in manifest.markers)
+                {
+                    Transform child = prefab.transform.Find("GameplayMarkers/" + marker.id);
+                    var metadata = child.GetComponent<BaekhoGameplayMarker>();
+                    Assert(child.localPosition == marker.position && child.localScale == Vector3.one &&
+                        Quaternion.Angle(child.localRotation, Quaternion.Euler(marker.rotation)) < 0.01f &&
+                        metadata.id == marker.id && metadata.label == marker.label && metadata.kind == marker.kind &&
+                        metadata.contentKey == marker.contentKey && child.GetComponents<Component>().Length == 2,
+                        "JS marker metadata and transform preserved without game logic: " + marker.id);
+                }
+            }
             Assert(active == SceneManager.GetActiveScene() && active.isDirty == dirty && active.rootCount == roots &&
                 EditorSceneManager.previewSceneCount == previews, "JS import preserves active scene and closes preview");
             string report = "PASS Unity " + Application.unityVersion + " — real JS bundle to native prefab: " +
                 manifest.placements.Length + " placements, " + (manifest.connections == null ? 0 : manifest.connections.Length) +
-                " connections, " + assertions + " assertions. Raised floor surface Y2, thin aligned floors, calibrated stairs at 90/180 degrees reach Y2, all GUIDs preserved. Output: " + output;
+                " connections, " + (manifest.markers == null ? 0 : manifest.markers.Length) + " markers, " + assertions +
+                " assertions. Surface alignment, height fitting, pivot transforms, metadata and nested source GUIDs preserved. Output: " + output;
             File.WriteAllText(Path.GetFullPath("../unity-app-export-result.txt"), report, new UTF8Encoding(false));
             Debug.Log("BAEKHO_APP_EXPORT_PASS " + report);
         }
@@ -138,6 +249,8 @@ public static class BaekhoImporterSmoke
 
     public static void Run()
     {
+        // Tiny geometry/validation fixtures opt out of baking; BaekhoNavMeshSmoke covers navigation.
+        // The real application export entry points above retain the default automatic bake.
         try
         {
             if (!Application.dataPath.Replace('\\', '/').EndsWith("/.local/unity-validation/Assets", StringComparison.Ordinal))
@@ -178,6 +291,7 @@ public static class BaekhoImporterSmoke
             UnityEngine.Object.DestroyImmediate(stairSource);
             string stairGuid = AssetDatabase.AssetPathToGUID(stairPath);
             string[] surfaceGuids = CreateSurfaceFixtures();
+            string lightGuid = CreateLightFixture();
             EditorSceneManager.SaveScene(baseline, Folder + "/Baseline.unity");
             int rootCount = baseline.rootCount;
             int previewCount = EditorSceneManager.previewSceneCount;
@@ -188,7 +302,7 @@ public static class BaekhoImporterSmoke
                 Placement("exit-1", "exit", "", "{\"x\":4,\"y\":5,\"z\":6}") + "]}";
             string input = Folder + "/sample.baekhomap.json";
             Write(input, valid);
-            string output = BaekhoMapImporter.BuildFromPath(input);
+            string output = BaekhoMapImporter.BuildFromPath(input, false);
             Assert(File.Exists(output), "prefab exists");
             Assert(!baseline.isDirty && SceneManager.GetActiveScene() == baseline && baseline.rootCount == rootCount,
                 "current scene remains clean and unchanged");
@@ -224,7 +338,7 @@ public static class BaekhoImporterSmoke
             Assert(prefab.transform.Find("spawn_spawn-1").localPosition.y == 1 &&
                 prefab.transform.Find("exit_exit-1").localPosition.y == 5, "markers preserve distinct floor elevations");
             string oldGuid = AssetDatabase.AssetPathToGUID(output);
-            string output2 = BaekhoMapImporter.BuildFromPath(input);
+            string output2 = BaekhoMapImporter.BuildFromPath(input, false);
             Assert(output != output2 && AssetDatabase.AssetPathToGUID(output) == oldGuid, "repeat import does not overwrite");
 
             Reject(input, valid.Replace("\"schemaVersion\":1", "\"schemaVersion\":2"), "schema version");
@@ -245,10 +359,13 @@ public static class BaekhoImporterSmoke
             Reject(input, valid.Replace("\"x\":4", "\"x\":\"4\""), "string instead of number");
             TestConnections(input, guid, baseline, rootCount, previewCount);
             TestSurfacePlacement(input, surfaceGuids, stairGuid, baseline, rootCount, previewCount);
+            TestV4Placement(input, surfaceGuids, stairGuid, lightGuid, baseline, rootCount, previewCount);
+            TestWideDoors(input, surfaceGuids, baseline, rootCount, previewCount);
+            TestV5Structures(input, surfaceGuids, stairGuid, baseline, rootCount, previewCount);
             Assert(!baseline.isDirty && baseline.rootCount == rootCount && EditorSceneManager.previewSceneCount == previewCount,
                 "all failures leave scene and preview state unchanged");
             Write(input, valid);
-            string report = "PASS Unity " + Application.unityVersion + " — " + assertions + " assertions; schema1/2 exact-transform compatibility, schema3 thin floors and surface-aligned objects across pivots/nested geometry, collider fallback, planes, unchanged stairs/sockets, strict validation and clean active scene.";
+            string report = "PASS Unity " + Application.unityVersion + " — " + assertions + " assertions; schema1/2 exact-transform compatibility, schema3 surface alignment, schema4 ceiling/bridge/cliff/wall fit/slope/light/fixtures/markers/wide-door fitting, nested prefabs, strict validation, no overwrite and clean active scene.";
             File.WriteAllText(Path.GetFullPath("../unity-validation-result.txt"), report, new UTF8Encoding(false));
             Debug.Log("BAEKHO_SMOKE_PASS " + report);
         }
@@ -274,7 +391,7 @@ public static class BaekhoImporterSmoke
         string suffix = "],\"schemaVersion\":2,\"name\":\"연결 방\",\"width\":4,\"height\":3,\"cellSize\":2,\"placements\":[" + placements + "]}";
         string valid = prefix + string.Join(",", sockets) + suffix;
         Write(input, valid);
-        string output = BaekhoMapImporter.BuildFromPath(input);
+        string output = BaekhoMapImporter.BuildFromPath(input, false);
         AssetDatabase.ImportAsset(output, ImportAssetOptions.ForceUpdate);
         GameObject loaded = PrefabUtility.LoadPrefabContents(output);
         try
@@ -311,7 +428,7 @@ public static class BaekhoImporterSmoke
         finally { PrefabUtility.UnloadPrefabContents(loaded); }
         Assert(!baseline.isDirty && baseline.rootCount == rootCount && EditorSceneManager.previewSceneCount == previewCount,
             "socket creation and prefab reload preserve the user scene");
-        string output2 = BaekhoMapImporter.BuildFromPath(input);
+        string output2 = BaekhoMapImporter.BuildFromPath(input, false);
         Assert(output2 != output && AssetDatabase.LoadAssetAtPath<GameObject>(output).GetComponentsInChildren<BaekhoMapConnection>().Length == 4,
             "repeated schema2 import preserves the original socket prefab");
 
@@ -437,7 +554,7 @@ public static class BaekhoImporterSmoke
             entries[index] = entries[index].Replace("\"id\":\"", "\"id\":\"" + index + "-");
         string valid = SurfaceManifest(string.Join(",", entries));
         Write(input, valid);
-        string output = BaekhoMapImporter.BuildFromPath(input);
+        string output = BaekhoMapImporter.BuildFromPath(input, false);
         GameObject loaded = PrefabUtility.LoadPrefabContents(output);
         try
         {
@@ -483,10 +600,312 @@ public static class BaekhoImporterSmoke
         Reject(input, SurfaceManifest(Placement("edge", "floor", guids[0], "{\"x\":0,\"y\":-1000000,\"z\":0}")), "derived aligned position overflow");
         Reject(input, SurfaceManifest(Placement("tilt", "floor", guids[0], rotation: "{\"x\":10,\"y\":0,\"z\":0}")), "tilted floor");
         Reject(input, valid.Replace("\"role\":\"floor\"", "\"role\":\"spawn\""), "schema3 legacy marker role");
-        Reject(input, valid.Replace("\"schemaVersion\":3", "\"schemaVersion\":4"), "unsupported future schema");
+        Reject(input, valid.Replace("\"schemaVersion\":3", "\"schemaVersion\":5"), "unsupported future schema");
         Reject(input, valid.Replace("\"cellSize\":2", "\"cellSize\":\"2\""), "schema3 string scalar");
         Assert(!baseline.isDirty && baseline.rootCount == rootCount && EditorSceneManager.previewSceneCount == previewCount,
             "schema3 success and bounds failures preserve active scene and close all previews");
+    }
+
+    private static string CreateLightFixture()
+    {
+        string path = AssetDatabase.GenerateUniqueAssetPath(Folder + "/LightOnly.prefab");
+        var root = new GameObject("AuthoredLight");
+        var light = root.AddComponent<Light>();
+        light.type = LightType.Spot;
+        light.intensity = 3.25f;
+        light.range = 17;
+        light.spotAngle = 42;
+        light.color = new Color(0.2f, 0.4f, 0.8f);
+        light.shadows = LightShadows.Soft;
+        PrefabUtility.SaveAsPrefabAsset(root, path);
+        UnityEngine.Object.DestroyImmediate(root);
+        return AssetDatabase.AssetPathToGUID(path);
+    }
+
+    private static void TestV4Placement(string input, string[] guids, string stairGuid, string lightGuid,
+        Scene baseline, int rootCount, int previewCount)
+    {
+        string[] fixtures = { "railing", "column", "arch", "water", "hazard", "trap", "gate", "switch",
+            "secretDoor", "rest", "merchant", "altar", "decoration" };
+        var entries = new System.Collections.Generic.List<string>
+        {
+            V4Placement("floor", "floor", guids[0], 2, "top", scaleY: 0.5f),
+            V4Placement("ceiling", "ceiling", guids[3], 5, "bottom", scaleY: 2),
+            V4Placement("bridge", "bridge", guids[0], 3, "top", scaleY: 0.4f),
+            V4Placement("cliff", "cliff", guids[3], -4, "bottom", fitHeight: 6),
+            V4Placement("wall", "wall", guids[0], 1, "bottom", fitHeight: 4.5f),
+            V4Placement("legacy-wall", "wall", guids[0], 1, "bottom", scaleY: 3),
+            V4Placement("slope", "slope", stairGuid, 2, "pivot", scaleY: 3),
+            V4Placement("light", "light", lightGuid, 7, "pivot"),
+            V4Placement("empty-pivot", "prop", guids[6], 9, "pivot"),
+            Placement("default-ceiling", "ceiling", guids[0], "{\"x\":0,\"y\":6,\"z\":0}"),
+            Placement("default-light", "light", lightGuid, "{\"x\":0,\"y\":8,\"z\":0}")
+        };
+        foreach (string role in fixtures)
+        {
+            string fixture = V4Placement(role, role, guids[0], 2, "pivot");
+            if (role == "switch") fixture = fixture.Substring(0, fixture.Length - 1) + ",\"linkedId\":\"gate\"}";
+            entries.Add(fixture);
+        }
+        string marker = Marker("enemy-1", "enemy", "units/guard");
+        string valid = FeatureManifest(string.Join(",", entries), marker + "," + Marker("reward-1", "reward", "") + "," + Marker("event-1", "event", "events/entry"));
+        Write(input, valid);
+        string output = BaekhoMapImporter.BuildFromPath(input, false);
+        GameObject loaded = PrefabUtility.LoadPrefabContents(output);
+        try
+        {
+            Assert(loaded.transform.childCount == entries.Count + 2, "v4 placements plus Connections and GameplayMarkers groups");
+            string[] aligned = { "floor_floor", "ceiling_ceiling", "bridge_bridge", "cliff_cliff", "wall_wall", "wall_legacy-wall", "ceiling_default-ceiling" };
+            float[] surfaces = { 2, 5, 3, -4, 1, 1, 6 };
+            float[] heights = { 0.12f, 0.48f, 0.4f, 6, 4.5f, 3, 0.24f };
+            for (int i = 0; i < aligned.Length; i++)
+            {
+                Transform child = loaded.transform.Find(aligned[i]);
+                Bounds bounds = GeometryBounds(child);
+                bool top = i == 0 || i == 2;
+                Assert(Mathf.Abs((top ? bounds.max.y : bounds.min.y) - surfaces[i]) < 0.001f &&
+                    Mathf.Abs(bounds.size.y - heights[i]) < 0.001f, "v4 measured surface and thickness/height: " + aligned[i]);
+                Assert(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(child.gameObject) != output,
+                    "v4 original nested prefab reference: " + aligned[i]);
+            }
+            Transform slope = loaded.transform.Find("slope_slope");
+            Assert(slope.localPosition.y == 2 && slope.localScale.y == 3 &&
+                Mathf.Abs(slope.Find("Step3").TransformPoint(0, 0.5f, 0).y - 5) < 0.001f,
+                "slope preserves low pivot and calibrated rise");
+            foreach (string id in new[] { "light_light", "light_default-light" })
+            {
+                Transform child = loaded.transform.Find(id);
+                Light light = child.GetComponent<Light>();
+                Assert(child.localPosition.y == (id == "light_light" ? 7 : 8) && light.type == LightType.Spot &&
+                    light.intensity == 3.25f && light.range == 17 && light.spotAngle == 42 &&
+                    light.color == new Color(0.2f, 0.4f, 0.8f) && light.shadows == LightShadows.Soft &&
+                    child.GetComponents<Component>().Length == 3 && child.GetComponent<BaekhoMapFixture>() != null,
+                    "Light-only authored prefab settings preserved, with fixture metadata: " + id);
+            }
+            Assert(loaded.transform.Find("prop_empty-pivot").localPosition.y == 9, "pivot accepts geometry-free prefab");
+            foreach (string role in fixtures)
+            {
+                Transform child = loaded.transform.Find(role + "_" + role);
+                var fixture = child.GetComponent<BaekhoMapFixture>();
+                Assert(child.localPosition.y == 2 && fixture.id == role && fixture.role == role &&
+                    fixture.linkedId == (role == "switch" ? "gate" : ""),
+                    "fixture role preserves explicit pivot and optional link metadata: " + role);
+            }
+            Assert(loaded.GetComponentsInChildren<BaekhoGameplayMarker>().Length == 3, "three marker kinds saved");
+            foreach (string kind in new[] { "enemy", "reward", "event" })
+            {
+                Transform child = loaded.transform.Find("GameplayMarkers/" + kind + "-1");
+                BaekhoGameplayMarker data = child.GetComponent<BaekhoGameplayMarker>();
+                Assert(child.localPosition == new Vector3(3, 2, 1) && child.localScale == Vector3.one &&
+                    Quaternion.Angle(child.localRotation, Quaternion.Euler(0, 90, 0)) < 0.01f &&
+                    child.GetComponents<Component>().Length == 2 && data.id == kind + "-1" &&
+                    data.label == "게임 표식" && data.kind == kind &&
+                    data.contentKey == (kind == "enemy" ? "units/guard" : kind == "event" ? "events/entry" : ""),
+                    "gameplay marker is metadata with raw position and rotation: " + kind);
+            }
+            Assert(loaded.transform.Find("Connections/east").GetComponent<BaekhoMapConnection>() != null,
+                "v4 connection runtime component remains available");
+        }
+        finally { PrefabUtility.UnloadPrefabContents(loaded); }
+        Write(input, valid);
+        string repeat = BaekhoMapImporter.BuildFromPath(input, false);
+        Assert(output != repeat && File.Exists(output), "v4 repeated import creates a new prefab");
+        Write(input, FeatureManifest(V4Placement("floor", "floor", guids[0], 0, "top")));
+        string emptyMarkers = BaekhoMapImporter.BuildFromPath(input, false);
+        Assert(AssetDatabase.LoadAssetAtPath<GameObject>(emptyMarkers).transform.Find("GameplayMarkers").childCount == 0,
+            "v4 empty marker array creates an empty metadata group");
+        Reject(input, FeatureManifest(V4Placement("cliff", "cliff", guids[5], -4, "bottom", fitHeight: 6)), "zero-height cliff cannot be fitted");
+        Reject(input, valid.Replace("\"surface\":\"top\"", "\"surface\":\"invalid\""), "unknown v4 surface");
+        Reject(input, valid.Replace("\"fitHeight\":6", "\"fitHeight\":0"), "zero fit height");
+        Reject(input, valid.Replace("\"fitHeight\":6", "\"fitHeight\":-2"), "negative fit height");
+        Reject(input, valid.Replace("\"fitHeight\":6", "\"fitHeight\":\"6\""), "fit height is numeric");
+        Reject(input, FeatureManifest(V4Placement("cliff", "cliff", guids[0], -4, "pivot", fitHeight: 6)), "fit height cannot use pivot");
+        Reject(input, FeatureManifest(V4Placement("prop", "prop", guids[0], 0, "bottom", fitHeight: 6)), "fit height requires wall or cliff");
+        Reject(input, FeatureManifest(V4Placement("light", "light", lightGuid, 7, "bottom")), "unmeasurable light requires pivot");
+        Reject(input, FeatureManifest(V4Placement("light", "light", "", 7, "pivot")), "light must reference a prefab");
+        Reject(input, FeatureManifest(V4Placement("floor", "floor", guids[0], 0, "top"), marker + "," + marker), "duplicate marker ids");
+        Reject(input, valid.Replace("\"kind\":\"enemy\"", "\"kind\":\"spawn\""), "invalid gameplay marker kind");
+        Reject(input, valid.Replace("\"linkedId\":\"gate\"", "\"linkedId\":\"missing-gate\""), "fixture link target must exist");
+        Reject(input, valid.Replace("\"linkedId\":\"gate\"", "\"linkedId\":\"switch\""), "fixture cannot link to itself");
+        Reject(input, valid.Replace("\"linkedId\":\"gate\"", "\"linkedId\":null"), "fixture link must be string");
+        Reject(input, valid.Replace("\"contentKey\":\"units/guard\",", ""), "missing marker content key");
+        Reject(input, valid.Replace("\"contentKey\":\"units/guard\"", "\"contentKey\":null"), "null marker content key");
+        Reject(input, valid.Replace("\"contentKey\":\"units/guard\"", "\"contentKey\":\"bad\\nkey\""), "marker content key control character");
+        Reject(input, valid.Replace("\"schemaVersion\":4", "\"schemaVersion\":3"), "v3 rejects v4 fields");
+        Reject(input, SurfaceManifest(V4Placement("floor", "floor", guids[0], 0, "top")), "v3 rejects optional surface even without markers");
+        Reject(input, FeatureManifest(Placement("floor", "floor", guids[0])).Replace(",\"markers\":[]", ""), "v4 requires markers array");
+        Assert(!baseline.isDirty && baseline.rootCount == rootCount && EditorSceneManager.previewSceneCount == previewCount,
+            "v4 success and failure preserve current scene and close isolated previews");
+    }
+
+    private static void TestWideDoors(string input, string[] guids, Scene baseline, int rootCount, int previewCount)
+    {
+        var entries = new System.Collections.Generic.List<string>();
+        foreach (int yaw in new[] { 0, 90, 180, 270 })
+        {
+            string entry = Placement("wide-" + yaw, "door", guids[3], "{\"x\":10,\"y\":2,\"z\":1}",
+                "{\"x\":0,\"y\":" + yaw + ",\"z\":0}", "{\"x\":9,\"y\":2,\"z\":0.3}");
+            entries.Add(entry.Substring(0, entry.Length - 1) + ",\"surface\":\"bottom\",\"fitWidth\":5.5}");
+        }
+        string valid = FeatureManifest(string.Join(",", entries)).Replace("\"width\":1.5", "\"width\":5.5");
+        Write(input, valid);
+        string output = BaekhoMapImporter.BuildFromPath(input, false);
+        GameObject loaded = PrefabUtility.LoadPrefabContents(output);
+        try
+        {
+            foreach (int yaw in new[] { 0, 90, 180, 270 })
+            {
+                Transform child = loaded.transform.Find("door_wide-" + yaw);
+                Bounds bounds = GeometryBounds(child);
+                bool acrossX = yaw % 180 == 0;
+                Assert(Mathf.Abs((acrossX ? bounds.size.x : bounds.size.z) - 5.5f) < 0.001f &&
+                    Mathf.Abs((acrossX ? bounds.center.x - 10 : bounds.center.z - 1)) < 0.001f && Mathf.Abs(bounds.min.y - 2) < 0.001f,
+                    "wide door fits and centers nested off-axis geometry in direction " + yaw);
+                Assert(child.localScale.y == 2 && child.localScale.z == 0.3f &&
+                    PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(child.gameObject) != output,
+                    "wide door preserves Y/Z scales and source reference in direction " + yaw);
+            }
+            Assert(loaded.transform.Find("Connections/east").GetComponent<BaekhoMapConnection>().width == 5.5f,
+                "v4 connection width may exceed cellSize and keeps raw metadata");
+        }
+        finally { PrefabUtility.UnloadPrefabContents(loaded); }
+        Reject(input, valid.Replace("\"fitWidth\":5.5", "\"fitWidth\":0"), "zero door fitted width");
+        Reject(input, valid.Replace("\"fitWidth\":5.5", "\"fitWidth\":40.01"), "door fitted width above maximum");
+        Reject(input, valid.Replace("\"role\":\"door\"", "\"role\":\"prop\""), "fitted width requires door role");
+        Reject(input, valid.Replace("\"surface\":\"bottom\"", "\"surface\":\"pivot\""), "fitted door requires bottom alignment");
+        Reject(input, valid.Replace("\"width\":5.5", "\"width\":40.01"), "v4 connection width above maximum");
+        Reject(input, valid.Replace("\"schemaVersion\":4", "\"schemaVersion\":3"), "old schema refuses width fitting");
+        Assert(!baseline.isDirty && baseline.rootCount == rootCount && EditorSceneManager.previewSceneCount == previewCount,
+            "wide-door imports preserve active scene and close previews");
+    }
+
+    private static void TestV5Structures(string input, string[] guids, string stairGuid, Scene baseline, int rootCount, int previewCount)
+    {
+        string zonePath = AssetDatabase.GenerateUniqueAssetPath(Folder + "/TriggerZone.prefab");
+        var zone = new GameObject("AuthoredDeadzone");
+        var child = new GameObject("OffCenterTrigger"); child.transform.SetParent(zone.transform, false);
+        child.transform.localPosition = new Vector3(3, -2, 5);
+        var box = child.AddComponent<BoxCollider>(); box.isTrigger = true; box.size = new Vector3(2, 4, 6);
+        box.center = new Vector3(1, .5f, -1);
+        var body = zone.AddComponent<Rigidbody>(); body.isKinematic = true; body.useGravity = false;
+        PrefabUtility.SaveAsPrefabAsset(zone, zonePath);
+        UnityEngine.Object.DestroyImmediate(zone);
+        string zoneGuid = AssetDatabase.AssetPathToGUID(zonePath);
+        string measuredPath = AssetDatabase.GenerateUniqueAssetPath(Folder + "/MeasuredProp.prefab");
+        var measuredRoot = new GameObject("OffCenterMeasuredProp");
+        var visual = GameObject.CreatePrimitive(PrimitiveType.Cube); visual.transform.SetParent(measuredRoot.transform, false);
+        visual.transform.localPosition = new Vector3(3, 2, -4); visual.transform.localScale = new Vector3(2, 2, 2);
+        var interaction = measuredRoot.AddComponent<BoxCollider>(); interaction.isTrigger = true;
+        interaction.center = new Vector3(7, 1, 2); interaction.size = new Vector3(2, 4, 6);
+        Vector3 nativePropSize = GeometryBounds(measuredRoot.transform, true).size;
+        PrefabUtility.SaveAsPrefabAsset(measuredRoot, measuredPath); UnityEngine.Object.DestroyImmediate(measuredRoot);
+        string measuredGuid = AssetDatabase.AssetPathToGUID(measuredPath);
+        string centeredStairPath = AssetDatabase.GenerateUniqueAssetPath(Folder + "/CenteredStair.prefab");
+        var centeredStairRoot = new GameObject("CenteredPivotStair");
+        var nestedSteps = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GUIDToAssetPath(stairGuid)));
+        nestedSteps.transform.SetParent(centeredStairRoot.transform, false);
+        nestedSteps.transform.localPosition = new Vector3(2, -.5f, -3);
+        var stairTrigger = centeredStairRoot.AddComponent<BoxCollider>(); stairTrigger.isTrigger = true;
+        stairTrigger.center = new Vector3(100, -100, 100); stairTrigger.size = new Vector3(80, 80, 80);
+        PrefabUtility.SaveAsPrefabAsset(centeredStairRoot, centeredStairPath); UnityEngine.Object.DestroyImmediate(centeredStairRoot);
+        string centeredStairGuid = AssetDatabase.AssetPathToGUID(centeredStairPath);
+        // Creating the fixture above legitimately touched the isolated baseline; reset test baseline.
+        EditorSceneManager.SaveScene(baseline, Folder + "/Baseline.unity");
+        Func<string, string, string, int, string> entry = (id, role, guid, yaw) =>
+        {
+            string json = Placement(id, role, guid, "{\"x\":10,\"y\":-4,\"z\":7}", "{\"x\":0,\"y\":" + yaw + ",\"z\":0}", "{\"x\":9,\"y\":8,\"z\":7}");
+            return json.Substring(0, json.Length - 1) + ",\"surface\":\"pivot\",\"fitSize\":{\"x\":5,\"y\":1,\"z\":3}}";
+        };
+        string prop = Placement("measured", "prop", measuredGuid, "{\"x\":10,\"y\":2,\"z\":7}", "{\"x\":0,\"y\":90,\"z\":0}", "{\"x\":2,\"y\":1.5,\"z\":0.5}");
+        prop = prop.Substring(0, prop.Length - 1) + ",\"surface\":\"bottom\",\"centerXZ\":true}";
+        string valid = FeatureManifest(entry("solid", "wall", guids[3], 90) + "," + entry("trigger", "deadzone", zoneGuid, 0) + "," + prop).Replace("\"schemaVersion\":4", "\"schemaVersion\":5");
+        Write(input, valid);
+        string output = BaekhoMapImporter.BuildFromPath(input, false);
+        GameObject loaded = PrefabUtility.LoadPrefabContents(output);
+        try
+        {
+            Transform solid = loaded.transform.Find("wall_solid"); Bounds actual = GeometryBounds(solid);
+            Assert((actual.size - new Vector3(3, 1, 5)).magnitude < .001f && (actual.center - new Vector3(10, -4, 7)).magnitude < .001f,
+                "v5 atomically fits three dimensions and centers off-axis nested geometry before yaw");
+            Transform trigger = loaded.transform.Find("deadzone_trigger"); BoxCollider collider = trigger.GetComponentInChildren<BoxCollider>();
+            Vector3 center = collider.transform.TransformPoint(collider.center);
+            Vector3 size = Vector3.Scale(collider.size, collider.transform.lossyScale);
+            Assert((center - new Vector3(10, -4, 7)).magnitude < .001f && (size - new Vector3(5, 1, 3)).magnitude < .001f,
+                "v5 collider-only trigger deadzone is sized and centered on all axes");
+            Assert(collider.isTrigger && trigger.GetComponent<Rigidbody>().isKinematic && !trigger.GetComponent<Rigidbody>().useGravity &&
+                trigger.GetComponents<Component>().Length == 2 && collider.GetComponents<Component>().Length == 2,
+                "deadzone preserves authored components and gameplay behavior without adding components");
+            Assert(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(trigger.gameObject) == zonePath,
+                "deadzone keeps original nested prefab reference");
+            Transform placedProp = loaded.transform.Find("prop_measured"); Bounds propBounds = GeometryBounds(placedProp, true);
+            Vector3 expectedSize = new Vector3(nativePropSize.z * .5f, nativePropSize.y * 1.5f, nativePropSize.x * 2);
+            Assert((propBounds.size - expectedSize).magnitude < .001f && Mathf.Abs(propBounds.center.x - 10) < .001f && Mathf.Abs(propBounds.center.z - 7) < .001f && Mathf.Abs(propBounds.min.y - 2) < .001f,
+                "v5 measured prop centers renderer+trigger union and aligns envelope bottom with off-center pivots");
+            Assert(placedProp.localScale == new Vector3(2, 1.5f, .5f) && placedProp.GetComponent<BoxCollider>().isTrigger &&
+                PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(placedProp.gameObject) == measuredPath,
+                "measured props retain original size, trigger and prefab references");
+        }
+        finally { PrefabUtility.UnloadPrefabContents(loaded); }
+        Reject(input, valid.Replace("\"schemaVersion\":5", "\"schemaVersion\":4"), "v4 rejects fitSize");
+        Reject(input, valid.Replace("\"x\":5,\"y\":1,\"z\":3", "\"x\":0,\"y\":1,\"z\":3"), "fitSize requires positive axes");
+        Reject(input, valid.Replace("\"surface\":\"pivot\"", "\"surface\":\"bottom\""), "fitSize has center semantics only");
+        Reject(input, valid.Replace("\"role\":\"wall\"", "\"role\":\"prop\""), "auto fitting cannot silently resize props");
+        Reject(input, valid.Replace("\"fitSize\":", "\"fitHeight\":2,\"fitSize\":"), "size fit cannot mix height fitting");
+        Reject(input, valid.Replace(zoneGuid, guids[6]), "deadzone must have a measurable collider");
+        Reject(input, valid.Replace(guids[3], guids[5]), "flat source cannot be fit to solid XYZ extent");
+        Reject(input, valid.Replace("\"centerXZ\":true", "\"centerXZ\":false"), "centerXZ cannot be explicitly false");
+        Reject(input, valid.Replace("\"centerXZ\":true", "\"centerXZ\":1"), "centerXZ must be boolean");
+        Reject(input, valid.Replace("\"role\":\"prop\"", "\"role\":\"wall\""), "centerXZ is restricted to measured props and decorations");
+        Reject(input, valid.Replace("\"surface\":\"bottom\"", "\"surface\":\"pivot\""), "centerXZ requires bottom surface");
+        Reject(input, valid.Replace("\"centerXZ\":true", "\"centerXZ\":true,\"fitHeight\":2"), "centerXZ cannot resize measured props");
+        string bottomStair = Placement("bottom-stair", "stair", centeredStairGuid, "{\"x\":4,\"y\":3,\"z\":5}", "{\"x\":0,\"y\":90,\"z\":0}", "{\"x\":2,\"y\":2,\"z\":2}");
+        bottomStair = bottomStair.Substring(0, bottomStair.Length - 1) + ",\"surface\":\"bottom\"}";
+        string pivotStair = bottomStair.Replace("bottom-stair", "old-pivot-stair").Replace("\"surface\":\"bottom\"", "\"surface\":\"pivot\"");
+        string slope = bottomStair.Replace("bottom-stair", "bottom-slope").Replace("\"role\":\"stair\"", "\"role\":\"slope\"");
+        Write(input, FeatureManifest(bottomStair + "," + pivotStair + "," + slope));
+        string stairOutput = BaekhoMapImporter.BuildFromPath(input, false); GameObject stairs = PrefabUtility.LoadPrefabContents(stairOutput);
+        try
+        {
+            foreach (string name in new[] { "stair_bottom-stair", "slope_bottom-slope" })
+            {
+                Transform placed = stairs.transform.Find(name); Bounds bounds = GeometryBounds(placed);
+                Assert(Mathf.Abs(bounds.min.y - 3) < .001f && Mathf.Abs(bounds.max.y - 5) < .001f && Mathf.Abs(bounds.center.x - 4) < .001f && Mathf.Abs(bounds.center.z - 5) < .001f,
+                    "bottom-centered stair/slope aligns support base and calibrated high landing despite centered/off-axis pivots: " + name);
+                Assert(placed.localScale == new Vector3(2, 2, 2) && placed.GetComponent<BoxCollider>().isTrigger && PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(placed.GetChild(0).gameObject) == AssetDatabase.GUIDToAssetPath(stairGuid),
+                    "stairs preserve calibrated rise, nested source and unrelated interaction trigger: " + name);
+            }
+            Assert(stairs.transform.Find("stair_old-pivot-stair").localPosition == new Vector3(4, 3, 5), "old explicit pivot stair import remains unchanged");
+        }
+        finally { PrefabUtility.UnloadPrefabContents(stairs); }
+        Reject(input, FeatureManifest(bottomStair.Replace("\"x\":0,\"y\":90", "\"x\":10,\"y\":90")), "bottom stair does not accept X/Z tilt");
+        string catalog = Path.GetFullPath("../prop-catalog-validation.json");
+        int count = BaekhoPropCatalog.ExportToPath(catalog, new[] { zoneGuid, guids[0], zoneGuid, guids[6], measuredGuid });
+        string data = File.ReadAllText(catalog);
+        Assert(count == 3 && data.Contains(zoneGuid) && data.Contains(guids[0]) && !data.Contains(guids[6]) && data.Contains(measuredGuid),
+            "bounds export includes collider-only triggers, deduplicates ids and skips unmeasurable prefabs");
+        Assert(!baseline.isDirty && baseline.rootCount == rootCount && EditorSceneManager.previewSceneCount == previewCount,
+            "v5 and catalog export preserve active scene and close isolated previews");
+    }
+
+    private static string Marker(string id, string kind, string contentKey)
+    {
+        return "{\"id\":\"" + id + "\",\"label\":\"게임 표식\",\"kind\":\"" + kind + "\",\"contentKey\":\"" + contentKey +
+            "\",\"position\":{\"x\":3,\"y\":2,\"z\":1},\"rotation\":{\"x\":0,\"y\":90,\"z\":0}}";
+    }
+
+    private static string V4Placement(string id, string role, string guid, float y, string surface, float scaleY = 1, float fitHeight = 0)
+    {
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        string entry = Placement(id, role, guid, "{\"x\":0,\"y\":" + y.ToString(culture) + ",\"z\":0}",
+            scale: "{\"x\":1,\"y\":" + scaleY.ToString(culture) + ",\"z\":1}");
+        return entry.Substring(0, entry.Length - 1) + ",\"surface\":\"" + surface + "\"" +
+            (fitHeight == 0 ? "" : ",\"fitHeight\":" + fitHeight.ToString(culture)) + "}";
+    }
+
+    private static string FeatureManifest(string placements, string markers = "")
+    {
+        string entry = SurfaceManifest(placements).Replace("\"schemaVersion\":3", "\"schemaVersion\":4");
+        return entry.Substring(0, entry.Length - 1) + ",\"markers\":[" + markers + "]}";
     }
 
     private static string SurfaceManifest(string placements)
@@ -496,7 +915,7 @@ public static class BaekhoImporterSmoke
     }
 
     // Check actual fixture vertices independently of the importer's mesh-box projection.
-    private static Bounds GeometryBounds(Transform root)
+    private static Bounds GeometryBounds(Transform root, bool unionTriggers = false)
     {
         bool found = false;
         Bounds result = new Bounds();
@@ -511,10 +930,10 @@ public static class BaekhoImporterSmoke
                 else result.Encapsulate(point);
             }
         }
-        if (!found)
+        if (!found || unionTriggers)
             foreach (BoxCollider box in root.GetComponentsInChildren<BoxCollider>(true))
             {
-                if (!box.enabled || box.isTrigger || !ActiveWithin(box.transform, root)) continue;
+                if (!box.enabled || (!unionTriggers && box.isTrigger) || !ActiveWithin(box.transform, root)) continue;
                 for (int corner = 0; corner < 8; corner++)
                 {
                     Vector3 point = box.transform.TransformPoint(box.center + Vector3.Scale(box.size / 2,
@@ -563,7 +982,7 @@ public static class BaekhoImporterSmoke
         int before = Directory.GetFiles(Folder, "*.prefab").Length;
         Write(path, json);
         bool rejected = false;
-        try { BaekhoMapImporter.BuildFromPath(path); }
+        try { BaekhoMapImporter.BuildFromPath(path, false); }
         catch (InvalidDataException) { rejected = true; }
         Assert(rejected && Directory.GetFiles(Folder, "*.prefab").Length == before, "reject " + label + " without saving");
     }
