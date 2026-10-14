@@ -1,5 +1,14 @@
 # Partsmith 검증 결과
 
+## 2026-10-14 — preview26 UV 후 모델 미리보기 복구
+
+- 실제 오류: UV 입력 등록이 `graphics-<버전 ID>`에 원본 FBX를 저장하고, 미리보기에서 같은 ID의 GLB를 기존 목록 뒤에 추가했습니다. 첫 번째 일치 항목인 FBX가 GLTFLoader로 들어가 `Unexpected token 'K', "Kaydara FB" ... is not valid JSON`이 발생했습니다. 파일 누락·손상이나 UV 생성 실패는 아니었습니다.
+- 화면용 임시 프로젝트는 선택한 GLB만 보유하도록 수정했습니다. 제작용 FBX·프로젝트 등록·실행 요청·채택 데이터는 변경하지 않습니다.
+- 실제 사용자 승인 T01 `4c852a23-8875-4025-b1f4-50a70a33074b`: 저장된 서비스 비용20크레딧, 원격 완료. 원본 크기·위치로 복원된 `eefacd21-954b-49b4-970e-f1e79e682a89`는 미채택입니다. 복원 보고서7검사 및 등록4파일 해시 일치; 원본 좌표·새 UV·안정된 파트 ID 보존, FBX 왕복 오차6.664e-8. 이는 파일·좌표 검사이며 UV 배치나 외형의 최종 사용자 합격을 대신하지 않습니다.
+- 실제 preview26에서 채택 원본과 새 UV 결과를 번갈아 표시해 각각10,314삼각형의 모델 로딩을 확인했습니다. 앱 재시작 후5작업공간·250등록파일 해시·7프로젝트JSON 동일, 추가 제작·채택·유료 제출·제작 GPT 호출0. 이전 취소 UV는 조회·재개하지 않았습니다.
+- 새 실제 Electron 회귀 검사1개 통과: 동일 ID FBX 충돌, 모델→UV→모델 전환, 실제 GLB 삼각형1→2→1, 제작 호출 금지와 데이터 보존. 옛 동작을 빌드 메모리에만 주입한 비교 검사는 예상대로 실패했습니다. TypeScript·빌드·별도 패키징 통과.
+- 증거: `artifacts/runtime/graphics-head-uv-preview-live.json`, `graphics-preview-exceptions.json`, `graphics-head-uv-preview-final.png`, `graphics-preview26-build.log`, `graphics-preview26-package.log`. 별도 실행본: `release/0.7.0-preview.26/win-unpacked/Partsmith.exe`.
+
 ## 2026-10-12 — 0.6.33 UV 승인 전달 실패와 잔여 예약 복구
 
 - 실제 surface job3f65e6b3-6adb-465d-a9fd-f65d31ec8f0b: attempt1은 비용0을 상한으로 오해해 중단. attempt2의 studio_surface_begin 도구가08:18:02.639Z 실패했으나 호스트 승인·예약은08:18:12.231Z 저장됐다. 이후 시도는 UV20 예약과 완료 결과 부재로 중단. 예약은 Tripo 결제 완료 증거가 아니며 UV/텍스처 완료를 주장하지 않는다.

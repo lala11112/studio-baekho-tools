@@ -373,7 +373,9 @@ function VersionPreview({
     const previewProject: Project = {
       ...project,
       assets: [
-        ...project.assets,
+        // UV/texture inputs register `graphics-${version.id}` as a native FBX.
+        // This preview must resolve only its selected GLB, not the backend input
+        // with the same id. Keep the persisted production asset list untouched.
         {
           id,
           file: glb.path,
