@@ -1,5 +1,5 @@
-export type StudioTool = "modeling" | "combat" | "hit-timing";
-export type StudioNativeTool = Exclude<StudioTool, "modeling">;
+export type StudioTool = "modeling" | "combat" | "hit-timing" | "bgm";
+export type StudioNativeTool = "combat" | "hit-timing";
 export type StudioPage = "home" | "tools" | "runs" | "results" | "settings";
 export interface StudioTarget {
   tool: StudioTool;
@@ -46,18 +46,29 @@ export interface StudioSummary {
   storage: { modeling: string; combat: string; hitTimer: string };
   warnings: string[];
 }
-export interface StudioBounds { x: number; y: number; width: number; height: number }
+export interface StudioBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 export interface StudioApi {
   summary(): Promise<StudioSummary>;
   showCombat(bounds: StudioBounds, target?: StudioTarget): Promise<void>;
   hideCombat(): Promise<void>;
   resizeCombat(bounds: StudioBounds): Promise<void>;
   chooseCombatProject(): Promise<void>;
-  showTool(tool: StudioNativeTool, bounds: StudioBounds, target?: StudioTarget): Promise<void>;
+  showTool(
+    tool: StudioNativeTool,
+    bounds: StudioBounds,
+    target?: StudioTarget,
+  ): Promise<void>;
   hideTools(): Promise<void>;
   resizeTool(tool: StudioNativeTool, bounds: StudioBounds): Promise<void>;
   chooseHitTimerProject(): Promise<void>;
 }
 declare global {
-  interface Window { studio: StudioApi }
+  interface Window {
+    studio: StudioApi;
+  }
 }

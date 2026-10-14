@@ -27,8 +27,10 @@ import { LocalPipeline } from "../engine/local";
 import { Vault } from "./vault";
 import { catalog } from "../shared/catalog";
 import { installStudioHost } from "./studio-host";
+import { installBgmHost } from "./bgm-host";
 import type { Command, Project } from "../shared/types";
 protocol.registerSchemesAsPrivileged([
+  { scheme: "bgm-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
   { scheme: "aht", privileges: { standard: true, secure: true, supportFetchAPI: true } },
   { scheme: "aht-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
   { scheme: "baekho", privileges: { standard: true, secure: true, supportFetchAPI: true } },
@@ -672,6 +674,7 @@ app.whenReady().then(async () => {
       };
     }
   });
+  installBgmHost(win, root);
   const host = installStudioHost({
     window: win,
     root,

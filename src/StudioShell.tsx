@@ -14,6 +14,7 @@ import {
   House,
   Layers3,
   LoaderCircle,
+  Music2,
   Play,
   RefreshCw,
   Settings2,
@@ -22,6 +23,8 @@ import {
   X,
 } from "lucide-react";
 import { App } from "./App";
+import { BgmWorkshop } from "./BgmWorkshop";
+import "./bgm.css";
 import type {
   StudioBounds,
   StudioEntry,
@@ -62,8 +65,9 @@ const toolNames: Record<StudioTool, string> = {
   modeling: "3D 모델링",
   combat: "타격감 찾기",
   "hit-timing": "타격 타이밍",
+  bgm: "BGM 만들기",
 };
-const toolOrder = ["modeling", "combat", "hit-timing"] as const;
+const toolOrder = ["modeling", "combat", "hit-timing", "bgm"] as const;
 const toolCopy: Record<
   StudioTool,
   {
@@ -94,6 +98,13 @@ const toolCopy: Record<
     flow: "프레임 촬영 → AI 제안 → 구간 검토",
     input: "입력: Unity 프로젝트·공격 애니메이션",
     output: "결과: 타이밍 제안·검토한 구간 설정",
+  },
+  bgm: {
+    category: "MUSIC CREATION",
+    description: "장면의 분위기를 담은 나만의 배경음악.",
+    flow: "분위기 선택 → 미리듣기 → MP3",
+    input: "입력: 장르·감정·장면 설명",
+    output: "결과: 30초 BGM 후보 3개",
   },
 };
 const toneNames: Record<StudioEntry["tone"], string> = {
@@ -130,6 +141,8 @@ function ToolIcon({ tool, size = 19 }: { tool: StudioTool; size?: number }) {
     <Box size={size} aria-hidden="true" />
   ) : tool === "hit-timing" ? (
     <Clock3 size={size} aria-hidden="true" />
+  ) : tool === "bgm" ? (
+    <Music2 size={size} aria-hidden="true" />
   ) : (
     <Swords size={size} aria-hidden="true" />
   );
@@ -160,6 +173,61 @@ function TigerMark() {
 }
 
 function ToolArt({ tool }: { tool: StudioTool }) {
+  if (tool === "bgm")
+    return (
+      <div className="bkh-tool-art bkh-tool-art-bgm" aria-hidden="true">
+        <svg viewBox="0 0 230 170">
+          <ellipse
+            cx="118"
+            cy="143"
+            rx="69"
+            ry="11"
+            fill="#b8b793"
+            opacity=".22"
+          />
+          <circle
+            cx="120"
+            cy="81"
+            r="54"
+            fill="#f9f8ec"
+            stroke="#c1bea0"
+            strokeWidth="1.5"
+          />
+          <circle cx="120" cy="81" r="39" fill="none" stroke="#d9d6bd" />
+          <circle cx="120" cy="81" r="27" fill="#e6e3c9" />
+          <path
+            d="M111 98V59l32-7v38M111 68l32-7"
+            fill="none"
+            stroke="#8c9066"
+            strokeWidth="4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <ellipse
+            cx="103"
+            cy="100"
+            rx="10"
+            ry="7"
+            fill="#8c9066"
+            transform="rotate(-20 103 100)"
+          />
+          <ellipse
+            cx="135"
+            cy="92"
+            rx="10"
+            ry="7"
+            fill="#8c9066"
+            transform="rotate(-20 135 92)"
+          />
+          <path
+            d="M45 77v17m9-27v37m9-19v10m118-37v24m9-12v38m9-24v11"
+            stroke="#b9b68f"
+            strokeWidth="3"
+            strokeLinecap="round"
+          />
+        </svg>
+      </div>
+    );
   if (tool === "hit-timing")
     return (
       <div className="bkh-tool-art bkh-tool-art-hit-timing" aria-hidden="true">
@@ -505,6 +573,7 @@ export function StudioShell() {
   const [choosingProject, setChoosingProject] =
     useState<StudioNativeTool | null>(null);
   const [modelingMounted, setModelingMounted] = useState(false);
+  const [bgmMounted, setBgmMounted] = useState(false);
   const [modelingNavigation, setModelingNavigation] =
     useState<ModelingNavigation>({ key: 0, tab: "home" });
   const [nativeNavigation, setNativeNavigation] = useState<{
@@ -520,8 +589,8 @@ export function StudioShell() {
   const alive = useRef(true);
   const request = useRef<Promise<void> | null>(null);
   const nativeEpoch = useRef(0);
-  const nativeTool =
-    activeTool && activeTool !== "modeling" ? activeTool : null;
+  const nativeTool: StudioNativeTool | null =
+    activeTool === "combat" || activeTool === "hit-timing" ? activeTool : null;
 
   const refresh = useCallback((): Promise<void> => {
     if (!bridge) return Promise.resolve();
@@ -593,6 +662,8 @@ export function StudioShell() {
             create: target.create,
           }));
         }
+      } else if (target.tool === "bgm") {
+        setBgmMounted(true);
       } else {
         setNativeError("");
         setNativeNavigation((previous) => ({ key: previous.key + 1, target }));
@@ -695,15 +766,17 @@ export function StudioShell() {
     ? {
         title: toolNames[activeTool],
         subtitle:
-          activeTool === "modeling"
-            ? "이미지부터 모델링, 리깅, Unity 연결까지"
-            : activeTool === "hit-timing"
-              ? summary?.hitTimer.projectName
-                ? `Unity 프로젝트 · ${summary.hitTimer.projectName}`
-                : "애니메이션의 공격 판정 구간을 제안하고 검토"
-              : summary?.combat.projectName
-                ? `Unity 프로젝트 · ${summary.combat.projectName}`
-                : "Unity 프로젝트를 연결하고 원하는 타격감을 찾아보세요.",
+          activeTool === "bgm"
+            ? "장르와 감정을 고르고, 장면에 어울리는 음악을 찾아보세요."
+            : activeTool === "modeling"
+              ? "이미지부터 모델링, 리깅, Unity 연결까지"
+              : activeTool === "hit-timing"
+                ? summary?.hitTimer.projectName
+                  ? `Unity 프로젝트 · ${summary.hitTimer.projectName}`
+                  : "애니메이션의 공격 판정 구간을 제안하고 검토"
+                : summary?.combat.projectName
+                  ? `Unity 프로젝트 · ${summary.combat.projectName}`
+                  : "Unity 프로젝트를 연결하고 원하는 타격감을 찾아보세요.",
       }
     : pageCopy[page];
 
@@ -748,6 +821,19 @@ export function StudioShell() {
             </button>
           ))}
         </nav>
+        <div className="bkh-bgm-shortcut">
+          <p className="bkh-nav-label">MUSIC</p>
+          <button
+            data-testid="nav-bgm"
+            className={`bkh-nav-item${activeTool === "bgm" ? " bkh-nav-item-active" : ""}`}
+            aria-current={activeTool === "bgm" ? "page" : undefined}
+            disabled={!bridge}
+            onClick={() => open({ tool: "bgm" })}
+          >
+            <Music2 size={19} strokeWidth={1.7} />
+            <span>BGM 만들기</span>
+          </button>
+        </div>
         <div className="bkh-sidebar-bottom">
           {activeTool && (
             <div className="bkh-current-tool">
@@ -1311,6 +1397,16 @@ export function StudioShell() {
                 aria-hidden={activeTool !== "modeling"}
               >
                 <App embedded navigation={modelingNavigation} />
+              </div>
+            )}
+            {bgmMounted && (
+              <div
+                data-testid="workspace-bgm"
+                className="bkh-bgm"
+                style={{ display: activeTool === "bgm" ? "flex" : "none" }}
+                aria-hidden={activeTool !== "bgm"}
+              >
+                <BgmWorkshop active={activeTool === "bgm"} />
               </div>
             )}
             {nativeTool && (
