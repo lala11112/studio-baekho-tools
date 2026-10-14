@@ -199,7 +199,7 @@ function createAutoHitTimerService({ getWindow, getWebContents, dataRoot, legacy
     send('aht:navigate', { projectPath: controller.state.projectPath, ...(jobId !== undefined ? { jobId } : {}), ...(tab ? { tab } : {}) });
   }
   function setVisible(visible) { send('aht:visibility', Boolean(visible)); }
-  function hasActiveWork() { return Boolean(controller && (controller.state.busy || controller.applying || controller.abortController)); }
+  function hasActiveWork() { return Boolean(controller && (controller.state.busy || controller.applying || controller.abortController || controller.searchAbortController)); }
   function shutdown() {
     if (shutdownPromise) return shutdownPromise;
     closing = true; if (timer) clearInterval(timer); timer = null;
@@ -251,7 +251,7 @@ function createAutoHitTimerService({ getWindow, getWebContents, dataRoot, legacy
     });
     handle('getState', () => publicState());
     handle('selectProject', async () => { await chooseProject(); return publicState(); });
-    for (const name of ['connectProject', 'installIntegration', 'refreshCatalog', 'searchAnimations', 'importFiles', 'addJobs', 'selectJob', 'updateJob', 'updateSettings', 'analyzeJobs', 'cancelAnalysis', 'removeJob', 'previewChange', 'applyChange'])
+    for (const name of ['connectProject', 'installIntegration', 'refreshCatalog', 'searchAnimations', 'cancelAnimationSearch', 'importFiles', 'addJobs', 'selectJob', 'updateJob', 'updateSettings', 'analyzeJobs', 'cancelAnalysis', 'removeJob', 'previewChange', 'applyChange'])
       handle(name, async (...args) => { const result = await controller[name](...args); return result === controller.state ? publicState() : result; });
     handle('revealAsset', filename => {
       if (!controller.client || typeof filename !== 'string') throw new Error('저장된 에셋을 선택하세요.');

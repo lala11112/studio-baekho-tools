@@ -25,7 +25,15 @@
         </section>
         <section class="input-section">
           <div class="section-heading"><h2>애니메이션 추가</h2><span class="eyebrow">01 / INPUT</span></div>
-          <form id="search-form" class="search-form"><label class="sr-only" for="animation-query">애니메이션 이름 또는 Animator 상태 검색</label><input id="animation-query" type="search" placeholder="클립 또는 Animator 상태 이름" autocomplete="off"><button id="search-button" type="submit" class="icon-button" aria-label="애니메이션 검색">⌕</button></form>
+          <form id="search-form" class="search-form">
+            <label class="sr-only" for="search-mode">애니메이션 검색 방식</label>
+            <select id="search-mode"><option value="semantic">원하는 동작으로 찾기</option><option value="name">이름으로 찾기</option></select>
+            <label id="animation-query-label" class="sr-only" for="animation-query">찾고 싶은 동작을 자연어로 설명하세요</label>
+            <textarea id="animation-query" rows="3" maxlength="600" placeholder="예: 앞으로 돌진하며 검을 두 번 휘두르는 공격" aria-describedby="search-help" spellcheck="false"></textarea>
+            <div class="search-actions"><button id="search-button" type="submit" class="button">비슷한 동작 찾기</button><button id="cancel-search" type="button" class="text-button danger-text" hidden>검색 취소</button></div>
+          </form>
+          <p id="search-help" class="search-help">AI가 클립 이름·상태·경로를 바탕으로 후보를 추천합니다. 실제 동작은 추가 후 미리보기로 확인하세요.</p>
+          <p id="search-progress" class="search-progress" role="status" aria-live="polite" hidden></p>
           <div id="search-results" class="search-results" hidden></div>
           <button id="drop-zone" class="drop-zone" type="button"><span class="drop-icon" aria-hidden="true">↧</span><strong>애니메이션 파일 놓기</strong><span>또는 클릭하여 선택 · FBX, ANIM</span></button>
           <input id="file-input" type="file" accept=".fbx,.anim" multiple hidden>

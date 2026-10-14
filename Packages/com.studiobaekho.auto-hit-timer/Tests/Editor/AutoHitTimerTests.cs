@@ -123,6 +123,164 @@ namespace StudioBaekho.AutoHitTimer.Tests
         }
 
         [Test]
+        public void AnimationSearchPagesCoverEveryClipOnceAndFinishAtAnExactPageBoundary()
+        {
+            var folder = CreateSearchFolder();
+            try
+            {
+                // Asset creation order differs from display order, and two takes share a name.
+                var last = CreateSearchClip(folder + "/z-last.anim", "Last");
+                var first = CreateSearchClip(folder + "/a-first.anim", "First");
+                var middle = CreateSearchClip(folder + "/m-takes.anim", "Main");
+                var takes = new[] { SearchClip("Same take"), SearchClip("Same take"), SearchClip("Other take") };
+                foreach (var take in takes) AssetDatabase.AddObjectToAsset(take, middle);
+                AssetDatabase.AddObjectToAsset(SearchClip("__preview__Main"), middle);
+                AssetDatabase.SaveAssets();
+                var expected = new[] { first, middle, last }.Concat(takes).Select(clip => SearchRowKey(AutoHitTimerAssets.ClipRef(clip))).ToArray();
+                var rows = new JArray();
+                var offset = 0;
+                for (var pageIndex = 0; pageIndex < 3; pageIndex++)
+                {
+                    var request = new JObject { ["query"] = folder, ["offset"] = offset, ["limit"] = 2 };
+                    var page = AutoHitTimerAssets.Search(request);
+                    Assert.That(page.ToString(), Is.EqualTo(AutoHitTimerAssets.Search(request).ToString()), "Page ordering must be stable.");
+                    Assert.That(((JArray)page["clips"]).Count, Is.EqualTo(2));
+                    foreach (var row in (JArray)page["clips"]) rows.Add(row.DeepClone());
+                    Assert.That((bool)page["truncated"], Is.EqualTo(pageIndex < 2));
+                    if (pageIndex < 2)
+                    {
+                        Assert.That((int)page["nextOffset"], Is.EqualTo(offset + 2));
+                        offset = (int)page["nextOffset"];
+                    }
+                    else Assert.That(page["nextOffset"].Type, Is.EqualTo(JTokenType.Null));
+                }
+                CollectionAssert.AreEquivalent(expected, rows.Select(SearchRowKey));
+                Assert.That(rows.Select(SearchRowKey).Distinct().Count(), Is.EqualTo(expected.Length));
+                Assert.That((string)rows.First["path"], Is.EqualTo(folder + "/a-first.anim"));
+                Assert.That((string)rows.Last["path"], Is.EqualTo(folder + "/z-last.anim"));
+                var legacy = AutoHitTimerAssets.Search(new JObject { ["query"] = folder });
+                CollectionAssert.AreEqual(rows.Select(SearchRowKey), ((JArray)legacy["clips"]).Select(SearchRowKey));
+                Assert.That((bool)legacy["truncated"], Is.False);
+                var beyond = AutoHitTimerAssets.Search(new JObject { ["query"] = folder, ["offset"] = 6, ["limit"] = 2 });
+                Assert.That(((JArray)beyond["clips"]).Count, Is.Zero);
+                Assert.That((bool)beyond["truncated"], Is.False);
+                Assert.That(beyond["nextOffset"].Type, Is.EqualTo(JTokenType.Null));
+            }
+            finally { AssetDatabase.DeleteAsset(folder); }
+        }
+
+        [Test]
+        public void AnimationSearchMatchesClipAndFileNamesIncludingSubclips()
+        {
+            var folder = CreateSearchFolder();
+            try
+            {
+                var token = Path.GetFileName(folder);
+                var root = CreateSearchClip(folder + "/SwordPack.anim", "Unrelated pose");
+                var take = SearchClip(token + "_OverheadStrike");
+                AssetDatabase.AddObjectToAsset(take, root);
+                AssetDatabase.SaveAssets();
+                var byName = AutoHitTimerAssets.Search(new JObject { ["query"] = (token + "_overheadstrike").ToLowerInvariant() });
+                Assert.That(((JArray)byName["clips"]).Count, Is.EqualTo(1));
+                Assert.That(SearchRowKey(byName["clips"][0]), Is.EqualTo(SearchRowKey(AutoHitTimerAssets.ClipRef(take))));
+                var byFile = AutoHitTimerAssets.Search(new JObject { ["query"] = folder + "/swordpack.anim", ["limit"] = 1 });
+                Assert.That(((JArray)byFile["clips"]).Count, Is.EqualTo(1));
+                Assert.That((bool)byFile["truncated"], Is.True);
+                var rest = AutoHitTimerAssets.Search(new JObject { ["query"] = folder + "/swordpack.anim", ["offset"] = (int)byFile["nextOffset"], ["limit"] = 3 });
+                Assert.That(((JArray)rest["clips"]).Count, Is.EqualTo(1));
+                Assert.That((bool)rest["truncated"], Is.False);
+                Assert.That(rest["nextOffset"].Type, Is.EqualTo(JTokenType.Null));
+            }
+            finally { AssetDatabase.DeleteAsset(folder); }
+        }
+
+        [Test]
+        public void AnimationSearchPreservesSharedClipStateNamesAndCompatibilityAcrossPages()
+        {
+            var folder = CreateSearchFolder();
+            // Replace the test runner's untitled scene; it restores the user's setup afterward.
+            var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+            try
+            {
+                var token = Path.GetFileName(folder);
+                var clip = CreateSearchClip(folder + "/motion.anim", token + "_SharedMotion");
+                var controller = AnimatorController.CreateAnimatorControllerAtPath(folder + "/actor.controller");
+                var machine = controller.layers[0].stateMachine;
+                var quick = machine.AddState(token + "_QuickStab");
+                quick.motion = clip;
+                var overhead = machine.AddStateMachine("Attacks").AddState(token + "_OverheadStrike");
+                overhead.motion = clip;
+                overhead.speed = 1.5f;
+                controller.AddLayer("UpperBody");
+                controller.layers[1].stateMachine.AddState(token + "_Guard").motion = clip;
+                var actor = new GameObject("Search actor").AddComponent<Animator>();
+                SceneManager.MoveGameObjectToScene(actor.gameObject, scene);
+                actor.runtimeAnimatorController = controller;
+                AssetDatabase.SaveAssets();
+                EditorSceneManager.SaveScene(scene, folder + "/search.unity");
+                var actorId = GlobalObjectId.GetGlobalObjectIdSlow(actor).ToString();
+                var all = AutoHitTimerAssets.Search(new JObject { ["query"] = folder, ["actorId"] = actorId });
+                var rows = (JArray)all["clips"];
+                Assert.That(rows.Count, Is.EqualTo(3), "Every state context is retained, without a duplicate asset-only row.");
+                Assert.That(rows.Select(row => (string)row["stateName"]).Distinct().Count(), Is.EqualTo(3));
+                Assert.That(rows.Select(row => (string)row["guid"] + ":" + (string)row["localId"]).Distinct().Count(), Is.EqualTo(1));
+                Assert.That(rows.Count(row => (bool)row["compatible"]), Is.EqualTo(1));
+                for (var index = 0; index < rows.Count; index++)
+                {
+                    var page = AutoHitTimerAssets.Search(new JObject { ["query"] = folder, ["actorId"] = actorId, ["offset"] = index, ["limit"] = 1 });
+                    Assert.That(SearchRowKey(page["clips"][0]), Is.EqualTo(SearchRowKey(rows[index])));
+                    Assert.That((bool)page["truncated"], Is.EqualTo(index < rows.Count - 1));
+                }
+                var byState = AutoHitTimerAssets.Search(new JObject { ["query"] = token + "_overheadstrike", ["actorId"] = actorId });
+                Assert.That(((JArray)byState["clips"]).Count, Is.EqualTo(1));
+                Assert.That((string)byState["clips"][0]["stateName"], Does.Contain(".Attacks."));
+                Assert.That((bool)byState["clips"][0]["compatible"], Is.False);
+                Assert.That((string)byState["clips"][0]["reason"], Is.EqualTo(AutoHitTimerAssets.StateReason(overhead, 0)));
+            }
+            finally
+            {
+                EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+                AssetDatabase.DeleteAsset(folder);
+            }
+        }
+
+        [TestCase("offset", "-1")]
+        [TestCase("offset", "2147483648")]
+        [TestCase("offset", "1.5")]
+        [TestCase("offset", "\"1\"")]
+        [TestCase("limit", "0")]
+        [TestCase("limit", "1001")]
+        [TestCase("limit", "true")]
+        [TestCase("limit", "null")]
+        public void AnimationSearchRejectsInvalidPageArguments(string name, string json)
+        {
+            Assert.Throws<AutoHitTimerException>(() => AutoHitTimerAssets.Search(new JObject { [name] = JToken.Parse(json) }));
+        }
+
+        static string CreateSearchFolder()
+        {
+            var name = "AutoHitTimerSearchTest_" + Guid.NewGuid().ToString("N");
+            AssetDatabase.CreateFolder("Assets", name);
+            return "Assets/" + name;
+        }
+
+        static AnimationClip SearchClip(string name)
+        {
+            var clip = new AnimationClip { name = name };
+            clip.SetCurve("", typeof(Transform), "m_LocalPosition.x", AnimationCurve.Linear(0, 0, 1, 1));
+            return clip;
+        }
+
+        static AnimationClip CreateSearchClip(string path, string name)
+        {
+            var clip = SearchClip(name);
+            AssetDatabase.CreateAsset(clip, path);
+            return clip;
+        }
+
+        static string SearchRowKey(JToken row) => (string)row["guid"] + ":" + (string)row["localId"] + ":" + (string)row["stateName"];
+
+        [Test]
         public void RenderCloneDoesNotCopyGameScriptsOrPhysics()
         {
             var actor = new GameObject("Actor");

@@ -32,12 +32,15 @@ const timeSettings = [
   ['Feedback.Slash.SlashVFXStartTime', '슬래시 이펙트 시작', .3]
 ].map(([path, label, value]) => ({ path, label, value, min: path === 'Feedback.Slash.SlashVFXStartTime' ? -1 : 0, max: 1.833 }));
 const sourceGuid = 'b'.repeat(32);
-const initialState = { projectPath: '', connection: { ready: false, message: 'Unity 프로젝트를 선택하세요.' }, ai: { available: false, authenticated: false, label: 'Codex 확인 전' }, actors: [], actorId: '', sources: [], targets: [], groups: [], jobs: [], selectedJobId: '', settings: {}, busy: false, notice: '' };
+const initialState = { projectPath: '', connection: { ready: false, message: 'Unity 프로젝트를 선택하세요.' }, ai: { available: false, authenticated: false, label: 'Codex 확인 전' }, actors: [], actorId: '', sources: [], targets: [], groups: [], jobs: [], selectedJobId: '', settings: {}, busy: false, search: { busy: false, progressText: '' }, notice: '' };
 let state = structuredClone(initialState);
 let saveCount = 0;
 let requireTimeOverrides = false;
 let previewValid = false;
 let previewAssignment = null;
+let searchMock = 'success';
+let finishSearch;
+const searchResponse = mode => ({ clips: [{ ...clip, ...(mode === 'semantic' ? { searchScore: .91, searchReason: 'Slash 상태와 검 경로가 베기 설명과 연관됩니다. 실제 돌진 여부는 확인이 필요합니다.' } : {}) }, { ...clip, localId: '7400002', name: '[모의] Sword_Slash_02', ...(mode === 'semantic' ? { searchScore: .72, searchReason: '두 번째 베기 클립 이름이 연속 공격의 후보입니다.' } : {}) }], mode, summary: mode === 'semantic' ? '검 베기와 관련된 후보 2개를 찾았습니다. 동작 방향은 미리보기에서 확인하세요.' : '이름이 일치하는 클립 2개를 찾았습니다.', searchedCount: 140, truncated: false });
 
 function frameData(time) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="512"><rect width="1024" height="512" fill="#19232c"/><path d="M0 405H1024M512 0V512" stroke="#3a4a56"/><g stroke="#90a4b2" stroke-width="14" stroke-linecap="round" fill="none"><circle cx="250" cy="160" r="28"/><path d="M250 190V310M250 224L182 285M250 230L336 205M250 310L210 390M250 310L294 390"/><circle cx="765" cy="160" r="28"/><path d="M765 190V310M765 224L755 292M765 230L833 227M765 310L733 390M765 310L791 390"/></g><path d="M335 205L405 ${100 + time * 40}M833 227L900 ${170 + time * 40}" stroke="#e9b767" stroke-width="7"/><text x="24" y="480" fill="#778f9f" font-size="18" font-family="sans-serif">MOCK UI FIXTURE · NOT UNITY CAPTURE / AI RESULT</text></svg>`;
@@ -60,7 +63,15 @@ const handlers = {
   connectProject: () => state,
   installIntegration: () => ({ message: '모의 연동 설치' }),
   refreshCatalog: () => state,
-  searchAnimations: () => ({ clips: [clip, { ...clip, localId: '7400002', name: '[모의] Sword_Slash_02' }] }),
+  searchAnimations: async (_query, { mode = 'semantic' } = {}) => {
+    state.search = { busy: true, progressText: '모의 검색: 140개 후보를 비교하고 있습니다.' }; publish();
+    if (searchMock === 'pending') return new Promise(resolve => { finishSearch = () => { state.search = { busy: false, progressText: '' }; publish(); resolve(searchResponse(mode)); }; });
+    state.search = { busy: false, progressText: '' }; publish();
+    if (searchMock === 'error') throw new Error('모의 Codex 연결 실패');
+    if (searchMock === 'empty') return { clips: [], mode, summary: '설명에 맞는 후보를 찾지 못했습니다. 무기와 동작을 다르게 설명해 보세요.', searchedCount: 140, truncated: false };
+    return searchResponse(mode);
+  },
+  cancelAnimationSearch: () => { state.search = { busy: false, progressText: '' }; publish(); return { cancelled: true }; },
   importFiles: () => ({ clips: [clip] }),
   addJobs: clips => { const jobs = clips.map(newJob); state.jobs.push(...jobs); state.selectedJobId = jobs[0].id; publish(); return state; },
   selectJob: id => { state.selectedJobId = id; previewValid = false; publish(); return state; },
@@ -123,6 +134,7 @@ async function until(expression, label) {
   throw new Error('Timed out: ' + label);
 }
 const click = id => evaluate(`document.getElementById(${JSON.stringify(id)}).click()`);
+const submitSearch = query => evaluate(`document.getElementById('animation-query').value=${JSON.stringify(query)};document.getElementById('search-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
 async function change(id, value) {
   await evaluate(`(() => {const input=document.getElementById(${JSON.stringify(id)});if(!input)throw new Error('Missing '+${JSON.stringify(id)});${typeof value === 'boolean' ? `input.checked=${value}` : `input.value=${JSON.stringify(String(value))}`};input.dispatchEvent(new Event('change',{bubbles:true}));})()`);
   await new Promise(resolve => setTimeout(resolve, 70));
@@ -139,6 +151,7 @@ async function main() {
   await screenshot('01-empty');
   await click('select-project');
   await until('document.getElementById("job-count").textContent === "1" && !!document.getElementById("composite-frame")', 'loaded fixture');
+  assert.equal(await evaluate('document.getElementById("install-integration").textContent'), 'Unity 연동 업데이트', 'Connected projects can update an older bridge');
   assert.equal(await evaluate('document.querySelectorAll(".hit-card").length'), 2);
   assert.equal(await evaluate('document.getElementById("analyze-selected").disabled'), false);
   await screenshot('02-mock-review');
@@ -279,14 +292,82 @@ async function main() {
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.equal(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), true, 'No horizontal overflow at narrow width');
   await screenshot('04-mock-narrow');
-  await evaluate('document.getElementById("animation-query").value="Slash";document.getElementById("search-form").dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}))');
-  await until('document.querySelectorAll("[data-result]").length === 2', 'multi-clip results');
+  assert.equal(await evaluate('document.getElementById("search-mode").value'), 'semantic');
+  assert.equal(await evaluate('document.getElementById("animation-query").maxLength'), 600);
+  await submitSearch('앞으로 돌진하며 검을 두 번 휘두르는 공격');
+  await until('document.querySelectorAll("[data-result]").length === 2', 'natural Korean search results');
+  assert.deepEqual(calls.filter(call => call.name === 'searchAnimations').at(-1).args, ['앞으로 돌진하며 검을 두 번 휘두르는 공격', { mode: 'semantic' }]);
+  assert.match(await evaluate('document.getElementById("search-results").textContent'), /검 베기와 관련된 후보 2개.*140개 후보 검토.*추천 1.*실제 돌진 여부/);
+  assert.equal(await evaluate('document.getElementById("add-search-results").disabled'), true, 'Search does not select or add results automatically');
+  assert.equal(state.jobs.length, 1, 'Search alone does not queue an animation');
+  assert.equal(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), true, 'Natural search results fit the narrow layout');
+  window.setContentSize(1550, 980);
+  await new Promise(resolve => setTimeout(resolve, 150));
+  await evaluate('window.scrollTo(0,0)');
+  await evaluate('document.getElementById("search-form").scrollIntoView({block:"start"})');
+  await screenshot('07-mock-natural-search');
+  await change('search-mode', 'name');
+  assert.equal(await evaluate('document.getElementById("search-results").hidden'), true, 'Changing mode invalidates results');
+  state.ai = { available: false, authenticated: false }; publish();
+  await submitSearch('Slash');
+  await until('document.querySelectorAll("[data-result]").length === 2', 'name search without AI');
+  assert.equal(calls.filter(call => call.name === 'searchAnimations').at(-1).args[1].mode, 'name');
+  assert.equal(await evaluate('document.querySelectorAll(".result-rank").length'), 0);
+  state.ai = { available: true, authenticated: true }; publish();
+  searchMock = 'empty';
+  await change('search-mode', 'semantic');
+  await submitSearch('하늘을 날며 활을 쏘는 동작');
+  await until('document.getElementById("search-results").textContent.includes("설명에 맞는 후보를 찾지 못했습니다")', 'empty search explanation');
+  assert.equal(await evaluate('document.querySelectorAll("[data-result]").length'), 0);
+  assert.equal(await evaluate('!!document.getElementById("add-search-results")'), false);
+  searchMock = 'error';
+  await submitSearch('검으로 베는 공격');
+  await until('!!document.getElementById("use-name-search")', 'semantic failure offers name fallback');
+  assert.match(await evaluate('document.getElementById("search-results").textContent'), /모의 Codex 연결 실패/);
+  await click('use-name-search');
+  assert.equal(await evaluate('document.getElementById("search-mode").value'), 'name');
+  searchMock = 'success';
+  await submitSearch('Slash');
+  await until('document.querySelectorAll("[data-result]").length === 2', 'name fallback result');
+  await change('search-mode', 'semantic');
+  searchMock = 'pending';
+  await submitSearch('회전하면서 검을 휘두르는 공격');
+  await until('document.getElementById("search-progress").textContent.includes("140개 후보를 비교")', 'independent search progress');
+  assert.equal(await evaluate('document.getElementById("analyze-selected").disabled'), true, 'Search prevents concurrent Unity capture');
+  assert.equal(await evaluate('document.getElementById("play-pause").disabled'), false, 'Existing animation review remains available during search');
+  assert.equal(state.busy, false, 'Search progress is separate from the global operation lock');
+  assert.equal(await evaluate('document.getElementById("drop-zone").disabled'), true, 'Search blocks conflicting file imports');
+  await click('cancel-search');
+  await until('document.getElementById("search-results").textContent.includes("검색을 취소했습니다") && document.getElementById("cancel-search").hidden', 'search cancelled');
+  finishSearch();
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(await evaluate('document.querySelectorAll("[data-result]").length'), 0, 'Late cancelled search results stay discarded');
+  assert.equal(await evaluate('document.getElementById("search-results").textContent.includes("검색을 취소했습니다")'), true);
+  await submitSearch('다른 캐릭터로 전환하기 전 검색');
+  await until('!document.getElementById("cancel-search").hidden', 'search before actor switch');
+  state.actorId = 'actor-2'; state.settings.actorId = 'actor-2'; publish();
+  await until('document.getElementById("search-results").hidden', 'actor switch clears results');
+  finishSearch();
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(await evaluate('document.querySelectorAll("[data-result]").length'), 0, 'Old actor search response stays discarded');
+  state.actorId = 'actor-1'; state.settings.actorId = 'actor-1'; publish();
+  await new Promise(resolve => setTimeout(resolve, 80));
+  searchMock = 'success';
+  await submitSearch('검을 두 번 휘두르는 공격');
+  await until('document.querySelectorAll("[data-result]").length === 2', 'fresh multi-clip results');
+  const originalProjectPath = state.projectPath;
+  state.projectPath = 'C:\\Mock\\OtherProject'; publish();
+  await until('document.getElementById("search-results").hidden', 'project switch clears results');
+  state.projectPath = originalProjectPath; publish();
+  await new Promise(resolve => setTimeout(resolve, 80));
+  await submitSearch('검을 두 번 휘두르는 공격');
+  await until('document.querySelectorAll("[data-result]").length === 2', 'multi-clip selection after context reset');
   await evaluate('document.querySelector("[data-result=\\"0\\"]").click()');
   await click('add-search-results');
   await until('document.getElementById("job-count").textContent === "2"', 'queued search selection');
   assert.equal(saveCount, 4, 'Register preview and search must not auto-save');
   assert.deepEqual(errors, [], 'Renderer console errors');
-  fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify({ kind: 'mock-ui-smoke', actualUnityCapture: false, actualAiAnalysis: false, checks: ['empty state', 'real sandboxed preload IPC', 'composite preview', 'playback and frame step', 'manual hit edit/add/delete', 'sparse existing hit mapping', 'review gate', 'damage and mapping diff', 'explicit apply only', 'uncertain save editing/removal/reanalysis lock', 'late receipt success notice', 'missing Motion target selection', 'clip attachment preview with copy/original controller', 'explicit existing-state clip attachment apply', 'existing occupied clip replacement in copy and original modes', 'all attack timing fields editable before preview', 'selected clip duration bounds', 'same clip duration correction', 'timing draft priority and target isolation', 'registration mode', 'negative time sentinel', 'override draft persistence', '950px responsive layout', 'multiple search result selection'], calls: calls.map(call => call.name), screenshots: ['01-empty.png', '02-mock-review.png', '03-mock-save-diff.png', '04-mock-narrow.png', '05-mock-missing-clip-diff.png', '06-mock-existing-attack-edit.png'] }, null, 2));
+  fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify({ kind: 'mock-ui-smoke', actualUnityCapture: false, actualAiAnalysis: false, checks: ['empty state', 'real sandboxed preload IPC', 'composite preview', 'playback and frame step', 'manual hit edit/add/delete', 'sparse existing hit mapping', 'review gate', 'damage and mapping diff', 'explicit apply only', 'uncertain save editing/removal/reanalysis lock', 'late receipt success notice', 'missing Motion target selection', 'clip attachment preview with copy/original controller', 'explicit existing-state clip attachment apply', 'existing occupied clip replacement in copy and original modes', 'all attack timing fields editable before preview', 'selected clip duration bounds', 'same clip duration correction', 'timing draft priority and target isolation', 'registration mode', 'negative time sentinel', 'override draft persistence', '950px responsive layout', 'natural Korean query and ranked explanations', 'name search without AI', 'empty search summary', 'AI failure name fallback', 'independent search progress and cancellation', 'late cancelled result rejection', 'actor and project search context invalidation', 'multiple search result selection'], calls: calls.map(call => call.name), screenshots: ['01-empty.png', '02-mock-review.png', '03-mock-save-diff.png', '04-mock-narrow.png', '05-mock-missing-clip-diff.png', '06-mock-existing-attack-edit.png', '07-mock-natural-search.png'] }, null, 2));
   console.log('MOCK UI SMOKE PASSED: ' + output);
   app.exit(0);
 }
