@@ -3,8 +3,10 @@ dist/
 dist-electron/
 release/
 .local/
+.superpowers/
 artifacts/runtime/
 artifacts/preserved-validation-files/
+artifacts/integration-runtime/
 *.log
 *.key
 *.db
@@ -14,3 +16,12 @@ artifacts/preserved-validation-files/
 !.env.example
 Thumbs.db
 .DS_Store
+__pycache__/
+CombatLabResults/
+Desktop/test-artifacts/
+/design/figma-state.json
+/design/verification-status.json
+
+test-artifacts/
+.test-unity/
+*.tmp

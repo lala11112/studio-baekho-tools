@@ -1,0 +1,55 @@
+=== a-control-room ===
+Use case: ui-mockup
+Asset type: high fidelity desktop application screen concept, 1600 by 1000 landscape aspect ratio.
+Primary request: Design a polished, production-quality Korean desktop application for Studio Baekho, a game-development automation studio. This is direction A, "Control Room": an elegant operational workspace focused on seeing the day's queue and inspecting one selected task.
+Composition: perfectly flat, straight-on full application screen, edge to edge, no presentation canvas, no device, no perspective. A compact 200px left sidebar, a wide central workspace, and a 330px task detail panel on the right. Consistent 8px spacing and clear typography at readable realistic desktop scale.
+Palette: charcoal #14171C workspace, slightly raised graphite panels, warm white text, restrained amber #E9AF4A highlights, muted slate secondary text, thin subtle borders. Sophisticated and calm, no neon or gradients.
+Brand at sidebar top exact: "BAEKHO / STUDIO". Small precise white tiger emblem. Project selector "사인검". Left nav exact labels: "오늘의 작업", "도구", "에셋", "파이프라인", "실행 기록"; bottom "설정". Current item "오늘의 작업" gets an amber-tinted background.
+Main header "오늘의 작업", smaller caption "작업의 흐름을 한눈에 확인하세요". Header right quiet search icon, notification icon, circular avatar.
+Beneath header, three compact summary counters in a single horizontal strip: "진행 중  3", "검토 대기  2", "완료  12". They must be modest; this is not an analytics dashboard.
+A low-height elegant studio banner includes a tasteful monochrome ink-style white tiger walking through mist on only the right half, overall subtle and integrated into product UI, with left text "사인검" and "오늘도, 한 걸음 더." It occupies under 15 percent of the screen.
+Central workspace section title "실행 대기열", tabs "전체", "진행 중", "검토 대기", a compact amber primary button "새 작업". Readable professional table, columns "작업", "상태", "진행", "업데이트". Five generously spaced rows with small distinct tool glyphs: "타격감 찾기 자동화" with amber "실행 중" and thin 68% progress bar, "모델링 자동화" with green "완료", "타격감 후보 비교" with slate "대기", "모델링 결과 검토" with green "완료", "타격감 결과 검토" with purple "검토 대기". First row selected subtly. No graphs.
+Right detail panel: "작업 상세", selected title "타격감 찾기 자동화", restrained amber "실행 중" pill, metadata "프로젝트  사인검", "실행 도구  후보 탐색", "시작  14:32"; simple thin progress bar at 68%; section "최근 로그" with 3 short timestamped lines. Bottom secondary outline action "로그 열기" and a compact subdued pause control.
+Tiny footer exact "예시 데이터 · 디자인 시안".
+Constraints: mature professional desktop product, excellent hierarchy and contrast, short accurately rendered Korean labels, typography resembling a clean Korean neo-grotesk. Useful and believable task-centric UI. White tiger art is a supporting brand detail, never dominant. No browser chrome, no giant dashboard charts, no huge hero, no glowing neon, no gibberish ornamental text.
+Product accuracy: the actual two core module names are "타격감 찾기 자동화" (finding and comparing tactile combat/impact feedback candidates with video-preview cards) and "모델링 자동화" (3D model preview and result version selection). All metrics and status are example data, and this is a conceptual UI direction, not a claim of implemented backend capability.
+
+=== b-atelier ===
+Use case: ui-mockup
+Asset type: high fidelity desktop application screen concept, 1600 by 1000 landscape aspect ratio.
+Primary request: Design a polished Korean desktop application for Studio Baekho game-development automation. This is direction B, "Atelier": a welcoming editorial tool library and discovery experience, distinct from a dense operations dashboard.
+Composition: perfectly flat straight-on full application screen edge to edge; no device, no perspective, no slide framing. Warm ivory workspace, thin dark top horizontal navigation rather than a large side nav. A narrow 60px icon rail at left. Broad editorial content area, generous margins, disciplined 8px spacing, quietly expressive typography.
+Palette: warm ivory #F5F3EF, paper white cards, ink black text, vermilion #C74E34 actions, warm gray dividers. Sophisticated Japanese/Korean design studio feel, tactile but clean digital UI. No excessive texture.
+Top left brand exact "BAEKHO / STUDIO", tiny white tiger seal mark. Top navigation "도구 라이브러리", "작업 공간", "실행 기록"; top right small avatar. Second row project tabs "사인검" selected with vermilion underline, "새 프로젝트 +" secondary.
+Content header at upper left small "YOUR STUDIO, AUTOMATED", large elegant Korean heading "무엇을 만들까요?", supporting line "반복은 도구에, 상상은 당신에게." To the right of this header, a modest ink drawing of a white tiger with one vermilion accent, small and integrated.
+A long outlined search box below header with magnifying glass and exact placeholder "필요한 도구를 찾아보세요", a tasteful shortcut badge "⌘ K".
+Category filter pills: "전체", "기획", "아트", "데이터", "빌드". "전체" uses ink fill, white label.
+Section "자주 쓰는 도구" with three large carefully composed cards in a horizontal grid. Each card has a small imaginative Korean fantasy artwork thumbnail at the top about 140px tall, with text and action under it:
+1 thumbnail a tasteful three side-by-side Korean fantasy sword-strike video-preview stills with small play icons; title "타격감 찾기 자동화"; subtitle "타격감 후보를 비교해요"; small label "기획"; small outlined action "실행".
+2 thumbnail a side-by-side comparison of two Korean fantasy combat video stills with a small play icon; title "타격감 후보 비교"; subtitle "장면을 나란히 살펴봐요"; small label "아트"; outlined action "실행".
+3 thumbnail a clean 3D viewport preview of a Korean fantasy sword with a subtle grid and small version badges; title "모델링 자동화"; subtitle "모델 시안을 만들어봐요"; small label "데이터"; outlined action "실행".
+Use a sparse realistic product card layout, readable text, quiet borders, minuscule shadows only.
+Bottom horizontal strip titled "최근 작업" with three compact rows or side-by-side activity items: "모델링 결과 검토" green dot "완료", "타격감 결과 검토" orange dot "검토 대기", "타격감 찾기 자동화" vermilion dot "실행 중". Small time labels.
+Tiny footer exact "예시 데이터 · 디자인 시안".
+Constraints: mature professional product, highly legible short Korean labels, polished typography, whitespace and approachable discovery. This must feel like an actual app library, not a marketing landing page. Artwork thumbnails are purposeful and small. No giant hero, no analytics charts, no glowing neon, no device frame or browser chrome, no gibberish.
+Product accuracy: the actual two core module names are "타격감 찾기 자동화" (finding and comparing tactile combat/impact feedback candidates with video-preview cards) and "모델링 자동화" (3D model preview and result version selection). All metrics and status are example data, and this is a conceptual UI direction, not a claim of implemented backend capability.
+
+=== c-pipeline ===
+Use case: ui-mockup
+Asset type: high fidelity desktop application screen concept, 1600 by 1000 landscape aspect ratio.
+Primary request: Create a polished Korean desktop application for Studio Baekho game-development automation. This is direction C, "Pipeline": a professional visual workflow builder where a user assembles and runs repeatable asset-processing tasks.
+Composition: flat straight-on edge-to-edge full app screen, no device, no perspective, no slide. Top application bar; left 230px resource palette; wide central workflow canvas; right 300px run configuration drawer; bottom 170px execution timeline spanning the central canvas. Clearly distinct information architecture from dashboards and card libraries.
+Palette: midnight navy #101828, deeper rail, graphite blue elevated nodes, near white text, restrained cyan #42D5C7 and muted lilac #A899EF accents. Thin calm borders, no glow, no vivid neon. Precise 8px spacing.
+Top bar left tiny white tiger geometric line emblem and brand exact "BAEKHO / STUDIO". A project breadcrumb "사인검  /  파이프라인". Main workflow title "모델링 자동화" with subtle "저장됨" status. Right an outlined "미리보기" control and cyan-filled primary "실행" button.
+Left sidebar title "도구 추가", compact search "도구 검색". Category headings "입력", "처리", "출력". Draggable rows with simple icons and readable labels: "파일 가져오기", "입력 검사", "작업 실행", "이미지 변환", "결과 검토", "내보내기". A quiet help tile at bottom "도구를 끌어 연결하세요".
+Canvas: subtle dot grid with generous negative space. Four large rounded rectangular nodes connected in a precise left-to-right logical sequence with tasteful elbow or smooth orthogonal connectors, clear cyan ports:
+Node 1 title "입력 검사", badge "01", supporting "레퍼런스 이미지", small green check.
+Node 2 title "작업 실행", badge "02", supporting "모델 시안 생성", a slim cyan progress bar with "68%". This node is selected with a crisp cyan border.
+Node 3 title "결과 검토", badge "03", supporting "3D 미리보기", muted lilac accent.
+Node 4 title "내보내기", badge "04", supporting "프로젝트 폴더", muted icon.
+Nodes can follow a gentle staggered arrangement with generous spacing to preserve readable labels, but clearly one ordered flow. A small contextual preview popover below selected node may show a small 3D viewport showing one Korean fantasy sword model and version tabs V1 V2 V3. Modest canvas zoom controls at bottom right.
+Right drawer title "실행 설정", section "작업 실행". Fields labeled "프로젝트" value "사인검"; "입력 폴더" value "Assets / Models"; "결과 버전" segmented choices "V1", "V2", "V3", with V2 selected; toggle "미리보기 표시" on; toggle "기존 파일 보존" on. Small lilac notice "결과 검토 후 저장됩니다". Bottom button "설정 저장".
+Bottom pane across canvas title "실행 로그", small status "진행 중". An elegant horizontal four-step timeline: "검사 완료", "변환 중", "검토 대기", "저장 대기". Below two compact timestamped log lines, tiny quiet activity bars. Bottom right "전체 로그".
+Tiny footer exact "예시 데이터 · 디자인 시안".
+Constraints: real mature desktop workflow product, exact short Korean labels, clean typography, coherent precise alignment, calm professional styling, useful readable node details. No huge charts, no giant abstract art, no luminous neon, no browser frame, no perspective, no presentation labels.
+Product accuracy: the actual two core module names are "타격감 찾기 자동화" (finding and comparing tactile combat/impact feedback candidates with video-preview cards) and "모델링 자동화" (3D model preview and result version selection). All metrics and status are example data, and this is a conceptual UI direction, not a claim of implemented backend capability.

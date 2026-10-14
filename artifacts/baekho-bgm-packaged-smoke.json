@@ -1,0 +1,112 @@
+{
+  "ok": true,
+  "mode": "packaged",
+  "checkedAt": "2026-10-14T10:00:55.127Z",
+  "runtime": "C:\\Users\\a0102\\Documents\\Codex\\2026-10-14\\task\\baekho-bgm-integration\\artifacts\\runtime\\baekho-bgm-packaged-b5ACqm",
+  "profile": "C:\\Users\\a0102\\Documents\\Codex\\2026-10-14\\task\\baekho-bgm-integration\\artifacts\\runtime\\baekho-bgm-packaged-b5ACqm\\profile",
+  "sourceBgm": "C:\\Users\\a0102\\Documents\\codex yes\\백호툴\\Baekho-3D-BGM-0.9.0\\Data\\bgm",
+  "originalFileCount": 7,
+  "modelProjectId": "68fcbb7d-e4b5-4381-a76d-daa8a3569f87",
+  "generatedCount": 0,
+  "reservedUsdBefore": 0.12,
+  "checks": [
+    "all four tool cards are available",
+    "latest GraphicsStudio opens by default and retains its local object draft across navigation",
+    "combat native workspace renders with its isolated bridge",
+    "hit-timing native workspace renders with its isolated bridge",
+    "three existing tracks play, select and export identically; BGM draft survives navigation",
+    "restart preserves all request IDs, reservations, selection and three offline exports",
+    "no renderer errors, external network attempts or generation jobs",
+    "original BGM ledger, journals and MP3 files remain byte-identical"
+  ],
+  "playback": [
+    {
+      "id": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6",
+      "restart": false,
+      "duration": 30.772167,
+      "currentTime": 0.221696,
+      "readyState": 4
+    },
+    {
+      "id": "40fde825-c271-4b8a-b15f-55d035006e1f",
+      "restart": false,
+      "duration": 30.772167,
+      "currentTime": 0.214703,
+      "readyState": 4
+    },
+    {
+      "id": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2",
+      "restart": false,
+      "duration": 30.772167,
+      "currentTime": 0.218564,
+      "readyState": 4
+    },
+    {
+      "id": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6",
+      "restart": true,
+      "duration": 30.772167,
+      "currentTime": 0.21909,
+      "readyState": 4
+    },
+    {
+      "id": "40fde825-c271-4b8a-b15f-55d035006e1f",
+      "restart": true,
+      "duration": 30.772167,
+      "currentTime": 0.219814,
+      "readyState": 4
+    },
+    {
+      "id": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2",
+      "restart": true,
+      "duration": 30.772167,
+      "currentTime": 0.223759,
+      "readyState": 4
+    }
+  ],
+  "exports": [
+    {
+      "id": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6",
+      "suffix": "initial",
+      "file": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6-initial.mp3",
+      "bytes": 746248,
+      "sha256": "18160d50bd7aa3e8362cf4a5f149cfb18d61f62a159d38c2bfb9fc64d5dc54b3"
+    },
+    {
+      "id": "40fde825-c271-4b8a-b15f-55d035006e1f",
+      "suffix": "initial",
+      "file": "40fde825-c271-4b8a-b15f-55d035006e1f-initial.mp3",
+      "bytes": 746248,
+      "sha256": "5ce035528111a2af726836f06252d2cd08f4ccca2b4a8579e44297f0d850a5d4"
+    },
+    {
+      "id": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2",
+      "suffix": "initial",
+      "file": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2-initial.mp3",
+      "bytes": 746248,
+      "sha256": "4de17fd636df773dee2de53f464f6a1d164ee321bcb048ad9a2fdef96d25a0a8"
+    },
+    {
+      "id": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6",
+      "suffix": "restart",
+      "file": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6-restart.mp3",
+      "bytes": 746248,
+      "sha256": "18160d50bd7aa3e8362cf4a5f149cfb18d61f62a159d38c2bfb9fc64d5dc54b3"
+    },
+    {
+      "id": "40fde825-c271-4b8a-b15f-55d035006e1f",
+      "suffix": "restart",
+      "file": "40fde825-c271-4b8a-b15f-55d035006e1f-restart.mp3",
+      "bytes": 746248,
+      "sha256": "5ce035528111a2af726836f06252d2cd08f4ccca2b4a8579e44297f0d850a5d4"
+    },
+    {
+      "id": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2",
+      "suffix": "restart",
+      "file": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2-restart.mp3",
+      "bytes": 746248,
+      "sha256": "4de17fd636df773dee2de53f464f6a1d164ee321bcb048ad9a2fdef96d25a0a8"
+    }
+  ],
+  "rendererErrors": [],
+  "networkAttempts": []
+}

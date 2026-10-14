@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { version as appVersion } from "../package.json";
 import {
   Box,
@@ -58,6 +64,7 @@ import {
   operationLabels,
   canPreview,
 } from "./TripoStudio";
+import "./partsmith-embedded.css";
 const steps = [
   ["graphics", "Unity 그래픽 제작", Boxes],
   ["workbench", "단계별 에셋 제작", Workflow],
@@ -137,7 +144,18 @@ function AssetImage({ p, a }: { p: Project; a?: Asset }) {
     </div>
   );
 }
-export function App() {
+export interface AppProps {
+  embedded?: boolean;
+  navigation?: {
+    key: number;
+    projectId?: string;
+    tab?: string;
+    create?: boolean;
+  };
+}
+
+export function App({ embedded = false, navigation }: AppProps = {}) {
+  const appliedNavigation = useRef<number | undefined>(undefined);
   const [state, setState] = useState<AppState>(),
     [id, setId] = useState(""),
     [tab, setTab] = useState("home"),
@@ -167,6 +185,60 @@ export function App() {
     const timer = setInterval(() => void refresh(), 2500);
     return () => clearInterval(timer);
   }, [refresh]);
+  useEffect(() => {
+    if (!state || !navigation || appliedNavigation.current === navigation.key)
+      return;
+    appliedNavigation.current = navigation.key;
+    const target = navigation.projectId
+      ? state.projects.find((project) => project.id === navigation.projectId)
+      : undefined;
+    if (navigation.projectId && !target) {
+      setId("");
+      setPartId("");
+      setPreview("");
+      setTab("home");
+      setError(
+        "요청한 프로젝트를 찾을 수 없습니다. 프로젝트 목록에서 다시 선택하거나 ‘프로젝트 열기’로 저장 폴더를 불러오세요.",
+      );
+      return;
+    }
+    if (target && target.id !== id) {
+      setId(target.id);
+      setPartId(target.parts[0]?.id ?? "");
+      setPreview("");
+    }
+    const requestedTab = navigation.tab;
+    if (
+      requestedTab &&
+      (requestedTab === "home" ||
+        requestedTab === "settings" ||
+        steps.some(([key]) => key === requestedTab))
+    ) {
+      if (
+        requestedTab !== "home" &&
+        requestedTab !== "settings" &&
+        !target &&
+        !state.projects.some((project) => project.id === id)
+      ) {
+        setTab("home");
+        setError(
+          "제작할 프로젝트를 먼저 선택하거나 새 프로젝트를 만들어 주세요.",
+        );
+      } else {
+        setTab(requestedTab);
+        setError("");
+      }
+    } else if (requestedTab) {
+      setTab("home");
+      setError(
+        "요청한 제작 화면을 찾을 수 없습니다. 프로젝트를 다시 선택해 주세요.",
+      );
+    } else if (target) {
+      setTab(target.demo ? "assembly" : "graphics");
+      setError("");
+    }
+    if (navigation.create) setCreate(true);
+  }, [navigation, state, id]);
   const p = state?.projects.find((p) => p.id === id),
     part = p?.parts.find((x) => x.id === partId) ?? p?.parts[0];
   async function run<T = any>(
@@ -241,7 +313,9 @@ export function App() {
   }, [tab, id, refresh]);
   if (!window.desktop)
     return (
-      <div className="standalone">
+      <div
+        className={embedded ? "standalone partsmith-embedded" : "standalone"}
+      >
         <h1>Partsmith</h1>
         <p>로컬 기능은 Electron 앱에서 실행됩니다.</p>
         <code>npm run dev</code>
@@ -249,7 +323,9 @@ export function App() {
     );
   if (!state)
     return (
-      <div className="standalone">
+      <div
+        className={embedded ? "standalone partsmith-embedded" : "standalone"}
+      >
         <LoaderCircle className="spin" />
         <p>제작실을 여는 중…</p>
       </div>
@@ -267,110 +343,215 @@ export function App() {
       : tab === "settings"
         ? "연결 설정"
         : (steps.find((s) => s[0] === tab)?.[1] ?? "제작실");
+  const darkGraphics = tab === "graphics" && Boolean(p);
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <button className="brand" onClick={() => setTab("home")}>
-          <div className="brand-mark">
-            <Boxes size={24} />
-          </div>
-          <span>
-            partsmith<small>Unity 그래픽 제작</small>
-          </span>
-        </button>
-        <div className="workspace-label">
-          작업 공간 <Badge>로컬</Badge>
-        </div>
-        <button
-          className={`nav ${tab === "home" ? "selected" : ""}`}
-          onClick={() => setTab("home")}
-        >
-          <Folder size={18} /> 모든 프로젝트
-        </button>
-        <div className="nav-label">에셋 제작</div>
-        <button
-          disabled={!p}
-          onClick={() => setTab("graphics")}
-          className={`nav ${tab === "graphics" ? "selected" : ""}`}
-        >
-          <Workflow size={18} />
-          <span>Unity 그래픽 제작</span>
-        </button>
-        <details
-          className="manual-tools"
-          key={p?.id}
-          open={p?.demo || undefined}
-        >
-          <summary>기존 작업 · 수동 도구</summary>
-          {steps.slice(1).map(([key, label, Icon], i) => (
-            <button
-              key={key}
-              disabled={!p}
-              onClick={() => setTab(key)}
-              className={`nav ${tab === key ? "selected" : ""}`}
-            >
-              <Icon size={18} />
-              <span>{label}</span>
-              <small>0{i + 1}</small>
-            </button>
-          ))}
-        </details>
-        <div className="sidebar-bottom">
-          <div className="local-note">
-            <ShieldCheck size={18} />
-            <div>
-              내 컴퓨터에 저장<small>키는 프로젝트와 별도 보관</small>
+    <div
+      className={
+        embedded
+          ? `app partsmith-host ${darkGraphics ? "partsmith-embedded-dark" : "partsmith-embedded"}`
+          : "app"
+      }
+    >
+      {!embedded && (
+        <aside className="sidebar">
+          <button className="brand" onClick={() => setTab("home")}>
+            <div className="brand-mark">
+              <Boxes size={24} />
             </div>
+            <span>
+              partsmith<small>Unity 그래픽 제작</small>
+            </span>
+          </button>
+          <div className="workspace-label">
+            작업 공간 <Badge>로컬</Badge>
           </div>
           <button
-            className={`nav ${tab === "settings" ? "selected" : ""}`}
-            onClick={() => setTab("settings")}
+            className={`nav ${tab === "home" ? "selected" : ""}`}
+            onClick={() => setTab("home")}
           >
-            <Settings size={18} /> 연결 설정
-            <span
-              className={`connection-dot ${state.key.configured ? "online" : ""}`}
-            />
+            <Folder size={18} /> 모든 프로젝트
           </button>
-          <div className="version">
-            개발 버전 <span>v{appVersion}</span>
-          </div>
-        </div>
-      </aside>
-      <div className="app-body">
-        <header className="topbar">
-          <div className="breadcrumbs">
-            <span>작업 공간</span>
-            <ChevronRight size={13} />
-            <button onClick={() => setTab("home")}>
-              {p?.name ?? "프로젝트"}
-            </button>
-            {p && (
-              <>
-                <ChevronRight size={13} />
-                <span>{headerTitle}</span>
-              </>
-            )}
-          </div>
-          <div className="top-actions">
-            <span className="saved">
-              <span className="status-dot" /> 로컬 자동 저장
-            </span>
+          <div className="nav-label">에셋 제작</div>
+          <button
+            disabled={!p}
+            onClick={() => setTab("graphics")}
+            className={`nav ${tab === "graphics" ? "selected" : ""}`}
+          >
+            <Workflow size={18} />
+            <span>Unity 그래픽 제작</span>
+          </button>
+          <details
+            className="manual-tools"
+            key={p?.id}
+            open={p?.demo || undefined}
+          >
+            <summary>기존 작업 · 수동 도구</summary>
+            {steps.slice(1).map(([key, label, Icon], i) => (
+              <button
+                key={key}
+                disabled={!p}
+                onClick={() => setTab(key)}
+                className={`nav ${tab === key ? "selected" : ""}`}
+              >
+                <Icon size={18} />
+                <span>{label}</span>
+                <small>0{i + 1}</small>
+              </button>
+            ))}
+          </details>
+          <div className="sidebar-bottom">
+            <div className="local-note">
+              <ShieldCheck size={18} />
+              <div>
+                내 컴퓨터에 저장<small>키는 프로젝트와 별도 보관</small>
+              </div>
+            </div>
             <button
-              title="프로젝트 폴더 열기"
-              onClick={() => run({ type: "folder.open", id: p?.id })}
+              className={`nav ${tab === "settings" ? "selected" : ""}`}
+              onClick={() => setTab("settings")}
             >
-              <FolderOpen size={17} />
+              <Settings size={18} /> 연결 설정
+              <span
+                className={`connection-dot ${state.key.configured ? "online" : ""}`}
+              />
             </button>
-            <button className="avatar" aria-label="연결 설정 열기" title="연결 설정" onClick={() => setTab("settings")}>
-              <Settings size={16} />
-            </button>
+            <div className="version">
+              개발 버전 <span>v{appVersion}</span>
+            </div>
           </div>
-        </header>
+        </aside>
+      )}
+      <div className="app-body">
+        {embedded ? (
+          <header className="ps-toolbar">
+            <div className="ps-project-row">
+              <label className="ps-project-picker">
+                <span>작업 프로젝트</span>
+                <select
+                  aria-label="작업 프로젝트"
+                  value={p?.id ?? ""}
+                  onChange={(event) => {
+                    const project = state.projects.find(
+                      (project) => project.id === event.target.value,
+                    );
+                    if (project) open(project);
+                  }}
+                >
+                  <option value="" disabled>
+                    프로젝트를 선택하세요
+                  </option>
+                  {state.projects.map((project) => (
+                    <option value={project.id} key={project.id}>
+                      {project.name}
+                      {project.demo ? " · 데모" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="ps-project-actions">
+                <button
+                  title="프로젝트 폴더 열기"
+                  aria-label="프로젝트 폴더 열기"
+                  onClick={() => run({ type: "folder.open", id: p?.id })}
+                >
+                  <FolderOpen size={16} />
+                </button>
+                <button className="primary" onClick={() => setCreate(true)}>
+                  <Plus size={16} /> 새 프로젝트
+                </button>
+              </div>
+            </div>
+            <nav className="ps-local-nav" aria-label="3D 제작 탐색">
+              <button
+                className={tab === "home" ? "selected" : ""}
+                aria-current={tab === "home" ? "page" : undefined}
+                onClick={() => setTab("home")}
+              >
+                <Folder size={15} /> 프로젝트 목록
+              </button>
+              <button
+                disabled={!p}
+                className={tab === "graphics" ? "selected" : ""}
+                aria-current={tab === "graphics" ? "page" : undefined}
+                onClick={() => setTab("graphics")}
+              >
+                <Workflow size={15} /> Unity 그래픽 제작
+              </button>
+              <label className="ps-manual-picker">
+                <span className="ps-visually-hidden">
+                  기존 작업 · 수동 도구
+                </span>
+                <select
+                  aria-label="기존 작업 · 수동 도구"
+                  disabled={!p}
+                  className={
+                    steps.slice(1).some(([key]) => key === tab)
+                      ? "selected"
+                      : ""
+                  }
+                  value={steps.slice(1).some(([key]) => key === tab) ? tab : ""}
+                  onChange={(event) => setTab(event.target.value)}
+                >
+                  <option value="" disabled>
+                    기존 작업 · 수동 도구
+                  </option>
+                  {steps.slice(1).map(([key, label]) => (
+                    <option value={key} key={key}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className={tab === "settings" ? "selected" : ""}
+                aria-current={tab === "settings" ? "page" : undefined}
+                onClick={() => setTab("settings")}
+              >
+                <Settings size={15} /> 연결 설정
+              </button>
+            </nav>
+          </header>
+        ) : (
+          <header className="topbar">
+            <div className="breadcrumbs">
+              <span>작업 공간</span>
+              <ChevronRight size={13} />
+              <button onClick={() => setTab("home")}>
+                {p?.name ?? "프로젝트"}
+              </button>
+              {p && (
+                <>
+                  <ChevronRight size={13} />
+                  <span>{headerTitle}</span>
+                </>
+              )}
+            </div>
+            <div className="top-actions">
+              <span className="saved">
+                <span className="status-dot" /> 로컬 자동 저장
+              </span>
+              <button
+                title="프로젝트 폴더 열기"
+                onClick={() => run({ type: "folder.open", id: p?.id })}
+              >
+                <FolderOpen size={17} />
+              </button>
+              <button
+                className="avatar"
+                aria-label="연결 설정 열기"
+                title="연결 설정"
+                onClick={() => setTab("settings")}
+              >
+                <Settings size={16} />
+              </button>
+            </div>
+          </header>
+        )}
         {error && (
           <div role="alert" className="banner error">
             <AlertTriangle size={17} />
             <span>{error}</span>
-            <button onClick={() => setError("")}>
+            <button aria-label="오류 메시지 닫기" onClick={() => setError("")}>
               <X size={16} />
             </button>
           </div>
@@ -391,7 +572,9 @@ export function App() {
             <div className="page-heading">
               <div>
                 <h1>프로젝트</h1>
-                <p>Unity에 사용할 오브젝트와 제작 결과를 프로젝트별로 관리하세요.</p>
+                <p>
+                  Unity에 사용할 오브젝트와 제작 결과를 프로젝트별로 관리하세요.
+                </p>
               </div>
               <button className="primary" onClick={() => setCreate(true)}>
                 <Plus size={17} /> 새 프로젝트
@@ -401,21 +584,28 @@ export function App() {
               <div>
                 <h2>오브젝트 제작 흐름</h2>
                 <p>
-                  만들 대상을 선택하고, 결과를 비교·채택한 뒤 필요한 작업을 이어가세요.
+                  만들 대상을 선택하고, 결과를 비교·채택한 뒤 필요한 작업을
+                  이어가세요.
                 </p>
                 <div className="hero-flow" aria-label="제작 순서">
-                  <span>이미지</span><ChevronRight size={13} /><span>모델·재질</span><ChevronRight size={13} /><span>필요한 리깅·동작</span><ChevronRight size={13} /><span>Unity 전달</span>
+                  <span>이미지</span>
+                  <ChevronRight size={13} />
+                  <span>모델·재질</span>
+                  <ChevronRight size={13} />
+                  <span>필요한 리깅·동작</span>
+                  <ChevronRight size={13} />
+                  <span>Unity 전달</span>
                 </div>
               </div>
               <button
-                  onClick={() => {
-                    setDemo(true);
-                    setName("마네킹 연결 테스트");
-                    setCreate(true);
-                  }}
-                >
-                  로컬 데모로 시작 <ArrowUpRight size={17} />
-                </button>
+                onClick={() => {
+                  setDemo(true);
+                  setName("마네킹 연결 테스트");
+                  setCreate(true);
+                }}
+              >
+                로컬 데모로 시작 <ArrowUpRight size={17} />
+              </button>
             </section>
             <div className="section-title">
               <h2>
@@ -521,67 +711,88 @@ export function App() {
               </button>
             </div>
             <div className="footnote">
-              <CircleHelp size={16} /> 각 단계는 실행 버튼을 누를 때 시작합니다. 원본과 채택 결과는 프로젝트에 보관합니다.
+              <CircleHelp size={16} /> 각 단계는 실행 버튼을 누를 때 시작합니다.
+              원본과 채택 결과는 프로젝트에 보관합니다.
             </div>
           </main>
         )}
         {p && tab !== "home" && tab !== "settings" && (
           <>
-            {tab !== "graphics" && <div className="stage-heading">
-              <div>
-                <span className="eyebrow">
-                  {String(steps.findIndex((s) => s[0] === tab) + 1).padStart(
-                    2,
-                    "0",
-                  )}{" "}
-                  / CHARACTER PIPELINE
-                </span>
-                <h1>
-                  {headerTitle}
-                  {p.demo && <Badge tone="amber">데모</Badge>}
-                </h1>
-              </div>
-              <div className="stage-actions">
-                <Badge>{p.style}</Badge>
-                <button
-                  title="프로젝트 백업"
-                  onClick={() =>
-                    run(
-                      { type: "project.export", id: p.id },
-                      "프로젝트 백업을 저장했습니다.",
-                    )
-                  }
-                >
-                  <Download size={16} />
-                </button>
-                {tab === "assembly" && (
+            {tab !== "graphics" && (
+              <div className="stage-heading">
+                <div>
+                  <span className="eyebrow">
+                    {String(steps.findIndex((s) => s[0] === tab) + 1).padStart(
+                      2,
+                      "0",
+                    )}{" "}
+                    / CHARACTER PIPELINE
+                  </span>
+                  <h1>
+                    {headerTitle}
+                    {p.demo && <Badge tone="amber">데모</Badge>}
+                  </h1>
+                </div>
+                <div className="stage-actions">
+                  <Badge>{p.style}</Badge>
                   <button
-                    className="primary"
+                    title="프로젝트 백업"
                     onClick={() =>
                       run(
-                        {
-                          type: "assembly.save",
-                          id: p.id,
-                          name: `조합 ${p.assemblies.length + 1}`,
-                        },
-                        "파츠 조합을 저장했습니다.",
+                        { type: "project.export", id: p.id },
+                        "프로젝트 백업을 저장했습니다.",
                       )
                     }
                   >
-                    <Save size={15} /> 조합 저장
+                    <Download size={16} />
                   </button>
-                )}
+                  {tab === "assembly" && (
+                    <button
+                      className="primary"
+                      onClick={() =>
+                        run(
+                          {
+                            type: "assembly.save",
+                            id: p.id,
+                            name: `조합 ${p.assemblies.length + 1}`,
+                          },
+                          "파츠 조합을 저장했습니다.",
+                        )
+                      }
+                    >
+                      <Save size={15} /> 조합 저장
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>}
+            )}
             {tab === "graphics" && (
-              <GraphicsStudio project={p} workspace={state.graphicsWorkspaces?.find(w => w.projectId === p.id)} busy={busy}
-                onAction={async action => {
-                  const result = await run({ type: "graphics.action", id: p.id, action });
-                  if (!result) throw new Error("그래픽 요청을 완료하지 못했습니다. 표시된 오류를 확인하세요. 다음 작업은 시작하지 않았습니다.");
+              <GraphicsStudio
+                project={p}
+                workspace={state.graphicsWorkspaces?.find(
+                  (w) => w.projectId === p.id,
+                )}
+                busy={busy}
+                onAction={async (action) => {
+                  const result = await run({
+                    type: "graphics.action",
+                    id: p.id,
+                    action,
+                  });
+                  if (!result)
+                    throw new Error(
+                      "그래픽 요청을 완료하지 못했습니다. 표시된 오류를 확인하세요. 다음 작업은 시작하지 않았습니다.",
+                    );
                   return result;
                 }}
                 onOpenSettings={() => setTab("settings")}
-                onExportProject={() => void run({ type: "project.export", id: p.id }, "프로젝트 백업을 저장했습니다.")} />
+                onExportProject={() =>
+                  void run(
+                    { type: "project.export", id: p.id },
+                    "프로젝트 백업을 저장했습니다.",
+                  )
+                }
+              />
             )}
             {tab === "workbench" && (
               <AssetWorkbench
@@ -1630,22 +1841,24 @@ export function App() {
           </>
         )}
         {tab === "settings" && <SettingsPanel state={state} run={run} />}
-        {tab !== "graphics" && <footer className="statusbar">
-          <span>
-            <span className="status-dot" /> 로컬 엔진 준비됨
-          </span>
-          <span>
-            {tab === "workbench"
-              ? "단계별 선택 · Blender + Astra"
-              : state.key.configured
-                ? "Tripo API 키 설정됨 · 모델 접근 미검증"
-                : "Tripo API 미연결"}{" "}
-            <i />{" "}
-            {p
-              ? `${p.parts.length} PARTS · REV ${p.revision}`
-              : "개인용 제작 도구"}
-          </span>
-        </footer>}
+        {tab !== "graphics" && (
+          <footer className="statusbar">
+            <span>
+              <span className="status-dot" /> 로컬 엔진 준비됨
+            </span>
+            <span>
+              {tab === "workbench"
+                ? "단계별 선택 · Blender + Astra"
+                : state.key.configured
+                  ? "Tripo API 키 설정됨 · 모델 접근 미검증"
+                  : "Tripo API 미연결"}{" "}
+              <i />{" "}
+              {p
+                ? `${p.parts.length} PARTS · REV ${p.revision}`
+                : "개인용 제작 도구"}
+            </span>
+          </footer>
+        )}
       </div>
       {create && (
         <div className="modal-backdrop">

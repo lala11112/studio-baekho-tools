@@ -152,7 +152,7 @@ test("multiview mapping requires four distinct image originals and preserves exp
   assert.equal(settings.rightVersionId, "right");
 });
 
-test("graphics catalog preserves all 116 reviewed tasks and declares the added Astra model path separately", () => {
+test("graphics catalog preserves 116 reviewed task identities with explicit bounded-repair and added Astra-model revisions", () => {
   const text = fs.readFileSync(
     path.resolve("docs/graphics-studio/02-전체-작업-선택표.md"),
     "utf8",
@@ -191,14 +191,23 @@ test("graphics catalog preserves all 116 reviewed tasks and declares the added A
   for (const [id, name, inputs, output] of expected) {
     const task = findGraphicsTask(id);
     assert(task, id);
+    // The original planning table predates M09's bounded append-only repair
+    // contract (ffc0836). Keep every other reviewed row exact.
+    const current = id === "M09" ? {
+      name: "빠진 면 보완",
+      inputs: "리깅 전 원본 파트·보완할 영역·추가 면과 정점 상한",
+      output: "기존 면·정점·UV·재질 보존 검사, 선택 메시의 빠진 면만 추가한 새 검토 버전",
+    } : { name, inputs, output };
     assert.deepEqual(
       { name: task.name, inputs: task.inputs, output: task.output },
-      { name, inputs, output },
+      current,
     );
   }
   assert.equal(findGraphicsTask("I02")?.name, "참조 기반 디자인");
   assert.equal(findGraphicsTask("I03")?.name, "기존 이미지 수정");
   assert.equal(findGraphicsTask("I07")?.status, "unverified");
+  assert.equal(findGraphicsTask("M09")?.executor, "astra");
+  assert.equal(findGraphicsTask("M09")?.status, "unverified");
 });
 
 test("catalog distinguishes connected unverified paths from local and unavailable paths", () => {
@@ -235,6 +244,7 @@ test("catalog distinguishes connected unverified paths from local and unavailabl
     "M06",
     "M07",
     "M08",
+    "M09",
     "M10",
     "T02",
     "T05",

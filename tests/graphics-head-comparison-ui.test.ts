@@ -51,12 +51,13 @@ test('image and model adoption are beside previews; head comparison shares displ
     assert.match(await page.getByTestId('head-comparison-status-new').innerText(), /검사 기록 미확인[\s\S]*사용자 검토 대기[\s\S]*미채택/);
     assert.equal(await compare.locator('canvas').count(), 1);
     assert.match(await compare.innerText(), /실제 크기·위치·파일은 바뀌지 않습니다/);
+    assert.match(await compare.innerText(), /얼굴 방향은 아직 확인되지 않아 카메라를 원본 축 방향으로 표시합니다/);
     await compare.scrollIntoViewIfNeeded();
     await compare.screenshot({ path: path.join(root, 'comparison-initial.png') });
     console.log(`Comparison screenshot: ${path.join(root, 'comparison-initial.png')}`);
-    await compare.getByRole('button', { name: '왼쪽', exact: true }).click();
-    await compare.screenshot({ path: path.join(root, 'comparison-side.png') });
-    await compare.getByRole('button', { name: '후면', exact: true }).click();
+    await compare.getByRole('button', { name: '+Z 방향', exact: true }).click();
+    await compare.screenshot({ path: path.join(root, 'comparison-plus-z.png') });
+    await compare.getByRole('button', { name: '−X 방향', exact: true }).click();
     await compare.getByRole('button', { name: '원본 재질', exact: true }).click();
     assert.equal(await compare.getByRole('button', { name: '원본 재질', exact: true }).getAttribute('aria-pressed'), 'true');
     await compare.getByRole('checkbox', { name: '후보 외형 검토 표시', exact: true }).check();

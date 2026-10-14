@@ -1,0 +1,7 @@
+{
+  "name": "StudioBaekho.CombatLab.Example.Editor",
+  "rootNamespace": "StudioBaekho.CombatLab.Example",
+  "references": ["StudioBaekho.CombatLab.Editor", "StudioBaekho.CombatLab.Example"],
+  "includePlatforms": ["Editor"],
+  "autoReferenced": true
+}

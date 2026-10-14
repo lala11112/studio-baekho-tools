@@ -1,9 +1,9 @@
 {
   "name": "partsmith",
-  "version": "0.7.0-preview.25",
+  "version": "0.9.0",
   "private": true,
-  "description": "Local character production workbench for Unity",
-  "author": "Partsmith",
+  "description": "Studio Baekho workspace for graphics production, combat tools and background music",
+  "author": "Studio Baekho",
   "license": "UNLICENSED",
   "type": "module",
   "main": "dist-electron/main.cjs",
@@ -11,7 +11,11 @@
     "dev": "node scripts/dev.mjs",
     "build": "tsc --noEmit && vite build && node scripts/build.mjs",
     "start": "electron .",
+    "start:partsmith": "electron . --partsmith",
     "test": "tsx --test tests/*.test.ts",
+    "test:combat": "node --test Desktop/tests/*.test.cjs",
+    "test:hit-timer": "node --test Apps/AutoHitTimer/tests/*.test.cjs",
+    "test:integration": "node scripts/studio-smoke.mjs",
     "test:ui": "node scripts/smoke.mjs",
     "package": "npm run build && electron-builder --win dir"
   },
@@ -44,18 +48,34 @@
   },
   "build": {
     "appId": "local.partsmith.app",
-    "productName": "Partsmith",
+    "productName": "Baekho Tools",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "Desktop/src/**/*.cjs",
+      "Desktop/renderer/**/*",
+      "Apps/AutoHitTimer/src/**/*.cjs",
+      "Apps/AutoHitTimer/renderer/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm",
       "!node_modules/ffmpeg-static/**/*",
       "package.json"
     ],
     "extraResources": [
+      {
+        "from": "Packages/com.studiobaekho.auto-hit-timer",
+        "to": "auto-hit-timer-kit/Packages/com.studiobaekho.auto-hit-timer"
+      },
+      {
+        "from": "Integrations/FourTigerSword/AutoHitTimer",
+        "to": "auto-hit-timer-kit/Integrations/FourTigerSword/AutoHitTimer"
+      },
+      {
+        "from": "Installer",
+        "to": "auto-hit-timer-kit/Installer"
+      },
       {
         "from": "integrations",
         "to": "integrations",
@@ -73,6 +93,17 @@
           "ffmpeg.exe.LICENSE",
           "ffmpeg.exe.README",
           "LICENSE"
+        ]
+      },
+      {
+        "from": "Packages",
+        "to": "Packages"
+      },
+      {
+        "from": "scripts",
+        "to": "scripts",
+        "filter": [
+          "*.ps1"
         ]
       }
     ],

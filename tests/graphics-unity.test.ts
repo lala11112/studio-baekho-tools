@@ -10,6 +10,14 @@ import type { GraphicsObject,AssetVersion } from "../shared/graphics";
 
 const sha=(b:Buffer|string)=>createHash("sha256").update(b).digest("hex");
 const put=(root:string,file:string,text:string|Buffer)=>{const p=path.join(root,file);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,text);return p;};
+// Avoid the native cpSync abort reproduced with Unicode paths on the Windows test runtime.
+function copyFixtureProject(source:string,destination:string){
+ fs.mkdirSync(destination,{recursive:true});
+ for(const entry of fs.readdirSync(source,{withFileTypes:true})){
+  const from=path.join(source,entry.name),to=path.join(destination,entry.name);
+  if(entry.isDirectory())copyFixtureProject(from,to);else fs.copyFileSync(from,to);
+ }
+}
 function fixture(){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),"graphics-unity-test-"));
  const unity=path.join(root,"Unity 한국어"),project=path.join(root,"Partsmith");
@@ -109,7 +117,7 @@ test("queued polling avoids directory scans, detects changed pipeline metadata, 
   put(f.unity,"Assets/Settings/PC.asset","MonoBehaviour:\n  m_RendererDataList: []\n");
   put(f.unity,"Assets/Settings/PC.asset.meta",meta);
   put(f.unity,"ProjectSettings/GraphicsSettings.asset",`GraphicsSettings:\n  m_CustomRenderPipeline: {fileID: 11400000, guid: ${guid}, type: 2}\n`);
-  const d=await prepareUnityDelivery(f.args());assert.equal(d.status,"queued");
+  const d=await prepareUnityDelivery(f.args());assert.equal(d.status,"queued",d.errors.join("\n"));
   const original=fs.readdirSync;
   const reads=t.mock.method(fs,"readdirSync",original);
   assert.equal(inspectUnityDelivery(f.unity,d).status,"queued");assert.equal(reads.mock.callCount(),0);
@@ -137,7 +145,7 @@ test("delivery file inventory cannot be dropped and copied project requests cann
  const f=fixture();try{
   const d=await prepareUnityDelivery(f.args());
   assert.equal(inspectUnityDelivery(f.unity,{...d,files:[]}).status,"failed");
-  const copied=path.join(f.root,"Copied Unity");fs.cpSync(f.unity,copied,{recursive:true});
+  const copied=path.join(f.root,"Copied Unity");copyFixtureProject(f.unity,copied);
   const queued=path.join(copied,`Library/PartsmithGraphicsInbox/${d.id}.json`),before=fs.readFileSync(queued);
   assert.throws(()=>cancelUnityDelivery(copied,d),/대상 프로젝트/);
   assert.deepEqual(fs.readFileSync(queued),before);assert.equal(inspectUnityDelivery(copied,d).status,"failed");
