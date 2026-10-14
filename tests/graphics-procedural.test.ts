@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { PNG } from 'pngjs';
 import { createGraphicsProceduralExecutor, executeGraphicsProcedural, proceduralProblem } from '../engine/graphics-procedural';
 import type { GraphicsNativeArgs } from '../engine/graphics-native';
+import { inspectGraphicsSurface } from '../engine/graphics-surface-preflight';
 
 const sha = (file: string) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 function fixture(t: any, taskId = 'M04') {
@@ -60,6 +61,32 @@ test('UV/material input must be frozen, accepted and unchanged before Blender st
 });
 
 const blender = process.env.PARTSMITH_TEST_BLENDER;
+const surfaceBlender = blender ?? 'C:/Program Files/Blender Foundation/Blender 5.0/blender.exe';
+test('new local UV exports exactly the active layout and retains the original collapsed layer only in editable BLEND', { skip: !fs.existsSync(surfaceBlender), timeout: 90000 }, async t => {
+  const f = fixture(t, 'T02'), script = path.join(f.root, 'uv-source.py'), source = path.join(f.root, 'source.blend');
+  const png = new PNG({ width: 8, height: 8 }); for (let i = 0; i < png.data.length; i++) png.data[i] = (i * 31) % 256;
+  const texture = path.join(f.root, 'source.png'); fs.writeFileSync(texture, PNG.sync.write(png)); const textureHash = sha(texture);
+  fs.writeFileSync(script, `import bpy,pathlib,sys,json\np=pathlib.Path(sys.argv[sys.argv.index('--')+1])\nbpy.ops.wm.read_factory_settings(use_empty=True)\nbpy.ops.mesh.primitive_cube_add()\no=bpy.context.object;o['partsmith_id']='test-stable-mesh'\nu=o.data.uv_layers.active\nfor i in o.data.polygons[-1].loop_indices:u.data[i].uv=(0,0)\n(p/'old-uv.json').write_text(json.dumps([list(x.uv) for x in u.data]))\nm=bpy.data.materials.new('Original');m.use_nodes=True;o.data.materials.append(m)\ni=bpy.data.images.load(str(p/'source.png'));i.pack();n=m.node_tree.nodes.new('ShaderNodeTexImage');n.image=i;uv=m.node_tree.nodes.new('ShaderNodeUVMap');uv.uv_map='UVMap';m.node_tree.links.new(uv.outputs['UV'],n.inputs['Vector']);m.node_tree.links.new(n.outputs['Color'],m.node_tree.nodes.get('Principled BSDF').inputs['Base Color'])\nbpy.ops.wm.save_as_mainfile(filepath=str(p/'source.blend'))\n`);
+  const made = spawnSync(surfaceBlender, ['--background', '--factory-startup', '--disable-autoexec', '--python-exit-code', '1', '--python', script, '--', f.root], { encoding: 'utf8', timeout: 60000, windowsHide: true });
+  assert.equal(made.status, 0, made.stdout + made.stderr); const original = sha(source);
+  f.attach(source); f.args.blenderPath = surfaceBlender; f.args.task.settings = { uvMode: 'local' };
+  const result = await executeGraphicsProcedural(f.args);
+  const receipt = JSON.parse(fs.readFileSync(path.join(f.root, result.files.find(x => x.path.endsWith('inspection.json'))!.path), 'utf8'));
+  assert.deepEqual(receipt.uvLayers.Cube, ['UVMap', 'Partsmith UV']);
+  assert.deepEqual(receipt.exportUV, [{ mesh: 'Cube', sourceLayer: 'Partsmith UV', exportLayer: 'Partsmith UV', layerCount: 1 }]);
+  assert.equal(receipt.originalImages[0].sha256, textureHash);
+  for (const ext of ['fbx', 'glb', 'blend']) {
+    const file = result.files.find(x => x.path.endsWith('.' + ext))!, actual = path.join(f.root, file.path);
+    const inspected = await inspectGraphicsSurface({ projectRoot: f.root, sourceVersionId: 'new-uv', source: { path: file.path, bytes: fs.statSync(actual).size, sha256: sha(actual) },
+      blenderPath: surfaceBlender, resources: path.resolve('integrations'), signal: new AbortController().signal });
+    assert.equal(inspected.report.ready, true, ext + ': ' + inspected.report.reason); assert.equal(inspected.report.invalidUvFaces, 0);
+    if (ext !== 'blend') assert.equal(inspected.report.meshes[0].activeUv, inspected.report.meshes[0].consumedUv);
+  }
+  const verify = path.join(f.root, 'verify-preserved.py'), native = path.join(f.root, result.files.find(x => x.path.endsWith('.blend'))!.path);
+  fs.writeFileSync(verify, `import bpy,pathlib,sys,json\np=pathlib.Path(sys.argv[sys.argv.index('--')+1]);bpy.ops.wm.open_mainfile(filepath=sys.argv[-1],load_ui=False,use_scripts=False)\no=bpy.data.objects['Cube'];assert o['partsmith_id']=='test-stable-mesh';assert [list(v.uv) for v in o.data.uv_layers['UVMap'].data]==json.loads((p/'old-uv.json').read_text());assert len(o.data.polygons)==6;assert o.data.uv_layers.active.name=='Partsmith UV';assert next(n for n in o.data.materials[-1].node_tree.nodes if n.type=='UVMAP').uv_map=='UVMap'\n`);
+  const checked = spawnSync(surfaceBlender, ['--background', '--factory-startup', '--disable-autoexec', '--python-exit-code', '1', '--python', verify, '--', f.root, native], { encoding: 'utf8', timeout: 60000, windowsHide: true });
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr); assert.equal(sha(source), original);
+});
 test('real Blender local low/high/seed presets and UV/material derivatives preserve original geometry, UV and encoded texture bytes', { skip: !blender || !fs.existsSync(blender), timeout: 180000 }, async t => {
   const f = fixture(t); f.args.blenderPath = blender!;
   const report = (r: Awaited<ReturnType<typeof executeGraphicsProcedural>>) => JSON.parse(fs.readFileSync(path.join(f.root, r.files.find(file => file.path.endsWith('inspection.json'))!.path), 'utf8'));

@@ -11,6 +11,7 @@ import { GraphicsEngine } from "../engine/graphics";
 import type { Tripo } from "../engine/tripo";
 import type { Quote } from "../shared/types";
 import { defaultCreation } from "../shared/graphics-creation";
+import type { GraphicsSurfaceArgs, GraphicsSurfaceReport } from '../engine/graphics-surface-preflight';
 
 const sha = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 function glb() {
@@ -31,12 +32,14 @@ async function settled(store: Store, id: string) {
 async function fixture(t: any, fbx = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "graphics-api-")), store = new Store(root);
   await store.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));
-  const calls = { uploads: [] as string[], submits: [] as { endpoint: string; body: Record<string, unknown> }[], polls: [] as string[], downloads: [] as string[], native: 0 };
+  const calls = { uploads: [] as string[], submits: [] as { endpoint: string; body: Record<string, unknown> }[], polls: [] as string[], downloads: [] as string[], native: 0,
+    balances: 0, surfaces: [] as Array<{ sourceVersionId: string; source: GraphicsSurfaceArgs['source'] }> };
   const nativeOutput = fbx ? Buffer.from("Kaydara FBX Binary  \x00\x1a\x00original") : glb();
   let final = false;
   let balance: () => Promise<{ balance: number }> = async () => ({ balance: 1000 });
+  let surfaceCheck: (args: GraphicsSurfaceArgs) => Promise<boolean> = async () => true;
   const api = {
-    balance: () => balance(),
+    balance: () => { calls.balances++; return balance(); },
     upload: async (file: string) => { calls.uploads.push(file); return "actual-upload-token-from-fake-boundary" + (calls.uploads.length > 1 ? `-${calls.uploads.length}` : ""); },
     submit: async (endpoint: string, body: Record<string, unknown>) => {
       calls.submits.push({ endpoint, body });
@@ -52,7 +55,17 @@ async function fixture(t: any, fbx = false) {
     store.write(id, preview.replace(/\.glb$/, ".report.json"), JSON.stringify({ schemaVersion: 1, mode: "convert", previewOnly: true, nativeSourceSha256: sha(nativeOutput), faces: 6, triangles: 12 }));
     return preview;
   }), project = engine.create("API boundary test");
-  const graphics = new GraphicsEngine(store, engine, { resources: path.resolve("integrations"), native: async () => { calls.native++; throw Error("API upload/poll/download must never dispatch GPT"); } });
+  // This fixture uses synthetic empty GLBs to exercise API coordination only.
+  // Actual geometry/UV inspection is covered by graphics-surface-preflight tests.
+  const graphics = new GraphicsEngine(store, engine, { resources: path.resolve("integrations"),
+    inspectSurface: async args => {
+      calls.surfaces.push({ sourceVersionId: args.sourceVersionId, source: { ...args.source } });
+      const ready = await surfaceCheck(args);
+      const report: GraphicsSurfaceReport = { schemaVersion: 1, identity: 'fixture', validatorFingerprint: 'fixture', sourceVersionId: args.sourceVersionId, sourceSha256: args.source.sha256,
+        ready, passed: ready, reason: ready ? '' : '빠진 면의 UV 면적이 없습니다.', reasons: ready ? [] : ['빠진 면의 UV 면적이 없습니다.'], uvMissing: false, uvMissingFaces: 0,
+        invalidUvFaces: ready ? 0 : 1, materialIndexIssues: 0, faces: 6, triangles: 12, ambiguousUvMeshes: 0, invalidGeometryFaces: 0, meshes: [], localOnly: true, modelTurns: 0, paidSubmissions: 0 };
+      return { report, files: [], cached: false };
+    }, native: async () => { calls.native++; throw Error("API upload/poll/download must never dispatch GPT"); } });
   let w = await graphics.action(project.id, { kind: "create-object", name: "Static prop", objectKind: "prop" });
   const objectId = w.objects[0].id;
   w = await graphics.action(project.id, { kind: "update-object", objectId, patch: { instruction: "A static stylized prop", settings: { count: 1 } } });
@@ -63,6 +76,7 @@ async function fixture(t: any, fbx = false) {
   t.after(() => { graphics.shutdown(); store.db.close(); fs.rmSync(root, { recursive: true, force: true }); });
   return { root, store, engine, graphics, project, objectId, original, source, calls, nativeOutput,
     setBalance: (next: typeof balance) => { balance = next; },
+    setSurfaceCheck: (next: typeof surfaceCheck) => { surfaceCheck = next; },
     complete: () => { final = true; },
     prepare: async (taskId: string) => (await graphics.action(project.id, { kind: "prepare", objectId, taskId })).tasks.at(-1)!,
   };
@@ -390,4 +404,49 @@ test("one corrupted candidate holds the entire new batch without partially regis
   assert.equal(state.tasks[0].status, "failed"); assert.equal(state.versions.length, 1); assert.deepEqual(state.tasks[0].outputVersionIds, []);
   assert.deepEqual(f.store.project(f.project.id).jobs.map(job => job.status), ["success", "success"]);
   assert.equal(f.calls.submits.length, 2); assert.equal(f.calls.downloads.length, 2);
+});
+
+test('T03 invalid UV blocks preparation before a quote, account query, upload or generation', async t => {
+  const f = await fixture(t); f.setSurfaceCheck(async () => false);
+  const original = f.graphics.get(f.project.id), beforeQuotes = f.store.all<Quote>('quote').length;
+  await assert.rejects(f.prepare('T03'), /UV 면적/);
+  assert.equal(f.graphics.get(f.project.id).tasks.length, 0); assert.equal(f.store.all<Quote>('quote').length, beforeQuotes);
+  assert.deepEqual(f.graphics.get(f.project.id).objects[0].accepted, original.objects[0].accepted);
+  assert.deepEqual(f.calls.surfaces, [{ sourceVersionId: f.original.id, source: f.original.files[0] }]);
+  assert.equal(f.calls.balances, 0); assert.equal(f.calls.uploads.length, 0); assert.equal(f.calls.submits.length, 0); assert.equal(f.calls.native, 0);
+});
+
+test('T03 rechecks older prepared input before approving and leaves its quote unconsumed when UV is invalid', async t => {
+  const f = await fixture(t), task = await f.prepare('T03');
+  f.setSurfaceCheck(async () => false);
+  await assert.rejects(f.graphics.action(f.project.id, { kind: 'approve', taskId: task.id }), /UV 면적/);
+  const saved = f.graphics.get(f.project.id).tasks[0]; assert.equal(saved.status, 'awaiting_approval'); assert.equal(saved.paidApproval, undefined);
+  assert.equal(f.store.get<Quote>('quote', task.quoteId!)!.consumed, false); assert.match(saved.message, /유료 제출 없음/);
+  assert.equal(f.calls.surfaces.length, 2); assert.equal(f.calls.balances, 0); assert.equal(f.calls.uploads.length, 0); assert.equal(f.calls.submits.length, 0);
+});
+
+test('T03 inspection and submission keep the exact frozen native source when another result is selected', async t => {
+  const f = await fixture(t), alternate = path.join(f.root, 'other.glb'); fs.writeFileSync(alternate, glb());
+  const second = f.graphics.importFiles(f.project.id, f.objectId, 'model', [alternate]).versions.at(-1)!;
+  const task = await f.prepare('T03'), q = f.store.get<Quote>('quote', task.quoteId!)!;
+  const alias = f.store.project(f.project.id).assets.find(a => a.id === q.request.sourceId)!;
+  assert.equal(alias.nativeFile ?? alias.file, f.calls.surfaces[0].source.path);
+  await f.graphics.action(f.project.id, { kind: 'accept', objectId: f.objectId, versionId: second.id });
+  await f.graphics.action(f.project.id, { kind: 'approve', taskId: task.id }); await settled(f.store, f.project.id);
+  assert.deepEqual(f.calls.surfaces.map(value => value.sourceVersionId), [f.original.id, f.original.id]);
+  assert.equal(f.calls.uploads[0], f.store.file(f.project.id, f.original.files[0].path));
+  assert.equal(f.graphics.get(f.project.id).objects[0].accepted['model:main'], second.id); assert.equal(f.calls.submits.length, 1);
+});
+
+test('T03 duplicate preparation is held during local inspection and changing the draft does not create a stale quote', async t => {
+  const f = await fixture(t); let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  f.setSurfaceCheck(async () => { entered(); await gate; return true; });
+  const first = f.prepare('T03'), failure = assert.rejects(first, /검사 중 원본 또는 설정이 변경/); await started;
+  await assert.rejects(f.prepare('T03'), /입력을 확인 중/);
+  await f.graphics.action(f.project.id, { kind: 'update-object', objectId: f.objectId, patch: { instruction: 'Changed while inspecting' } });
+  release(); await failure;
+  assert.equal(f.graphics.get(f.project.id).tasks.length, 0); assert.equal(f.store.all<Quote>('quote').length, 0);
+  assert.equal(f.graphics.get(f.project.id).objects[0].instruction, 'Changed while inspecting');
+  assert.equal(f.calls.surfaces.length, 1); assert.equal(f.calls.balances, 0); assert.equal(f.calls.uploads.length, 0); assert.equal(f.calls.submits.length, 0);
 });

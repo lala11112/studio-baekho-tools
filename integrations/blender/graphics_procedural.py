@@ -250,9 +250,43 @@ for obj in bpy.context.scene.objects:
     if obj.type in {'MESH','ARMATURE','EMPTY'}: obj.select_set(True)
 bpy.context.view_layer.objects.active=meshes[0]
 bpy.ops.wm.save_as_mainfile(filepath=str(out/'Asset.blend'), compress=False)
-bpy.ops.export_scene.fbx(filepath=str(out/'Asset.fbx'), use_selection=True, object_types={'MESH','ARMATURE','EMPTY'}, add_leaf_bones=False,
-    bake_anim=bool(bpy.data.actions), bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False, bake_anim_simplify_factor=0.0, path_mode='COPY', embed_textures=True)
-glb_images=export_packed_glb(out/'Asset.glb', use_selection=True, export_animations=True)
+export_uv = []
+export_copies, export_materials = [], {}
+try:
+    if operation == 'T02' and s.get('uvMode', 'local') != 'keep':
+        # Upload consumers commonly use UV set 0, ignoring active_render.
+        # Every layer remains in the saved editable BLEND. Only these temporary
+        # FBX/GLB copies contain a single explicitly selected new UV set.
+        for obj in meshes:
+            original = obj.data
+            selected = original.uv_layers.active
+            if selected is None or not selected.active_render:
+                raise RuntimeError('UV export requires the explicitly active new UV layer')
+            copy = original.copy(); obj.data = copy; export_copies.append((obj, original, copy))
+            chosen = copy.uv_layers.get(selected.name)
+            for layer in list(copy.uv_layers):
+                if layer != chosen: copy.uv_layers.remove(layer)
+            chosen = copy.uv_layers[0]; chosen.name = 'Partsmith UV'; copy.uv_layers.active = chosen; chosen.active_render = True
+            for index, material in enumerate(copy.materials):
+                if not material: continue
+                if not material.use_nodes or not any(node.type == 'UVMAP' for node in material.node_tree.nodes): continue
+                key = material.as_pointer()
+                if key not in export_materials:
+                    derivative = material.copy()
+                    if derivative.use_nodes:
+                        for node in derivative.node_tree.nodes:
+                            if node.type == 'UVMAP': node.uv_map = chosen.name
+                    export_materials[key] = derivative
+                copy.materials[index] = export_materials[key]
+            export_uv.append({'mesh': obj.name, 'sourceLayer': selected.name, 'exportLayer': chosen.name, 'layerCount': 1})
+            if not valid_uv(obj): raise RuntimeError('Selected export UV contains a degenerate face')
+    bpy.ops.export_scene.fbx(filepath=str(out/'Asset.fbx'), use_selection=True, object_types={'MESH','ARMATURE','EMPTY'}, add_leaf_bones=False,
+        bake_anim=bool(bpy.data.actions), bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False, bake_anim_simplify_factor=0.0, path_mode='COPY', embed_textures=True)
+    glb_images=export_packed_glb(out/'Asset.glb', use_selection=True, export_animations=True)
+finally:
+    for obj, original, copy in export_copies:
+        obj.data = original; bpy.data.meshes.remove(copy)
+    for material in export_materials.values(): bpy.data.materials.remove(material)
 material_parameters=[]
 if operation=='M04':
     for material in sorted({material for obj in meshes for material in obj.data.materials if material},key=lambda item:item.name):
@@ -263,7 +297,7 @@ report = {'schemaVersion':1,'identity':q['identity'],'operation':operation,'orig
     'faceLimit':int(s.get('faceLimit',10000)) if operation=='M04' else None,'faceLimitSatisfied':faces<=int(s.get('faceLimit',10000)) if operation=='M04' else None,
     'symmetry':symmetry_evidence,'materialParameters':material_parameters,'geometryPreserved':geometry_preserved,'uvPreserved':uv_preserved,'originalTexturesPreserved':True,
     'originalImages':preserved_images,'selfContainedGlb':True,'glbImages':glb_images,'changes':changes,'warnings':warnings,
-    'meshNames':[o.name for o in meshes], 'uvLayers':{o.name:[layer.name for layer in o.data.uv_layers] for o in meshes}, 'settings':s,
+    'meshNames':[o.name for o in meshes], 'uvLayers':{o.name:[layer.name for layer in o.data.uv_layers] for o in meshes}, 'exportUV':export_uv, 'settings':s,
     'localOnly':True,'modelTurns':0,'paidSubmissions':0}
 if q.get('sourceSha256'): report['sourceSha256']=q['sourceSha256']
 (out/'inspection.json').write_text(json.dumps(report,ensure_ascii=False),encoding='utf8')

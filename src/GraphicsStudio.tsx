@@ -26,7 +26,7 @@ import type {
   GraphicsTask,
   GraphicsWorkspace,
 } from "../shared/graphics";
-import { graphicsLegacyUnlinkProblem, requiresPartSourcePreparation, requiresPartSpaceRestoration } from "../shared/graphics";
+import { graphicsLegacyUnlinkProblem, requiresPartSourcePreparation, requiresPartSpaceRestoration, surfaceRepairSources } from "../shared/graphics";
 import {
   filterGraphicsTasks,
   findGraphicsTask,
@@ -143,6 +143,22 @@ const fileName = (file: string) => file.split(/[\\/]/).at(-1) ?? file;
 const stamp = (value: string) => new Date(value).toLocaleString("ko-KR");
 const acceptedVersion = (object: GraphicsObject, version: AssetVersion) =>
   Object.values(object.accepted).includes(version.id);
+
+/** Presentation only: execution still validates the exact accepted model and native UVs. */
+function pendingSurfaceUvVersions(source: AssetVersion | undefined, versions: AssetVersion[], tasks: GraphicsTask[]): AssetVersion[] {
+  if (!source) return [];
+  const related = versions.filter(version => version.objectId === source.objectId && version.slot === source.slot && version.role === 'model');
+  const byId = new Map(related.map(version => [version.id, version]));
+  const followsSource = (version: AssetVersion, seen = new Set<string>()): boolean => {
+    if (seen.has(version.id)) return false;
+    seen.add(version.id);
+    return version.sourceVersionIds.some(id => id === source.id || !!byId.get(id) && followsSource(byId.get(id)!, seen));
+  };
+  return related.filter(version => version.id !== source.id && followsSource(version) && tasks.some(task =>
+    task.objectId === source.objectId && ['T01', 'T02'].includes(task.taskId) && task.status === 'review' &&
+    task.outputVersionIds.includes(version.id)) && !related.some(derivative => derivative.partSpace?.providerVersionId === version.id))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
 
 function modelFaceTarget(
   version: AssetVersion,
@@ -799,6 +815,12 @@ export function GraphicsStudio({
           (part) => part.id === creation.activePartId && part.enabled,
         )
       : undefined;
+  const surfaceSlot = texturePart ? `part-${texturePart.id}` : 'main';
+  const surfaceModel = versions.find(version => version.id === object?.accepted[`model:${surfaceSlot}`] && version.role === 'model' && version.slot === surfaceSlot);
+  const pendingSurfaceUvs = pendingSurfaceUvVersions(surfaceModel, versions, objectTasks);
+  const shownMissingSurfaceResult = shownVersion && objectTasks.some(task => task.taskId === 'M09' && task.outputVersionIds.includes(shownVersion.id));
+  const shownSurfaceRepairSources = workspace && shownVersion ? surfaceRepairSources(workspace, shownVersion) : undefined;
+  const shownSurfaceRepairResult = shownSurfaceRepairSources && versions.find(version => version.surfaceRepair?.providerVersionId === shownVersion?.id);
   const textureDesignId =
     object?.accepted[
       texturePart ? `design:part-${texturePart.id}` : "design:main"
@@ -863,10 +885,10 @@ export function GraphicsStudio({
   for (const task of [...objectTasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
     if (isShownContactContinuation(task)) contactContinuations.set(String(task.settings.contactPhase), task);
   }
-  const visibleTasks = [...new Map([...latestTaskByOperation.values(), ...latestResultByOperation.values(), ...contactContinuations.values(), ...(contactReviewActive && shownContactTask ? [shownContactTask] : [])].map(task => [task.id, task])).values()]
+  const visibleTasks = [...new Map([...latestTaskByOperation.values(), ...latestResultByOperation.values(), ...contactContinuations.values(), ...objectTasks.filter(task => task.surfaceRecoveryVersionId), ...(contactReviewActive && shownContactTask ? [shownContactTask] : [])].map(task => [task.id, task])).values()]
     .filter(
       (task) =>
-        (contactReviewActive ? task.id === shownContactTask?.id || isShownContactContinuation(task) : task.taskId === taskId) ||
+        (contactReviewActive ? task.id === shownContactTask?.id || isShownContactContinuation(task) : task.taskId === taskId) || task.surfaceRecoveryVersionId ||
         ["running", "submission_unknown", "awaiting_approval"].includes(
           task.status,
         ),
@@ -891,7 +913,7 @@ export function GraphicsStudio({
   function showTaskResult(task: GraphicsTask) {
     const results = task.outputVersionIds.map(id => versions.find(version => version.id === id)).filter((version): version is AssetVersion => !!version);
     const contactResult = task.settings.contactPhase ? contactVersionForTask(task) : undefined;
-    const result = contactResult ?? [...results].reverse().find(version => version.partSpace || version.partSource) ?? results[0];
+    const result = contactResult ?? [...results].reverse().find(version => version.surfaceRepair || version.partSpace || version.partSource) ?? results[0];
     if (result) showVersion(result);
     document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }
@@ -935,6 +957,20 @@ export function GraphicsStudio({
       setStage('assembly'); setTaskId(undefined); setError('');
       setNotice(`${source.label}을 추가 보정 원본으로 지정했습니다. 다듬을 위치와 유지할 부분을 적은 뒤 실행을 준비하세요. 채택 상태는 유지됩니다.`);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  }
+
+  function showUvPreparation(source: AssetVersion) {
+    if (disabled || active) return;
+    setCreation(current => ({
+      ...current,
+      ...(source.slot.startsWith('part-') && current.parts.some(part => part.enabled && `part-${part.id}` === source.slot) ? { activePartId: source.slot.slice(5) } : {}),
+      stageSettings: { ...current.stageSettings, surface: {
+        instruction: current.stageSettings.surface?.instruction ?? '',
+        values: { ...current.stageSettings.surface?.values, surfaceOperation: 'uv', uvMode: 'local' },
+      } },
+    }));
+    setStage('surface'); setTaskId(undefined); setError('');
+    setNotice('로컬 UV 준비 설정으로 이동했습니다. 실행 원본에는 채택한 모델을 사용합니다. 보완 결과가 아직 미채택이면 먼저 이 모델 채택을 누르세요. UV 생성과 채택은 각각 직접 진행합니다.');
   }
 
   function showAuxiliary(view: "history" | "support" | "storage") {
@@ -1447,6 +1483,7 @@ export function GraphicsStudio({
               {taskId === 'M09' && <span><b>보완 원본</b> {versions.find(version => version.id === settings.sourceVersionId)?.label ?? '미리보기에서 선택 필요'}</span>}
               {taskId === 'M05' && settings.editSourceMode === 'candidate' && <span><b>보정 원본</b> {versions.find(version => version.id === settings.sourceVersionId)?.label ?? '미리보기에서 선택 필요'}</span>}
               {taskId === 'M09' && <span><b>추가 상한</b> {String(settings.repairMaxAddedFaces ?? 1500)}면 · {String(settings.repairMaxAddedVertices ?? 1000)}정점</span>}
+              {stage === 'surface' && <span><b>실행할 모델</b> {surfaceModel?.label ?? '모델 채택 필요'}{texturePart ? ` · ${texturePart.label}` : ''}</span>}
               <span><b>목표 크기</b> {physicalSizeSummary(creation.physicalSize)}</span>
               <span><b>예상 비용</b> {activeTask.executor === 'local' ? '무료 · GPT 0회' : '준비 후 비용 카드 확인'}</span>
             </div>
@@ -1480,9 +1517,12 @@ export function GraphicsStudio({
                         {task.settings.clipName
                           ? `${task.settings.clipName} · `
                           : task.settings.partLabel || task.settings.partId ? `${task.settings.partLabel ?? task.settings.partId} · ` : ""}
-                        {task.settings.contactPhase ? task.settings.contactPhase === 'analyze' ? '목·헤어 접합 영역 분석' : task.settings.contactPhase === 'reconstruct' ? '목·헤어 구조 보정' : '목·헤어 접합 보정' : findGraphicsTask(task.taskId)?.name ?? task.taskId} ·{" "}
+                        {task.surfaceRecoveryVersionId ? '빈 면 UV 복구' : task.settings.contactPhase ? task.settings.contactPhase === 'analyze' ? '목·헤어 접합 영역 분석' : task.settings.contactPhase === 'reconstruct' ? '목·헤어 구조 보정' : '목·헤어 접합 보정' : findGraphicsTask(task.taskId)?.name ?? task.taskId} ·{" "}
                         {task.runtimeApproval && task.status === "running"
                           ? "사용자 확인 대기"
+                          : task.surfaceRecoveryVersionId && task.status === 'running' ? '로컬 빈 면 UV 복구 중'
+                          : task.surfaceRecoveryVersionId && task.status === 'cancelled' ? '로컬 빈 면 UV 복구 중지'
+                          : task.surfaceRecoveryVersionId && task.status === 'failed' ? '로컬 빈 면 UV 복구 실패'
                           : task.partSourceRecoveryVersionId && task.status === 'running' ? '로컬 파트 작업 원본 준비 중'
                           : task.partSourceRecoveryVersionId && task.status === 'cancelled' ? '로컬 원본 준비 중지'
                           : task.partSpaceRecoveryVersionId && task.status === 'running' ? '로컬 크기·위치 복원 중'
@@ -1490,11 +1530,11 @@ export function GraphicsStudio({
                           : task.status === 'review' && contactResultForTask(task)?.status === 'blocked' ? task.settings.contactPhase === 'analyze' ? '영역 분석 완료 · 보정 불가' : '보정 중단 · 범위 제한'
                           : task.status === 'review' && task.settings.contactPhase === 'analyze' && task.outputVersionIds.length ? '분석 완료 · 영역 검토'
                           : task.status === 'review' && task.outputVersionIds.length ? '완료 · 결과 확인'
-                          : task.status === 'cancelled' && task.paidApproval ? '추적 중지 · 원격 상태 확인 필요'
+                          : task.status === 'cancelled' && task.paidApproval && !task.surfaceRecoveryVersionId ? '추적 중지 · 원격 상태 확인 필요'
                           : taskStatuses[task.status]}
                       </strong>
                       <p>{contactResultForTask(task)?.status === 'blocked' ? contactResultForTask(task)?.warnings[0] || '보호 영역과 수정 범위를 확정하지 못해 중단했습니다. 기존 조립·파트와 채택 상태는 유지됩니다.' : task.status === 'review' && contactResultForTask(task)?.status === 'repaired' ? '수정 후보의 보존 검사를 통과했습니다. 외형은 전후 비교에서 검토한 뒤 채택하세요. 이전 중단 진단과 원본은 유지됩니다.' : task.status === 'review' && task.settings.contactPhase === 'analyze' ? '분석한 수정 영역을 먼저 확인하세요. 이 결과는 모델 채택 대상이 아닙니다.' : task.message || "작업 상태를 확인하고 있습니다."}</p>
-                      {task.status === 'cancelled' && task.paidApproval && !task.partSpaceRecoveryVersionId && !task.partSourceRecoveryVersionId && <p className="gs-warning">유료 실행이 승인된 요청입니다. 추적 중지는 원격 처리나 과금 취소를 뜻하지 않습니다. 이전에 완료된 결과는 별도로 유지됩니다.</p>}
+                      {task.status === 'cancelled' && task.paidApproval && !task.partSpaceRecoveryVersionId && !task.partSourceRecoveryVersionId && !task.surfaceRecoveryVersionId && <p className="gs-warning">유료 실행이 승인된 요청입니다. 추적 중지는 원격 처리나 과금 취소를 뜻하지 않습니다. 이전에 완료된 결과는 별도로 유지됩니다.</p>}
                       {task.errorCode && <code>{task.errorCode}</code>}
                       {task.runtimeApproval && task.status === "running" && (
                         <RuntimeApprovalCard
@@ -1539,7 +1579,7 @@ export function GraphicsStudio({
                             void run({ kind: "recover", taskId: task.id })
                           }
                         >
-                          {task.partSourceRecoveryVersionId ? '저장된 파트 작업 원본 준비 · 무료' : task.partSpaceRecoveryVersionId ? '저장된 파트 크기·위치 복원 · 무료' : recoveryLabel(task)}
+                          {task.surfaceRecoveryVersionId ? '저장된 빈 면 UV 복구 · 무료' : task.partSourceRecoveryVersionId ? '저장된 파트 작업 원본 준비 · 무료' : task.partSpaceRecoveryVersionId ? '저장된 파트 크기·위치 복원 · 무료' : recoveryLabel(task)}
                         </button>
                       )}
                       {task.status === "running" && (
@@ -1549,7 +1589,7 @@ export function GraphicsStudio({
                             void run({ kind: "cancel", taskId: task.id })
                           }
                         >
-                          {task.partSourceRecoveryVersionId ? '로컬 원본 준비 중지' : task.partSpaceRecoveryVersionId ? '로컬 복원 중지' : '추적 중지'}
+                          {task.surfaceRecoveryVersionId ? '로컬 빈 면 UV 복구 중지' : task.partSourceRecoveryVersionId ? '로컬 원본 준비 중지' : task.partSpaceRecoveryVersionId ? '로컬 복원 중지' : '추적 중지'}
                         </button>
                       )}
                       {task.status === "review" && task.outputVersionIds.some(id => versions.some(version => version.id === id)) && (
@@ -1997,6 +2037,23 @@ export function GraphicsStudio({
                     </div>
                     <small>{shownAssembly ? '같은 조립 작업의 전체 모델과 배치된 파트를 함께 채택합니다. 이후 파트 UV도 이 배치를 사용하며, 이전 원본은 유지됩니다.' : '채택은 다음 작업의 원본만 바꾸며, 제작을 실행하지 않습니다.'}</small>
                   </div>}
+                  {shownVersion && shownSurfaceRepairSources && <section className="gs-result-notes" aria-label="빈 면의 UV 복구" data-testid="graphics-surface-repair">
+                    <strong>보완한 면에 무늬가 빠져 있나요?</strong>
+                    <p>기존 같은 재질 면의 무늬를 재사용해 새 면의 UV만 복구합니다. 기존 이미지 맵과 원본은 유지하고 별도 수정본을 만듭니다.</p>
+                    {shownSurfaceRepairResult
+                      ? <button type="button" className="gs-primary" data-testid="graphics-surface-repair-result" disabled={disabled || active} onClick={() => showVersion(shownSurfaceRepairResult)}>복구한 결과 보기</button>
+                      : <button type="button" className="gs-primary" data-testid="graphics-repair-surface-uv" disabled={disabled || active} onClick={() => void run({ kind: 'repair-surface-uv', versionId: shownVersion.id }, '빈 면의 UV 복구를 시작했습니다. 진행 상태를 확인하고 완료 후 복구한 결과를 비교해 직접 채택하세요. 기존 채택은 유지됩니다.')}>
+                        기존 재질로 빈 면 복구 · 무료
+                      </button>}
+                    <small>추가 API 비용·GPT 호출 없음. 무늬 공유·늘어짐·경계 차이는 결과를 보고 확인하세요. 자동으로 채택하지 않습니다.</small>
+                  </section>}
+                  {shownVersion?.surfaceRepair && <p className="gs-fine" data-testid="graphics-surface-repair-complete">기존 재질을 재사용한 빈 면 UV 복구본입니다. 원본 텍스처 이미지는 유지됐습니다. 새 면의 무늬와 경계를 확인한 뒤 채택하세요.</p>}
+                  {shownVersion && shownMissingSurfaceResult && <section className="gs-result-notes" aria-label="보완한 면의 UV 준비" data-testid="graphics-repair-uv-warning">
+                    <strong>새로 보완한 면은 UV를 확인해야 합니다</strong>
+                    <p>면을 추가해도 새 면의 UV와 텍스처가 자동으로 완성되지는 않습니다. 이 보완 결과를 채택한 뒤 UV 생성 → UV 결과 채택 → 텍스처 생성 순서로 진행하세요.</p>
+                    <button type="button" disabled={disabled || active} onClick={() => showUvPreparation(shownVersion)}>UV 준비로 이동</button>
+                    <small>무료 로컬 UV 설정으로 이동합니다. 이동만으로 생성하거나 채택하지 않습니다.</small>
+                  </section>}
                   {contactPartProducer && <section className="gs-contact-entry" aria-label="접합 보정 파트 채택 안내">
                     <div><strong>이 파트는 수정한 조립과 함께 채택합니다</strong><p>목·헤어 접합의 배치를 유지하도록 전체 비교에서 조립·파트를 한 번에 채택하세요.</p></div>
                     <button type="button" className="gs-primary" data-testid="graphics-contact-part-review" disabled={!contactPartMain} onClick={() => showVersion(contactPartMain!)}>수정한 조립 비교로 돌아가기</button>
@@ -2220,6 +2277,21 @@ export function GraphicsStudio({
 
                 <section className="gs-instruction">
                   {["model", "unity"].includes(stage) && <GraphicsSizePanel key={object.id} value={creation.physicalSize} bounds={!shownVersion?.slot.startsWith("part-") && shownVersion?.files.some(file => /\.glb$/i.test(file.path)) ? modelBounds : undefined} restricted={object.kind === "character" || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation)} disabled={disabled || active} onValidityChange={setSizeInputsValid} onChange={physicalSize => setCreation(current => ({ ...current, physicalSize }))} onSave={() => void run({ kind: "update-object", objectId: object.id, patch: { creation } }, "크기 설정을 저장했습니다. 새 생성은 없습니다.")} onApply={creation.attributes.composition !== "parts" && (object.accepted["model:main"] || object.accepted["rig:main"]) ? () => void prepareSizeCopy() : undefined} />}
+                  {stage === 'surface' && <section className="gs-result-notes" aria-label="재질 작업의 원본과 UV" data-testid="graphics-surface-input">
+                    <strong>이번 작업에 사용할 채택 모델</strong>
+                    <p data-testid="graphics-surface-input-model" data-version-id={surfaceModel?.id ?? ''}>{surfaceModel?.label ?? '모델을 먼저 채택하세요.'}{texturePart ? ` · ${texturePart.label}` : ''}</p>
+                    <small>미리보기에서 결과를 보기만 해서는 실행 원본이 바뀌지 않습니다.</small>
+                    {pendingSurfaceUvs.length > 0 && <div data-testid="graphics-pending-uv-results">
+                      <strong>현재 모델로 만든 UV 결과가 아직 채택되지 않았습니다</strong>
+                      <p>UV 결과를 확인하고 ‘이 모델 채택’을 눌러야 다음 텍스처 요청에 그 UV가 사용됩니다.</p>
+                      {pendingSurfaceUvs.map(version => <div className="gs-file-actions" key={version.id}>
+                        <span>{version.label}</span>
+                        <button type="button" data-testid={`graphics-view-pending-uv-${version.id}`} onClick={() => { showVersion(version); document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' }); }}>이 UV 결과 보기</button>
+                      </div>)}
+                    </div>}
+                    <p>새 면을 추가했거나 UV가 없는 모델은 <b>UV 생성 → 결과 채택 → 텍스처 생성</b> 순서로 진행하세요.</p>
+                    {settings.surfaceOperation !== 'uv' && <small>현재 선택은 텍스처·재질 작업입니다. UV를 새로 만들려면 아래 ‘UV 준비’를 선택해 먼저 실행하세요. 텍스처 실행이 UV 준비를 대신 실행하지 않습니다.</small>}
+                  </section>}
                   <CreationOptions
                     kind={object.kind}
                     spec={creation}
