@@ -23,6 +23,7 @@ import { executeGraphicsMotionSource } from "./graphics-motion-source";
 import { prepareGraphicsMotionImport } from "./graphics-motion-import";
 import { readUnityTarget, prepareUnityDelivery, inspectUnityDelivery, cancelUnityDelivery } from "./graphics-unity";
 import { inspectGraphicsStorage } from './graphics-storage';
+import { validateContactReview } from '../shared/graphics-contact';
 
 const hash = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
 const now = () => new Date().toISOString();
@@ -399,13 +400,27 @@ export class GraphicsEngine {
       case "accept": {
         const o = this.object(w, action.objectId), v = w.versions.find(v => v.id === action.versionId && v.objectId === o.id);
         if (!v) throw Error("이 대상의 결과가 아닙니다.");
+        if (v.contact && (v.contact.phase !== 'repair' || v.contact.status !== 'repaired') || v.slot === 'contact-review')
+          throw Error('접합 영역 분석은 채택할 모델이 아닙니다. 확인된 영역의 보정 결과를 비교하세요.');
+        if (v.slot.startsWith('part-') && w.tasks.some(task => task.id === v.provenance.jobId && task.taskId === 'M06' && task.settings.contactPhase === 'repair'))
+          throw Error('접합 보정은 전체 비교 화면의 수정한 조립·파트 채택 버튼으로 함께 채택하세요.');
         let candidates = [v];
         if (v.role === 'model' && v.slot === 'main') {
-          const producers = w.tasks.filter(task => task.taskId === 'M08' && task.outputVersionIds.includes(v.id));
+          const producers = w.tasks.filter(task => (task.taskId === 'M08' || task.taskId === 'M06' && task.settings.contactPhase === 'repair') && task.outputVersionIds.includes(v.id));
           if (producers.length > 1) throw Error('조립 결과의 제작 작업이 중복됩니다. 채택 상태는 유지됩니다.');
           const producer = producers[0];
           const hasParts = producer && (producer.outputVersionIds.length > 1 || w.versions.some(version => version.provenance.jobId === producer.id && version.slot.startsWith('part-')));
+          if ((v.contact || producer?.taskId === 'M06') && (!v.contact || !producer || producer.taskId !== 'M06' || producer.settings.contactPhase !== 'repair' || !hasParts))
+            throw Error('접합 보정 전체와 세 파트의 제작 기록이 필요합니다. 기존 채택을 유지합니다.');
           if (producer && hasParts) {
+            if (producer.taskId === 'M06' && (!v.contact || v.contact.phase !== 'repair' || v.contact.status !== 'repaired' || producer.status !== 'review'))
+              throw Error('검사된 접합 보정 결과가 아닙니다. 기존 채택을 유지합니다.');
+            if (producer.taskId === 'M06') {
+              validateContactReview(v.contact!, v.files.map(file => file.path));
+              if (producer.settings.sourceVersionId !== v.contact!.sourceVersionId || producer.settings.contactPartVersionIds !== JSON.stringify(v.contact!.partVersionIds) ||
+                  producer.settings.contactAnalysisVersionId !== v.contact!.analysisVersionId)
+                throw Error('접합 검토와 고정 원본의 연결이 다릅니다. 기존 채택을 유지합니다.');
+            }
             if (producer.objectId !== o.id || v.provenance.jobId !== producer.id || new Set(producer.outputVersionIds).size !== producer.outputVersionIds.length)
               throw Error('조립 결과의 대상·제작 작업·후보 연결이 잘못됐습니다. 채택 상태는 유지됩니다.');
             const inputs = producer.inputVersionIds.map(versionId => w.versions.find(version => version.id === versionId));
@@ -436,6 +451,7 @@ export class GraphicsEngine {
         // Other slots and clips remain accessible. Compatibility is checked on delivery, not by deleting history.
         return this.save(w);
       }
+      case 'prepare-contact': return this.prepareContact(id, action.versionId, action.phase);
       case "inspect-target": w.target = readUnityTarget(this.store.project(id).unityPath || this.store.settings.unityPath); return this.save(w);
       case "audit-usage": return this.audit(id);
       case "inspect-storage": return { ...w, storageReport: await inspectGraphicsStorage({
@@ -510,10 +526,75 @@ export class GraphicsEngine {
       case "import": throw Error("앱 파일 선택 창을 사용하세요.");
     }
   }
+  /** Explicit candidate review is independent of acceptance and the user's unsaved creation draft. */
+  private prepareContact(id: string, versionId: string, phase: 'analyze' | 'repair') {
+    if (!['analyze', 'repair'].includes(phase)) throw Error('접합 확인 또는 영역 보정을 선택하세요.');
+    const w = this.get(id);
+    const uniqueVersion = (value: string) => {
+      const matches = w.versions.filter(version => version.id === value);
+      if (matches.length !== 1) throw Error('접합 원본 버전이 누락됐거나 중복됩니다.');
+      return matches[0];
+    };
+    const selected = uniqueVersion(versionId);
+    if (!selected) throw Error('접합을 확인할 저장 결과가 없습니다.');
+    const o = this.object(w, selected.objectId);
+    const analysis = phase === 'repair' ? selected : undefined;
+    if (analysis) {
+      if (!analysis.contact || analysis.contact.phase !== 'analyze' || analysis.contact.status !== 'ready' || analysis.slot !== 'contact-review')
+        throw Error('수정 영역이 확인된 분석 결과를 선택하세요. 불확실한 영역은 보정하지 않습니다.');
+      validateContactReview(analysis.contact, analysis.files.map(file => file.path));
+      const producer = w.tasks.filter(task => task.id === analysis.provenance.jobId && task.taskId === 'M06' && task.settings.contactPhase === 'analyze' && task.status === 'review' && task.outputVersionIds.includes(analysis.id));
+      if (producer.length !== 1 || producer[0].objectId !== o.id || producer[0].settings.sourceVersionId !== analysis.contact.sourceVersionId ||
+          JSON.stringify(analysis.sourceVersionIds) !== JSON.stringify(producer[0].inputVersionIds))
+        throw Error('분석 결과의 원본·작업 연결을 확인할 수 없습니다.');
+    }
+    const source = analysis ? uniqueVersion(analysis.contact!.sourceVersionId) : selected;
+    if (!source || source.objectId !== o.id || source.role !== 'model' || source.slot !== 'main' || source.contact || !source.files.some(file => /\.blend$/i.test(file.path)))
+      throw Error('기존 임시 조립의 편집 가능한 전체 후보를 선택하세요. 다시 조립하거나 채택할 필요는 없습니다.');
+    const producers = w.tasks.filter(task => task.id === source.provenance.jobId && task.objectId === o.id && task.taskId === 'M08' && task.status === 'review' && task.outputVersionIds.includes(source.id));
+    if (producers.length !== 1) throw Error('완료된 임시 조립의 정확한 파트 연결이 필요합니다.');
+    const producer = producers[0], parts = producer.outputVersionIds.filter(value => value !== source.id).map(uniqueVersion);
+    const slots = ['part-head', 'part-body', 'part-hair'];
+    if (parts.length !== 3 || parts.some(part => !part || part.objectId !== o.id || part.role !== 'model' || part.provenance.jobId !== producer.id ||
+          !slots.includes(part.slot) || JSON.stringify(part.sourceVersionIds) !== JSON.stringify(producer.inputVersionIds)) ||
+        new Set(parts.map(part => part?.slot)).size !== 3 || JSON.stringify(source.sourceVersionIds) !== JSON.stringify(producer.inputVersionIds))
+      throw Error('같은 임시 조립의 머리·몸통·머리카락 세 파트가 필요합니다.');
+    const partVersions = parts as AssetVersion[];
+    if (analysis && JSON.stringify(analysis.contact!.partVersionIds) !== JSON.stringify(partVersions.map(part => part.id)))
+      throw Error('분석한 파트와 보정할 파트가 다릅니다. 기존 결과를 유지합니다.');
+    const previous = w.tasks.filter(task => task.objectId === o.id && task.taskId === 'M06' && task.settings.contactPhase === phase && task.settings.sourceVersionId === source.id);
+    if (previous.length) {
+      if (previous.length !== 1) throw Error('접합 실행 기록이 중복돼 있습니다. 새 요청을 만들지 않습니다.');
+      // Keep failed/cancelled/finished jobs too: recovery may inspect saved output but never spend another turn.
+      return w;
+    }
+    if (w.tasks.some(task => task.objectId === o.id && ['awaiting_approval', 'running', 'submission_unknown'].includes(task.status)))
+      throw Error('현재 대상의 진행 중인 작업부터 확인하세요.');
+    const refs = [...new Set([...producer.inputVersionIds, ...Object.entries(o.accepted).filter(([key]) => key.startsWith('design:')).map(([, value]) => value), ...o.references.map(ref => ref.versionId)])].map(value => w.versions.find(version => version.id === value))
+      .filter((version): version is AssetVersion => !!version && version.objectId === o.id && version.role === 'design');
+    const inputs = [source, ...partVersions, ...refs, ...(analysis ? [analysis] : [])];
+    for (const version of inputs) {
+      if (!version.files.length) throw Error('접합 원본 파일이 없습니다.');
+      for (const file of version.files) this.verified(id, file);
+    }
+    const settings: GraphicsTask['settings'] = { contactPhase: phase, sourceVersionId: source.id, contactPartVersionIds: JSON.stringify(partVersions.map(part => part.id)),
+      count: 1, 'lock.topology': true, 'lock.materials': true, 'lock.rig': true,
+      ...(analysis ? { contactAnalysisVersionId: analysis.id, contactRegionsConfirmed: true } : {}) };
+    const instruction = phase === 'analyze'
+      ? '현재 임시 조립의 목 연결부와 헤어 안쪽만 분석합니다. 얼굴·귀·헤어 외곽·의상은 보호합니다. 정확한 수정 영역과 보호 영역을 색으로 표시하고 불확실하면 보정 불가로 보고하세요. 원본과 형상은 변경하지 않습니다.'
+      : '앱에서 확인한 목 연결부·헤어 안쪽 정점 영역만 한 번 보정합니다. 얼굴·귀·헤어 외곽·의상, 전체 배치·면 구조·UV·재질·식별자는 보존합니다. 허용 영역으로 해결되지 않으면 중단하세요. 자동 재시도·새 생성·UV·텍스처·리깅은 하지 않습니다.';
+    const objectSnapshot = { name: o.name, kind: o.kind, references: structuredClone(o.references), accepted: structuredClone(o.accepted), ...(o.creation ? { creation: structuredClone(o.creation) } : {}) };
+    const snapshot = { taskId: 'M06', objectId: o.id, inputVersionIds: inputs.map(version => version.id), settings, instruction, objectSnapshot };
+    const task: GraphicsTask = { ...snapshot, id: uid(), createdAt: now(), updatedAt: now(), status: 'awaiting_approval', requestHash: hash(JSON.stringify(snapshot)),
+      outputVersionIds: [], backendJobIds: [], localOnly: false, message: '요청을 저장했습니다. 실행 버튼 전까지 GPT·외부 생성 요청은 없습니다.',
+      cost: { provider: 'Codex', credits: null, basis: `추가 Tripo·fal 비용 없음 · Blender + gpt-6-astra ${phase === 'analyze' ? '영역 분석' : '영역 보정'} 최대 1회 · 자동 재시도 없음. GPT 사용량은 발생하며 모델·추론 설정은 유지합니다.` } };
+    w.tasks.push(task); return this.save(w);
+  }
   private prepare(id: string, objectId: string, taskId: string) {
     const w = this.get(id), stored = this.object(w, objectId), definition = findGraphicsTask(taskId);
     const compiled = stored.creation ? compileCreation(stored, taskId) : undefined;
     const base = compiled ? { ...stored, settings: compiled.settings, instruction: compiled.instruction, creation: compiled.spec } : stored;
+    if (taskId === 'M06' && base.settings.contactPhase !== undefined) throw Error('접합 검토 버튼에서 정확한 조립 후보를 선택하세요.');
     const o = ['M01', 'M02', 'M03', 'M04', 'M15'].includes(taskId) ? { ...base, settings: requireModelGeometry(base.settings, taskId) } : base;
     if (!definition || definition.status === "planned") throw Error(definition?.reason ?? "등록되지 않은 작업입니다.");
     if (["A01", "A02", "A03"].includes(taskId)) throw Error("자료 가져오기·대상 추가·참고 연결 버튼을 사용하세요.");
@@ -756,11 +837,20 @@ export class GraphicsEngine {
       if (!groups.length || groups.some(g => !g.files.length)) throw Error("등록할 원본 결과가 없습니다.");
       const versions = groups.map((group): AssetVersion => {
         const verified = group.files.map(f => this.file(id, f.path, f.kind));
+        const contact = result.contact && ['main', 'contact-review'].includes(group.slot) ? structuredClone(result.contact) : undefined;
+        if (contact) {
+          validateContactReview(contact, verified.map(file => file.path));
+          if (t.taskId !== 'M06' || t.settings.contactPhase !== contact.phase || t.settings.sourceVersionId !== contact.sourceVersionId ||
+              t.settings.contactPartVersionIds !== JSON.stringify(contact.partVersionIds) ||
+              contact.phase === 'repair' && contact.analysisVersionId !== t.settings.contactAnalysisVersionId)
+            throw Error('접합 결과가 고정한 요청·원본·파트와 다릅니다. 기존 채택은 유지됩니다.');
+        }
         return { id: uid(), objectId: o.id, role: group.role, slot: t.settings.partId && ['design','model','material'].includes(group.role) ? `part-${t.settings.partId}` : group.slot,
           label: `${group.label}${executions.length > 1 ? ` · 후보 ${candidateIndex + 1}` : ''}`, files: verified, createdAt: now(), sourceVersionIds: t.inputVersionIds,
           provenance: { type: t.localOnly ? "local" : graphicsVideoTasks.has(t.taskId) ? "runway" : "codex", jobId: child.id },
-          preview: group.role === "motion-reference" ? verified.find(f => /\.(mp4|webm)$/i.test(f.path))?.path : verified.find(f => image.test(f.path))?.path, warnings: group.warnings };
+          preview: group.role === "motion-reference" ? verified.find(f => /\.(mp4|webm)$/i.test(f.path))?.path : verified.find(f => image.test(f.path))?.path, warnings: group.warnings, ...(contact ? { contact } : {}) };
       });
+      if (t.settings.contactPhase && !versions.some(version => version.contact)) throw Error('접합 검토 결과가 누락됐습니다. 기존 원본·채택은 유지됩니다.');
       const fresh = t.derivativeRefreshRequested ? versions.filter(version => !w.versions.some(prior => prior.provenance.jobId === child.id && prior.slot === version.slot && JSON.stringify(prior.files) === JSON.stringify(version.files))) : versions;
       w.versions.push(...fresh);
       current.outputVersionIds = t.derivativeRefreshRequested ? [...fresh.map(v => v.id), ...current.outputVersionIds] : [...current.outputVersionIds, ...fresh.map(v => v.id)];
@@ -786,7 +876,16 @@ export class GraphicsEngine {
     signal.throwIfAborted();
     if (failure !== undefined) throw failure;
     w = this.get(id); const current = w.tasks.find(x => x.id === taskId)!;
-    current.status = "review"; current.message = t.derivativeRefreshRequested ? "저장된 분리 결과에서 미리보기를 확인했습니다. 기존 원본·채택 유지, GPT·유료 생성 없음." : "원본을 보존해 새 결과를 등록했습니다. 확인 후 채택하세요."; delete current.derivativeRefreshRequested; current.updatedAt = now(); this.save(w);
+    const contactReview = w.versions.find(version => current.outputVersionIds.includes(version.id) && version.contact)?.contact;
+    current.status = "review";
+    current.message = contactReview
+      ? contactReview.status === 'blocked'
+        ? '허용 영역에서 안전하게 진행할 수 없어 중단했습니다. 접합 검토에서 이유를 확인하세요. 기존 원본·채택은 유지됩니다.'
+        : contactReview.phase === 'analyze'
+          ? '수정 영역 제안을 저장했습니다. 색으로 표시한 범위를 확인한 뒤 이 영역만 보정을 선택하세요. 모델은 아직 변경하지 않았습니다.'
+          : '접합 보정의 원본 보존 검사를 통과했습니다. 전후 비교에서 외형을 확인한 뒤 조립·파트를 함께 채택하세요.'
+      : t.derivativeRefreshRequested ? "저장된 분리 결과에서 미리보기를 확인했습니다. 기존 원본·채택 유지, GPT·유료 생성 없음." : "원본을 보존해 새 결과를 등록했습니다. 확인 후 채택하세요.";
+    delete current.derivativeRefreshRequested; current.updatedAt = now(); this.save(w);
   }
   private refreshParts(id: string, taskId: string) {
     const w = this.get(id), t = w.tasks.find(t => t.id === taskId);

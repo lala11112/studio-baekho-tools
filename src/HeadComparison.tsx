@@ -104,7 +104,7 @@ export function HeadComparison({ projectId, baseline, candidate, choices, accept
       <div><strong>현재 후보</strong><span>{candidate.label} · {candidate.id.slice(0, 8)}</span></div>
     </div>
     <div className="head-comparison-controls" role="group" aria-label="함께 보는 시점과 표면">
-      {([['정면', 1, 0, 0], ['왼쪽', 0, 0, 1], ['오른쪽', 0, 0, -1], ['후면', -1, 0, 0], ['사선', 4.7, 1.35, 3]] as const).map(([label, x, y, z]) => <button key={label} disabled={!ready} onClick={() => api.current?.fit(new THREE.Vector3(x, y, z))}>{label}</button>)}
+      {([['+X 방향', 1, 0, 0], ['+Z 방향', 0, 0, 1], ['−Z 방향', 0, 0, -1], ['−X 방향', -1, 0, 0], ['사선', 4.7, 1.35, 3]] as const).map(([label, x, y, z]) => <button key={label} disabled={!ready} onClick={() => api.current?.fit(new THREE.Vector3(x, y, z))}>{label}</button>)}
       <button aria-pressed={solid} onClick={() => setSolid(true)}>단색 형태</button><button aria-pressed={!solid} onClick={() => setSolid(false)}>원본 재질</button>
     </div>
     <div className="head-comparison-canvas" ref={host} data-testid="graphics-head-comparison-canvas" data-ready={ready} aria-label="두 머리의 공통 카메라 미리보기" />
@@ -119,6 +119,6 @@ export function HeadComparison({ projectId, baseline, candidate, choices, accept
         <label><input type="checkbox" checked={!!reviewed[version.id]} onChange={event => setReviewed(current => ({ ...current, [version.id]: event.target.checked }))} />{index === 0 ? '기준' : '후보'} 외형 검토 표시</label>
       </div>)}
     </div>
-    <p className="gs-fine">파일 검사 기록과 외형의 자연스러움은 별개입니다. 검토 표시는 이 비교 화면에만 적용되며 채택하지 않습니다. 목 접합·뒤통수·두피를 여러 시점에서 직접 확인하세요. 정면은 원본 +X 방향 기준이며, 서로 다른 원본의 얼굴 방향은 자동으로 맞추지 않습니다.</p>
+    <p className="gs-fine">파일 검사 기록과 외형의 자연스러움은 별개입니다. 검토 표시는 이 비교 화면에만 적용되며 채택하지 않습니다. 목 접합·뒤통수·두피를 여러 시점에서 직접 확인하세요. 얼굴 방향은 아직 확인되지 않아 카메라를 원본 축 방향으로 표시합니다. 서로 다른 원본의 얼굴 방향은 자동으로 맞추지 않습니다.</p>
   </section>;
 }

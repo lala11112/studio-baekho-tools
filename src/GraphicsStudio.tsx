@@ -40,6 +40,7 @@ import {
 import { catalog } from "../shared/catalog";
 import { Viewport } from "./Viewport";
 import { HeadComparison } from './HeadComparison';
+import { GraphicsContactReview } from './GraphicsContactReview';
 import { CreationOptions } from "./CreationOptions";
 import { CreationSubjectChooser } from './CreationSubjectChooser';
 import { GraphicsStoragePanel } from './GraphicsStoragePanel';
@@ -719,9 +720,18 @@ export function GraphicsStudio({
   const needsPartSpaceRestoration = Boolean(workspace && shownVersion && requiresPartSpaceRestoration(workspace, shownVersion));
   const needsPartSourcePreparation = Boolean(workspace && shownVersion && requiresPartSourcePreparation(workspace, shownVersion));
   const needsPartPreparation = needsPartSpaceRestoration || needsPartSourcePreparation;
+  const shownContact = shownVersion?.contact;
+  const contactReviewActive = Boolean(shownContact && stage === 'assembly');
+  const shownContactTask = shownContact && shownVersion
+    ? objectTasks.find(task => task.id === shownVersion.provenance.jobId && task.taskId === 'M06' && task.outputVersionIds.includes(shownVersion.id)) : undefined;
+  const contactResultForTask = (task: GraphicsTask) => versions.find(version => version.contact && version.provenance.jobId === task.id && task.outputVersionIds.includes(version.id))?.contact;
+  const contactPartProducer = shownVersion?.slot.startsWith('part-')
+    ? objectTasks.find(task => task.taskId === 'M06' && task.settings.contactPhase === 'repair' && task.outputVersionIds.includes(shownVersion.id)) : undefined;
+  const contactPartMain = contactPartProducer?.outputVersionIds.map(id => versions.find(version => version.id === id)).find(version => version?.slot === 'main' && version.contact?.phase === 'repair');
   const shownAssembly = shownVersion?.role === 'model' && shownVersion.slot === 'main'
-    ? objectTasks.find(task => task.taskId === 'M08' && task.outputVersionIds.includes(shownVersion.id) && task.outputVersionIds.length > 1) : undefined;
+    ? objectTasks.find(task => (task.taskId === 'M08' || task.taskId === 'M06' && task.settings.contactPhase === 'repair') && task.outputVersionIds.includes(shownVersion.id) && task.outputVersionIds.length > 1) : undefined;
   const assemblyParts = shownAssembly?.outputVersionIds.map(id => versions.find(version => version.id === id)).filter((version): version is AssetVersion => !!version && version.role === 'model' && version.slot.startsWith('part-'));
+  const canInspectContact = shownAssembly?.taskId === 'M08' && ['part-head', 'part-body', 'part-hair'].every(slot => assemblyParts?.some(version => version.slot === slot));
   const shownAcceptanceComplete = Boolean(object && shownVersion && acceptedVersion(object, shownVersion) && (!shownAssembly || assemblyParts?.length && assemblyParts.every(version => object.accepted[`model:${version.slot}`] === version.id)));
   const headVersions = versions.filter(version => version.slot === 'part-head' && ['model', 'material'].includes(version.role) && version.files.some(file => /\.glb$/i.test(file.path)));
   const headCandidate = headVersions.find(version => version.id === shownVersion?.id);
@@ -830,15 +840,15 @@ export function GraphicsStudio({
   for (const task of [...objectTasks].sort((a, b) =>
     a.createdAt.localeCompare(b.createdAt),
   )) {
-    const operation = `${task.taskId}:${task.settings.clipName ?? ""}:${task.settings.partId ?? ""}`;
+    const operation = `${task.taskId}:${task.settings.clipName ?? ""}:${task.settings.partId ?? ""}${task.settings.contactPhase ? `:contact:${task.settings.contactPhase}:${task.settings.sourceVersionId ?? ''}` : ''}`;
     latestTaskByOperation.set(operation, task);
     // A later cancelled/failed request must not hide an already registered result.
     if (task.status === 'review' && task.outputVersionIds.some(id => versions.some(version => version.id === id))) latestResultByOperation.set(operation, task);
   }
-  const visibleTasks = [...new Map([...latestTaskByOperation.values(), ...latestResultByOperation.values()].map(task => [task.id, task])).values()]
+  const visibleTasks = [...new Map([...latestTaskByOperation.values(), ...latestResultByOperation.values(), ...(contactReviewActive && shownContactTask ? [shownContactTask] : [])].map(task => [task.id, task])).values()]
     .filter(
       (task) =>
-        task.taskId === taskId ||
+        (contactReviewActive ? task.id === shownContactTask?.id : task.taskId === taskId) ||
         ["running", "submission_unknown", "awaiting_approval"].includes(
           task.status,
         ),
@@ -862,13 +872,32 @@ export function GraphicsStudio({
 
   function showTaskResult(task: GraphicsTask) {
     const results = task.outputVersionIds.map(id => versions.find(version => version.id === id)).filter((version): version is AssetVersion => !!version);
-    setShownVersionId([...results].reverse().find(version => version.partSpace || version.partSource)?.id ?? results[0]?.id ?? '');
+    const result = [...results].reverse().find(version => version.partSpace || version.partSource) ?? results[0];
+    if (result) showVersion(result);
     document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }
 
+  function showVersion(version: AssetVersion) {
+    setShownVersionId(version.id);
+    setHeadComparisonOpen(false);
+    if (version.contact || objectTasks.some(task => task.taskId === 'M06' && task.settings.contactPhase && task.outputVersionIds.includes(version.id))) {
+      setStage('assembly'); setTaskId('M06');
+    } else if (shownContact || contactPartProducer) {
+      setStage('assembly'); setTaskId(objectTasks.some(task => task.taskId === 'M08' && task.outputVersionIds.includes(version.id)) ? 'M08' : undefined);
+    }
+  }
+
   function adoptVersion(version: AssetVersion) {
+    if (version.contact?.phase === 'analyze' || version.contact?.status === 'blocked') return;
+    if (version.slot.startsWith('part-') && objectTasks.some(task => task.taskId === 'M06' && task.settings.contactPhase === 'repair' && task.outputVersionIds.includes(version.id))) return;
     if (version.slot === 'part-head' && acceptedHeadId && acceptedHeadId !== version.id) setHeadBaselineId(acceptedHeadId);
     void run({ kind: 'accept', objectId: version.objectId, versionId: version.id }, shownAssembly && version.id === shownVersion?.id ? '이 조립 전체와 같은 작업의 파트를 함께 채택했습니다. 다음 작업은 직접 실행하세요.' : `${roles[version.role]} / ${version.slot}에 채택했습니다. 다음 작업은 직접 실행하세요.`);
+  }
+
+  async function prepareContact(source: AssetVersion, phase: 'analyze' | 'repair') {
+    if (disabled || active) return;
+    const prepared = await run({ kind: 'prepare-contact', versionId: source.id, phase }, `${phase === 'analyze' ? '접합 영역 분석' : '허용 영역 보정'}의 입력·사용량 카드를 준비했습니다. 기존 결과와 채택 상태는 유지됩니다.`);
+    if (prepared) { setStage('assembly'); setTaskId('M06'); setHeadComparisonOpen(false); }
   }
 
   function chooseRepairSource(source: AssetVersion, mesh?: MeshSelection) {
@@ -1350,7 +1379,12 @@ export function GraphicsStudio({
                 </button>
               ))}
             </nav>
-            <div className="gs-execution-card">
+            {shownContact && contactReviewActive ? <div className="gs-execution-card gs-contact-current" data-testid="graphics-contact-current">
+              <div className="gs-creation-execute"><div>
+                <strong>{shownContact.status === 'blocked' ? shownContact.phase === 'analyze' ? '영역 분석 완료 · 보정 불가' : '보정 중단 · 범위 제한' : shownContact.phase === 'analyze' ? '수정 영역 검토' : '접합 보정 결과 검토'}</strong>
+                <small>{shownContact.status === 'blocked' ? '보호 영역을 유지한 채 수정할 범위를 확정하지 못했습니다. 원본과 채택 상태는 그대로입니다.' : '아래 비교 화면에서 이번 결과를 확인하세요. 새 작업은 자동으로 시작하지 않습니다.'}</small>
+              </div><button type="button" onClick={() => document.querySelector('[data-testid="graphics-contact-heading"]')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>검토 내용 보기</button></div>
+            </div> : <div className="gs-execution-card">
             <div className="gs-creation-execute" aria-label="현재 단계 실행">
               <div>
                 <strong>{activeTask.name}</strong>
@@ -1397,7 +1431,7 @@ export function GraphicsStudio({
               <span><b>목표 크기</b> {physicalSizeSummary(creation.physicalSize)}</span>
               <span><b>예상 비용</b> {activeTask.executor === 'local' ? '무료 · GPT 0회' : '준비 후 비용 카드 확인'}</span>
             </div>
-            </div>
+            </div>}
 
             {visibleTasks.length > 0 && (
               <div className="gs-current-jobs" aria-label="현재 작업 상태">
@@ -1427,18 +1461,20 @@ export function GraphicsStudio({
                         {task.settings.clipName
                           ? `${task.settings.clipName} · `
                           : task.settings.partLabel || task.settings.partId ? `${task.settings.partLabel ?? task.settings.partId} · ` : ""}
-                        {findGraphicsTask(task.taskId)?.name ?? task.taskId} ·{" "}
+                        {task.settings.contactPhase ? task.settings.contactPhase === 'analyze' ? '목·헤어 접합 영역 분석' : '목·헤어 접합 보정' : findGraphicsTask(task.taskId)?.name ?? task.taskId} ·{" "}
                         {task.runtimeApproval && task.status === "running"
                           ? "사용자 확인 대기"
                           : task.partSourceRecoveryVersionId && task.status === 'running' ? '로컬 파트 작업 원본 준비 중'
                           : task.partSourceRecoveryVersionId && task.status === 'cancelled' ? '로컬 원본 준비 중지'
                           : task.partSpaceRecoveryVersionId && task.status === 'running' ? '로컬 크기·위치 복원 중'
                           : task.partSpaceRecoveryVersionId && task.status === 'cancelled' ? '로컬 복원 중지'
+                          : task.status === 'review' && contactResultForTask(task)?.status === 'blocked' ? task.settings.contactPhase === 'analyze' ? '영역 분석 완료 · 보정 불가' : '보정 중단 · 범위 제한'
+                          : task.status === 'review' && task.settings.contactPhase === 'analyze' && task.outputVersionIds.length ? '분석 완료 · 영역 검토'
                           : task.status === 'review' && task.outputVersionIds.length ? '완료 · 결과 확인'
                           : task.status === 'cancelled' && task.paidApproval ? '추적 중지 · 원격 상태 확인 필요'
                           : taskStatuses[task.status]}
                       </strong>
-                      <p>{task.message || "작업 상태를 확인하고 있습니다."}</p>
+                      <p>{contactResultForTask(task)?.status === 'blocked' ? contactResultForTask(task)?.warnings[0] || '보호 영역과 수정 범위를 확정하지 못해 중단했습니다. 기존 조립·파트와 채택 상태는 유지됩니다.' : task.status === 'review' && task.settings.contactPhase === 'analyze' ? '분석한 수정 영역을 먼저 확인하세요. 이 결과는 모델 채택 대상이 아닙니다.' : task.message || "작업 상태를 확인하고 있습니다."}</p>
                       {task.status === 'cancelled' && task.paidApproval && !task.partSpaceRecoveryVersionId && !task.partSourceRecoveryVersionId && <p className="gs-warning">유료 실행이 승인된 요청입니다. 추적 중지는 원격 처리나 과금 취소를 뜻하지 않습니다. 이전에 완료된 결과는 별도로 유지됩니다.</p>}
                       {task.errorCode && <code>{task.errorCode}</code>}
                       {task.runtimeApproval && task.status === "running" && (
@@ -1928,7 +1964,7 @@ export function GraphicsStudio({
                       </div>
                     </section>
                   )}
-                  {shownVersion && ['model', 'material'].includes(shownVersion.role) && <div className="gs-preview-actions" data-testid="graphics-preview-actions">
+                  {shownVersion && !shownContact && !contactPartProducer && ['model', 'material'].includes(shownVersion.role) && <div className="gs-preview-actions" data-testid="graphics-preview-actions">
                     <strong>{shownVersion.label}</strong>
                     <div>
                       <button className="gs-primary" data-testid="graphics-accept-preview" disabled={disabled || needsPartPreparation || shownAcceptanceComplete} onClick={() => adoptVersion(shownVersion)}>
@@ -1940,6 +1976,15 @@ export function GraphicsStudio({
                     </div>
                     <small>{shownAssembly ? '같은 조립 작업의 전체 모델과 배치된 파트를 함께 채택합니다. 이후 파트 UV도 이 배치를 사용하며, 이전 원본은 유지됩니다.' : '채택은 다음 작업의 원본만 바꾸며, 제작을 실행하지 않습니다.'}</small>
                   </div>}
+                  {contactPartProducer && <section className="gs-contact-entry" aria-label="접합 보정 파트 채택 안내">
+                    <div><strong>이 파트는 수정한 조립과 함께 채택합니다</strong><p>목·헤어 접합의 배치를 유지하도록 전체 비교에서 조립·파트를 한 번에 채택하세요.</p></div>
+                    <button type="button" className="gs-primary" data-testid="graphics-contact-part-review" disabled={!contactPartMain} onClick={() => showVersion(contactPartMain!)}>수정한 조립 비교로 돌아가기</button>
+                  </section>}
+                  {shownVersion && canInspectContact && !shownContact && <section className="gs-contact-entry" aria-label="목·헤어 접합 확인">
+                    <div><strong>목 연결부와 헤어 안쪽을 확인하세요</strong><p>현재 조립 후보를 그대로 검사합니다. 먼저 채택하거나 조립을 다시 실행하지 않습니다.</p></div>
+                    <button type="button" className="gs-primary" data-testid="graphics-contact-analyze" disabled={disabled || active} onClick={() => void prepareContact(shownVersion, 'analyze')}>목·헤어 접합 확인</button>
+                    <small>영역 분석 최대 1회 + 확인한 영역 보정 최대 1회 · GPT 사용량 발생 · 추가 Tripo·fal 비용 없음. 새 모델·UV·텍스처·리깅은 실행하지 않습니다.</small>
+                  </section>}
                   {shownVersion && needsPartSourcePreparation && <div className="gs-result-notes" aria-label="파트 작업 원본 준비 필요" data-testid="graphics-part-source-warning">
                     <strong>채택 전 파트 작업 원본 준비 필요</strong>
                     <p>외부에서 생성한 파트의 작업 원본이 아직 준비되지 않았습니다. 무료로 로컬 작업 사본을 준비한 뒤 결과를 확인하고 채택하세요. 외형을 자동으로 판단하거나 다시 생성하지 않으며, 외부 원본 파일은 그대로 보관합니다.</p>
@@ -1948,12 +1993,15 @@ export function GraphicsStudio({
                       파트 작업 원본 준비 · 무료
                     </button>
                   </div>}
-                  <div className={`gs-preview${headComparisonOpen && headCandidate && headBaseline ? ' gs-preview-comparison' : ''}`} data-testid="graphics-preview">
+                  {shownVersion && shownContact ? <GraphicsContactReview key={shownVersion.id} projectId={project.id} version={shownVersion} disabled={disabled || active} accepted={shownAcceptanceComplete} sourceAvailable={versions.some(version => version.id === shownContact.sourceVersionId)}
+                    onPrepareRepair={() => void prepareContact(shownVersion, 'repair')}
+                    onKeepSource={() => { const source = versions.find(version => version.id === shownContact.sourceVersionId); if (source) showVersion(source); setNotice('기존 조립 결과로 돌아왔습니다. 채택 상태와 파일은 변경하지 않았습니다.'); }}
+                    onAccept={() => adoptVersion(shownVersion)} onImage={(path, label) => setFocusedImage({ path, label })} /> : <div className={`gs-preview${headComparisonOpen && headCandidate && headBaseline ? ' gs-preview-comparison' : ''}`} data-testid="graphics-preview">
                     {headComparisonOpen && headCandidate && headBaseline
                       ? <HeadComparison projectId={project.id} baseline={headBaseline} candidate={headCandidate} choices={headVersions} acceptedId={acceptedHeadId} onBaseline={setHeadBaselineId} onClose={() => setHeadComparisonOpen(false)} />
                       : <VersionPreview project={project} version={shownVersion} physicalSize={shownVersion?.slot.startsWith("part-") ? undefined : creation.physicalSize} onBounds={setModelBounds} onMeshSelect={setMeshSelection} nativePolygonCount={nativeMeasurement?.versionId === shownVersion?.id ? nativeMeasurement?.faces : undefined} />}
-                  </div>
-                  {meshSelection && shownVersion && <div className="gs-mesh-correction">
+                  </div>}
+                  {meshSelection && shownVersion && !shownContact && !contactPartProducer && <div className="gs-mesh-correction">
                     <strong>선택 부품: {meshSelection.name}</strong>
                     <p>위치·형태만 보정하며 다른 메시와 원본 구조를 보존합니다. 재생성·재토폴로지는 별도 작업입니다.</p>
                     <button disabled={disabled || active || needsPartPreparation || shownVersion.role !== 'model' || !acceptedVersion(object, shownVersion) || (!meshSelection.sourceId && !meshSelection.sourceName)} onClick={() => {
@@ -1990,8 +2038,8 @@ export function GraphicsStudio({
                         {provenanceLabels[shownVersion.provenance.type]} · 저장
                         파일 {shownVersion.files.length}개
                       </p>
-                      {["model", "rig", "animation"].includes(shownVersion.role) && <p className="gs-model-provenance">제작 원본: {modelProductionLabel(shownVersion, versions, objectTasks)}<br />{modelProductionGeometry(shownVersion, versions, objectTasks)} · 실제 결과 면수와 다를 수 있습니다.</p>}
-                      {shownVersion.role === "model" && (
+                      {shownContact?.phase !== 'analyze' && ["model", "rig", "animation"].includes(shownVersion.role) && <p className="gs-model-provenance">제작 원본: {modelProductionLabel(shownVersion, versions, objectTasks)}<br />{modelProductionGeometry(shownVersion, versions, objectTasks)} · 실제 결과 면수와 다를 수 있습니다.</p>}
+                      {shownVersion.role === "model" && shownContact?.phase !== 'analyze' && (
                         <ModelStatistics
                           projectId={project.id}
                           version={shownVersion}
@@ -2014,11 +2062,11 @@ export function GraphicsStudio({
                       </div>}
                       {shownVersion.partSpace && <p className="gs-fine" data-testid="graphics-part-space-restored">원래 파트의 크기·위치 복원 결과입니다. 외부 원본은 별도 버전으로 보관됩니다.</p>}
                       {shownVersion.partSource && <p className="gs-fine" data-testid="graphics-part-source-prepared">로컬 파트 작업 사본입니다. 외부 원본은 별도 버전으로 보관되며, 외형 검토와 채택은 직접 진행하세요.</p>}
-                      {['model', 'material'].includes(shownVersion.role) && <div className="gs-result-notes" aria-label="결과 추가 보정">
+                      {!shownContact && !contactPartProducer && ['model', 'material'].includes(shownVersion.role) && <div className="gs-result-notes" aria-label="결과 추가 보정">
                         <button disabled={disabled || active || needsPartPreparation} onClick={() => chooseRevisionSource(shownVersion)}>이 결과 더 보정</button>
                         <small>현재 보는 결과의 형태를 이어서 수정합니다. 채택 전 후보도 지정할 수 있으며, 원본과 채택 상태는 유지됩니다.</small>
                       </div>}
-                      {['model', 'material'].includes(shownVersion.role) && shownVersion.slot.startsWith('part-') && <div className="gs-result-notes" aria-label="파트 빠진 면 보완">
+                      {!contactPartProducer && ['model', 'material'].includes(shownVersion.role) && shownVersion.slot.startsWith('part-') && <div className="gs-result-notes" aria-label="파트 빠진 면 보완">
                         <p>분리된 파트에 두피·뒤통수처럼 빠진 면이 있으면, 이 원본의 기존 면을 보존하면서 보완할 수 있습니다. UV·텍스처는 보완 결과를 채택한 다음 준비하세요.</p>
                         <button disabled={disabled || active || needsPartPreparation || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation)}
                           onClick={() => chooseRepairSource(shownVersion)}>이 파트 빠진 면 보완</button>
@@ -2103,7 +2151,7 @@ export function GraphicsStudio({
                           <p>작업: {shownVersion.provenance.jobId}</p>
                         )}
                       </details>
-                      <button
+                      {!shownContact && !contactPartProducer && <button
                         data-testid="graphics-accept-version"
                         aria-label={shownAssembly ? '상세 결과에서 조립과 파트 함께 채택' : undefined}
                         disabled={
@@ -2117,7 +2165,7 @@ export function GraphicsStudio({
                           : needsPartSourcePreparation ? '작업 원본 준비 후 채택'
                           : shownAssembly ? '이 조립과 파트 채택'
                           : `${roles[shownVersion.role]} / ${shownVersion.slot}에 채택`}
-                      </button>
+                      </button>}
                     </div>
                   )}
                   <div className="gs-version-list" aria-label="전체 버전">
@@ -2129,7 +2177,7 @@ export function GraphicsStudio({
                         className={
                           shownVersion?.id === version.id ? "is-active" : ""
                         }
-                        onClick={() => setShownVersionId(version.id)}
+                        onClick={() => showVersion(version)}
                       >
                         <span>
                           <strong>{version.label}</strong>

@@ -9,6 +9,7 @@ import type { GraphicsNativeArgs, GraphicsNativeResult } from "./graphics-native
 import type { AssetVersion, GraphicsRole } from "../shared/graphics";
 import { isGraphicsClipName } from "../shared/graphics";
 import { rigContractForProducer } from "../shared/graphics-rig";
+import { createGraphicsContactExecutor } from './graphics-contact';
 import type { ProductionRun, ProductionStage } from "../shared/production";
 
 export const graphicsAstraOperations = ["M05", "M06", "M07", "M08", "M09", "M15", "R01", "R02", "R03", "N04", "N05", "N06"] as const;
@@ -176,6 +177,8 @@ const schema = {
 /** One immutable app-owned Astra authoring dispatch; saved-result recovery is host-only. */
 export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
   return async (args: GraphicsNativeArgs): Promise<GraphicsNativeResult> => {
+    if (args.task.taskId === 'M06' && args.task.settings.contactPhase !== undefined)
+      return createGraphicsContactExecutor(dependencies)(args);
     args.signal.throwIfAborted();
     if (!(graphicsAstraOperations as readonly string[]).includes(args.task.taskId)) throw Error("이 Astra 작업은 아직 구현하지 않았습니다.");
     if (!args.task.instruction.trim()) throw Error("보정·리깅·동작의 구체적인 작업 지시가 필요합니다.");

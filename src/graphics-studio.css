@@ -1634,6 +1634,42 @@
   .graphics-studio .gs-create > .gs-subject-chooser { grid-column: 1 / -1; }
 }
 
+/* Contact review is a document, not a fixed-height model viewport. */
+.gs-contact-entry, .gs-contact-review { min-width: 0; border: 1px solid #536a57; border-radius: 9px; padding: 12px; margin: 10px 0; background: var(--gs-panel); }
+.gs-contact-entry { display: flex; gap: 10px 16px; flex-wrap: wrap; align-items: center; }
+.gs-contact-entry > div { flex: 1 1 260px; min-width: 0; }
+.gs-contact-entry p, .gs-contact-review p { margin: 5px 0 0; }
+.gs-contact-entry small { flex-basis: 100%; color: var(--gs-muted); line-height: 1.5; }
+.gs-contact-review header { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
+.gs-contact-review header > div { flex: 1 1 300px; min-width: 0; }
+.gs-contact-review h3 { margin: 0; font-size: var(--ps-section, 15px); }
+.gs-contact-review h4 { margin: 0; font-size: var(--ps-text, 13px); }
+.gs-contact-review .gs-tag { white-space: normal; }
+.gs-contact-legend { display: flex; gap: 8px 20px; flex-wrap: wrap; margin: 12px 0; padding: 10px; background: #14221b; border: 1px solid var(--gs-border); border-radius: 7px; }
+.gs-contact-legend span { display: inline-flex; align-items: center; gap: 7px; }
+.gs-contact-legend i { width: 12px; height: 12px; flex: 0 0 12px; border: 1px solid #fff8; border-radius: 3px; }
+.gs-contact-legend .is-allowed { background: #37d967; }
+.gs-contact-legend .is-protected { background: #ed5454; }
+.gs-contact-legend p { flex-basis: 100%; margin: 0; color: var(--gs-muted); }
+.gs-contact-warnings { padding: 10px; margin-top: 12px; border: 1px solid #7a6544; border-radius: 7px; background: #30291e; color: #f3d29b; }
+.gs-contact-warnings ul { padding-left: 18px; margin: 6px 0 0; max-height: 180px; overflow-y: auto; overflow-wrap: anywhere; }
+.gs-contact-views { display: grid; gap: 16px; margin-top: 10px; max-height: min(44vh, 480px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-right: 4px; }
+.gs-contact-views:empty { display: none; }
+.gs-contact-views:focus-visible { outline: 2px solid var(--gs-accent); outline-offset: 3px; }
+.gs-contact-review header { scroll-margin-top: 12px; }
+.gs-contact-view { min-width: 0; display: grid; gap: 6px; }
+.gs-contact-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.gs-contact-pair figure { min-width: 0; margin: 0; border: 1px solid var(--gs-border); border-radius: 7px; overflow: hidden; background: #111815; }
+.gs-contact-pair figcaption { padding: 6px 9px; font-size: var(--ps-caption, 12px); color: var(--gs-muted); }
+.graphics-studio button.gs-contact-image { display: block; width: 100%; height: auto; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; cursor: zoom-in; }
+.gs-contact-image img { display: block; width: 100%; height: auto; object-fit: contain; }
+.gs-contact-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin: 14px 0 8px; padding-top: 12px; border-top: 1px solid var(--gs-border); }
+.graphics-studio .gs-contact-entry button, .graphics-studio .gs-contact-actions button { height: auto; min-height: 36px; white-space: normal; }
+@media (max-width: 600px) {
+  .gs-contact-pair { grid-template-columns: 1fr; }
+  .gs-contact-entry > button, .gs-contact-actions > button { flex: 1 1 180px; }
+}
+
 /* New-object setup has its own space; the sidebar remains an object navigator. */
 .gs-new-object-action { position: sticky; top: -12px; z-index: 2; background: #17201d; padding: 0 0 12px; }
 .graphics-studio .gs-new-object-action button { width: 100%; min-height: 36px; font-size: var(--ps-text, 13px); font-weight: 600; }

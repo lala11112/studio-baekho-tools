@@ -1088,12 +1088,13 @@ def validate(q):
     save_json(q['report'], report)
 
 
-q = json.loads(pathlib.Path(sys.argv[sys.argv.index('--') + 1]).read_text(encoding='utf8'))
-if q['mode'] == 'prepare':
-    prepare(q)
-elif q['mode'] == 'prepare-assembly':
-    prepare_assembly(q)
-elif q['mode'] == 'validate':
-    validate(q)
-else:
-    raise RuntimeError('Unknown host validation mode')
+if __name__ == '__main__':
+    q = json.loads(pathlib.Path(sys.argv[sys.argv.index('--') + 1]).read_text(encoding='utf8'))
+    if q['mode'] == 'prepare':
+        prepare(q)
+    elif q['mode'] == 'prepare-assembly':
+        prepare_assembly(q)
+    elif q['mode'] == 'validate':
+        validate(q)
+    else:
+        raise RuntimeError('Unknown host validation mode')

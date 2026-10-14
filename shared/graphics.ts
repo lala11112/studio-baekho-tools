@@ -13,6 +13,8 @@ export type AssetVersion = {
   partSpace?: { schemaVersion: 1; sourceVersionId: string; providerVersionId: string; reportPath: string };
   /** Separate native working copy with stable part/mesh IDs; provider bytes remain immutable. */
   partSource?: { schemaVersion: 1; providerVersionId: string; reportPath: string };
+  /** Analysis is review-only; repaired main and placed parts are adopted atomically. */
+  contact?: import('./graphics-contact').GraphicsContactReview;
 };
 export type UnityTargetProfile = {
   id: string; projectPath: string; unityVersion: string;
@@ -121,6 +123,7 @@ export function requiresPartSourcePreparation(workspace: GraphicsWorkspace, vers
 }
 
 export type GraphicsAction =
+  | { kind: 'prepare-contact'; versionId: string; phase: 'analyze' | 'repair' }
   | { kind: "create-object"; name: string; objectKind: GraphicsKind; creation?: CreationSpec }
   | { kind: "update-object"; objectId: string; patch: Partial<Pick<GraphicsObject, "name" | "selectedTasks" | "instruction" | "settings" | "references" | "creation">> }
   | { kind: "import"; objectId: string; role: GraphicsRole; clipName?: string }

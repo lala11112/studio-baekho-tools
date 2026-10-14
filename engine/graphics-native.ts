@@ -27,6 +27,7 @@ export type GraphicsNativeArgs = {
   onProgress: (message: string) => void;
 };
 export type GraphicsNativeResult = {
+  contact?: import('../shared/graphics-contact').GraphicsContactReview;
   files: { path: string; kind: string }[];
   label: string;
   role: GraphicsRole;

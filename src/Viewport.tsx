@@ -497,11 +497,11 @@ export function Viewport({
           <small>원근 보기</small>
         </span>
         <div className="inspection-control-group inspection-camera" role="group" aria-label="카메라 시점">
-          <span className="inspection-control-label">시점</span>
+          <span className="inspection-control-label" title="모델의 얼굴·정면 방향이 확인되지 않아 원본 축을 기준으로 표시합니다.">원본 축 시점</span>
           <div className="inspection-control-actions">
-            <button onClick={() => view(0, 0, 1)}>정면</button>
-            <button onClick={() => view(1, 0, 0)}>측면</button>
-            <button onClick={() => view(0, 0, -1)}>후면</button>
+            <button onClick={() => view(0, 0, 1)}>+Z 방향</button>
+            <button onClick={() => view(1, 0, 0)}>+X 방향</button>
+            <button onClick={() => view(0, 0, -1)}>−Z 방향</button>
             <button title="시점 초기화" aria-label="시점 초기화" onClick={() => view(3, 1.35, 4.7)}>
               <RotateCcw size={14} />
             </button>
