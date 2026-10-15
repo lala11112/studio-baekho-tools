@@ -320,6 +320,7 @@ export function creationTaskId(spec: CreationSpec, stage: CreationStage): string
   return s.deliveryMode === 'files' ? 'X04' : 'X05';
 }
 export function stageForTask(taskId: string): CreationStage {
+  if (taskId === 'LOCAL_PLANAR_INSPECT' || taskId === 'LOCAL_PLANAR_REPAIR') return 'model';
   if (taskId.startsWith('I')) return 'design';
   if (taskId.startsWith('T')) return 'surface';
   if (['M05', 'M06', 'M07', 'M08', 'M09'].includes(taskId)) return 'assembly';

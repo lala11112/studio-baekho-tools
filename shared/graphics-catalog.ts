@@ -949,6 +949,7 @@ export const graphicsCatalog: GraphicsTaskDefinition[] = [...definitions, { id: 
 export function findGraphicsTask(
   id: string,
 ): GraphicsTaskDefinition | undefined {
+  if (id === 'LOCAL_PLANAR_INSPECT' || id === 'LOCAL_PLANAR_REPAIR') return {id,name:id === 'LOCAL_PLANAR_INSPECT'?'평면 경계 검사':'선택한 평면 경계 보완',group:'모델',inputs:'고정된 정적 BLEND·FBX 원본과 경계 검사 기록',output:id === 'LOCAL_PLANAR_INSPECT'?'검사 기록 · 채택할 모델 아님':'별도 로컬 모델 후보',executor:'local',status:'ready',reason:'GPT 호출·유료 제출 없이 로컬에서 처리합니다. 검사는 모델을 만들거나 채택하지 않습니다.'};
   return graphicsCatalog.find((task) => task.id === id);
 }
 

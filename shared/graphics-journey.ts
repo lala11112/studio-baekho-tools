@@ -23,6 +23,12 @@ export type GraphicsJourney = {
 /** Shared read-only prerequisites for the guided route. Native/file checks remain coordinator-owned. */
 export function getJourneyReadiness(workspace: GraphicsWorkspace, objectId: string, draft: CreationSpec, focus: JourneyFocus): JourneyReadiness {
   const object=workspace.objects.find(o=>o.id===objectId), taskId=focus.taskOverride || creationTaskId(draft,focus.stage);
+  if(taskId==='LOCAL_PLANAR_INSPECT'||taskId==='LOCAL_PLANAR_REPAIR') {
+    const task=workspace.tasks.find(t=>t.objectId===objectId&&t.id===focus.taskId&&t.taskId===taskId);
+    const sourceId=task?.inputVersionIds[0]??task?.planarSelection?.versionId;
+    const source=workspace.versions.find(v=>v.objectId===objectId&&v.id===sourceId);
+    return {inputs:source?[{key:`model:${source.slot}`,versionId:source.id,version:source}]:[],problems:source?[]:[{reason:'고정된 모델의 경계 검사 화면에서 진행하세요.',target:{stage:'model'}}]};
+  }
   const part=creationPartForTask({...draft,activePartId:focus.partId ?? draft.activePartId},taskId);
   const slot=part ? `part-${part.id}` : 'main';
   const problems: JourneyReadiness['problems']=[], inputs: JourneyAcceptedInput[]=[];
@@ -174,13 +180,13 @@ export function deriveJourney(workspace: GraphicsWorkspace, objectId: string, dr
   };
   const tasks = workspace.tasks.filter(item => item.objectId === objectId);
   const newest = (items: GraphicsTask[]) => [...items].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.updatedAt.localeCompare(a.updatedAt))[0];
-  const scoped = tasks.filter(item => stageForTask(item.taskId) === focus.stage && (!focus.taskOverride || item.taskId===focus.taskOverride) && (!focus.partId || item.settings.partId === focus.partId) && (!focus.clipName || item.settings.clipName === focus.clipName));
+  const scoped = tasks.filter(item => (item.taskId!=='LOCAL_PLANAR_INSPECT'||focus.taskOverride==='LOCAL_PLANAR_INSPECT'||focus.taskId===item.id) && stageForTask(item.taskId) === focus.stage && (!focus.taskOverride || item.taskId===focus.taskOverride) && (!focus.partId || item.settings.partId === focus.partId || item.inputVersionIds.some(id=>byId.get(id)?.slot===`part-${focus.partId}`)) && (!focus.clipName || item.settings.clipName === focus.clipName));
   const task = (focus.taskId ? tasks.find(item => item.id === focus.taskId) : undefined) ?? newest(scoped);
   const active = newest(tasks.filter(item => ['running', 'awaiting_approval', 'submission_unknown'].includes(item.status)));
   const selectedTask = active ?? task;
   const matchesPart = (v: AssetVersion | undefined): v is AssetVersion => !!v && (!focus.partId || v.slot === `part-${focus.partId}`) &&
     (focus.stage === 'design' ? v.role === 'design' : ['model','surface','assembly'].includes(focus.stage) ? ['model','material'].includes(v.role) : focus.stage === 'animation' ? ['animation','motion-reference'].includes(v.role) : focus.stage === 'rig' ? v.role === 'rig' : v.role === 'unity');
-  const candidate = focus.candidateVersionId ? [byId.get(focus.candidateVersionId)].find(matchesPart) :
+  const candidate = task?.taskId==='LOCAL_PLANAR_INSPECT'?undefined:focus.candidateVersionId ? [byId.get(focus.candidateVersionId)].find(matchesPart) :
     (task?.outputVersionIds.map(id => byId.get(id)).find(matchesPart) ??
       newest(scoped.filter(item => item.status === 'review'))?.outputVersionIds.map(id => byId.get(id)).find(matchesPart));
   const compatibilityIssues = object ? getGraphicsCompatibility(object, workspace.versions) : ['오브젝트를 선택하세요.'];
@@ -235,6 +241,9 @@ export function deriveJourney(workspace: GraphicsWorkspace, objectId: string, dr
     if (selectedTask.status !== 'submission_unknown') secondaryActions.push(action('stop', '작업 중단', '현재 작업의 중단을 요청합니다.', extra));
     const row = stages.find(s => s.id === stage)!;
     row.status = selectedTask.status === 'submission_unknown' ? 'blocked' : selectedTask.runtimeApproval || selectedTask.status === 'awaiting_approval' ? 'approval' : 'running'; row.reason = primaryAction.reason;
+  } else if(task?.taskId==='LOCAL_PLANAR_INSPECT') {
+    primaryAction=action('review','경계 검사 기록 확인','검사는 채택할 모델을 만들지 않습니다. 원본 모델의 경계 검사 화면에서 결과를 확인하세요.',{stage:'model',taskId:task.id});
+    secondaryActions.length=0;
   } else if (task && ['failed', 'cancelled'].includes(task.status) && !candidate) primaryAction = action('review', '작업 기록 확인', '실패·취소 기록을 확인하세요. 자동으로 다시 실행하지 않습니다.', { taskId: task.id });
   if (review && !active) { const row = stages.find(s => s.id === focus.stage)!; if (!review.accepted) { row.status = review.adoptable ? 'review' : 'blocked'; row.reason = review.reason; } }
   if (!active && !candidate && primaryAction.intent === 'prepare') primaryAction.target.taskId = focus.taskOverride || creationTaskId(draft, focus.stage);

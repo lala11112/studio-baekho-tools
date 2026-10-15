@@ -83,13 +83,41 @@ namespace Partsmith.Graphics {
    string actual=GraphicsSettings.currentRenderPipeline?GraphicsSettings.currentRenderPipeline.GetType().Name:"Built-in";
    if(q.pipeline=="urp"&&!actual.Contains("Universal")||q.pipeline=="hdrp"&&!actual.Contains("HDRender")||q.pipeline=="builtin"&&GraphicsSettings.currentRenderPipeline)throw new Conflict("Current renderer differs from the inspected PC target: "+actual);
   }
+  [Serializable] class JsonPropertyName { public string value; }
+  static bool HasRootProperty(string json,string name){
+   int depth=0;
+   for(int i=0;i<json.Length;i++){
+    char c=json[i];
+    if(c=='"'){
+     int start=i,end=i+1;bool escaped=false;
+     for(;end<json.Length;end++){char next=json[end];if(escaped){escaped=false;continue;}if(next=='\\'){escaped=true;continue;}if(next=='"')break;}
+     if(end>=json.Length)throw new Exception("Invalid JSON string");
+     int after=end+1;while(after<json.Length&&char.IsWhiteSpace(json[after]))after++;
+     if(depth==1&&after<json.Length&&json[after]==':'&&JsonUtility.FromJson<JsonPropertyName>("{\"value\":"+json.Substring(start,end-start+1)+"}").value==name)return true;
+     i=end;
+    }else if(c=='{'||c=='[')depth++;else if(c=='}'||c==']')depth--;
+   }
+   return false;
+  }
+  // Unity synthesizes empty nested objects even when optional JSON fields are absent.
+  // Detect actual top-level presence so omitted contracts differ from supplied partial objects.
+  public static DeliveryRequest ParseDeliveryRequest(string json,DeliveryRequest q=null){
+   q=q??new DeliveryRequest();JsonUtility.FromJsonOverwrite(json,q);
+   if(!HasRootProperty(json,"rigContract"))q.rigContract=null;
+   if(q.rigContract!=null){var c=q.rigContract;
+    if(c.schemaVersion!=1||string.IsNullOrWhiteSpace(c.versionId)||string.IsNullOrWhiteSpace(c.producerVersionId)||string.IsNullOrWhiteSpace(c.producerTaskId)||
+       (c.rigType!="generic"&&c.rigType!="humanoid")||(c.hairBinding!="head"&&c.hairBinding!="controls")||c.requiredParts==null||c.humanBones==null)
+     throw new Exception("Supplied rig contract is incomplete");
+   }
+   return q;
+  }
   static void Process(string requestFile){
    DeliveryRequest q=null;
    var warnings=new List<string>{"Import verified only. No Play Mode, visual fidelity, skin deformation, UI layout, or gameplay verification was performed."};
    var errors=new List<string>();
    var r=new DeliveryReport{status="failed",unityVersion=Application.unityVersion,playbackVerified=false,clips=Array.Empty<string>()};
    try{
-    q=JsonUtility.FromJson<DeliveryRequest>(File.ReadAllText(requestFile));
+    q=new DeliveryRequest();ParseDeliveryRequest(File.ReadAllText(requestFile),q);
     if(q==null||q.schemaVersion!=1||!System.Text.RegularExpressions.Regex.IsMatch(q.requestId??"","^[a-f0-9]{32}$")||string.IsNullOrWhiteSpace(q.objectId))throw new Exception("Invalid graphics request");
     r.requestId=q.requestId;r.objectId=q.objectId;r.profileFingerprint=q.profileFingerprint;r.converterVersion=q.converterVersion;r.pipeline=q.pipeline;
     if(q.destination==null||!System.Text.RegularExpressions.Regex.IsMatch(q.destination,"^Assets/PartsmithGraphics/[A-Za-z0-9_-]{1,64}$"))throw new Exception("Unsafe graphics destination");

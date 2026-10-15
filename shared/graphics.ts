@@ -15,6 +15,7 @@ export type AssetVersion = {
   partSource?: { schemaVersion: 1; providerVersionId: string; reportPath: string };
   /** Explicit local recovery reuses existing material pixels; it does not generate texture detail. */
   surfaceRepair?: { schemaVersion: 1; providerVersionId: string; repairVersionId: string; originalVersionId: string; reportPath: string };
+  planarRepair?: import('./graphics-planar').PlanarRepairProvenance;
   /** Analysis is review-only; repaired main and placed parts are adopted atomically. */
   contact?: import('./graphics-contact').GraphicsContactReview;
 };
@@ -62,6 +63,9 @@ export type GraphicsTask = {
   partSpaceRecoveryVersionId?: string;
   partSourceRecoveryVersionId?: string;
   surfaceRecoveryVersionId?: string;
+  planarSelection?: import('./graphics-planar').PlanarSelection;
+  /** Exact saved inspection used by this one local repair attempt, independent of later inspections. */
+  planarInspection?: import('./graphics-planar').PlanarInspection;
   objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted" | "creation">;
   targetProfile?: UnityTargetProfile;
   deliveryId?: string;
@@ -88,6 +92,7 @@ export type GraphicsWorkspace = {
   legacyPreview?: { versions: AssetVersion[]; fingerprint: string; objectName: string };
   /** Transient, read-only storage inspection; never persisted with production state. */
   storageReport?: import('./graphics-storage').GraphicsStorageReport;
+  planarInspections?: Record<string, import('./graphics-planar').PlanarInspection>;
 };
 
 /** Unlink only an unused legacy collection. Never remove production objects or their history. */
@@ -152,6 +157,8 @@ export type GraphicsAction =
   | { kind: 'restore-part-space'; versionId: string }
   | { kind: 'prepare-part-source'; versionId: string }
   | { kind: 'repair-surface-uv'; versionId: string }
+  | { kind: 'inspect-planar'; versionId: string }
+  | ({ kind: 'repair-planar' } & import('./graphics-planar').PlanarSelection)
   | { kind: "prepare"; objectId: string; taskId: string }
   | { kind: "approve" | "cancel" | "recover" | "refresh-parts"; taskId: string }
   | { kind: "runtime-approval"; taskId: string; approvalId: string; answer: WorkbenchRuntimeAnswer }

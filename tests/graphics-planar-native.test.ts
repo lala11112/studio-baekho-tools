@@ -1,0 +1,21 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+const blender = process.env.BLENDER_PATH ?? 'C:/Program Files/Blender Foundation/Blender 5.0/blender.exe';
+test('offline planar native fixtures preserve geometry and validate exports', { timeout: 180_000 }, t => {
+  if (!fs.existsSync(blender)) return t.skip('Blender executable is not installed');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-planar-native-'));
+  const result = spawnSync(blender, ['--factory-startup', '-b', '--python-exit-code', '1', '--python', path.resolve('tests/graphics-planar-native-fixture.py')], { encoding: 'utf8', timeout: 170_000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, PLANAR_FIXTURE_ROOT: root } });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const evidence = JSON.parse(fs.readFileSync(path.join(root, 'native-evidence.json'), 'utf8'));
+  assert.equal(evidence.passed, true);
+  assert(evidence.checks.length >= 12);
+  assert.equal(evidence.modelTurns, 0);
+  assert.equal(evidence.paidSubmissions, 0);
+  fs.mkdirSync(path.resolve('artifacts/runtime'), { recursive: true });
+  fs.writeFileSync(path.resolve('artifacts/runtime/graphics-planar-native-evidence.json'), JSON.stringify(evidence, null, 2));
+});

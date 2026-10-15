@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { deriveJourney, nextAfterAccept, journeySurfaceCapabilities, getJourneyReadiness } from '../shared/graphics-journey';
 import { defaultCreation } from '../shared/graphics-creation';
 import type { AssetVersion, GraphicsTask, GraphicsWorkspace } from '../shared/graphics';
+import {stageForTask} from '../shared/graphics-creation';
+import {findGraphicsTask,graphicsAstraTasks} from '../shared/graphics-catalog';
 
 const version = (id: string, slot = 'main'): AssetVersion => ({ id, objectId: 'o', role: 'model', slot, label: id, createdAt: id, files: [], sourceVersionIds: [], provenance: { type: 'local' }, warnings: [] });
 const task = (id: string, status: GraphicsTask['status'], outputVersionIds: string[] = []): GraphicsTask => ({ id, objectId: 'o', taskId: 'T03', createdAt: id, updatedAt: id, status, outputVersionIds, inputVersionIds: ['a'], settings: {}, instruction: '', requestHash: id, backendJobIds: [], message: '', localOnly: false });
@@ -11,6 +13,18 @@ const setup = () => {
   const workspace: GraphicsWorkspace = { schemaVersion: 1, id: 'w', projectId: 'p', revision: 1, objects: [{ id: 'o', name: 'Box', kind: 'prop', createdAt: '', selectedTasks: [], instruction: '', settings: {}, references: [], accepted: { 'model:main': 'a' } }], versions: [version('a'), version('b')], tasks: [], deliveries: [] };
   return { workspace, draft };
 };
+test('local planar repair resumes as a model review despite newer report-only inspection',()=>{
+ const {workspace,draft}=setup();workspace.tasks=[{...task('1','review',['b']),taskId:'LOCAL_PLANAR_REPAIR',localOnly:true},{...task('2','review',[]),taskId:'LOCAL_PLANAR_INSPECT',localOnly:true}];
+ const before=structuredClone(workspace),j=deriveJourney(workspace,'o',draft,{stage:'model'});
+ assert.equal(j.task?.taskId,'LOCAL_PLANAR_REPAIR');assert.equal(j.review?.version.id,'b');assert(j.secondaryActions.some(a=>a.intent==='accept'));assert.equal(stageForTask('LOCAL_PLANAR_REPAIR'),'model');assert.equal(findGraphicsTask('LOCAL_PLANAR_REPAIR')?.executor,'local');assert.equal(graphicsAstraTasks.has('LOCAL_PLANAR_REPAIR'),false);assert.deepEqual(workspace,before);
+ const inspection=deriveJourney(workspace,'o',draft,{stage:'model',taskId:'2',taskOverride:'LOCAL_PLANAR_INSPECT'});assert.equal(inspection.review,undefined);assert.equal(inspection.primaryAction.intent,'review');assert(!inspection.secondaryActions.some(a=>a.intent==='accept'));assert.equal(stageForTask('LOCAL_PLANAR_INSPECT'),'model');
+});
+test('adopted static planar repair continues to surface or reuses textured ancestry for Unity without generation',()=>{
+ const {workspace,draft}=setup(),repair=workspace.versions[1];repair.sourceVersionIds=['a'];repair.planarRepair={schemaVersion:1,versionId:'a',inspectionId:'inspect1',meshId:'m1',selectedBoundaryIds:['b1'],keptBoundaryIds:[],materialPolicy:'preserve',sourceSha256:'f'.repeat(64),identity:'local',algorithmVersion:'planar-v1',reportPath:'report.json'};
+ workspace.objects[0].accepted['model:main']='b';workspace.tasks=[{...task('1','review',['b']),taskId:'LOCAL_PLANAR_REPAIR',localOnly:true}];
+ assert.equal(nextAfterAccept(workspace,'o',draft,repair).stage,'surface');workspace.tasks.push({...task('0','review',['a']),taskId:'T03'});assert.equal(nextAfterAccept(workspace,'o',draft,repair).stage,'unity');
+ const guide=deriveJourney(workspace,'o',draft,{stage:'model'});assert.equal(guide.primaryAction.intent,'navigate');assert.equal(guide.primaryAction.target.stage,'unity');assert(!guide.secondaryActions.some(a=>a.intent==='prepare'));assert.equal(findGraphicsTask(guide.task!.taskId)?.executor,'local');
+});
 test('preview selection never changes accepted inputs or saved state; static route skips motion', () => {
   const {workspace,draft} = setup(), before = structuredClone({workspace,draft});
   const journey = deriveJourney(workspace,'o',draft,{stage:'surface',candidateVersionId:'b'});

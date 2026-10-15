@@ -88,6 +88,7 @@ test('guided static workflow reviews exact input, persists draft, and keeps cost
     assert.deepEqual(await page.evaluate(()=>(window as any).desktopCommands),[]);
     await page.evaluate(()=>{const w=window as any;w.fixture.deliveries[0].status='imported';w.renderFixture();});
     await page.getByRole('button',{name:'Unity에서 확인',exact:true}).waitFor();
+    assert.equal(await page.getByRole('button',{name:'Unity 전달 다시 준비',exact:true}).isVisible(),true,'Completed delivery must keep an explicit redelivery preparation action');
     assert.match(await guide.innerText(),/현재 결과 가져오기 완료/);
     await page.getByRole('button',{name:'Unity에서 확인',exact:true}).click();
     await page.waitForFunction(()=>(window as any).desktopCommands.length===1);

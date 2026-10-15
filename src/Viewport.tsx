@@ -23,6 +23,7 @@ import {
   Layers3,
 } from "lucide-react";
 import type { Project, Transform } from "../shared/types";
+export type BoundaryOverlay = { id: string; number: number; points: number[][]; color: string };
 type Props = {
   project: Project;
   selectedPart?: string;
@@ -37,6 +38,8 @@ type Props = {
   unitsKnown?: boolean;
   nativePolygonCount?: number;
   nativeVersionId?: string;
+  boundaryOverlays?: BoundaryOverlay[];
+  focusedBoundaryId?: string;
 };
 export function Viewport({
   project,
@@ -45,7 +48,7 @@ export function Viewport({
   onSelect,
   onTransform,
   animation,
-  onMeshSelect, onBounds, previewTransform, physicalSize, unitsKnown = false, nativePolygonCount, nativeVersionId,
+  boundaryOverlays, focusedBoundaryId, onMeshSelect, onBounds, previewTransform, physicalSize, unitsKnown = false, nativePolygonCount, nativeVersionId,
 }: Props) {
   const host = useRef<HTMLDivElement>(null),
     api = useRef<any>(null);
@@ -416,7 +419,7 @@ export function Viewport({
     resize.observe(host.current);
     const clock = new THREE.Clock();
     api.current = { camera, orbit, controls, actions, mixers, objects, scene, skeletons, fitModels,
-      applyInspection, applyPreview, entries, playing };
+      applyInspection, applyPreview, entries, playing, previewRoot };
     controls.setMode(mode);
     const tick = () => {
       frame = requestAnimationFrame(tick);
@@ -455,6 +458,29 @@ export function Viewport({
       renderer.domElement.remove();
     };
   }, [signature, project.id, selectedPart, previewId, explode, animation, topology?.status === 'ready' ? topology.preview.sha256 : '']);
+  useEffect(() => {
+    const current = api.current; if (!current || !boundaryOverlays) return;
+    const group = new THREE.Group();
+    for (const boundary of boundaryOverlays) {
+      if (boundary.points.length < 2) continue;
+      const points = boundary.points.map(point => new THREE.Vector3(point[0], point[1], point[2]));
+      const geometry = new THREE.BufferGeometry().setFromPoints([...points, points[0]]);
+      const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: boundary.color, depthTest: false }));
+      line.renderOrder = 100; group.add(line);
+      const canvas = document.createElement('canvas'); canvas.width=64; canvas.height=64;
+      const context = canvas.getContext('2d');
+      if (context) { context.fillStyle='#121a1c'; context.beginPath(); context.arc(32,32,29,0,Math.PI*2); context.fill(); context.strokeStyle=boundary.color; context.lineWidth=4; context.stroke(); context.fillStyle='#ffffff'; context.font='bold 34px sans-serif'; context.textAlign='center'; context.textBaseline='middle'; context.fillText(String(boundary.number),32,33); }
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false }));
+      const box = new THREE.Box3().setFromPoints(points); sprite.position.copy(box.getCenter(new THREE.Vector3()));
+      const size=Math.max(box.getSize(new THREE.Vector3()).length()*.15,.003); sprite.scale.setScalar(size); sprite.renderOrder=101; group.add(sprite);
+      if (boundary.id === focusedBoundaryId) {
+        const framed=frameModelBounds(current.camera,box,current.camera.position.clone().sub(current.orbit.target),2);
+        if (framed) { current.orbit.target.copy(framed.center); current.orbit.minDistance=framed.minDistance; current.orbit.maxDistance=framed.maxDistance; current.orbit.update(); }
+      }
+    }
+    current.previewRoot.add(group);
+    return () => { group.removeFromParent(); group.traverse((node: any) => { node.geometry?.dispose(); node.material?.map?.dispose(); node.material?.dispose(); }); };
+  }, [boundaryOverlays, focusedBoundaryId, meshList]);
   useEffect(() => { api.current?.applyInspection(); }, [solid, selectedMesh, hiddenMeshes]);
   const transformSignature = JSON.stringify(effectiveTransform);
   useEffect(() => { api.current?.applyPreview(); api.current?.fitModels(); }, [transformSignature, calibrated]);

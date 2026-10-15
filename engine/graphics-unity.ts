@@ -313,12 +313,15 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
           merge=combinedReport; nativeSource=combined;
           copied.push({original:combined,local:combined,sha256:sha(combined)});
         }
-        write(spec,{source:nativeSource,inputRoot,files:copied,output:path.join(temp,"export"),optimization,clipSettings,physicalSize,rigContract});
+        // Planar editable BLEND preserves old UV layers; its validated active layer is the delivery UV0.
+        const activeUvOnly=!!a.versions.find(version=>version.id===source.versionId)?.planarRepair;
+        write(spec,{source:nativeSource,inputRoot,files:copied,output:path.join(temp,"export"),optimization,clipSettings,physicalSize,rigContract,activeUvOnly});
         a.signal?.throwIfAborted();
         await runProcess(a.blenderPath,["--background","--factory-startup","--disable-autoexec","--python-exit-code","1","--python",converterSource,"--",spec]);
         a.signal?.throwIfAborted();
         const converted=json(path.join(temp,"export/inspection.json"));
         if(!converted.structure || !Array.isArray(converted.clips)) throw Error("Blender 구조 검사 결과가 없습니다.");
+        if(activeUvOnly&&(!Array.isArray(converted.exportUv)||!converted.exportUv.length||converted.exportUv.some((item:{uv0MatchesActive?:boolean;sourceLayersPreserved?:boolean})=>item.uv0MatchesActive!==true||item.sourceLayersPreserved!==true)))throw Error('평면 보완 원본의 활성 UV0·편집 레이어 보존 검사 기록이 없습니다.');
         if(rigType==='humanoid'){
           const evidence=json(path.join(temp,"export/rig.json"));
           if(evidence.schemaVersion!==1||evidence.sourceSha256!==sha(nativeSource)||JSON.stringify(evidence.contract)!==JSON.stringify(rigContract)||evidence.armatureCount!==1||!evidence.armatureName||!Array.isArray(evidence.parts)||evidence.parts.length!==converted.structure.meshes.length||evidence.parts.some((part:{meshName:string;vertices:number;normalizedWeights:boolean;armatureName:string})=>!part.normalizedWeights||part.armatureName!==evidence.armatureName||!converted.structure.meshes.some((mesh:{name:string;vertices:number})=>mesh.name===part.meshName&&mesh.vertices===part.vertices)))throw Error("Humanoid의 단일 리그·파트·웨이트 검사 근거가 없습니다.");

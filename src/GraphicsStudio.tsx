@@ -39,6 +39,7 @@ import {
 } from "../shared/graphics-catalog";
 import { catalog } from "../shared/catalog";
 import { Viewport } from "./Viewport";
+import { GraphicsPlanarReview } from './GraphicsPlanarReview';
 import { HeadComparison } from './HeadComparison';
 import { GraphicsContactReview } from './GraphicsContactReview';
 import { CreationOptions } from "./CreationOptions";
@@ -630,6 +631,7 @@ export function GraphicsStudio({
   const [objectId, setObjectId] = useState(() => lastGraphicsObject(localStorage, project.id) ?? "");
   const [helpOpen, setHelpOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [planarSourceId, setPlanarSourceId] = useState('');
   const [movementExpanded, setMovementExpanded] = useState(false);
   const [draftSaved, setDraftSaved] = useState(true);
   const hydratedView = useRef('');
@@ -1468,7 +1470,7 @@ export function GraphicsStudio({
   const guideFooter = <footer className="gs-guide-footer">
     {deliveryCurrent && !active ? <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled} onClick={() => void openUnity()}>Unity에서 확인</button> : guideAction && <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled || guideAction.intent === 'prepare' && prepareDisabled || guideTask?.status === 'awaiting_approval' && graphicsApprovalState(guideTask, clock) === 'blocked'} onClick={() => handleGuide(guideAction)}>{pending ? <><LoaderCircle size={15} className="gs-spin" /> 요청 처리 중…</> : actionLabel}</button>}
     <div className="gs-guide-secondary">
-      {guideAction?.intent !== 'prepare' && !active && !shownContact && !contactPartProducer && <button data-testid="graphics-prepare" disabled={prepareDisabled} onClick={() => void prepare()}>새 {stage === 'design' ? '이미지' : stage === 'model' ? '모델' : '작업'} 준비</button>}
+      {(guideAction?.intent !== 'prepare' || deliveryCurrent) && !active && !shownContact && !contactPartProducer && <button data-testid="graphics-prepare" disabled={prepareDisabled} onClick={() => void prepare()}>{deliveryCurrent ? 'Unity 전달 다시 준비' : `새 ${stage === 'design' ? '이미지' : stage === 'model' ? '모델' : '작업'} 준비`}</button>}
       {journey?.secondaryActions.filter(action => action.intent === 'navigate').map(action => <button key={action.label} onClick={() => handleGuide(action)}>{action.label}</button>)}
       <button type="button" onClick={openImportPanel}>기존 자료 가져오기</button>
     </div>
@@ -1832,7 +1834,7 @@ export function GraphicsStudio({
               </section>
   </>);
   return (
-    <section className="graphics-studio" data-testid="graphics-studio">
+    <section className={`graphics-studio${planarSourceId ? ' gs-planar-open' : ''}`} data-testid="graphics-studio">
       <header className="gs-header">
         <div>
           <h1>Unity 오브젝트 제작실</h1>
@@ -2154,13 +2156,14 @@ export function GraphicsStudio({
                     {shownVersion.role === 'design' && <button disabled={!acceptedVersion(object, shownVersion)} onClick={() => { changeStage('design'); settingForStage('design', 'designMode', 'revision'); setNotice('현재 사용하는 이미지를 수정합니다. 바꿀 부분과 유지할 부분을 추가 지시에 적어 주세요.'); }}>이미지 수정</button>}
                     {['model', 'material'].includes(shownVersion.role) && <>
                       <button disabled={needsPartPreparation || !!shownContact || !!contactPartProducer} onClick={() => chooseRevisionSource(shownVersion)}>형태·비율 보정</button>
-                      <button disabled={needsPartPreparation || !!shownContact || !!contactPartProducer || !!(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation)} onClick={() => chooseRepairSource(shownVersion, meshSelection ?? undefined)}>빠진 면 보완</button>
+                      <button disabled={needsPartPreparation || !!shownContact || !!contactPartProducer} onClick={() => { setPlanarSourceId(shownVersion.planarRepair?.versionId ?? shownVersion.id); setEditOpen(false); requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-testid=graphics-planar-review]')?.scrollIntoView({ block: 'start', behavior: 'auto' })); }}>빠진 면 검사</button>
                       <button disabled={!acceptedVersion(object, shownVersion)} onClick={() => { changeStage('surface'); settingForStage('surface', 'surfaceOperation', 'texture'); }}>재질·텍스처 변경</button>
                       <button disabled={!acceptedVersion(object, shownVersion)} onClick={() => { changeStage('model'); window.setTimeout(() => document.querySelector('.gs-size-panel')?.scrollIntoView({block:'center'}), 0); }}>실제 크기 변경</button>
                     </>}
                     {!acceptedVersion(object, shownVersion) && <small>이미지·재질·크기 변경은 먼저 이 결과 사용으로 원본을 확정하세요. 형태 보정과 빠진 면 보완은 지정한 후보를 직접 사용합니다.</small>}
                     {['rig', 'animation', 'unity', 'motion-reference'].includes(shownVersion.role) && <p>이 결과의 수정 범위는 해당 단계 설정에서 확인하세요. 메시 수정은 원본 모델에서 진행합니다.</p>}
                   </div>}
+                  {planarSourceId && workspace && versions.find(version => version.id === planarSourceId) && <GraphicsPlanarReview key={planarSourceId + ':' + (workspace.planarInspections?.[planarSourceId]?.reportFile?.sha256 ?? workspace.planarInspections?.[planarSourceId]?.inspectionId ?? '')} project={project} workspace={workspace} source={versions.find(version => version.id === planarSourceId)!} disabled={disabled || active} onAction={onAction} onClose={() => setPlanarSourceId('')} onAccept={version => { void adoptVersion(version); setPlanarSourceId(''); }} />}
                   {shownVersion && shownContact ? <GraphicsContactReview key={shownVersion.id} projectId={project.id} version={shownVersion} disabled={disabled || active} accepted={shownAcceptanceComplete} sourceAvailable={versions.some(version => version.id === shownContact.sourceVersionId)}
                     procedureRecoveryAvailable={contactProcedureRecoveryAvailable}
                     onPrepareRepair={() => void prepareContact(shownVersion, 'repair')}

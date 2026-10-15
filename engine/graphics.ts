@@ -14,6 +14,8 @@ import { restoreTripoPartPreservation } from './tripo-part-preservation';
 import { prepareTripoPartSource, preflightTripoPartSource } from './tripo-part-source';
 import { inspectGraphicsSurface } from './graphics-surface-preflight';
 import { repairGraphicsSurface } from './graphics-surface-repair';
+import { runGraphicsPlanar, validatePlanarReport } from './graphics-planar';
+import { validatePlanarSelection, type PlanarSelection, type PlanarInspection } from '../shared/graphics-planar';
 import { compileCreation, validateCreation, creationCompositionStrategy } from "../shared/graphics-creation";
 import { freezeUnityRigContract } from '../shared/graphics-rig';
 import { DEFAULT_MODEL_FACE_LIMIT, requireModelGeometry } from '../shared/graphics-model-geometry';
@@ -72,12 +74,16 @@ type Options = {
   preflightPartSource?: typeof preflightTripoPartSource;
   inspectSurface?: typeof inspectGraphicsSurface;
   repairSurface?: typeof repairGraphicsSurface;
+  planar?: typeof runGraphicsPlanar;
   legacyActive?: (id: string) => boolean;
   probe?: () => Promise<NonNullable<GraphicsWorkspace["connections"]>>;
 };
 
 /** Object workspace is an adapter over the existing submission journal, not another paid-job engine. */
 export class GraphicsEngine {
+  private planarQueue:{projectId:string;versionId:string}[]=[];
+  private planarTimer?:ReturnType<typeof setTimeout>;
+  private closing=false;
   private preparing = new Set<string>();
   private active = new Map<string, { projectId: string; controller: AbortController }>();
   private pendingApprovals = new Map<string, { projectId: string; approvalId: string; resolve: (answer: WorkbenchRuntimeAnswer) => void }>();
@@ -94,6 +100,10 @@ export class GraphicsEngine {
       let changed = false;
       for (const t of w.tasks.filter(t => t.status === "running")) {
         this.closeRuntimeApproval(t, "interrupted");
+        if(t.taskId==='LOCAL_PLANAR_INSPECT'||t.taskId==='LOCAL_PLANAR_REPAIR'){
+          t.status='failed';t.message='앱 종료로 로컬 검사가 중단됐습니다. 저장된 완전한 결과만 복구하며 새 실행하지 않습니다.';
+          changed=true;continue;
+        }
         if (t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId || t.surfaceRecoveryVersionId) {
           t.status = 'failed'; t.message = '로컬 처리가 중단됐습니다. 저장된 API 결과만 복구하며 새 제출은 하지 않습니다.';
           changed = true; continue;
@@ -118,13 +128,18 @@ export class GraphicsEngine {
     };
   }
   private save(w: GraphicsWorkspace) {
+    const previous=this.store.get<GraphicsWorkspace>('graphics',w.projectId);
+    const added=previous?w.versions.filter(v=>!previous.versions.some(old=>old.id===v.id)&&v.role==='model'&&v.files.some(f=>/\.(blend|fbx)$/i.test(f.path))):[];
     w.revision++;
     this.store.put("graphics", w.projectId, w);
     this.store.write(w.projectId, "graphics/workspace.json", JSON.stringify(w, null, 2));
+    for(const version of added)this.planarQueue.push({projectId:w.projectId,versionId:version.id});
+    if(added.length)this.schedulePlanar();
     return w;
   }
+  private schedulePlanar(){if(this.closing||this.planarTimer||!this.planarQueue.length)return;this.planarTimer=setTimeout(()=>{this.planarTimer=undefined;const next=this.planarQueue[0];if(!next)return;if(this.isActive(next.projectId)||this.options.legacyActive?.(next.projectId)||this.engine.isProjectActive(next.projectId)){this.schedulePlanar();return;}this.planarQueue.shift();try{const w=this.get(next.projectId);if(!w.planarInspections?.[next.versionId]&&!w.tasks.some(t=>t.taskId==='LOCAL_PLANAR_INSPECT'&&t.inputVersionIds.includes(next.versionId)))this.planar(next.projectId,next.versionId);}catch{/* A refused local preflight never retries automatically. */}this.schedulePlanar();},500);this.planarTimer.unref?.();}
   isActive(id: string) { return [...this.active.values()].some(a => a.projectId === id) || this.get(id).tasks.some(t => t.status === "running" && t.taskId === "X05"); }
-  shutdown() { for (const a of this.active.values()) a.controller.abort(); }
+  shutdown() { this.closing=true;if(this.planarTimer)clearTimeout(this.planarTimer);this.planarQueue=[];for (const a of this.active.values()) a.controller.abort(); }
   private closeRuntimeApproval(task: GraphicsTask, decision: NonNullable<GraphicsTask["runtimeApprovalHistory"]>[number]["decision"]) {
     const request = task.runtimeApproval;
     if (!request) return;
@@ -380,6 +395,11 @@ export class GraphicsEngine {
     } finally { this.active.delete(versionId); }
   }
   async action(id: string, action: GraphicsAction): Promise<GraphicsWorkspace> {
+    if(action?.kind==='inspect-planar'||action?.kind==='repair-planar'){
+      const identifier=(value:unknown)=>typeof value==='string'&&value.length>0&&value.length<=500;
+      if(!identifier(action.versionId))throw Error('경계 검사 원본 버전이 잘못됐습니다.');
+      if(action.kind==='repair-planar'&&(!identifier(action.inspectionId)||!identifier(action.meshId)||!['preserve','reuse-existing-pattern'].includes(action.materialPolicy)||![action.selectedBoundaryIds,action.keptBoundaryIds].every(values=>Array.isArray(values)&&values.length<=10000&&values.every(identifier))))throw Error('경계 보완 선택·유지 목록과 재질 정책이 잘못됐습니다.');
+    }
     const w = this.get(id);
     switch (action.kind) {
       case "create-object": {
@@ -505,6 +525,8 @@ export class GraphicsEngine {
       case 'restore-part-space': return this.restorePartSpace(id, action.versionId);
       case 'prepare-part-source': return this.preparePartSource(id, action.versionId);
       case 'repair-surface-uv': return this.repairSurface(id, action.versionId);
+      case 'inspect-planar': return this.planar(id, action.versionId);
+      case 'repair-planar': return this.planar(id, action.versionId, action);
       case "refresh-parts": return this.refreshParts(id, action.taskId);
       case "runtime-approval": {
         const task = w.tasks.find(value => value.id === action.taskId), pending = this.pendingApprovals.get(action.taskId);
@@ -530,7 +552,7 @@ export class GraphicsEngine {
         if (t.status === "review") throw Error("완료한 결과는 취소하지 않습니다. 다른 버전을 채택할 수 있습니다.");
         this.closeRuntimeApproval(t, "cancelled");
         this.active.get(t.id)?.controller.abort();
-        if (!t.partSpaceRecoveryVersionId && !t.partSourceRecoveryVersionId && !t.surfaceRecoveryVersionId) for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
+        if (!t.taskId.startsWith('LOCAL_PLANAR_') && !t.partSpaceRecoveryVersionId && !t.partSourceRecoveryVersionId && !t.surfaceRecoveryVersionId) for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
         if (t.deliveryId && t.targetProfile) {
           const index = w.deliveries.findIndex(d => d.id === t.deliveryId);
           if (index >= 0) {
@@ -540,7 +562,7 @@ export class GraphicsEngine {
             }
           }
         }
-        t.status = "cancelled"; t.message = t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId || t.surfaceRecoveryVersionId ? '로컬 처리를 중지했습니다. 기존 API 결과는 유지합니다.' : "사용자가 중지했습니다. 이미 제출한 원격 작업의 과금 취소를 뜻하지는 않습니다."; t.updatedAt = now();
+        t.status = "cancelled"; t.message = t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId || t.surfaceRecoveryVersionId || t.taskId.startsWith('LOCAL_PLANAR_') ? '로컬 처리를 중지했습니다. 기존 API 결과는 유지합니다.' : "사용자가 중지했습니다. 이미 제출한 원격 작업의 과금 취소를 뜻하지는 않습니다."; t.updatedAt = now();
         return this.save(w);
       }
       case "import": throw Error("앱 파일 선택 창을 사용하세요.");
@@ -630,6 +652,7 @@ export class GraphicsEngine {
     if (!result.report.ready) throw Error(`텍스처 준비 불가 · ${source.label}: ${result.report.reason} UV 작업 결과를 확인·채택한 뒤 텍스처를 준비하세요. 업로드·유료 제출은 하지 않았습니다.`);
   }
   private async prepare(id: string, objectId: string, taskId: string) {
+    if(taskId==='LOCAL_PLANAR_INSPECT'||taskId==='LOCAL_PLANAR_REPAIR')throw Error('로컬 평면 작업은 모델의 경계 검사 화면에서 명시적으로 선택하세요.');
     const key = `${id}:${objectId}`;
     if (this.preparing.has(key)) throw Error('같은 오브젝트의 입력을 확인 중입니다. 잠시 기다려 주세요.');
     this.preparing.add(key);
@@ -1109,6 +1132,31 @@ export class GraphicsEngine {
     }).finally(() => { this.active.delete(task.id); });
     return this.get(id);
   }
+  private planar(id:string,versionId:string,selection?:PlanarSelection,recovery?:GraphicsTask) {
+    const w=this.get(id),source=w.versions.find(v=>v.id===versionId);
+    if(!source || source.role!=='model')throw Error('검사할 정적 모델을 선택하세요.');
+    const file=source.files.find(f=>/\.blend$/i.test(f.path))??source.files.find(f=>/\.fbx$/i.test(f.path));
+    if(!file)throw Error('검사에는 BLEND 또는 FBX 원본이 필요합니다.');
+    for(const f of source.files)this.verified(id,f);
+    const inspection=recovery?.planarInspection??(recovery&&selection?undefined:w.planarInspections?.[versionId]);
+    if(recovery&&recovery.settings.sourceSha256!==file.sha256)throw Error('중단된 로컬 작업의 고정 원본이 변경됐습니다.');
+    if(selection){if(!inspection||inspection.sourceSha256!==file.sha256)throw Error('현재 원본의 경계 검사가 필요합니다.');validatePlanarSelection(inspection,selection);if(!inspection.reportFile)throw Error('저장된 경계 검사 파일이 없습니다.');this.verified(id,inspection.reportFile);const stored=JSON.parse(fs.readFileSync(this.store.file(id,inspection.reportFile.path),'utf8'));if(JSON.stringify(stored)!==JSON.stringify(Object.fromEntries(Object.entries(inspection).filter(([k])=>k!=='reportFile'))))throw Error('경계 검사 기록이 달라졌습니다.');}
+    const frozen=selection?{versionId,inspectionId:selection.inspectionId,meshId:selection.meshId,selectedBoundaryIds:[...selection.selectedBoundaryIds],keptBoundaryIds:[...selection.keptBoundaryIds],materialPolicy:selection.materialPolicy}:undefined;
+    const requestHash=hash(JSON.stringify({source:versionId,sha:file.sha256,selection:frozen??null,inspectionReportSha256:inspection?.reportFile?.sha256??null,inspectionIdentity:inspection?.identity??null,algorithmVersion:inspection?.algorithmVersion??'planar-v1'}));
+    const prior=w.tasks.find(t=>t.taskId==='LOCAL_PLANAR_REPAIR'&&t.requestHash===requestHash);
+    if(prior&&!recovery)return w;
+    if(this.isActive(id)||this.options.legacyActive?.(id)||this.engine.isProjectActive(id))throw Error('다른 제작이 실행 중입니다.');
+    const task=(recovery?w.tasks.find(t=>t.id===recovery.id):undefined)??{id:uid(),objectId:source.objectId,taskId:selection?'LOCAL_PLANAR_REPAIR':'LOCAL_PLANAR_INSPECT',createdAt:now(),updatedAt:now(),status:'running' as const,inputVersionIds:[versionId],settings:{algorithmVersion:'planar-v1',sourceSha256:file.sha256},instruction:'명시적으로 선택한 정적 평면 경계만 로컬 검사·보완',requestHash,outputVersionIds:[],backendJobIds:[],message:'로컬 검사 준비 · GPT 0 · 유료 제출 0',localOnly:true,...(frozen?{planarSelection:frozen,planarInspection:structuredClone(inspection!)}:{})};
+    if(!recovery)w.tasks.push(task);task.status='running';task.updatedAt=now();this.save(w);
+    const controller=new AbortController();this.active.set(task.id,{projectId:id,controller});
+    void(this.options.planar??runGraphicsPlanar)({projectRoot:this.store.directory(id),source:file,sourceVersionId:versionId,resources:this.options.resources,blenderPath:this.store.settings.blenderPath,signal:controller.signal,mode:selection?'repair':'inspect',inspectionAttempt:selection?undefined:task.id,selection:frozen,inspection:selection?inspection:undefined,recoveryOnly:!!recovery,onProgress:message=>{if(controller.signal.aborted)return;const current=this.get(id),t=current.tasks.find(t=>t.id===task.id);if(t?.status==='running'){t.message=message;t.updatedAt=now();this.save(current);}}}).then(result=>{
+      controller.signal.throwIfAborted();const current=this.get(id),t=current.tasks.find(t=>t.id===task.id)!;if(t.status!=='running')throw Error('로컬 검사 상태가 변경됐습니다.');for(const f of source.files)this.verified(id,f);for(const f of result.files)this.verified(id,f);
+      validatePlanarReport(result.report,{projectRoot:this.store.directory(id),source:file,sourceVersionId:versionId,resources:this.options.resources,blenderPath:this.store.settings.blenderPath,signal:controller.signal,mode:selection?'repair':'inspect',selection:frozen},result.report.identity);const reportFile=result.files.find(f=>f.kind==='report');if(!reportFile||result.report.passed!==true||result.report.sourceVersionId!==versionId||result.report.sourceSha256!==file.sha256||result.report.localOnly!==true||result.report.modelTurns!==0||result.report.paidSubmissions!==0||JSON.stringify(JSON.parse(fs.readFileSync(this.store.file(id,reportFile.path),'utf8')))!==JSON.stringify(result.report))throw Error('고정된 로컬 결과 기록이 다릅니다.');
+      if(!selection){current.planarInspections??={};current.planarInspections[versionId]={...result.report,reportFile} as PlanarInspection;t.message='경계 검사 완료 · 검사 기록은 채택할 모델이 아닙니다.';}
+      else{if(!['.blend','.fbx','.glb'].every(ext=>result.files.some(f=>f.path.endsWith(ext))))throw Error('완전한 보완 파일이 없습니다.');const v:AssetVersion={id:uid(),objectId:source.objectId,role:source.role,slot:source.slot,label:source.label+' · 평면 경계 보완',files:result.files,createdAt:now(),sourceVersionIds:[versionId],provenance:{type:'local'},warnings:result.report.warnings??[],planarRepair:{schemaVersion:1,...frozen!,sourceSha256:file.sha256,identity:result.report.identity,algorithmVersion:'planar-v1',reportPath:reportFile.path}};current.versions.push(v);t.outputVersionIds.push(v.id);t.message='선택한 경계 보완 완료 · 원본은 보존됩니다. 결과를 검토하고 채택하세요.';}
+      t.status='review';t.updatedAt=now();this.save(current);
+    }).catch(error=>{const current=this.get(id),t=current.tasks.find(t=>t.id===task.id);if(t&&t.status!=='cancelled'){t.status='failed';t.message='로컬 보완 보류 · '+(error instanceof Error?error.message:String(error));t.updatedAt=now();this.save(current);}}).finally(()=>this.active.delete(task.id));return this.get(id);
+  }
   private repairSurface(id: string, versionId: string) {
     const w = this.get(id), provider = w.versions.find(version => version.id === versionId);
     const lineage = provider && surfaceRepairSources(w, provider);
@@ -1172,7 +1220,9 @@ export class GraphicsEngine {
   }
   async recover(id: string, taskId: string) {
     const w = this.get(id), t = w.tasks.find(t => t.id === taskId);
-    if (!t || !["failed", "submission_unknown"].includes(t.status)) throw Error("복구할 중단 작업이 없습니다.");
+    if (!t || !["failed", "submission_unknown", ...(t.taskId.startsWith("LOCAL_PLANAR_") ? ["cancelled"] : [])].includes(t.status)) throw Error("복구할 중단 작업이 없습니다.");
+    if(t.taskId==='LOCAL_PLANAR_INSPECT')return this.planar(id,t.inputVersionIds[0],undefined,t);
+    if (t.planarSelection) return this.planar(id,t.planarSelection.versionId,t.planarSelection,t);
     if (t.contactProcedureRecoveryRequested) return this.recoverContactProcedure(id, taskId);
     if (t.partSpaceRecoveryVersionId) return this.restorePartSpace(id, t.partSpaceRecoveryVersionId);
     if (t.partSourceRecoveryVersionId) return this.preparePartSource(id, t.partSourceRecoveryVersionId);

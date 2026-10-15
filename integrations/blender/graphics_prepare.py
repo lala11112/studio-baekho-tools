@@ -316,7 +316,25 @@ if optimization.get('collider') in {'mesh','convex'} and rigs:
     raise RuntimeError('Mesh/convex collision delivery supports static meshes only; choose box for a rig')
 (out/'optimization.json').write_text(json.dumps({'schemaVersion':1,'settings':optimization,'lods':lods},ensure_ascii=False),encoding='utf8')
 
-if suffix == '.fbx' and not lod_enabled and not physical_size['transformed']:
+export_uv=[]
+if q.get('activeUvOnly'):
+    if rigs or clips or any(o.data.shape_keys or o.modifiers or o.constraints for o in meshes):
+        raise RuntimeError('Active-only UV delivery requires the verified static planar model')
+    for obj in meshes:
+        active=obj.data.uv_layers.active
+        if active is None:
+            raise RuntimeError('Verified planar model is missing its active delivery UV')
+        name=active.name
+        expected=[tuple(item.uv) for item in active.data]
+        # Private export data only: never save or rewrite the editable native source/layers.
+        obj.data=obj.data.copy()
+        for other in [layer.name for layer in obj.data.uv_layers]:
+            if other!=name: obj.data.uv_layers.remove(obj.data.uv_layers[other])
+        obj.data.uv_layers.active_index=0;obj.data.uv_layers[0].active_render=True
+        if expected!=[tuple(item.uv) for item in obj.data.uv_layers[0].data]:
+            raise RuntimeError('Active delivery UV changed while creating the export copy')
+        export_uv.append({'mesh':obj.name,'layer':name,'uv0MatchesActive':True,'sourceLayersPreserved':True})
+if suffix == '.fbx' and not lod_enabled and not physical_size['transformed'] and not q.get('activeUvOnly'):
     # Preserve native animation curves and original FBX bytes instead of re-encoding them.
     shutil.copyfile(source, out/'Asset.fbx')
     # FBX take names are reported by Unity rather than guessed from Blender action names.
@@ -334,4 +352,4 @@ else:
 warnings.append('Import checks do not establish visual material fidelity or animation playback quality.')
 (out/'inspection.json').write_text(json.dumps({'structure':structure,'clips':clips,
     'bones':sum(len(r.data.bones) for r in rigs),'warnings':warnings,
-    'sourceChanged':False,'animationAuthored':False,'physicalSize':physical_size},ensure_ascii=False),encoding='utf8')
+    'sourceChanged':False,'animationAuthored':False,'physicalSize':physical_size,'exportUv':export_uv},ensure_ascii=False),encoding='utf8')
