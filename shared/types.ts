@@ -299,6 +299,7 @@ export type Command =
   | { type: "unity.install"; id: string }
   | { type: "unity.import"; id: string; buildId: string }
   | { type: "unity.result"; id: string }
+  | { type: "unity.open"; id: string }
   | { type: "folder.open"; id?: string };
 export interface DesktopApi {
   call<T = unknown>(command: Command): Promise<T>;

@@ -1,3 +1,4 @@
+import { revealGraphicsControl, openGraphicsInspection } from './graphics-ui-disclosures';
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -58,9 +59,21 @@ test("creation choices deselect explicitly, persist empty values and block incom
     const stage = (name: string) => page.getByRole("navigation", { name: "제작 단계" }).getByRole("button", { name, exact: true });
     const savedTarget = () => page.evaluate(() => (window as any).workspace.objects.find((object: any) => object.id === "target"));
     const actions = () => page.evaluate(() => (window as any).actions);
+    const assertPreparationReady = async () => {
+      const explicitPrepare = page.getByTestId("graphics-prepare");
+      assert.equal(await (await explicitPrepare.count() ? explicitPrepare : page.getByTestId("graphics-guide-primary")).isEnabled(), true, "Valid settings must allow preparing the current stage");
+    };
+    const assertPreparationBlocked = async () => {
+      const explicitPrepare = page.getByTestId("graphics-prepare");
+      if (await explicitPrepare.count()) assert.equal(await explicitPrepare.isDisabled(), true);
+      else assert.equal(await page.getByTestId("graphics-guide-primary").isDisabled(), true);
+      assert((await actions()).every((action: any) => action.kind === "update-object"), "Missing required settings must never prepare or execute work");
+    };
     const save = async () => {
       const revision = await page.evaluate(() => (window as any).workspace.revision);
-      await page.getByRole("button", { name: "옵션 저장", exact: true }).click();
+      const saveButton = page.locator("button").filter({ hasText: /^옵션 저장$/ });
+      await revealGraphicsControl(saveButton);
+      await saveButton.click();
       await page.waitForFunction(value => (window as any).workspace.revision > value, revision);
     };
 
@@ -76,9 +89,15 @@ test("creation choices deselect explicitly, persist empty values and block incom
     assert.equal(await button("어떤 표현으로 만들까요?", "스타일화").getAttribute("aria-pressed"), "true");
     assert.equal(await button("어떤 표현으로 만들까요?", "사실적").getAttribute("aria-pressed"), "false");
     await button("어떤 표현으로 만들까요?", "스타일화").click();
-    assert.equal(await page.getByTestId("graphics-prepare").isEnabled(), true, "Optional appearance choices must not prevent preparing a default image");
+    await assertPreparationReady();
 
-    await page.getByText("세부 외형 · 구도 옵션", { exact: true }).click();
+    // Technical controls remain available behind a native keyboard disclosure.
+    const appearanceDetails = page.getByTestId("graphics-creation-options").locator('details').filter({ has: page.getByText("세부 외형 · 구도 옵션", { exact: true }) });
+    assert.equal(await appearanceDetails.getAttribute('open'), null);
+    const appearanceSummary = appearanceDetails.locator('summary');
+    await appearanceSummary.focus();
+    await page.keyboard.press('Enter');
+    assert.notEqual(await appearanceDetails.getAttribute('open'), null);
     assert.equal(await button("방향", "정면").getAttribute("aria-pressed"), "true");
     await button("방향", "정면").click();
     assert.equal(await button("방향", "정면").getAttribute("aria-pressed"), "false");
@@ -100,14 +119,14 @@ test("creation choices deselect explicitly, persist empty values and block incom
     await button("이미지 제작 방식", "새 이미지").click();
     assert.equal(await button("이미지 제작 방식", "새 이미지").getAttribute("aria-pressed"), "false");
     assert.match(await choices("이미지 제작 방식").innerText(), /미선택/);
-    assert.equal(await page.getByTestId("graphics-prepare").isDisabled(), true);
+    await assertPreparationBlocked();
     await page.getByText("이미지 제작 방식 선택이 필요합니다.", { exact: true }).first().waitFor();
     await save();
     assert.equal((await savedTarget()).creation.stageSettings.design.values.designMode, "");
     assert((await actions()).every((action: any) => action.kind === "update-object"));
     await stage("1 이미지").click(); await stage("1 이미지").click();
     assert.equal(await stage("1 이미지").getAttribute("aria-current"), "step");
-    assert.equal(await page.getByTestId("graphics-prepare").isDisabled(), true);
+    await assertPreparationBlocked();
     await page.getByTestId("graphics-object-target").click(); await page.getByTestId("graphics-object-target").click();
     assert.equal(await page.getByTestId("graphics-object-target").getAttribute("aria-pressed"), "true");
     assert.equal(await button("이미지 제작 방식", "새 이미지").getAttribute("aria-pressed"), "false");
@@ -123,10 +142,10 @@ test("creation choices deselect explicitly, persist empty values and block incom
     assert.equal((await savedTarget()).creation.attributes.style, "");
     assert.equal(await button("어떤 표현으로 만들까요?", "스타일화").getAttribute("aria-pressed"), "false");
     assert.equal(await button("이미지 제작 방식", "새 이미지").getAttribute("aria-pressed"), "false");
-    assert.equal(await page.getByTestId("graphics-prepare").isDisabled(), true);
+    await assertPreparationBlocked();
     await button("이미지 제작 방식", "새 이미지").click();
     assert.equal(await button("이미지 제작 방식", "새 이미지").getAttribute("aria-pressed"), "true");
-    assert.equal(await page.getByTestId("graphics-prepare").isEnabled(), true);
+    await assertPreparationReady();
     await save();
 
     // Topology clears explicitly; numeric values are independent and remain empty when cleared.
@@ -155,12 +174,18 @@ test("creation choices deselect explicitly, persist empty values and block incom
     await save();
 
     // Repeated preview selection and acceptance retain their previous, non-toggle semantics.
+    await revealGraphicsControl(page.getByTestId("graphics-version-alternative"));
     await page.getByTestId("graphics-version-alternative").click(); await page.getByTestId("graphics-version-alternative").click();
     assert.equal(await page.getByTestId("graphics-version-alternative").getAttribute("aria-pressed"), "true");
     const accepted = page.getByTestId("graphics-accept-version");
+    await revealGraphicsControl(accepted);
     assert.equal(await accepted.isEnabled(), true);
     await accepted.click();
     await page.waitForFunction(() => (window as any).workspace.objects.find((object: any) => object.id === "target").accepted['design:main'] === 'alternative');
+    assert.equal(await stage("2 모델").getAttribute("aria-current"), "step", "Adoption opens the next settings without preparing work");
+    await revealGraphicsControl(page.getByTestId("graphics-version-alternative"));
+    await page.getByTestId("graphics-version-alternative").click();
+    await revealGraphicsControl(accepted);
     assert.equal(await accepted.isDisabled(), true);
     assert.equal(await accepted.innerText(), "현재 채택 버전");
     await page.getByTestId("graphics-version-alternative").click();

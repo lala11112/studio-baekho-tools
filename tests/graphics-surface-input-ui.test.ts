@@ -1,3 +1,4 @@
+import { revealGraphicsControl, openGraphicsInspection } from './graphics-ui-disclosures';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultCreation } from '../shared/graphics-creation';
@@ -38,7 +39,9 @@ test('surface UI makes the accepted model and unadopted matching UV explicit wit
   try {
     const page = await app.firstWindow(), errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message)); page.setDefaultTimeout(8000);
+    await revealGraphicsControl(page.getByTestId('graphics-version-repaired'));
     await page.getByTestId('graphics-version-repaired').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-repair-uv-warning').isVisible(), true);
     await page.getByRole('button', { name: 'UV 준비로 이동', exact: true }).click();
     assert.equal(await page.getByRole('button', { name: 'UV 준비', exact: true }).getAttribute('aria-pressed'), 'true');
@@ -49,7 +52,9 @@ test('surface UI makes the accepted model and unadopted matching UV explicit wit
     assert.doesNotMatch(await pending.innerText(), /다른 원본|다른 파트|다른 오브젝트|취소된/);
     assert.equal(await pending.getByRole('button', { name: '이 UV 결과 보기', exact: true }).count(), 1);
     assert.equal(await page.evaluate(() => (window as any).actions.length), 0);
-    await page.getByRole('button', { name: '옵션 저장', exact: true }).click();
+    const saveButton = page.locator('button').filter({ hasText: /^옵션 저장$/ });
+    await revealGraphicsControl(saveButton);
+    await saveButton.click();
     await page.waitForFunction(() => (window as any).actions.length === 1);
     const saved = await page.evaluate(() => (window as any).workspace.objects[0]);
     assert.equal(saved.creation.stageSettings.surface.instruction, creation.stageSettings.surface!.instruction);
@@ -67,6 +72,7 @@ test('surface UI makes the accepted model and unadopted matching UV explicit wit
     await page.waitForFunction(() => (window as any).workspace.objects[0].accepted['model:main'] === 'uv');
     assert.equal(await page.getByTestId('graphics-surface-input-model').getAttribute('data-version-id'), 'uv');
     assert.equal(await page.getByTestId('graphics-pending-uv-results').count(), 0);
+    await revealGraphicsControl(page.locator('.gs-execution-summary'));
     assert.match(await page.getByLabel('실행 설정 요약', { exact: true }).innerText(), /실행할 모델.*새 면까지 펼친 UV/);
     assert.deepEqual(await page.evaluate(() => (window as any).actions.map((action: any) => action.kind)), ['update-object', 'accept']);
     assert.deepEqual(await page.evaluate(() => (window as any).workspace.versions), initial.versions);
@@ -106,9 +112,13 @@ test('exact repaired texture offers one explicit local UV recovery and leaves ac
   try {
     const page = await app.firstWindow(), errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message)); page.setDefaultTimeout(8000);
+    await revealGraphicsControl(page.getByTestId('graphics-version-unrelated-texture'));
     await page.getByTestId('graphics-version-unrelated-texture').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-surface-repair').count(), 0);
+    await revealGraphicsControl(page.getByTestId('graphics-version-texture'));
     await page.getByTestId('graphics-version-texture').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-surface-repair').isVisible(), true);
     assert.match(await page.getByTestId('graphics-surface-repair').innerText(), /추가 API 비용·GPT 호출 없음/);
     assert.equal(await page.evaluate(() => (window as any).actions.length), 0);
@@ -124,19 +134,23 @@ test('exact repaired texture offers one explicit local UV recovery and leaves ac
     assert.deepEqual(await page.evaluate(() => (window as any).actions), [{ kind: 'repair-surface-uv', versionId: 'texture' }]);
     assert.deepEqual(await page.evaluate(() => (window as any).workspace.objects[0].accepted), object.accepted);
     await page.evaluate(() => (window as any).setRecoveryStatus('cancelled'));
+    await revealGraphicsControl(status);
     assert.equal(await status.isVisible(), true);
     assert.match(await status.innerText(), /로컬 빈 면 UV 복구 중지/);
     assert.doesNotMatch(await status.innerText(), /원격 상태 확인 필요|과금 취소/);
     await page.evaluate(() => (window as any).setRecoveryStatus('failed'));
+    await status.filter({ hasText: '로컬 빈 면 UV 복구 실패' }).waitFor({ state: 'attached' });
     assert.match(await status.innerText(), /로컬 빈 면 UV 복구 실패/);
     assert.equal(await page.getByTestId('graphics-recover-t03').innerText(), '저장된 빈 면 UV 복구 · 무료');
     await page.getByTestId('graphics-recover-t03').click();
     await page.waitForFunction(() => (window as any).workspace.tasks[1].status === 'running');
     assert.match(await status.innerText(), /로컬 빈 면 UV 복구 중/);
     await page.evaluate(() => (window as any).finishRepair());
+    await revealGraphicsControl(page.getByTestId('graphics-surface-repair-result'));
     await page.getByTestId('graphics-surface-repair-result').waitFor();
     assert.equal(await page.getByTestId('graphics-repair-surface-uv').count(), 0);
     await page.getByTestId('graphics-surface-repair-result').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-surface-repair-complete').isVisible(), true);
     assert.equal(await page.getByTestId('graphics-surface-repair').count(), 0);
     assert.match(await page.getByLabel('결과 검토 사항', { exact: true }).innerText(), /공유한 무늬와 경계/);
@@ -145,7 +159,9 @@ test('exact repaired texture offers one explicit local UV recovery and leaves ac
     assert.deepEqual(await page.evaluate(() => (window as any).workspace.tasks[1].paidApproval), { requestHash: 't03', provider: 'Tripo API', credits: 20, approvedAt: '' });
     assert.deepEqual(await page.evaluate(() => (window as any).workspace.tasks[1].outputVersionIds), ['texture', 'recovered']);
     await page.getByRole('navigation', { name: '제작 단계', exact: true }).getByRole('button', { name: '3 재질', exact: true }).click();
+    await revealGraphicsControl(page.getByTestId('graphics-version-texture'));
     await page.getByTestId('graphics-version-texture').click();
+    await openGraphicsInspection(page);
     await page.getByTestId('graphics-task-result-t03').click();
     assert.equal(await page.getByTestId('graphics-version-recovered').getAttribute('aria-pressed'), 'true');
     assert.equal(await page.getByTestId('graphics-accept-preview').isEnabled(), true);

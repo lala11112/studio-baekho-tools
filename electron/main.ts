@@ -606,6 +606,22 @@ async function dispatch(c: Command): Promise<unknown> {
       return local.importUnity(c.id, c.buildId);
     case "unity.result":
       return local.result(c.id);
+    case "unity.open": {
+      const project = store.project(c.id), editor = store.settings.unityEditorPath;
+      if (!project.unityPath || !fs.existsSync(path.join(project.unityPath, "ProjectSettings", "ProjectVersion.txt")))
+        throw new Error("연결 설정에서 Unity 프로젝트 폴더를 확인하세요.");
+      if (!editor || !fs.existsSync(editor) || path.basename(editor).toLowerCase() !== "unity.exe")
+        throw new Error("연결 설정에서 Unity Editor 실행 파일을 확인하세요.");
+      // An open editor already owns the project; never launch another import or Play Mode run.
+      if (fs.existsSync(path.join(project.unityPath, "Temp", "UnityLockfile")))
+        return "이 프로젝트가 Unity에 열려 있습니다. Unity 창에서 전달된 프리팹을 확인하세요.";
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(editor, ["-projectPath", project.unityPath], { detached: true, stdio: "ignore", windowsHide: true, shell: false });
+        child.once("error", reject);
+        child.once("spawn", () => { child.unref(); resolve(); });
+      });
+      return "Unity 프로젝트를 여는 요청을 보냈습니다. Play Mode는 실행하지 않습니다.";
+    }
     case "folder.open":
       return shell.openPath(c.id ? store.directory(c.id) : store.root);
     default:

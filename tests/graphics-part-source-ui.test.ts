@@ -1,3 +1,4 @@
+import { revealGraphicsControl, openGraphicsInspection } from './graphics-ui-disclosures';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultCreation, setHumanPartsCreation } from '../shared/graphics-creation';
@@ -34,9 +35,11 @@ test('generated part result requires free local source preparation and opens the
     const page = await app.firstWindow(), errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message)); page.setDefaultTimeout(8000);
     await page.getByRole('navigation', { name: '제작 단계', exact: true }).getByRole('button', { name: '2 모델', exact: true }).click();
+    await revealGraphicsControl(page.getByTestId('graphics-task-result-completed-model'));
     await page.getByTestId('graphics-current-task-completed-model').getByRole('button', { name: '완료 · 결과 보기', exact: true }).click();
     assert.equal(await page.getByTestId('graphics-part-source-warning').isVisible(), true);
     assert.match(await page.getByTestId('graphics-part-source-warning').innerText(), /작업 원본이 아직 준비되지 않았습니다/);
+    await revealGraphicsControl(page.getByTestId('graphics-accept-version'));
     assert.equal(await page.getByTestId('graphics-accept-version').isDisabled(), true);
     assert.equal(await page.getByTestId('graphics-accept-preview').isDisabled(), true);
     assert.equal(await page.getByRole('button', { name: '이 결과 더 보정', exact: true }).isDisabled(), true);
@@ -45,6 +48,7 @@ test('generated part result requires free local source preparation and opens the
     await page.getByTestId('graphics-prepare-part-source').click();
     await page.waitForFunction(() => (window as any).workspace.tasks[0].status === 'running');
     assert.equal(await page.getByTestId('graphics-prepare-part-source').isDisabled(), true);
+    await revealGraphicsControl(page.getByTestId('graphics-accept-version'));
     assert.equal(await page.getByTestId('graphics-accept-version').isDisabled(), true);
     const task = page.getByTestId('graphics-current-task-completed-model');
     assert.match(await task.innerText(), /로컬 파트 작업 원본 준비 중/);
@@ -55,6 +59,7 @@ test('generated part result requires free local source preparation and opens the
     assert.equal(await page.getByTestId('graphics-recover-completed-model').innerText(), '저장된 파트 작업 원본 준비 · 무료');
     assert.equal(await page.getByTestId('graphics-prepare-part-source').isEnabled(), true);
     await page.evaluate(() => (window as any).finishRestore());
+    await revealGraphicsControl(page.getByTestId('graphics-task-result-completed-model'));
     await page.getByTestId('graphics-current-task-completed-model').getByRole('button', { name: '완료 · 결과 보기', exact: true }).click();
     assert.equal(await page.getByTestId('graphics-version-prepared-model').getAttribute('aria-pressed'), 'true');
     assert.equal(await page.getByTestId('graphics-part-source-prepared').isVisible(), true);

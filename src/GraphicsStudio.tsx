@@ -52,7 +52,9 @@ import type { ModelMeasurement, MeshSelection } from './viewport-inspection';
 import {
   creationStages,
   creationTaskId,
+  creationPartForTask,
   creationSettings,
+  stageForTask,
   creationSelectionProblem,
   defaultCreation,
   effectiveCreation,
@@ -64,13 +66,18 @@ import {
   type CreationStage,
 } from "../shared/graphics-creation";
 import "./graphics-studio.css";
+import "./graphics-guide.css";
+import { deriveJourney, nextAfterAccept, journeySurfaceCapabilities, type JourneyAction, type JourneyTarget } from '../shared/graphics-journey';
+import { lastGraphicsObject, readGraphicsView, saveGraphicsView } from './graphics-view-state';
 
 type Props = {
   project: Project;
   workspace: GraphicsWorkspace | undefined;
   busy: boolean;
   onAction: (action: GraphicsAction) => Promise<unknown>;
-  onOpenSettings?: () => void;
+  onOpenSettings?: (provider?: 'tripo' | 'fal' | 'openai') => void;
+  entryIntent?: { id: number; kind: 'new' | 'import' | 'resume' };
+  onEntryHandled?: () => void;
   onExportProject?: () => void;
 };
 const usesModelMultiview = (
@@ -617,8 +624,17 @@ export function GraphicsStudio({
   onAction,
   onOpenSettings,
   onExportProject,
+  entryIntent,
+  onEntryHandled,
 }: Props) {
-  const [objectId, setObjectId] = useState("");
+  const [objectId, setObjectId] = useState(() => lastGraphicsObject(localStorage, project.id) ?? "");
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [movementExpanded, setMovementExpanded] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(true);
+  const hydratedView = useRef('');
+  const consumedEntry = useRef<number | undefined>(undefined);
+  const importAfterCreate = useRef(false);
   const [newName, setNewName] = useState("");
   const [newSubject, setNewSubject] = useState("");
   const [newObjectOpen, setNewObjectOpen] = useState(false);
@@ -718,23 +734,24 @@ export function GraphicsStudio({
   const partStatus = Object.fromEntries(creation.parts.filter(part => part.enabled).map(part => {
     const design = versions.find(version => version.id === object?.accepted[`design:part-${part.id}`]);
     const model = versions.find(version => version.id === object?.accepted[`model:part-${part.id}`]);
-    const producer = model && objectTasks.find(task => task.outputVersionIds.includes(model.id));
-    const modelStatus = !model ? '모델 미채택' : producer?.taskId === 'T03' ? '텍스처 채택' : producer?.taskId === 'T01' || producer?.taskId === 'T02' ? 'UV 채택' : '모델 채택';
+    const capabilities = model && workspace ? journeySurfaceCapabilities(workspace, model) : {};
+    const modelStatus = !model ? '모델 선택 필요' : capabilities.textureVersionId ? '텍스처 사용 중' : capabilities.uvVersionId ? 'UV 사용 중' : '모델 사용 중';
     return [part.id, `${design ? '참조 채택' : '참조 미채택'} · ${modelStatus}`];
   }));
+  const previewPart = creationPartForTask(creation, taskId);
+  const previewSlot = previewPart ? `part-${previewPart.id}` : 'main';
   const mediaGroups = candidateGroups(versions, objectTasks);
   const latestMediaGroup = ["design", "animation"].includes(stage)
-    ? mediaGroups
-        .filter(
-          (group) => group.kind === (stage === "animation" ? "video" : "image"),
-        )
-        .at(-1)
+    ? mediaGroups.map(group => ({...group, candidates: group.candidates.filter(({version}) => stage === 'animation' ? version.slot === String(settings.clipName ?? 'Idle') : version.slot === previewSlot)}))
+        .filter(group => group.kind === (stage === 'animation' ? 'video' : 'image') && group.candidates.length).at(-1)
     : undefined;
+  const stageRoles: Record<CreationStage, GraphicsRole[]> = { design: ['design'], model: ['model'], surface: ['material', 'model'], assembly: ['model'], rig: ['rig', 'model'], animation: ['animation', 'motion-reference', 'rig'], unity: ['unity', 'animation', 'rig', 'model'] };
+  const stageVersions = versions.filter(version => stageRoles[stage].includes(version.role) && (version.slot === previewSlot || stage === 'animation' && version.slot === String(settings.clipName ?? 'Idle')));
   const shownVersion =
     versions.find((version) => version.id === shownVersionId) ??
     latestMediaGroup?.candidates[0].version ??
-    versions.find((version) => object && acceptedVersion(object, version)) ??
-    versions.at(-1);
+    [...stageVersions].reverse().find((version) => object && acceptedVersion(object, version)) ??
+    stageVersions.at(-1);
   const needsPartSpaceRestoration = Boolean(workspace && shownVersion && requiresPartSpaceRestoration(workspace, shownVersion));
   const needsPartSourcePreparation = Boolean(workspace && shownVersion && requiresPartSourcePreparation(workspace, shownVersion));
   const needsPartPreparation = needsPartSpaceRestoration || needsPartSourcePreparation;
@@ -923,16 +940,26 @@ export function GraphicsStudio({
     setHeadComparisonOpen(false);
     if (version.contact || objectTasks.some(task => task.taskId === 'M06' && task.settings.contactPhase && task.outputVersionIds.includes(version.id))) {
       setStage('assembly'); setTaskId('M06');
-    } else if (shownContact || contactPartProducer) {
-      setStage('assembly'); setTaskId(objectTasks.some(task => task.taskId === 'M08' && task.outputVersionIds.includes(version.id)) ? 'M08' : undefined);
+    } else {
+      const producer = objectTasks.find(task => task.outputVersionIds.includes(version.id));
+      setStage(producer ? stageForTask(producer.taskId) : version.role === 'design' ? 'design' : version.role === 'rig' ? 'rig' : version.role === 'animation' || version.role === 'motion-reference' ? 'animation' : version.role === 'unity' ? 'unity' : 'model');
+      setTaskId(undefined);
     }
+    if (version.slot.startsWith('part-')) setCreation(current => current.parts.some(part => part.enabled && `part-${part.id}` === version.slot) ? { ...current, activePartId: version.slot.slice(5) } : current);
   }
 
-  function adoptVersion(version: AssetVersion) {
+  async function adoptVersion(version: AssetVersion) {
     if (version.contact?.phase === 'analyze' || version.contact?.status === 'blocked') return;
     if (version.slot.startsWith('part-') && objectTasks.some(task => task.taskId === 'M06' && ['repair', 'reconstruct'].includes(String(task.settings.contactPhase)) && task.outputVersionIds.includes(version.id))) return;
     if (version.slot === 'part-head' && acceptedHeadId && acceptedHeadId !== version.id) setHeadBaselineId(acceptedHeadId);
-    void run({ kind: 'accept', objectId: version.objectId, versionId: version.id }, shownAssembly && version.id === shownVersion?.id ? '이 조립 전체와 같은 작업의 파트를 함께 채택했습니다. 다음 작업은 직접 실행하세요.' : `${roles[version.role]} / ${version.slot}에 채택했습니다. 다음 작업은 직접 실행하세요.`);
+    const target = workspace ? nextAfterAccept(workspace, objectId, creation, version) : undefined;
+    const ok = await run({ kind: 'accept', objectId: version.objectId, versionId: version.id }, '이 결과를 사용할 원본으로 저장했습니다. 다음 설정을 확인하세요. 새 제작은 시작하지 않았습니다.');
+    if (ok && target) {
+      navigateGuide(target);
+      const producer = objectTasks.find(task => task.outputVersionIds.includes(version.id));
+      if (producer && ['T01', 'T02'].includes(producer.taskId)) settingForStage('surface', 'surfaceOperation', 'texture');
+      if (version.role === 'motion-reference') settingForStage('animation', 'animationMode', 'reference');
+    }
   }
 
   async function prepareContact(source: AssetVersion, phase: 'analyze' | 'repair' | 'reconstruct') {
@@ -988,28 +1015,56 @@ export function GraphicsStudio({
     if (workspace?.tripoBudget) setBudget(workspace.tripoBudget.limit);
   }, [workspace?.tripoBudget?.limit]);
   useEffect(() => {
-    setCreation(object ? effectiveCreation(object) : defaultCreation("prop"));
-    setStage("design");
-    setTaskId(undefined);
-    setShownVersionId("");
-    setHeadComparisonOpen(false);
-    setHeadBaselineId('');
-    setFocusedImage(undefined);
-    setReferenceId("");
-    setError("");
-    setNotice("");
-    setImportRole("design");
-  }, [object?.id]);
+    const saved = object ? readGraphicsView(localStorage, project.id, object) : undefined;
+    setCreation(saved?.creation ?? (object ? effectiveCreation(object) : defaultCreation("prop")));
+    setStage(saved?.stage ?? "design"); setTaskId(saved?.taskOverride); setShownVersionId(saved?.shownVersionId ?? "");
+    setMovementExpanded(saved?.movementExpanded ?? false);
+    setHeadComparisonOpen(false); setHeadBaselineId(''); setFocusedImage(undefined);
+    setReferenceId(""); setError(""); setNotice(""); setImportRole("design"); setEditOpen(false);
+    hydratedView.current = '';
+    const id = window.setTimeout(() => { hydratedView.current = `${project.id}:${object?.id ?? ''}`; setDraftSaved(true); }, 0);
+    return () => window.clearTimeout(id);
+  }, [project.id, object?.id]);
+  useEffect(() => {
+    if (!object || hydratedView.current !== `${project.id}:${object.id}`) return;
+    setDraftSaved(saveGraphicsView(localStorage, project.id, object.id, { schemaVersion: 1, stage, creation, shownVersionId, taskOverride, movementExpanded }));
+  }, [project.id, object?.id, creation, stage, shownVersionId, taskOverride, movementExpanded]);
+  useEffect(() => {
+    if (!entryIntent || consumedEntry.current === entryIntent.id || !workspace) return;
+    if (entryIntent.kind === 'resume') {
+      const attention = [...workspace.tasks].reverse().find(task => ['awaiting_approval','running','submission_unknown'].includes(task.status))
+        ?? [...workspace.tasks].reverse().find(task => task.status === 'failed' || task.status === 'review' && task.outputVersionIds.some(id => !Object.values(workspace.objects.find(row => row.id === task.objectId)?.accepted ?? {}).includes(id)));
+      if (attention && attention.objectId !== object?.id && workspace.objects.some(row => row.id === attention.objectId)) { setObjectId(attention.objectId); return; }
+      if (workspace.objects.length && !object) return;
+    }
+    consumedEntry.current = entryIntent.id;
+    onEntryHandled?.();
+    if (entryIntent.kind === 'new') openNewObject();
+    if (entryIntent.kind === 'resume' && object) {
+      const attention = [...objectTasks].reverse().find(task => ['awaiting_approval','running','submission_unknown'].includes(task.status))
+        ?? [...objectTasks].reverse().find(task => ['review','failed'].includes(task.status) && task.outputVersionIds.some(id => !Object.values(object.accepted).includes(id)));
+      if (attention) window.setTimeout(() => {
+        setStage(stageForTask(attention.taskId)); setTaskId(attention.taskId);
+        if (attention.outputVersionIds.some(id => versions.some(version => version.id === id))) showTaskResult(attention);
+        if (typeof attention.settings.partId === 'string') setCreation(current => ({...current,activePartId: String(attention.settings.partId)}));
+      }, 0);
+    }
+    if (entryIntent.kind === 'import') {
+      if (!object) { importAfterCreate.current = true; openNewObject(); }
+      else { setImportRole('model'); window.setTimeout(openImportPanel, 0); }
+    }
+  }, [entryIntent?.id, workspace, object?.id]);
   useEffect(() => {
     if (!focusNewObject || !object || previousObjectIds.current.has(object.id)) return;
     setFocusNewObject(false);
+    if (importAfterCreate.current) { importAfterCreate.current = false; setImportRole('model'); window.setTimeout(openImportPanel, 50); return; }
     requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.gs-creation-stages button')?.focus());
   }, [object?.id, focusNewObject]);
   useEffect(() => {
-    if (!waiting.length) return;
+    if (!waiting.length && !objectTasks.some(task => task.status === 'running')) return;
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [waiting.length]);
+  }, [waiting.length, objectTasks.some(task => task.status === 'running')]);
   useEffect(() => {
     setClipNameDraft(
       String(creation.stageSettings.animation?.values.clipName ?? ""),
@@ -1073,6 +1128,7 @@ export function GraphicsStudio({
               : {}),
             ...current.stageSettings[stage]?.values,
             [key]: value,
+            ...(stage === 'rig' && key === 'rigType' ? { enabled: value !== 'none' && value !== '' } : {}),
           },
         },
       },
@@ -1135,6 +1191,8 @@ export function GraphicsStudio({
   function changeStage(next: CreationStage) {
     setStage(next);
     setTaskId(undefined);
+    setShownVersionId('');
+    setEditOpen(false);
     setImportRole(
       next === "design"
         ? "design"
@@ -1198,7 +1256,8 @@ export function GraphicsStudio({
       activeTask.status === "planned" ||
       multiviewProblem ||
       modelProblem ||
-      selectionProblem
+      selectionProblem ||
+      !!journey?.inputReadiness.problems.length
     )
       return;
     if (activeTask.id === "A01") return importSource();
@@ -1314,181 +1373,108 @@ export function GraphicsStudio({
     }
   }
 
-  return (
-    <section className="graphics-studio" data-testid="graphics-studio">
-      <header className="gs-header">
-        <div>
-          <h1>Unity 오브젝트 제작실</h1>
-          <p title={`${project.name} · ${object?.name ?? '새 오브젝트'}`}>{object?.name ?? project.name}</p>
-        </div>
-        <div className="gs-header-actions">
-          <details className="gs-aux-menu">
-            <summary aria-label="보조 메뉴">
-              <MoreHorizontal size={16} />
-              <span>더 보기</span>
-            </summary>
-            <div>
-              <button
-                disabled={!object}
-                onClick={() => showAuxiliary("history")}
-              >
-                <History size={14} /> 작업 기록 {objectTasks.length}개
-              </button>
-              <button onClick={() => showAuxiliary("support")}>
-                <ListChecks size={14} /> 기능 지원 현황
-              </button>
-              <button onClick={() => showAuxiliary('storage')}>저장 공간 현황</button>
-            </div>
-          </details>
-          {onExportProject && (
-            <button
-              aria-label="프로젝트 백업"
-              title="프로젝트 백업"
-              disabled={disabled}
-              onClick={onExportProject}
-            >
-              <Download size={14} />
-            </button>
-          )}
-          {onOpenSettings && (
-            <button onClick={onOpenSettings}>
-              <Settings2 size={15} /> 연결 설정
-            </button>
-          )}
-        </div>
-      </header>
-      <aside className="gs-objects" aria-label="오브젝트 목록">
-        <div className="gs-new-object-action">
-          <button type="button" className="gs-primary" data-testid="graphics-new-object" disabled={disabled} onClick={event => openNewObject(event.currentTarget)}>
-            <FilePlus2 size={17} /> 새 오브젝트
-          </button>
-        </div>
-        <div className="gs-section-title">
-          <h2>오브젝트</h2>
-          <span>{workspace?.objects.length ?? 0}</span>
-        </div>
-        <div className="gs-object-list">
-          {workspace?.objects.map((item) => (
-            <button
-              key={item.id}
-              className={`gs-object ${objectId === item.id ? "is-active" : ""}`}
-              aria-pressed={objectId === item.id}
-              data-testid={`graphics-object-${item.id}`}
-              onClick={() => setObjectId(item.id)}
-            >
-              <Box size={18} />
-              <span>
-                <strong>{item.name}</strong>
-                <small>
-                  {kinds[item.kind]} ·{" "}
-                  {
-                    workspace.versions.filter(
-                      (version) => version.objectId === item.id,
-                    ).length
-                  }
-                  개 버전
-                </small>
-              </span>
-              <ChevronRight size={14} />
-            </button>
-          ))}
-        </div>
-        {object?.id === "legacy" && (
-          <button
-            className="gs-legacy"
-            data-testid="graphics-unlink-legacy"
-            disabled={disabled}
-            onClick={() => {
-              setError("");
-              setUnlinkObjectId(object.id);
-            }}
-          >
-            <X size={15} /> 선택한 오브젝트 연결 해제
-          </button>
-        )}
-        <button
-          className="gs-legacy"
-          disabled={disabled}
-          onClick={() => void inspectLegacy()}
-        >
-          <FolderInput size={15} /> 기존 프로젝트 자료 연결
-        </button>
-      </aside>
+  useEffect(() => {
+    const main = document.querySelector<HTMLElement>('.gs-main');
+    const studio = document.querySelector<HTMLElement>('.graphics-studio');
+    const footer = document.querySelector<HTMLElement>('.gs-guide-footer');
+    if (!main || !studio || !footer) return;
+    const measure = () => {
+      studio.style.setProperty('--guide-height', `${Math.max(240, main.clientHeight - 32)}px`);
+      studio.style.setProperty('--guide-footer-height', `${footer.getBoundingClientRect().height}px`);
+    };
+    const observer = new ResizeObserver(measure); observer.observe(main); observer.observe(footer); measure();
+    return () => observer.disconnect();
+  }, [object?.id]);
 
-      <div className="gs-workspace">
-        {object && (
-          <section
-            className="gs-command-area"
-            aria-label="제작 실행과 현재 상태"
-          >
-            <nav className="gs-creation-stages" aria-label="제작 단계">
-              {creationStages.map((item, index) => (
-                <button
-                  type="button"
-                  key={item.id}
-                  aria-current={stage === item.id ? "step" : undefined}
-                  onClick={() => changeStage(item.id)}
-                >
-                  <span>{index + 1}</span>
-                  {item.label}
-                </button>
-              ))}
-            </nav>
-            {shownContact && contactReviewActive ? <div className="gs-execution-card gs-contact-current" data-testid="graphics-contact-current">
-              <div className="gs-creation-execute"><div>
-                <strong>{shownContact.status === 'blocked' ? shownContact.phase === 'analyze' ? '영역 분석 완료 · 보정 불가' : '보정 중단 · 범위 제한' : shownContact.phase === 'analyze' ? '수정 영역 검토' : shownContact.phase === 'reconstruct' ? '목·헤어 구조 보정 결과 검토' : '접합 보정 결과 검토'}</strong>
-                <small>{shownContact.status === 'blocked' ? '보호 영역을 유지한 채 수정할 범위를 확정하지 못했습니다. 원본과 채택 상태는 그대로입니다.' : '아래 비교 화면에서 이번 결과를 확인하세요. 새 작업은 자동으로 시작하지 않습니다.'}</small>
-              </div><button type="button" onClick={() => document.querySelector('[data-testid="graphics-contact-heading"]')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>검토 내용 보기</button></div>
-            </div> : <div className="gs-execution-card">
-            <div className="gs-creation-execute" aria-label="현재 단계 실행">
-              <div>
-                <strong>{activeTask.name}</strong>
-                <small role={selectionProblem ? "status" : undefined}>
-                  {selectionProblem ||
-                    (activeTask.status === "planned"
-                      ? activeTask.reason
-                      : active
-                        ? "기존 작업의 승인 또는 결과를 확인하세요."
-                      : completedUvTask ? '완료된 UV 결과가 있습니다. 결과 보기는 새 제작이나 과금을 시작하지 않습니다.'
-                      : activeTask.executor === "local"
-                          ? "로컬 처리 · GPT 요청 없이 준비"
-                          : "실행 전 입력과 비용을 앱에서 확인합니다.")}
-                </small>
-              </div>
-              {completedUvTask && <button className="gs-primary" data-testid="graphics-open-completed-result" onClick={() => showTaskResult(completedUvTask)}>완료 · 결과 보기</button>}
-              <button
-                className={completedUvTask ? undefined : "gs-primary"}
-                data-testid="graphics-prepare"
-                disabled={
-                  disabled ||
-                  !sizeInputsValid ||
-                  Boolean(
-                    multiviewProblem || modelProblem || selectionProblem,
-                  ) ||
-                  activeTask.status === "planned" ||
-                  active ||
-                  (stage === "rig" && settings.rigType === "none") ||
-                  ["sprite", "ui", "vfx"].includes(object.kind)
-                }
-                onClick={() => void prepare()}
-              >
-                {pending ? "요청 확인 중…" : prepareLabel}
-              </button>
-            </div>
-            <div className="gs-execution-summary" aria-label="실행 설정 요약">
-              <span><b>대상</b> {creationSubjects.find(item => item.id === creation.subject)?.label ?? object.name}</span>
-              <span><b>도구·모델</b> {activeTask.executor === 'tripo' && stage !== 'model' ? `Tripo API · ${activeTask.name}` : activeTask.executor === 'tripo' ? `Tripo · ${catalog.model.find(model => model.id === String(settings.model ?? 'P2-20260801'))?.label ?? settings.model}` : activeTask.executor === 'astra' ? 'Blender + Astra' : activeTask.executor === 'local' ? '로컬 처리' : activeTask.executor === 'runway' ? 'Runway' : activeTask.executor === 'codex-image' ? 'Codex 이미지' : '설정 확인'}</span>
-              <span><b>후보</b> {String(settings.count ?? 1)}개</span>
-              {stage === 'model' && <span><b>목표 면 수</b> {Number(settings.faceLimit ?? 5000).toLocaleString()}</span>}
-              {taskId === 'M09' && <span><b>보완 원본</b> {versions.find(version => version.id === settings.sourceVersionId)?.label ?? '미리보기에서 선택 필요'}</span>}
-              {taskId === 'M05' && settings.editSourceMode === 'candidate' && <span><b>보정 원본</b> {versions.find(version => version.id === settings.sourceVersionId)?.label ?? '미리보기에서 선택 필요'}</span>}
-              {taskId === 'M09' && <span><b>추가 상한</b> {String(settings.repairMaxAddedFaces ?? 1500)}면 · {String(settings.repairMaxAddedVertices ?? 1000)}정점</span>}
-              {stage === 'surface' && <span><b>실행할 모델</b> {surfaceModel?.label ?? '모델 채택 필요'}{texturePart ? ` · ${texturePart.label}` : ''}</span>}
-              <span><b>목표 크기</b> {physicalSizeSummary(creation.physicalSize)}</span>
-              <span><b>예상 비용</b> {activeTask.executor === 'local' ? '무료 · GPT 0회' : '준비 후 비용 카드 확인'}</span>
-            </div>
-            </div>}
-
+  function openImportPanel() {
+    const panel = document.querySelector<HTMLDetailsElement>('.gs-import-details');
+    if (panel) { panel.open = true; panel.scrollIntoView({ block: 'center' }); panel.querySelector<HTMLElement>('select,button')?.focus(); }
+  }
+  function settingForStage(targetStage: CreationStage, key: string, value: string | number | boolean) {
+    setCreation(current => ({ ...current, stageSettings: { ...current.stageSettings, [targetStage]: { instruction: current.stageSettings[targetStage]?.instruction ?? '', values: { ...current.stageSettings[targetStage]?.values, [key]: value } } } }));
+  }
+  function navigateGuide(target: JourneyTarget) {
+    changeStage(target.stage);
+    if (target.partId) setCreation(current => ({ ...current, activePartId: target.partId }));
+    if (target.clipName) setClipName(target.clipName);
+    if (target.versionId) setShownVersionId(target.versionId);
+    window.setTimeout(() => document.querySelector<HTMLElement>('.gs-guide-heading')?.focus(), 0);
+  }
+  const shownProducer = shownVersion && objectTasks.find(task => task.outputVersionIds.includes(shownVersion.id));
+  const relevantPreview = shownVersion && (shownVersionId || (shownProducer ? stageForTask(shownProducer.taskId) === stage : stageRoles[stage][0] === shownVersion.role)) ? shownVersion.id : undefined;
+  const journey = workspace && object ? deriveJourney(workspace, object.id, creation, { stage, partId: texturePart?.id, taskOverride, clipName: stage === 'animation' ? String(settings.clipName ?? 'Idle') : undefined, candidateVersionId: relevantPreview }) : undefined;
+  const guideTask = journey?.task;
+  const deliveryCurrent = stage === 'unity' && journey?.stages.find(item => item.id === 'unity')?.status === 'complete';
+  const reviewVersion = journey?.review?.version;
+  const reviewIsShown = Boolean(reviewVersion && shownVersion?.id === reviewVersion.id);
+  const adoptableReview = Boolean(journey?.review?.adoptable && !journey.review.accepted && reviewIsShown && !contactPartProducer);
+  const readyProblem = activeTask.status === 'planned' ? activeTask.reason || '아직 개발 중인 작업입니다.' : selectionProblem || multiviewProblem || modelProblem || (!sizeInputsValid ? '실제 크기 입력을 확인하세요.' : '');
+  const guideAction: JourneyAction | undefined = journey && !active && adoptableReview
+    ? { intent: 'accept', label: `${reviewVersion?.role === 'design' ? '이 이미지' : reviewVersion?.role === 'animation' ? '이 동작' : shownAssembly ? '이 조립과 파트' : '이 결과'} 사용 · 다음 설정`, reason: shownAssembly ? '전체 조립과 같은 작업의 파트를 함께 사용합니다. 새 제작은 시작하지 않습니다.' : '선택한 결과를 다음 작업의 원본으로 저장합니다. 새 제작은 시작하지 않습니다.', target: { stage, versionId: reviewVersion!.id } }
+    : journey?.primaryAction;
+  const guideTitles: Record<string, string> = { design: '어떤 모습으로 만들까요?', model: '3D 모델을 만들어요', surface: '표면과 색을 완성해요', assembly: '모양과 연결을 확인해요', rig: '움직일 뼈대를 준비해요', animation: '동작을 만들어요', unity: 'Unity로 가져와요' };
+  const guideState = pending ? '요청을 처리하고 있어요' : guideTask?.runtimeApproval && guideTask.status === 'running' ? '작업 중 확인이 필요해요' : guideTask?.status === 'awaiting_approval' ? '입력과 비용을 확인하세요' : guideTask?.status === 'running' ? '제작이 진행 중이에요' : guideTask?.status === 'submission_unknown' ? '기존 제출을 먼저 확인하세요' : adoptableReview ? '마음에 드는 결과를 사용하세요' : guideTitles[stage];
+  const prepareDisabled = disabled || !!journey?.inputReadiness.problems.length || !sizeInputsValid || !!(selectionProblem || multiviewProblem || modelProblem) || active || activeTask.status === 'planned' || (stage === 'rig' && settings.rigType === 'none') || Boolean(object && ['sprite', 'ui', 'vfx'].includes(object.kind));
+  function handleGuide(action: JourneyAction) {
+    const version = versions.find(item => item.id === action.target.versionId);
+    const task = objectTasks.find(item => item.id === action.target.taskId);
+    if (action.intent === 'accept' && version) return void adoptVersion(version);
+    if (action.intent === 'prepare') return void prepare();
+    if (action.intent === 'navigate') {
+      navigateGuide(action.target);
+      if (action.target.stage === 'surface' && journey?.review?.accepted && objectTasks.some(task => ['T01', 'T02'].includes(task.taskId) && task.outputVersionIds.includes(journey.review!.version.id))) settingForStage('surface', 'surfaceOperation', 'texture');
+      if (action.target.stage === stage) window.setTimeout(() => document.querySelector<HTMLElement>('.gs-instruction button, .gs-instruction input')?.focus(), 0);
+      return;
+    }
+    if (action.intent === 'recover' && version) {
+      if (workspace && requiresPartSpaceRestoration(workspace, version)) return void run({ kind: 'restore-part-space', versionId: version.id });
+      if (workspace && requiresPartSourcePreparation(workspace, version)) return void run({ kind: 'prepare-part-source', versionId: version.id });
+    }
+    if (action.intent === 'approve' && task) {
+      if (task.runtimeApproval) { document.querySelector<HTMLElement>(`[data-testid="graphics-current-task-${task.id}"] input, [data-testid="graphics-current-task-${task.id}"] button`)?.focus(); return; }
+      if (graphicsApprovalState(task, clock) !== 'blocked') return void run({ kind: 'approve', taskId: task.id });
+    }
+    if (action.intent === 'review') {
+      if (version) return showVersion(version);
+      if (task?.outputVersionIds.length && task.status === 'review') return showTaskResult(task);
+      const panel = task && document.querySelector<HTMLElement>(`[data-testid="graphics-current-task-${task.id}"]`);
+      if (panel) { panel.scrollIntoView({ block: 'center' }); return; }
+      return showAuxiliary('history');
+    }
+  }
+  const actionLabel = guideTask?.status === 'awaiting_approval' && guideAction?.intent === 'approve'
+    ? graphicsApprovalState(guideTask, clock) === 'refresh' ? '견적 다시 확인' : guideTask.localOnly ? '무료 로컬 작업 실행' : guideTask.cost?.provider === 'Codex' ? 'Codex 사용량으로 실행' : guideTask.cost?.credits != null ? `${guideTask.cost.credits.toLocaleString()}크레딧으로 생성` : '비용 확인 필요'
+    : guideAction?.intent === 'prepare' ? prepareLabel : guideAction?.label ?? '현재 설정을 확인하세요';
+  const guideHeading = <div className="gs-guide-heading" tabIndex={-1}>
+    <div className="gs-guide-kicker"><span>지금 할 일</span><button type="button" aria-expanded={helpOpen} onClick={() => setHelpOpen(value => !value)}>도움말</button></div>
+    <h2>{deliveryCurrent && !active ? 'Unity 가져오기를 확인했어요' : guideState}</h2>
+    <p>{(active || adoptableReview ? guideAction?.reason : readyProblem || guideAction?.reason) || '주요 조건을 선택하고 입력과 비용을 확인하세요.'}</p>
+    {guideTask?.status === 'running' && <p role="status"><LoaderCircle size={14} className="gs-spin" /> {Math.max(0, Math.floor((clock - new Date(guideTask.createdAt).getTime()) / 60000))}분 전 요청 · 마지막 갱신 {stamp(guideTask.updatedAt)}</p>}
+    <small role="status">{draftSaved ? '설정 초안 자동 저장 · 생성은 실행 버튼에서 시작' : '이 기기에 초안을 저장하지 못했습니다. 설정 저장을 이용하세요.'}</small>
+    {helpOpen && <div className="gs-inline-help"><strong>이 화면은 이렇게 사용하세요</strong><ol><li>왼쪽 결과는 클릭해서 비교합니다.</li><li>마음에 들면 ‘이 결과 사용’을 누릅니다.</li><li>오른쪽 설정과 비용을 확인하고 실행합니다.</li></ol><p>UV는 모델 표면에 무늬를 배치하는 좌표입니다. 리깅은 움직임을 위한 뼈대입니다. 정적 소품은 움직임 단계를 건너뛸 수 있습니다.</p><button onClick={() => onOpenSettings?.(activeTask.executor === 'tripo' ? 'tripo' : undefined)}>필요한 연결 설정</button></div>}
+  </div>;
+  const exactInputs = journey?.inputReadiness.inputs ?? [];
+  const guideInputs = <div className="gs-guide-inputs" aria-label="실제 사용할 원본">
+    <strong>{waiting.length ? '준비된 요청의 원본은 위 비용 카드에 고정돼 있습니다' : active ? '진행 중인 요청의 고정 원본' : '실제 사용할 원본'}</strong>
+    {!waiting.length && (exactInputs.length ? exactInputs.map(input => <button key={`${input.key}:${input.versionId}`} onClick={() => { if (input.version) { setShownVersionId(input.version.id); document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' }); } }}><Check size={13} /><span>{input.version?.label ?? '원본 확인 필요'}<small>{roles[input.version?.role ?? 'model']} · 현재 사용 중</small></span></button>) : <p>{stage === 'design' ? '새 디자인을 준비합니다. 참고 자료는 아래에서 연결할 수 있습니다.' : '이 단계에 사용할 결과를 먼저 선택해 주세요.'}</p>)}
+    {journey && journey.parts.length > 0 && <details><summary>파트별 준비 상태 · {journey.parts.length}개</summary>{journey.parts.map(part => <button key={part.id} aria-pressed={creation.activePartId === part.id} onClick={() => { setCreation(current => ({ ...current, activePartId: part.id })); setShownVersionId(''); }}><span>{part.label}<small>{part.reason}</small></span></button>)}</details>}
+  </div>;
+  async function openUnity() {
+    setPending(true); setError('');
+    try { setNotice(String(await window.desktop.call({type:'unity.open',id:project.id}))); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setPending(false); }
+  }
+  const guideFooter = <footer className="gs-guide-footer">
+    {deliveryCurrent && !active ? <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled} onClick={() => void openUnity()}>Unity에서 확인</button> : guideAction && <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled || guideAction.intent === 'prepare' && prepareDisabled || guideTask?.status === 'awaiting_approval' && graphicsApprovalState(guideTask, clock) === 'blocked'} onClick={() => handleGuide(guideAction)}>{pending ? <><LoaderCircle size={15} className="gs-spin" /> 요청 처리 중…</> : actionLabel}</button>}
+    <div className="gs-guide-secondary">
+      {guideAction?.intent !== 'prepare' && !active && !shownContact && !contactPartProducer && <button data-testid="graphics-prepare" disabled={prepareDisabled} onClick={() => void prepare()}>새 {stage === 'design' ? '이미지' : stage === 'model' ? '모델' : '작업'} 준비</button>}
+      {journey?.secondaryActions.filter(action => action.intent === 'navigate').map(action => <button key={action.label} onClick={() => handleGuide(action)}>{action.label}</button>)}
+      <button type="button" onClick={openImportPanel}>기존 자료 가져오기</button>
+    </div>
+    <small>{guideTask?.status === 'awaiting_approval' ? '위 카드의 고정된 요청만 실행합니다.' : '화면 이동·후보 비교만으로 생성하거나 과금하지 않습니다.'}</small>
+  </footer>;
+  const currentJobs = (<>
             {visibleTasks.length > 0 && (
               <div className="gs-current-jobs" aria-label="현재 작업 상태">
                 {visibleTasks.map((task) => (
@@ -1615,113 +1601,8 @@ export function GraphicsStudio({
                 ))}
               </div>
             )}
-            {error && (
-              <div role="alert" className="gs-alert gs-alert-error">
-                <strong>요청을 완료하지 못했습니다.</strong>
-                <p>{error}</p>
-                <span>기존 원본과 채택 결과는 유지됩니다.</span>
-              </div>
-            )}
-          </section>
-        )}
-        <main className="gs-main">
-          {!object && error && (
-            <div role="alert" className="gs-alert gs-alert-error">
-              <strong>작업을 완료하지 못했습니다.</strong>
-              <p>{error}</p>
-              <span>기존 원본과 채택 결과는 유지됩니다.</span>
-            </div>
-          )}
-          {notice && auxiliary !== "support" && (
-            <div role="status" className="gs-notice">
-              {notice}
-            </div>
-          )}
-          {!object ? (
-            <div className="gs-empty">
-              <Box size={54} strokeWidth={1} />
-              <h2>무엇을 만들까요?</h2>
-              <p>
-                새 오브젝트에서 만들 대상을 고른 뒤 모양과 특징을 설정하세요.
-                <br />
-                이미 모델이 있다면 이미지 생성 없이 바로 작업할 수 있습니다.
-              </p>
-              <button type="button" className="gs-primary" data-testid="graphics-empty-new-object" disabled={disabled} onClick={event => openNewObject(event.currentTarget)}><FilePlus2 size={18} /> 첫 오브젝트 만들기</button>
-            </div>
-          ) : (
-            <>
-              <section
-                className="gs-current-options"
-                aria-label="현재 제작 옵션"
-              >
-                <details>
-                  <summary>
-                    <strong>{object.name}</strong> · 선택한 특징
-                  </summary>
-                  <p>{summarizeCreation(creation).join(" · ")}</p>
-                  <small>
-                    옵션 변경과 단계 이동은 생성하지 않습니다. 이미지를 채택한
-                    뒤 모델을 제작하세요.
-                  </small>
-                </details>
-                <button
-                  type="button"
-                  disabled={disabled || !sizeInputsValid}
-                  onClick={() =>
-                    void run(
-                      {
-                        kind: "update-object",
-                        objectId: object.id,
-                        patch: { creation },
-                      },
-                      "현재 제작 옵션을 저장했습니다.",
-                    )
-                  }
-                >
-                  옵션 저장
-                </button>
-              </section>
-              {stage === "design" && (
-                <div className="gs-reference-strip">
-                  <div>
-                    <strong>
-                      참고 이미지 {object.references.length}개 연결됨
-                    </strong>
-                    <small>
-                      외형·스타일 참고로 사용하며 원본을 덮어쓰지 않습니다.
-                    </small>
-                  </div>
-                  {object.references.map((reference) => {
-                    const version = workspace?.versions.find(
-                      (item) => item.id === reference.versionId,
-                    );
-                    const file = version?.files.find((item) =>
-                      isImagePath(item.path),
-                    );
-                    return file ? (
-                      <img
-                        className="gs-reference-thumb"
-                        key={`${reference.versionId}-${reference.role}`}
-                        alt={version?.label ?? "참고 원본"}
-                        src={window.desktop.assetUrl(project.id, file.path)}
-                      />
-                    ) : null;
-                  })}
-                  <button
-                    type="button"
-                    onClick={() =>
-                      document
-                        .getElementById("gs-reference-version")
-                        ?.scrollIntoView({
-                          behavior: "smooth",
-                          block: "center",
-                        })
-                    }
-                  >
-                    참고 원본 연결
-                  </button>
-                </div>
-              )}
+  </>);
+  const approvalCards = (<>
               {waiting.map((task) => {
                 const approval = graphicsApprovalState(task, clock);
                 const nativeUsage =
@@ -1875,7 +1756,7 @@ export function GraphicsStudio({
                     </div>
                     <div className="gs-cost-actions">
                       <button
-                        className="gs-primary"
+                        className="gs-secondary"
                         data-testid={`graphics-approve-${task.id}`}
                         disabled={disabled || approval === "blocked"}
                         onClick={() =>
@@ -1903,8 +1784,246 @@ export function GraphicsStudio({
                 );
               })}
 
+  </>);
+  const executionSummary = object && (<>
+            <div className="gs-execution-summary" aria-label="실행 설정 요약">
+              <span><b>대상</b> {creationSubjects.find(item => item.id === creation.subject)?.label ?? object.name}</span>
+              <span><b>도구·모델</b> {activeTask.executor === 'tripo' && stage !== 'model' ? `Tripo API · ${activeTask.name}` : activeTask.executor === 'tripo' ? `Tripo · ${catalog.model.find(model => model.id === String(settings.model ?? 'P2-20260801'))?.label ?? settings.model}` : activeTask.executor === 'astra' ? 'Blender + Astra' : activeTask.executor === 'local' ? '로컬 처리' : activeTask.executor === 'runway' ? 'Runway' : activeTask.executor === 'codex-image' ? 'Codex 이미지' : '설정 확인'}</span>
+              <span><b>후보</b> {String(settings.count ?? 1)}개</span>
+              {stage === 'model' && <span><b>목표 면 수</b> {Number(settings.faceLimit ?? 5000).toLocaleString()}</span>}
+              {taskId === 'M09' && <span><b>보완 원본</b> {versions.find(version => version.id === settings.sourceVersionId)?.label ?? '미리보기에서 선택 필요'}</span>}
+              {taskId === 'M05' && settings.editSourceMode === 'candidate' && <span><b>보정 원본</b> {versions.find(version => version.id === settings.sourceVersionId)?.label ?? '미리보기에서 선택 필요'}</span>}
+              {taskId === 'M09' && <span><b>추가 상한</b> {String(settings.repairMaxAddedFaces ?? 1500)}면 · {String(settings.repairMaxAddedVertices ?? 1000)}정점</span>}
+              {stage === 'surface' && <span><b>실행할 모델</b> {surfaceModel?.label ?? '모델 채택 필요'}{texturePart ? ` · ${texturePart.label}` : ''}</span>}
+              <span><b>목표 크기</b> {physicalSizeSummary(creation.physicalSize)}</span>
+              <span><b>예상 비용</b> {activeTask.executor === 'local' ? '무료 · GPT 0회' : '준비 후 비용 카드 확인'}</span>
+            </div>  </>);
+  const optionsSummary = object && (<>
+              <section
+                className="gs-current-options"
+                aria-label="현재 제작 옵션"
+              >
+                <details>
+                  <summary>
+                    <strong>{object.name}</strong> · 선택한 특징
+                  </summary>
+                  <p>{summarizeCreation(creation).join(" · ")}</p>
+                  <small>
+                    옵션 변경과 단계 이동은 생성하지 않습니다. 이미지를 채택한
+                    뒤 모델을 제작하세요.
+                  </small>
+                </details>
+                <button
+                  type="button"
+                  disabled={disabled || !sizeInputsValid}
+                  onClick={() =>
+                    void run(
+                      {
+                        kind: "update-object",
+                        objectId: object.id,
+                        patch: { creation },
+                      },
+                      "현재 제작 옵션을 저장했습니다.",
+                    )
+                  }
+                >
+                  옵션 저장
+                </button>
+              </section>
+  </>);
+  return (
+    <section className="graphics-studio" data-testid="graphics-studio">
+      <header className="gs-header">
+        <div>
+          <h1>Unity 오브젝트 제작실</h1>
+          <p title={`${project.name} · ${object?.name ?? '새 오브젝트'}`}>{object?.name ?? project.name}</p>
+        </div>
+        <div className="gs-header-actions">
+          <details className="gs-aux-menu">
+            <summary aria-label="보조 메뉴">
+              <MoreHorizontal size={16} />
+              <span>더 보기</span>
+            </summary>
+            <div>
+              <button
+                disabled={!object}
+                onClick={() => showAuxiliary("history")}
+              >
+                <History size={14} /> 작업 기록 {objectTasks.length}개
+              </button>
+              <button onClick={() => showAuxiliary("support")}>
+                <ListChecks size={14} /> 기능 지원 현황
+              </button>
+              <button onClick={() => showAuxiliary('storage')}>저장 공간 현황</button>
+            </div>
+          </details>
+          {onExportProject && (
+            <button
+              aria-label="프로젝트 백업"
+              title="프로젝트 백업"
+              disabled={disabled}
+              onClick={onExportProject}
+            >
+              <Download size={14} />
+            </button>
+          )}
+          {onOpenSettings && (
+            <button onClick={() => onOpenSettings()}>
+              <Settings2 size={15} /> 연결 설정
+            </button>
+          )}
+        </div>
+      </header>
+      <aside className="gs-objects" aria-label="오브젝트 목록">
+        <div className="gs-new-object-action">
+          <button type="button" className="gs-primary" data-testid="graphics-new-object" disabled={disabled} onClick={event => openNewObject(event.currentTarget)}>
+            <FilePlus2 size={17} /> 새 오브젝트
+          </button>
+        </div>
+        <div className="gs-section-title">
+          <h2>오브젝트</h2>
+          <span>{workspace?.objects.length ?? 0}</span>
+        </div>
+        <div className="gs-object-list">
+          {workspace?.objects.map((item) => (
+            <button
+              key={item.id}
+              className={`gs-object ${objectId === item.id ? "is-active" : ""}`}
+              aria-pressed={objectId === item.id}
+              data-testid={`graphics-object-${item.id}`}
+              onClick={() => setObjectId(item.id)}
+            >
+              <Box size={18} />
+              <span>
+                <strong>{item.name}</strong>
+                <small>
+                  {kinds[item.kind]} ·{" "}
+                  {
+                    workspace.versions.filter(
+                      (version) => version.objectId === item.id,
+                    ).length
+                  }
+                  개 버전
+                </small>
+              </span>
+              <ChevronRight size={14} />
+            </button>
+          ))}
+        </div>
+        {object?.id === "legacy" && (
+          <button
+            className="gs-legacy"
+            data-testid="graphics-unlink-legacy"
+            disabled={disabled}
+            onClick={() => {
+              setError("");
+              setUnlinkObjectId(object.id);
+            }}
+          >
+            <X size={15} /> 선택한 오브젝트 연결 해제
+          </button>
+        )}
+        <button
+          className="gs-legacy"
+          disabled={disabled}
+          onClick={() => void inspectLegacy()}
+        >
+          <FolderInput size={15} /> 기존 프로젝트 자료 연결
+        </button>
+      </aside>
+
+      <div className="gs-workspace">
+        {object && (
+          <section
+            className="gs-command-area"
+            aria-label="제작 실행과 현재 상태"
+          >
+            <nav className="gs-creation-stages" aria-label="제작 단계">
+              {(journey?.stages ?? creationStages.map(item => ({ ...item, status: 'missing', optional: false, reason: '' }))).filter(item => !['rig', 'animation'].includes(item.id) || item.status !== 'skipped' || movementExpanded).map((item, index) => (
+                <button
+                  type="button"
+                  key={item.id}
+                  aria-current={stage === item.id ? "step" : undefined}
+                  aria-label={`${creationStages.findIndex(row => row.id === item.id) + 1} ${item.label}`}
+                  aria-description={item.reason}
+                  onClick={() => changeStage(item.id)}
+                >
+                  <span>{creationStages.findIndex(row => row.id === item.id) + 1}</span>
+                  {item.label}<small>{({complete:'사용 중',review:'결과 확인',running:'진행 중',approval:'확인 필요',blocked:'확인 필요',skipped:'선택 사항',ready:'준비됨',missing:''} as Record<string,string>)[item.status]}</small>
+                </button>
+              ))}
+            </nav>
+            {journey?.stages.some(item => item.status === 'skipped') && <button className="gs-motion-toggle" type="button" aria-expanded={movementExpanded} onClick={() => setMovementExpanded(value => !value)}>{movementExpanded ? '움직임 단계 접기' : '움직임 추가 · 선택 사항'}</button>}
+
+          </section>
+        )}
+        <main className="gs-main">
+          {!object && error && (
+            <div role="alert" className="gs-alert gs-alert-error">
+              <strong>작업을 완료하지 못했습니다.</strong>
+              <p>{error}</p>
+              <span>기존 원본과 채택 결과는 유지됩니다.</span>
+            </div>
+          )}
+          {notice && auxiliary !== "support" && (
+            <div role="status" className="gs-notice">
+              {notice}
+            </div>
+          )}
+          {!object ? (
+            <div className="gs-empty">
+              <Box size={54} strokeWidth={1} />
+              <h2>무엇을 만들까요?</h2>
+              <p>
+                새 오브젝트에서 만들 대상을 고른 뒤 모양과 특징을 설정하세요.
+                <br />
+                이미 모델이 있다면 이미지 생성 없이 바로 작업할 수 있습니다.
+              </p>
+              <button type="button" className="gs-primary" data-testid="graphics-empty-new-object" disabled={disabled} onClick={event => openNewObject(event.currentTarget)}><FilePlus2 size={18} /> 첫 오브젝트 만들기</button>
+            </div>
+          ) : (
+            <>
               <div className="gs-work-layout">
                 <section className="gs-result">
+              {stage === "design" && (
+                <div className="gs-reference-strip">
+                  <div>
+                    <strong>
+                      참고 이미지 {object.references.length}개 연결됨
+                    </strong>
+                    <small>
+                      외형·스타일 참고로 사용하며 원본을 덮어쓰지 않습니다.
+                    </small>
+                  </div>
+                  {object.references.map((reference) => {
+                    const version = workspace?.versions.find(
+                      (item) => item.id === reference.versionId,
+                    );
+                    const file = version?.files.find((item) =>
+                      isImagePath(item.path),
+                    );
+                    return file ? (
+                      <img
+                        className="gs-reference-thumb"
+                        key={`${reference.versionId}-${reference.role}`}
+                        alt={version?.label ?? "참고 원본"}
+                        src={window.desktop.assetUrl(project.id, file.path)}
+                      />
+                    ) : null;
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const panel = document.querySelector<HTMLDetailsElement>('.gs-references-disclosure');
+                      if (panel) panel.open = true;
+                      document.getElementById('gs-reference-version')?.focus();
+                    }}
+                  >
+                    참고 원본 연결
+                  </button>
+                </div>
+              )}
+
                   <div className="gs-section-title">
                     <h2>자료와 결과</h2>
                     <span>{versions.length}개 버전</span>
@@ -2014,9 +2133,9 @@ export function GraphicsStudio({
                                     )}
                                   </span>
                                 </button>
-                                {media.kind === 'image' && <button className="gs-primary gs-candidate-adopt" data-testid={`graphics-accept-image-${version.id}`} disabled={disabled || accepted}
+                                {media.kind === 'image' && <button className="gs-candidate-adopt" data-testid={`graphics-accept-image-${version.id}`} disabled={disabled || accepted}
                                   onClick={() => { setShownVersionId(version.id); adoptVersion(version); }}>
-                                  {accepted ? '채택한 이미지' : '이 이미지 채택'}
+                                  {accepted ? '현재 사용하는 이미지' : '이 이미지 사용 · 다음 설정'}
                                 </button>}
                               </article>
                             );
@@ -2025,10 +2144,38 @@ export function GraphicsStudio({
                       </div>
                     </section>
                   )}
+                  {shownVersion && <div className="gs-preview-caption" data-testid="graphics-preview-context">
+                    <div><strong>{acceptedVersion(object, shownVersion) ? '현재 사용하는 결과' : '미리보는 후보 · 아직 사용하지 않음'}</strong><small>{shownVersion.label}</small></div>
+                    <button type="button" aria-expanded={editOpen} disabled={disabled || active} onClick={() => setEditOpen(value => !value)}>수정하기</button>
+                    <small>미리보기 선택은 다음 작업의 원본을 바꾸지 않습니다.</small>
+                  </div>}
+                  {editOpen && shownVersion && <div className="gs-edit-menu" aria-label="결과 수정 방법">
+                    <p><b>수정 원본:</b> {shownVersion.label} · 수정본은 별도로 저장됩니다.</p>
+                    {shownVersion.role === 'design' && <button disabled={!acceptedVersion(object, shownVersion)} onClick={() => { changeStage('design'); settingForStage('design', 'designMode', 'revision'); setNotice('현재 사용하는 이미지를 수정합니다. 바꿀 부분과 유지할 부분을 추가 지시에 적어 주세요.'); }}>이미지 수정</button>}
+                    {['model', 'material'].includes(shownVersion.role) && <>
+                      <button disabled={needsPartPreparation || !!shownContact || !!contactPartProducer} onClick={() => chooseRevisionSource(shownVersion)}>형태·비율 보정</button>
+                      <button disabled={needsPartPreparation || !!shownContact || !!contactPartProducer || !!(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation)} onClick={() => chooseRepairSource(shownVersion, meshSelection ?? undefined)}>빠진 면 보완</button>
+                      <button disabled={!acceptedVersion(object, shownVersion)} onClick={() => { changeStage('surface'); settingForStage('surface', 'surfaceOperation', 'texture'); }}>재질·텍스처 변경</button>
+                      <button disabled={!acceptedVersion(object, shownVersion)} onClick={() => { changeStage('model'); window.setTimeout(() => document.querySelector('.gs-size-panel')?.scrollIntoView({block:'center'}), 0); }}>실제 크기 변경</button>
+                    </>}
+                    {!acceptedVersion(object, shownVersion) && <small>이미지·재질·크기 변경은 먼저 이 결과 사용으로 원본을 확정하세요. 형태 보정과 빠진 면 보완은 지정한 후보를 직접 사용합니다.</small>}
+                    {['rig', 'animation', 'unity', 'motion-reference'].includes(shownVersion.role) && <p>이 결과의 수정 범위는 해당 단계 설정에서 확인하세요. 메시 수정은 원본 모델에서 진행합니다.</p>}
+                  </div>}
+                  {shownVersion && shownContact ? <GraphicsContactReview key={shownVersion.id} projectId={project.id} version={shownVersion} disabled={disabled || active} accepted={shownAcceptanceComplete} sourceAvailable={versions.some(version => version.id === shownContact.sourceVersionId)}
+                    procedureRecoveryAvailable={contactProcedureRecoveryAvailable}
+                    onPrepareRepair={() => void prepareContact(shownVersion, 'repair')}
+                    onPrepareReconstruct={() => void prepareContact(shownVersion, 'reconstruct')}
+                    onRecoverProcedure={() => { if (shownContactTask) void run({ kind: 'recover-contact-procedure', taskId: shownContactTask.id }, '저장된 보정 절차의 로컬 호환 복구를 요청했습니다. 추가 GPT 호출 없이 같은 작업의 결과를 확인합니다.'); }}
+                    onKeepSource={() => { const source = versions.find(version => version.id === shownContact.sourceVersionId); if (source) showVersion(source); setNotice('기존 조립 결과로 돌아왔습니다. 채택 상태와 파일은 변경하지 않았습니다.'); }}
+                    onAccept={() => adoptVersion(shownVersion)} onImage={(path, label) => setFocusedImage({ path, label })} /> : <div className={`gs-preview${headComparisonOpen && headCandidate && headBaseline ? ' gs-preview-comparison' : ''}`} data-testid="graphics-preview">
+                    {headComparisonOpen && headCandidate && headBaseline
+                      ? <HeadComparison projectId={project.id} baseline={headBaseline} candidate={headCandidate} choices={headVersions} acceptedId={acceptedHeadId} onBaseline={setHeadBaselineId} onClose={() => setHeadComparisonOpen(false)} />
+                      : <VersionPreview project={project} version={shownVersion} physicalSize={shownVersion?.slot.startsWith("part-") ? undefined : creation.physicalSize} onBounds={setModelBounds} onMeshSelect={setMeshSelection} nativePolygonCount={nativeMeasurement?.versionId === shownVersion?.id ? nativeMeasurement?.faces : undefined} />}
+                  </div>}
                   {shownVersion && !shownContact && !contactPartProducer && ['model', 'material'].includes(shownVersion.role) && <div className="gs-preview-actions" data-testid="graphics-preview-actions">
                     <strong>{shownVersion.label}</strong>
                     <div>
-                      <button className="gs-primary" data-testid="graphics-accept-preview" disabled={disabled || needsPartPreparation || shownAcceptanceComplete} onClick={() => adoptVersion(shownVersion)}>
+                      <button className="gs-adopt-secondary" data-testid="graphics-accept-preview" disabled={disabled || needsPartPreparation || shownAcceptanceComplete} onClick={() => adoptVersion(shownVersion)}>
                         {shownAcceptanceComplete ? shownAssembly ? '현재 채택한 조립·파트' : '현재 채택한 모델' : needsPartSpaceRestoration ? '크기·위치 복원 후 채택' : needsPartSourcePreparation ? '작업 원본 준비 후 채택' : shownAssembly ? '이 조립과 파트 채택' : '이 모델 채택'}
                       </button>
                       {headCandidate && headBaseline && !headComparisonOpen && <button data-testid="graphics-compare-heads" onClick={() => { setHeadBaselineId(headBaseline.id); setHeadComparisonOpen(true); setMeshSelection(null); }}>
@@ -2071,17 +2218,6 @@ export function GraphicsStudio({
                       파트 작업 원본 준비 · 무료
                     </button>
                   </div>}
-                  {shownVersion && shownContact ? <GraphicsContactReview key={shownVersion.id} projectId={project.id} version={shownVersion} disabled={disabled || active} accepted={shownAcceptanceComplete} sourceAvailable={versions.some(version => version.id === shownContact.sourceVersionId)}
-                    procedureRecoveryAvailable={contactProcedureRecoveryAvailable}
-                    onPrepareRepair={() => void prepareContact(shownVersion, 'repair')}
-                    onPrepareReconstruct={() => void prepareContact(shownVersion, 'reconstruct')}
-                    onRecoverProcedure={() => { if (shownContactTask) void run({ kind: 'recover-contact-procedure', taskId: shownContactTask.id }, '저장된 보정 절차의 로컬 호환 복구를 요청했습니다. 추가 GPT 호출 없이 같은 작업의 결과를 확인합니다.'); }}
-                    onKeepSource={() => { const source = versions.find(version => version.id === shownContact.sourceVersionId); if (source) showVersion(source); setNotice('기존 조립 결과로 돌아왔습니다. 채택 상태와 파일은 변경하지 않았습니다.'); }}
-                    onAccept={() => adoptVersion(shownVersion)} onImage={(path, label) => setFocusedImage({ path, label })} /> : <div className={`gs-preview${headComparisonOpen && headCandidate && headBaseline ? ' gs-preview-comparison' : ''}`} data-testid="graphics-preview">
-                    {headComparisonOpen && headCandidate && headBaseline
-                      ? <HeadComparison projectId={project.id} baseline={headBaseline} candidate={headCandidate} choices={headVersions} acceptedId={acceptedHeadId} onBaseline={setHeadBaselineId} onClose={() => setHeadComparisonOpen(false)} />
-                      : <VersionPreview project={project} version={shownVersion} physicalSize={shownVersion?.slot.startsWith("part-") ? undefined : creation.physicalSize} onBounds={setModelBounds} onMeshSelect={setMeshSelection} nativePolygonCount={nativeMeasurement?.versionId === shownVersion?.id ? nativeMeasurement?.faces : undefined} />}
-                  </div>}
                   {meshSelection && shownVersion && !shownContact && !contactPartProducer && <div className="gs-mesh-correction">
                     <strong>선택 부품: {meshSelection.name}</strong>
                     <p>위치·형태만 보정하며 다른 메시와 원본 구조를 보존합니다. 재생성·재토폴로지는 별도 작업입니다.</p>
@@ -2102,7 +2238,7 @@ export function GraphicsStudio({
                     {(shownVersion.role !== 'model' || !acceptedVersion(object, shownVersion)) && <small>채택한 모델에서 선택하세요. 리그·동작 결과의 직접 메시 보정은 지원하지 않습니다.</small>}
                   </div>}
                   {shownVersion && (
-                    <div className="gs-version-detail">
+                    <details className="gs-version-detail"><summary>결과 검사 · 원본 파일 · 상세 작업</summary>
                       <div>
                         <strong>{shownVersion.label}</strong>
                         <span className="gs-tag">
@@ -2247,9 +2383,9 @@ export function GraphicsStudio({
                           : shownAssembly ? '이 조립과 파트 채택'
                           : `${roles[shownVersion.role]} / ${shownVersion.slot}에 채택`}
                       </button>}
-                    </div>
+                    </details>
                   )}
-                  <div className="gs-version-list" aria-label="전체 버전">
+                  <details className="gs-version-history"><summary>이전 결과 · {versions.length}개</summary><div className="gs-version-list" aria-label="전체 버전">
                     {[...versions].reverse().map((version) => (
                       <button
                         key={version.id}
@@ -2272,10 +2408,23 @@ export function GraphicsStudio({
                         )}
                       </button>
                     ))}
-                  </div>
+                  </div></details>
                 </section>
 
-                <section className="gs-instruction">
+                <aside className="gs-guide" aria-label="현재 작업 안내" data-testid="graphics-guide">
+                  {guideHeading}
+                  <div className="gs-guide-scroll">
+                    {error && <div role="alert" className="gs-alert gs-alert-error"><strong>요청을 완료하지 못했습니다.</strong><p>{error}</p><span>기존 원본과 사용하는 결과는 유지됩니다.</span></div>}
+                    {approvalCards}
+                    {active || journey?.task?.status === 'failed' || journey?.task?.status === 'submission_unknown' ? currentJobs : <details className="gs-recent-status"><summary>최근 작업 상태와 복구</summary>{currentJobs}</details>}
+                    {guideInputs}
+                    {stage === 'unity' && journey?.delivery && <section className="gs-guide-inputs" aria-label="Unity 전달 확인">
+                      <strong>{deliveryCurrent ? '현재 결과 가져오기 완료' : '이전 전달 기록 · 현재 원본과 다시 확인 필요'}</strong>
+                      <p>{journey.delivery.prefabPath ?? journey.delivery.destination}</p>
+                      <p>{journey.delivery.playbackVerified ? '재생 검사 기록 있음' : 'Play Mode 재생 검사는 별도입니다.'}</p>
+                      <small>{journey.delivery.status === 'imported' ? 'Unity에서 확인된 가져오기 기록' : '파일 준비와 Unity 가져오기 완료는 다릅니다.'}</small>
+                    </section>}
+                    <section className="gs-instruction" aria-label="현재 작업 설정">
                   {["model", "unity"].includes(stage) && <GraphicsSizePanel key={object.id} value={creation.physicalSize} bounds={!shownVersion?.slot.startsWith("part-") && shownVersion?.files.some(file => /\.glb$/i.test(file.path)) ? modelBounds : undefined} restricted={object.kind === "character" || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation)} disabled={disabled || active} onValidityChange={setSizeInputsValid} onChange={physicalSize => setCreation(current => ({ ...current, physicalSize }))} onSave={() => void run({ kind: "update-object", objectId: object.id, patch: { creation } }, "크기 설정을 저장했습니다. 새 생성은 없습니다.")} onApply={creation.attributes.composition !== "parts" && (object.accepted["model:main"] || object.accepted["rig:main"]) ? () => void prepareSizeCopy() : undefined} />}
                   {stage === 'surface' && <section className="gs-result-notes" aria-label="재질 작업의 원본과 UV" data-testid="graphics-surface-input">
                     <strong>이번 작업에 사용할 채택 모델</strong>
@@ -2902,10 +3051,15 @@ export function GraphicsStudio({
                       영역이나 더 보기의 작업 기록을 확인하세요.
                     </p>
                   )}
-                </section>
+                    </section>
+                    <details className="gs-request-summary"><summary>선택한 조건과 실행 정보</summary>{executionSummary}</details>
+                    <details className="gs-request-summary"><summary>제작 설정 저장</summary>{optionsSummary}</details>
+                  </div>
+                  {guideFooter}
+                </aside>
               </div>
 
-              <section className="gs-references">
+              <details className="gs-references-disclosure"><summary>참고 자료 연결 · 다른 결과의 외형과 스타일 사용</summary><section className="gs-references">
                 <div className="gs-section-title">
                   <h2>참고 자료 연결</h2>
                   <span>대상 원본 유지</span>
@@ -3038,11 +3192,11 @@ export function GraphicsStudio({
                     );
                   })}
                 </div>
-              </section>
+              </section></details>
             </>
           )}
 
-          <div className="gs-bottom-grid">
+          <details className="gs-diagnostics-disclosure"><summary>연결 진단 · Unity 상태 · 사용량</summary><div className="gs-bottom-grid">
             <section className="gs-target">
               <div className="gs-section-title">
                 <h2>연결 상태</h2>
@@ -3211,7 +3365,7 @@ export function GraphicsStudio({
                 </p>
               )}
             </section>
-          </div>
+          </div></details>
         </main>
       </div>
       {(legacyPreview || unlinkObject) && (

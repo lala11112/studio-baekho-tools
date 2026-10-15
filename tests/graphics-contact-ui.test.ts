@@ -1,3 +1,4 @@
+import { revealGraphicsControl, openGraphicsInspection } from './graphics-ui-disclosures';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -40,12 +41,16 @@ test('contact review uses exact assembly and analysis IDs, forbids analysis adop
   try {
     const page = await app.firstWindow(), errors: string[] = []; page.on('pageerror', error => errors.push(error.message)); page.setDefaultTimeout(10000);
     const actions = () => page.evaluate(() => (window as any).actions);
+    await revealGraphicsControl(page.getByTestId('graphics-version-assembled'));
     await page.getByTestId('graphics-version-assembled').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-contact-analyze').isEnabled(), true);
     assert.deepEqual(await actions(), []);
     await page.getByTestId('graphics-contact-analyze').click();
     assert.deepEqual(await actions(), [{ kind: 'prepare-contact', versionId: 'assembled', phase: 'analyze' }]);
+    await revealGraphicsControl(page.getByTestId('graphics-version-analysis'));
     await page.getByTestId('graphics-version-analysis').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-current-task-assembly').count(), 0, 'old assembly success must not be the current contact status');
     assert.match(await page.getByTestId('graphics-current-task-analysis').innerText(), /분석 완료 · 영역 검토/);
     assert.doesNotMatch(await page.getByTestId('graphics-current-task-analysis').innerText(), /채택하세요/);
@@ -59,8 +64,10 @@ test('contact review uses exact assembly and analysis IDs, forbids analysis adop
     assert.deepEqual(await page.getByTestId('graphics-contact-review').locator('img').evaluateAll(elements => elements.map(element => new URL((element as HTMLImageElement).src).searchParams.get('path'))), ['whole-before.png', 'whole-overlay.png', 'neck-before.png', 'neck-overlay.png']);
     await page.getByTestId('graphics-contact-repair').click();
     assert.deepEqual((await actions()).at(-1), { kind: 'prepare-contact', versionId: 'analysis', phase: 'repair' });
+    await revealGraphicsControl(page.getByTestId('graphics-version-blocked'));
     await page.getByTestId('graphics-version-blocked').click();
-    assert.match(await page.getByTestId('graphics-contact-current').innerText(), /영역 분석 완료 · 보정 불가/);
+    await openGraphicsInspection(page);
+    assert.match(await page.getByTestId('graphics-contact-review').innerText(), /허용 범위에서 진행할 수 없어 중단했습니다/);
     assert.match(await page.getByTestId('graphics-current-task-blocked').innerText(), /영역 분석 완료 · 보정 불가/);
     assert.doesNotMatch(await page.getByTestId('graphics-current-task-blocked').innerText(), /채택하세요/);
     assert.equal(await page.getByTestId('graphics-current-task-assembly').count(), 0);
@@ -87,7 +94,9 @@ test('contact review uses exact assembly and analysis IDs, forbids analysis adop
     assert.doesNotMatch(await page.getByTestId('graphics-current-task-reconstruct').innerText(), /보정 중단|범위 제한|보호 영역과 겹쳐|자동 재시도 금지/);
     assert.match(await page.getByTestId('graphics-current-task-reconstruct').innerText(), /수정 후보의 보존 검사를 통과/);
     assert.equal((await actions()).length, 3, 'opening the directly derived result does not submit or adopt');
+    await revealGraphicsControl(page.getByTestId('graphics-version-blocked'));
     await page.getByTestId('graphics-version-blocked').click();
+    await openGraphicsInspection(page);
     assert.match(await page.getByTestId('graphics-contact-review').innerText(), /보호 영역과 겹쳐/);
     assert.doesNotMatch(await page.getByTestId('graphics-contact-review').innerText(), /비교 파일을 모두 표시하지 못해/);
     assert.equal(await page.getByTestId('graphics-contact-views').evaluate(element => element.clientHeight <= 480 && element.scrollHeight > element.clientHeight), true, '13 reference views must scroll inside a bounded region');
@@ -95,14 +104,20 @@ test('contact review uses exact assembly and analysis IDs, forbids analysis adop
     assert.equal(await page.getByTestId('graphics-version-assembled').getAttribute('aria-pressed'), 'true');
     assert.equal((await actions()).length, 3);
     assert.deepEqual(await page.evaluate(() => (window as any).workspace), initial, 'navigation/preparation must not mutate originals, acceptance or settings');
+    await revealGraphicsControl(page.getByTestId('graphics-version-missing'));
     await page.getByTestId('graphics-version-missing').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-contact-accept').isDisabled(), true);
+    await revealGraphicsControl(page.getByTestId('graphics-version-repaired'));
     await page.getByTestId('graphics-version-repaired').click();
+    await openGraphicsInspection(page);
     await page.waitForFunction(() => !(document.querySelector('[data-testid="graphics-contact-accept"]') as HTMLButtonElement)?.disabled);
     assert.deepEqual(await page.getByTestId('graphics-contact-review').locator('img').evaluateAll(elements => elements.map(element => new URL((element as HTMLImageElement).src).searchParams.get('path'))), ['whole-before.png', 'whole-after.png', 'neck-before.png', 'neck-after.png']);
     await page.getByTestId('graphics-contact-accept').click();
     assert.deepEqual((await actions()).at(-1), { kind: 'accept', objectId: 'human', versionId: 'repaired' });
+    await revealGraphicsControl(page.getByTestId('graphics-version-repaired-head'));
     await page.getByTestId('graphics-version-repaired-head').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-accept-preview').count(), 0);
     assert.equal(await page.getByTestId('graphics-accept-version').count(), 0);
     assert.equal(await page.getByText('이 결과 더 보정', { exact: true }).count(), 0);
@@ -121,19 +136,25 @@ test('contact review uses exact assembly and analysis IDs, forbids analysis adop
       const box = await page.getByTestId('graphics-contact-accept').boundingBox();
       assert.ok(box && box.x >= 0 && box.width > 100);
     }
+    await revealGraphicsControl(page.getByTestId('graphics-version-reconstructed'));
     await page.getByTestId('graphics-version-reconstructed').click();
+    await openGraphicsInspection(page);
     await page.waitForFunction(() => !(document.querySelector('[data-testid="graphics-contact-accept"]') as HTMLButtonElement)?.disabled);
     assert.match(await page.getByTestId('graphics-contact-reconstructed-notice').innerText(), /새 면의 UV·텍스처는 별도 검토/);
     assert.equal(await page.getByTestId('graphics-contact-repair').count(), 0);
     assert.equal(await page.getByTestId('graphics-contact-reconstruct').count(), 0, 'a completed reconstruction must not offer another pass');
     await page.getByTestId('graphics-contact-accept').click();
     assert.deepEqual((await actions()).at(-1), { kind: 'accept', objectId: 'human', versionId: 'reconstructed' });
+    await revealGraphicsControl(page.getByTestId('graphics-version-reconstructed-head'));
     await page.getByTestId('graphics-version-reconstructed-head').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-accept-preview').count(), 0);
     assert.equal(await page.getByTestId('graphics-accept-version').count(), 0);
     await page.getByTestId('graphics-contact-part-review').click();
     assert.equal(await page.getByTestId('graphics-version-reconstructed').getAttribute('aria-pressed'), 'true');
+    await revealGraphicsControl(page.getByTestId('graphics-version-reconstruct-blocked'));
     await page.getByTestId('graphics-version-reconstruct-blocked').click();
+    await openGraphicsInspection(page);
     assert.match(await page.getByTestId('graphics-current-task-reconstruct-blocked').innerText(), /보정 중단 · 범위 제한/);
     assert.match(await page.getByTestId('graphics-current-task-reconstruct-blocked').innerText(), /보호 영역과 겹쳐/);
     assert.equal(await page.getByTestId('graphics-contact-reconstruct').count(), 0, 'blocked reconstruction must not offer automatic retry');
@@ -141,7 +162,9 @@ test('contact review uses exact assembly and analysis IDs, forbids analysis adop
     assert.equal(await page.getByTestId('graphics-contact-accept').count(), 0);
     assert.equal(await page.getByTestId('graphics-contact-recover-procedure').count(), 0, 'ordinary blocked reconstruction is not eligible for procedure recovery');
     assert.equal((await actions()).length, 5);
+    await revealGraphicsControl(page.getByTestId('graphics-version-compatibility-blocked'));
     await page.getByTestId('graphics-version-compatibility-blocked').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-contact-recover-procedure').isEnabled(), true);
     assert.match(await page.getByTestId('graphics-contact-procedure-recovery-note').innerText(), /같은 보정 절차/);
     assert.match(await page.getByTestId('graphics-contact-procedure-recovery-note').innerText(), /GPT 호출은 없으며/);

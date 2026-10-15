@@ -12,6 +12,7 @@ import { Engine } from '../engine/engine';
 import { GraphicsEngine } from '../engine/graphics';
 import type { GraphicsAction, GraphicsTask, AssetVersion } from '../shared/graphics';
 import type { Tripo } from '../engine/tripo';
+import { revealGraphicsControl, openGraphicsInspection } from './graphics-ui-disclosures';
 
 test('question UI creates atomic subject objects, preserves existing results, displays immutable provider and inspects storage without production', { timeout: 120000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'graphics-object-inspection-ui-'));
@@ -104,6 +105,8 @@ test('question UI creates atomic subject objects, preserves existing results, di
 
     await page.getByTestId(`graphics-object-${created.id}`).click();await stage('2 모델').click();
     const summary=page.getByLabel('실행 설정 요약',{exact:true}), provenance=page.locator('.gs-model-provenance');
+    await revealGraphicsControl(summary);
+    await openGraphicsInspection(page);
     assert.match(await summary.innerText(),/기계|Tripo|P2\.0|5,000|원본 크기/);
     assert.match(await provenance.innerText(),/P2\.0.*P2-20260801/);
     await page.getByLabel('모델 제작 모델',{exact:true}).selectOption('v3.1-20260211');
@@ -121,13 +124,15 @@ test('question UI creates atomic subject objects, preserves existing results, di
     assert.equal(await uniform.inputValue(),'');
     assert.equal(await page.getByRole('button',{name:'크기 설정 저장 · 생성 없음',exact:true}).isDisabled(),true);
     assert.equal(await page.getByRole('button',{name:'크기 맞춤 사본 준비 · 무료',exact:true}).isDisabled(),true);
-    assert.equal(await page.getByRole('button',{name:'옵션 저장',exact:true}).isDisabled(),true);
+    const saveOptions=page.locator('button').filter({hasText:/^옵션 저장$/});
+    await revealGraphicsControl(saveOptions);
+    assert.equal(await saveOptions.isDisabled(),true);
     assert.equal(await page.getByTestId('graphics-prepare').isDisabled(),true);
     await uniform.pressSequentially('0');assert.equal(await uniform.inputValue(),'0');
     await uniform.pressSequentially('.');assert.equal(await uniform.inputValue(),'0.');
     await uniform.pressSequentially('25');assert.equal(await uniform.inputValue(),'0.25');
     assert.equal(await page.getByRole('button',{name:'크기 설정 저장 · 생성 없음',exact:true}).isEnabled(),true);
-    assert.equal(await page.getByTestId('graphics-prepare').isEnabled(),true);
+    assert.equal(await page.getByTestId('graphics-prepare').isDisabled(),true,'Valid size cannot replace the missing model reference image');
     assert.match(await summary.innerText(),/0.25m/);assert.equal(actions.length,2);
     await page.getByLabel('실제 크기 모드',{exact:true}).selectOption('axes');
     const widthInput=page.getByLabel('가로 X 미터',{exact:true});
@@ -143,11 +148,11 @@ test('question UI creates atomic subject objects, preserves existing results, di
     assert.match(await summary.innerText(),/2 × 3 × 4m/);assert.equal(actions.length,2);
     for(const width of [1280,960]){
       await app.evaluate(({BrowserWindow},{width})=>{const win=BrowserWindow.getAllWindows()[0];win.setSize(width,1000);win.webContents.setZoomFactor(1.5);},{width});
-      await page.getByTestId('graphics-prepare').scrollIntoViewIfNeeded();
+      await page.getByTestId('graphics-guide-primary').scrollIntoViewIfNeeded();
       const measurements=await page.evaluate(()=>({viewport:innerWidth,doc:document.documentElement.scrollWidth,panels:[...document.querySelectorAll('.gs-execution-summary,.gs-creation-execute,.gs-size-panel')].map(el=>({class:el.className,width:el.clientWidth,scroll:el.scrollWidth}))}));
       assert(measurements.doc<=measurements.viewport+1,JSON.stringify(measurements));
       assert(measurements.panels.every(p=>p.scroll<=p.width+1),JSON.stringify(measurements));
-      const rect=await page.getByTestId('graphics-prepare').boundingBox();assert(rect && rect.width>80 && rect.height>=28);
+      const rect=await page.getByTestId('graphics-guide-primary').boundingBox();assert(rect && rect.width>80 && rect.height>=28);
     }
     await page.getByText('더 보기',{exact:true}).click();await page.getByRole('button',{name:'저장 공간 현황',exact:true}).click();
     const dialog=page.getByRole('dialog',{name:'저장 공간 현황',exact:true});await dialog.waitFor();
@@ -161,7 +166,9 @@ test('question UI creates atomic subject objects, preserves existing results, di
     assert.equal(createHash('sha256').update(fs.readFileSync(store.file(project.id,sourcePath))).digest('hex'),file.sha256);
     await dialog.getByRole('button',{name:'보조 화면 닫기',exact:true}).click();
     await page.reload();await page.getByTestId(`graphics-object-${created.id}`).click();await stage('2 모델').click();
-    assert.equal(await page.getByLabel('실제 크기 모드',{exact:true}).inputValue(),'keep','Unsaved draft must not rewrite the preserved object');
+    assert.equal(await page.getByLabel('실제 크기 모드',{exact:true}).inputValue(),'axes','Local draft resumes without rewriting the preserved source object');
+    assert.deepEqual(graphics.get(project.id).objects[0],preserved);
+    await openGraphicsInspection(page);
     assert.match(await page.locator('.gs-model-provenance').innerText(),/P2\.0.*P2-20260801/);
 
     // Modal drafts are separate from the current object's stage and unsaved options.

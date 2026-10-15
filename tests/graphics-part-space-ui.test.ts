@@ -1,3 +1,4 @@
+import { revealGraphicsControl, openGraphicsInspection } from './graphics-ui-disclosures';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultCreation, setHumanPartsCreation } from '../shared/graphics-creation';
@@ -34,9 +35,12 @@ test('external part result requires local restoration before adoption and result
     const page = await app.firstWindow(), errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message)); page.setDefaultTimeout(8000);
     await page.getByRole('navigation', { name: '제작 단계', exact: true }).getByRole('button', { name: '3 재질', exact: true }).click();
-    await page.getByTestId('graphics-open-completed-result').click();
+    await revealGraphicsControl(page.getByTestId('graphics-task-result-completed-uv'));
+    await page.getByTestId('graphics-task-result-completed-uv').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-part-space-warning').isVisible(), true);
     assert.match(await page.getByTestId('graphics-part-space-warning').innerText(), /유지했는지 아직 확인하지 않았습니다/);
+    await revealGraphicsControl(page.getByTestId('graphics-accept-version'));
     assert.equal(await page.getByTestId('graphics-accept-version').isDisabled(), true);
     assert.equal(await page.getByRole('button', { name: '이 결과 더 보정', exact: true }).isDisabled(), true);
     assert.equal(await page.getByRole('button', { name: '이 파트 빠진 면 보완', exact: true }).isDisabled(), true);
@@ -44,6 +48,7 @@ test('external part result requires local restoration before adoption and result
     await page.getByTestId('graphics-restore-part-space').click();
     await page.waitForFunction(() => (window as any).workspace.tasks[0].status === 'running');
     assert.equal(await page.getByTestId('graphics-restore-part-space').isDisabled(), true);
+    await revealGraphicsControl(page.getByTestId('graphics-accept-version'));
     assert.equal(await page.getByTestId('graphics-accept-version').isDisabled(), true);
     const task = page.getByTestId('graphics-current-task-completed-uv');
     assert.match(await task.innerText(), /로컬 크기·위치 복원 중/);
@@ -54,7 +59,9 @@ test('external part result requires local restoration before adoption and result
     assert.equal(await page.getByTestId('graphics-recover-completed-uv').innerText(), '저장된 파트 크기·위치 복원 · 무료');
     assert.equal(await page.getByTestId('graphics-restore-part-space').isEnabled(), true);
     await page.evaluate(() => (window as any).finishRestore());
-    await page.getByTestId('graphics-open-completed-result').click();
+    await revealGraphicsControl(page.getByTestId('graphics-task-result-completed-uv'));
+    await page.getByTestId('graphics-task-result-completed-uv').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-version-restored-uv').getAttribute('aria-pressed'), 'true');
     assert.equal(await page.getByTestId('graphics-part-space-restored').isVisible(), true);
     assert.equal(await page.getByTestId('graphics-restore-part-space').count(), 0);

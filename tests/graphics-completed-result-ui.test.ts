@@ -1,3 +1,4 @@
+import { revealGraphicsControl, openGraphicsInspection } from './graphics-ui-disclosures';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultCreation, setHumanPartsCreation } from '../shared/graphics-creation';
@@ -31,6 +32,7 @@ test('later cancelled paid UV request keeps the completed part result visible an
     const page = await app.firstWindow(), errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message)); page.setDefaultTimeout(8000);
     await page.getByRole('navigation', { name: '제작 단계', exact: true }).getByRole('button', { name: '3 재질', exact: true }).click();
+    await revealGraphicsControl(page.getByTestId('graphics-current-task-completed-uv'));
     const result = page.getByTestId('graphics-current-task-completed-uv'), stopped = page.getByTestId('graphics-current-task-cancelled-uv');
     assert.equal(await result.isVisible(), true);
     assert.equal(await stopped.isVisible(), true);
@@ -38,12 +40,13 @@ test('later cancelled paid UV request keeps the completed part result visible an
     assert.match(await stopped.innerText(), /추적 중지 · 원격 상태 확인 필요/);
     assert.match(await stopped.innerText(), /과금 취소를 뜻하지 않습니다/);
     assert.equal(await stopped.getByRole('button', { name: '완료 · 결과 보기', exact: true }).count(), 0);
-    assert.equal(await page.getByTestId('graphics-prepare').innerText(), '새 UV 작업 · 비용 확인');
-    assert.match(await page.getByLabel('현재 단계 실행', { exact: true }).innerText(), /결과 보기는 새 제작이나 과금을 시작하지 않습니다/);
-    await page.getByTestId('graphics-open-completed-result').click();
+    assert.equal(await page.getByTestId('graphics-prepare').innerText(), '새 작업 준비');
+    assert.match(await page.getByTestId('graphics-guide').innerText(), /화면 이동·후보 비교만으로 생성하거나 과금하지 않습니다/);
+    await result.getByRole('button', { name: '완료 · 결과 보기', exact: true }).click();
     assert.equal(await page.getByTestId('graphics-version-uv-result').getAttribute('aria-pressed'), 'true');
     await result.getByRole('button', { name: '완료 · 결과 보기', exact: true }).click();
     assert.equal(await page.getByTestId('graphics-version-uv-result').getAttribute('aria-pressed'), 'true');
+    await revealGraphicsControl(page.locator('.gs-version-detail > summary'));
     assert.match(await page.locator('.gs-version-detail').innerText(), /완료된 머리 UV/);
     await result.getByRole('button', { name: '기록', exact: true }).click();
     const history = page.getByRole('dialog', { name: '작업 기록', exact: true });

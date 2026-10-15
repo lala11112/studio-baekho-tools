@@ -51,6 +51,7 @@ import { Viewport } from "./Viewport";
 import { CropEditor } from "./CropEditor";
 import { AssetWorkbench } from "./AssetWorkbench";
 import { GraphicsStudio } from "./GraphicsStudio";
+import "./app-guidance.css";
 import { catalog } from "../shared/catalog";
 import {
   TripoStudio,
@@ -150,6 +151,25 @@ export function App() {
     [create, setCreate] = useState(false),
     [name, setName] = useState("새 캐릭터 01"),
     [demo, setDemo] = useState(false);
+  const [entryIntent, setEntryIntent] = useState<{ id: number; kind: 'new' | 'import' | 'resume' }>();
+  const [projectIntent, setProjectIntent] = useState<'new' | 'import'>();
+  const [settingsReturn, setSettingsReturn] = useState('home');
+  const [settingsProvider, setSettingsProvider] = useState<'tripo' | 'fal' | 'openai'>();
+  function openSettings(provider?: 'tripo' | 'fal' | 'openai') {
+    if (tab !== 'settings') setSettingsReturn(tab);
+    setSettingsProvider(provider);
+    setTab('settings');
+  }
+  function enterProject(project: Project, kind: 'new' | 'import' | 'resume') {
+    open(project);
+    setTab('graphics');
+    setEntryIntent({ id: Date.now(), kind });
+    setProjectIntent(undefined);
+  }
+  function begin(kind: 'new' | 'import') {
+    if (p) enterProject(p, kind);
+    else setProjectIntent(kind);
+  }
   const [prompt, setPrompt] = useState(""),
     [model, setModel] = useState(catalog.image[0].id),
     [size, setSize] = useState("2K"),
@@ -188,6 +208,7 @@ export function App() {
     }
   }
   function open(p: Project) {
+    setEntryIntent(undefined);
     setId(p.id);
     setPartId(p.parts[0]?.id ?? "");
     setTab(p.demo ? "assembly" : "graphics");
@@ -267,8 +288,13 @@ export function App() {
       : tab === "settings"
         ? "연결 설정"
         : (steps.find((s) => s[0] === tab)?.[1] ?? "제작실");
+  const continueProject = p ?? [...state.projects].sort((a,b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  const continueWorkspace = state.graphicsWorkspaces?.find(workspace => workspace.projectId === continueProject?.id);
+  const continueTask = [...(continueWorkspace?.tasks ?? [])].reverse().find(task => ['running','awaiting_approval','submission_unknown'].includes(task.status))
+    ?? [...(continueWorkspace?.tasks ?? [])].reverse().find(task => task.status === 'failed' || task.status === 'review' && task.outputVersionIds.some(id => !Object.values(continueWorkspace?.objects.find(object => object.id === task.objectId)?.accepted ?? {}).includes(id)));
+  const continueStatus = continueTask ? ({running:'제작 진행 중',awaiting_approval:'입력·비용 확인 대기',submission_unknown:'기존 제출 확인 필요',failed:'오류·복구 확인',review:'새 결과 확인 대기'} as Record<string,string>)[continueTask.status] : '저장한 설정에서 계속하기';
   return (
-    <div className="app">
+    <div className={`app guided-shell ${tab === 'graphics' ? 'graphics-shell' : ''}`}>
       <aside className="sidebar">
         <button className="brand" onClick={() => setTab("home")}>
           <div className="brand-mark">
@@ -324,7 +350,7 @@ export function App() {
           </div>
           <button
             className={`nav ${tab === "settings" ? "selected" : ""}`}
-            onClick={() => setTab("settings")}
+            onClick={() => openSettings()}
           >
             <Settings size={18} /> 연결 설정
             <span
@@ -339,6 +365,11 @@ export function App() {
       <div className="app-body">
         <header className="topbar">
           <div className="breadcrumbs">
+            <button className="shell-home" onClick={() => setTab('home')} aria-label="Partsmith 홈">partsmith</button>
+            <select aria-label="현재 프로젝트" value={id} onChange={event => { const project = state.projects.find(item => item.id === event.target.value); if (project) open(project); }}>
+              <option value="" disabled>프로젝트 선택</option>
+              {state.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
             <span>작업 공간</span>
             <ChevronRight size={13} />
             <button onClick={() => setTab("home")}>
@@ -352,6 +383,7 @@ export function App() {
             )}
           </div>
           <div className="top-actions">
+            <details className="shell-tools"><summary>도구</summary><div className="shell-tools-menu"><strong>기존 작업실</strong>{steps.slice(1).map(([key, label]) => <button key={key} disabled={!p} onClick={event => { setTab(key); event.currentTarget.closest('details')?.removeAttribute('open'); }}>{label}</button>)}<small>v{appVersion}</small></div></details>
             <span className="saved">
               <span className="status-dot" /> 로컬 자동 저장
             </span>
@@ -361,7 +393,7 @@ export function App() {
             >
               <FolderOpen size={17} />
             </button>
-            <button className="avatar" aria-label="연결 설정 열기" title="연결 설정" onClick={() => setTab("settings")}>
+            <button className="avatar" aria-label="연결 설정 열기" title="연결 설정" onClick={() => openSettings()}>
               <Settings size={16} />
             </button>
           </div>
@@ -397,25 +429,14 @@ export function App() {
                 <Plus size={17} /> 새 프로젝트
               </button>
             </div>
-            <section className="hero-card" aria-label="제작 흐름 안내">
-              <div>
-                <h2>오브젝트 제작 흐름</h2>
-                <p>
-                  만들 대상을 선택하고, 결과를 비교·채택한 뒤 필요한 작업을 이어가세요.
-                </p>
-                <div className="hero-flow" aria-label="제작 순서">
-                  <span>이미지</span><ChevronRight size={13} /><span>모델·재질</span><ChevronRight size={13} /><span>필요한 리깅·동작</span><ChevronRight size={13} /><span>Unity 전달</span>
-                </div>
+            <section className="home-start" aria-label="제작 시작">
+              <div><span className="eyebrow">무엇부터 시작할까요?</span><h2>아이디어를 Unity 오브젝트로</h2><p>이미지와 모델을 만들고, 마음에 드는 결과를 골라 작업을 이어가세요.</p></div>
+              <div className="home-start-actions">
+                <button className="start-card primary" onClick={() => begin('new')}><Plus size={24}/><strong>새 오브젝트 만들기</strong><span>만들 대상과 제작 방법을 선택하세요</span></button>
+                <button className="start-card" onClick={() => begin('import')}><Upload size={24}/><strong>이미지·모델로 시작</strong><span>가지고 있는 파일을 가져오세요</span></button>
+                <button className="start-card" disabled={!state.projects.length} onClick={() => { const recent = p ?? [...state.projects].sort((a,b) => b.updatedAt.localeCompare(a.updatedAt))[0]; if (recent) enterProject(recent, 'resume'); }}><Clock size={24}/><strong>마지막 작업 이어하기</strong><span>{continueProject?.name ?? '아직 저장한 작업이 없어요'}</span>{continueProject && <small>{continueTask && continueWorkspace?.objects.find(object => object.id === continueTask.objectId)?.name} · {continueStatus}</small>}</button>
               </div>
-              <button
-                  onClick={() => {
-                    setDemo(true);
-                    setName("마네킹 연결 테스트");
-                    setCreate(true);
-                  }}
-                >
-                  로컬 데모로 시작 <ArrowUpRight size={17} />
-                </button>
+              <small>시작 버튼은 준비 화면을 엽니다. 유료 작업은 비용을 확인하고 승인한 뒤 실행됩니다.</small>
             </section>
             <div className="section-title">
               <h2>
@@ -574,13 +595,15 @@ export function App() {
               </div>
             </div>}
             {tab === "graphics" && (
-              <GraphicsStudio project={p} workspace={state.graphicsWorkspaces?.find(w => w.projectId === p.id)} busy={busy}
+              <GraphicsStudio key={p.id} project={p} workspace={state.graphicsWorkspaces?.find(w => w.projectId === p.id)} busy={busy}
                 onAction={async action => {
                   const result = await run({ type: "graphics.action", id: p.id, action });
                   if (!result) throw new Error("그래픽 요청을 완료하지 못했습니다. 표시된 오류를 확인하세요. 다음 작업은 시작하지 않았습니다.");
                   return result;
                 }}
-                onOpenSettings={() => setTab("settings")}
+                entryIntent={entryIntent}
+                onEntryHandled={() => setEntryIntent(undefined)}
+                onOpenSettings={openSettings}
                 onExportProject={() => void run({ type: "project.export", id: p.id }, "프로젝트 백업을 저장했습니다.")} />
             )}
             {tab === "workbench" && (
@@ -1629,7 +1652,7 @@ export function App() {
             )}
           </>
         )}
-        {tab === "settings" && <SettingsPanel state={state} run={run} />}
+        {tab === "settings" && <><div className="settings-return"><button onClick={() => setTab(settingsReturn)}>← {p && settingsReturn !== 'home' ? `${p.name} 작업으로 돌아가기` : '홈으로 돌아가기'}</button><span>필요한 서비스만 연결하세요.</span></div><SettingsPanel state={state} run={run} provider={settingsProvider} /></>}
         {tab !== "graphics" && <footer className="statusbar">
           <span>
             <span className="status-dot" /> 로컬 엔진 준비됨
@@ -1647,6 +1670,7 @@ export function App() {
           </span>
         </footer>}
       </div>
+      {projectIntent && !create && <div className="modal-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="project-choice-title"><div className="section-title"><h2 id="project-choice-title">어느 프로젝트에서 시작할까요?</h2><button aria-label="프로젝트 선택 닫기" onClick={() => setProjectIntent(undefined)}><X size={20}/></button></div><p>오브젝트와 결과를 보관할 프로젝트를 선택하세요.</p><div className="project-choice-list">{state.projects.map(project => <button key={project.id} onClick={() => enterProject(project, projectIntent)}><Folder size={18}/>{project.name}<ChevronRight size={16}/></button>)}</div><button className="primary full" onClick={() => { setDemo(false); setName('새 프로젝트'); setCreate(true); }}><Plus size={17}/>새 프로젝트 만들기</button></section></div>}
       {create && (
         <div className="modal-backdrop">
           <section role="dialog" aria-modal="true" className="modal">
@@ -1672,8 +1696,7 @@ export function App() {
               로컬 데모 테스트 프로젝트
             </label>
             <p>
-              몸체·머리·헤어 파츠로 시작합니다. 구성은 자유롭게 바꿀 수
-              있습니다.
+              프로젝트는 오브젝트와 제작 결과를 보관하는 폴더입니다. 만들 대상은 다음 화면에서 선택합니다.
             </p>
             <button
               className="primary full"
@@ -1686,7 +1709,7 @@ export function App() {
                 });
                 if (p) {
                   setCreate(false);
-                  open(p);
+                  if (projectIntent) enterProject(p, projectIntent); else open(p);
                   if (demo) setTab("rig");
                 }
               }}
@@ -1880,7 +1903,9 @@ function JobPanel({
 function SettingsPanel({
   state,
   run,
+  provider,
 }: {
+  provider?: 'tripo' | 'fal' | 'openai';
   state: AppState;
   run: (c: Command, s?: string) => Promise<any>;
 }) {
@@ -1896,8 +1921,9 @@ function SettingsPanel({
           <p>제작 파일은 로컬에, API 키는 운영체제 보안 저장소에 보관합니다.</p>
         </div>
       </div>
+      {provider && <div className="connection-guidance" role="status">{provider === 'tripo' ? '모델·재질 제작에 사용할 Tripo 연결을 확인하세요.' : `${provider === 'fal' ? 'fal 이미지' : 'OpenAI'} 연결은 해당 제작 단계의 연결 안내에서 설정하세요. 아래 Tripo 키와는 별도입니다.`} 저장된 키는 연결 확인 전까지 사용 가능 여부가 검증되지 않습니다.</div>}
       <div className="settings-grid">
-        <section className="surface">
+        <section className={`surface ${provider === "tripo" ? "provider-highlight" : ""}`} id="connection-tripo">
           <div className="section-title">
             <h2>
               <Sparkles size={18} /> Tripo API
