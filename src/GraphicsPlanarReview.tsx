@@ -8,6 +8,14 @@ import type { PlanarMaterialPolicy } from "../shared/graphics-planar";
 import type { Project } from "../shared/types";
 import { Viewport } from "./Viewport";
 import { PlanarComparison } from "./PlanarComparison";
+import {
+  validatePlanarCandidateReport,
+  currentPlanarInspection,
+  planarBoundaryLabel,
+  planarBoundaryCanRepair,
+  planarBoundaryOverlay,
+  planarSelectionConflict,
+} from "./planar-review";
 import "./graphics-planar.css";
 const colors = ["#ffce62", "#63d9ff", "#ed9dff", "#91eea0", "#ffa18c"];
 const requiredChecks = [
@@ -45,6 +53,7 @@ function reasonLabel(reason: string) {
   return "구조를 안전하게 복구할 수 있는지 추가 검토가 필요합니다.";
 }
 type SavedRepairReport = {
+  uiVersionId: string;
   checks?: Record<string, boolean>;
   warnings?: string[];
   addedFaces?: number;
@@ -72,6 +81,8 @@ export function GraphicsPlanarReview({
     heading.current?.focus({ preventScroll: true });
   }, []);
   const report = workspace.planarInspections?.[source.id];
+  const currentInspection = currentPlanarInspection(report);
+  const [historicalResultId, setHistoricalResultId] = useState("");
   const draftKey = `partsmith.planar.${project.id}.${source.id}.${report?.reportFile?.sha256 ?? report?.inspectionId ?? "uninspected"}`;
   const [draft] = useState(() => {
     try {
@@ -111,45 +122,85 @@ export function GraphicsPlanarReview({
     kept = boundaries.filter((b) => decisions[b.id] === "keep");
   const overlays = useMemo(
     () =>
-      boundaries.map((b, i) => ({
-        id: b.id,
-        number: b.number,
-        points: (b.polyline ?? b.worldVertices).map(([x, y, z]) => [x, z, -y]),
-        color: colors[i % colors.length],
-      })),
+      boundaries.map((b, i) =>
+        planarBoundaryOverlay(b, colors[i % colors.length]),
+      ),
     [mesh],
   );
-  const result = [...workspace.versions]
+  const savedCandidates = [...workspace.versions]
     .reverse()
-    .find(
-      (v) =>
-        v.planarRepair?.versionId === source.id &&
-        v.planarRepair.inspectionId === report?.inspectionId &&
-        v.planarRepair.meshId === mesh?.meshId &&
-        v.planarRepair.materialPolicy === policy &&
-        JSON.stringify([...v.planarRepair.selectedBoundaryIds].sort()) ===
-          JSON.stringify(selected.map((b) => b.id).sort()) &&
-        JSON.stringify([...v.planarRepair.keptBoundaryIds].sort()) ===
-          JSON.stringify(kept.map((b) => b.id).sort()) &&
-        !!report?.reportFile?.sha256 &&
-        workspace.tasks?.some(
-          (t) =>
-            t.outputVersionIds.includes(v.id) &&
-            t.planarInspection?.reportFile?.sha256 ===
-              report.reportFile?.sha256,
-        ),
-    );
+    .filter((version) => version.planarRepair?.versionId === source.id);
+  const result =
+    savedCandidates.find((version) => version.id === historicalResultId) ??
+    [...workspace.versions]
+      .reverse()
+      .find(
+        (v) =>
+          v.planarRepair?.versionId === source.id &&
+          v.planarRepair.inspectionId === report?.inspectionId &&
+          v.planarRepair.meshId === mesh?.meshId &&
+          v.planarRepair.materialPolicy === policy &&
+          JSON.stringify([...v.planarRepair.selectedBoundaryIds].sort()) ===
+            JSON.stringify(selected.map((b) => b.id).sort()) &&
+          JSON.stringify([...v.planarRepair.keptBoundaryIds].sort()) ===
+            JSON.stringify(kept.map((b) => b.id).sort()) &&
+          !!report?.reportFile?.sha256 &&
+          workspace.tasks?.some(
+            (t) =>
+              t.outputVersionIds.includes(v.id) &&
+              t.planarInspection?.reportFile?.sha256 ===
+                report.reportFile?.sha256,
+          ),
+      );
+  const resultTask =
+    result &&
+    workspace.tasks?.find((task) => task.outputVersionIds.includes(result.id));
+  const resultInspection = resultTask?.planarInspection;
+  const resultFocus =
+    resultInspection?.meshes
+      ?.find((item) => item.meshId === result?.planarRepair?.meshId)
+      ?.boundaries.filter((boundary) =>
+        result?.planarRepair?.selectedBoundaryIds.includes(boundary.id),
+      )
+      .map((boundary, index) =>
+        planarBoundaryOverlay(boundary, colors[index % colors.length]),
+      ) ?? [];
+  const resultRequiredChecks =
+    result?.planarRepair?.algorithmVersion === "planar-v2"
+      ? [...requiredChecks, "keptBoundaryEdgesPreserved"]
+      : requiredChecks;
   useEffect(() => {
     let cancelled = false;
     setSavedResult(undefined);
     setResultError("");
-    if (result?.planarRepair?.reportPath)
+    const reportFile = result?.files.find(
+      (file) =>
+        file.kind === "report" && file.path === result.planarRepair?.reportPath,
+    );
+    if (result && !reportFile) {
+      setResultError("이 복구본에 등록된 검사 보고서가 없습니다.");
+      return;
+    }
+    if (result?.planarRepair?.reportPath && reportFile)
       void fetch(
         window.desktop.assetUrl(project.id, result.planarRepair.reportPath),
       )
-        .then((response) => {
+        .then(async (response) => {
           if (!response.ok) throw Error("보고서를 읽지 못했습니다.");
-          return response.json();
+          const bytes = await response.arrayBuffer();
+          const digest = [
+            ...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+          ]
+            .map((value) => value.toString(16).padStart(2, "0"))
+            .join("");
+          if (
+            bytes.byteLength !== reportFile.bytes ||
+            digest !== reportFile.sha256
+          )
+            throw Error("등록된 검사 보고서의 파일 내용이 달라졌습니다.");
+          const value = JSON.parse(new TextDecoder().decode(bytes));
+          validatePlanarCandidateReport(value, result, source.id);
+          return { ...value, uiVersionId: result.id };
         })
         .then((value) => {
           if (!cancelled) setSavedResult(value);
@@ -209,12 +260,21 @@ export function GraphicsPlanarReview({
     selected.length > 0 &&
     selected.every((b) => b.materialOptions.includes("reuse-existing-pattern"));
   const canRepair =
+    currentInspection &&
     !!mesh &&
     selected.length > 0 &&
     selected.length + kept.length === boundaries.length &&
     selected.every(
-      (b) => b.status === "eligible" && b.materialOptions.includes(policy),
+      (b) => planarBoundaryCanRepair(b) && b.materialOptions.includes(policy),
+    ) &&
+    !planarSelectionConflict(
+      boundaries,
+      selected.map((boundary) => boundary.id),
     );
+  const selectionConflict = planarSelectionConflict(
+    boundaries,
+    selected.map((boundary) => boundary.id),
+  );
   const task = [...(workspace.tasks ?? [])]
     .reverse()
     .find(
@@ -326,6 +386,36 @@ export function GraphicsPlanarReview({
             )}
           </div>
         )}
+      {savedCandidates.length > 0 && (
+        <details className="gs-planar-history">
+          <summary>저장된 복구본 {savedCandidates.length}개</summary>
+          <p>
+            이전 검사로 만든 결과는 현재의 경계 선택과 별도로 확인할 수
+            있습니다.
+          </p>
+          {savedCandidates.map((version) => (
+            <button
+              key={version.id}
+              disabled={pending || running}
+              onClick={() => setHistoricalResultId(version.id)}
+            >
+              {version.label} · {version.id.slice(0, 8)} 비교
+            </button>
+          ))}
+          {historicalResultId && (
+            <button onClick={() => setHistoricalResultId("")}>
+              현재 검사로 돌아가기
+            </button>
+          )}
+        </details>
+      )}
+      {report && !currentInspection && (
+        <p role="status" className="gs-planar-inspection-update">
+          이전 방식의 검사 기록입니다. 새 부분을 복구하려면 이 원본을 다시
+          검사하세요. 저장된 복구본 확인·사용은 계속할 수 있습니다. 재검사는
+          자동으로 실행하지 않습니다.
+        </p>
+      )}
       {!report ? (
         <div>
           <p>검사는 컴퓨터에서 실행하고 저장합니다. GPT 호출 0 · 유료 제출 0</p>
@@ -361,11 +451,7 @@ export function GraphicsPlanarReview({
                 choices={[source]}
                 onBaseline={() => {}}
                 onClose={onClose}
-                focusBoundaries={overlays.filter((boundary) =>
-                  result.planarRepair?.selectedBoundaryIds.includes(
-                    boundary.id,
-                  ),
-                )}
+                focusBoundaries={resultFocus}
               />
               <section
                 className="gs-planar-result-guide"
@@ -373,6 +459,15 @@ export function GraphicsPlanarReview({
               >
                 <div className="gs-planar-result-body">
                   <h4>복구본 저장됨 · 사용자 외형 검토 대기</h4>
+                  {historicalResultId && (
+                    <p>
+                      저장된 복구본 보기 · 현재 검사에서 선택한 부분을 새로
+                      복구한 결과가 아닙니다.
+                    </p>
+                  )}
+                  {result.planarRepair?.algorithmVersion === "planar-v1" && (
+                    <p>이전 검사 기준으로 만든 복구본입니다.</p>
+                  )}
                   <p>
                     구조·UV·재질 검사는 저장된 보고서에서 확인하세요. 무늬
                     늘어짐, 반복, 이음새와 면 방향은 직접 검토해야 합니다.
@@ -403,14 +498,26 @@ export function GraphicsPlanarReview({
                         label: "재질·이미지",
                         keys: ["materialsAndImagesPreserved"],
                       },
+                      ...(result?.planarRepair?.algorithmVersion === "planar-v2"
+                        ? [
+                            {
+                              label: "열린 경계 유지",
+                              keys: ["keptBoundaryEdgesPreserved"],
+                            },
+                          ]
+                        : []),
                     ].map(({ label, keys }) => (
                       <div key={label}>
                         <dt>{label}</dt>
                         <dd>
                           {savedResult
-                            ? keys.every(
-                                (key) => savedResult.checks?.[key] === true,
-                              )
+                            ? keys
+                                .filter((key) =>
+                                  resultRequiredChecks.includes(key),
+                                )
+                                .every(
+                                  (key) => savedResult.checks?.[key] === true,
+                                )
                               ? "검사 통과"
                               : "확인 필요"
                             : "저장 보고서 확인 중"}
@@ -440,8 +547,9 @@ export function GraphicsPlanarReview({
                       pending ||
                       resultAccepted ||
                       !savedResult ||
+                      savedResult.uiVersionId !== result.id ||
                       !savedResult.checks ||
-                      requiredChecks.some(
+                      resultRequiredChecks.some(
                         (key) => savedResult.checks?.[key] !== true,
                       )
                     }
@@ -513,7 +621,16 @@ export function GraphicsPlanarReview({
                   </label>
                   {mesh && boundaries.length === 0 && (
                     <p role="status">
-                      열린 경계가 없습니다. 이 검사로 복구할 부분이 없습니다.
+                      열린 경계가 없습니다. 이미 면이 막혀 있다면 복구 대상으로
+                      다시 나오지 않습니다. 기존 면을 중복해서 추가하지
+                      않습니다.
+                    </p>
+                  )}
+                  {currentInspection && (
+                    <p className="gs-planar-boundary-note">
+                      이 원본에서 실제로 열린 경계만 표시합니다. 이미 막힌 큰
+                      부분은 다시 나오지 않으며, 같은 면을 중복해서 추가하지
+                      않습니다.
                     </p>
                   )}
                   <div className="gs-planar-boundaries">
@@ -523,11 +640,23 @@ export function GraphicsPlanarReview({
                           <span style={{ color: colors[i % colors.length] }}>
                             ●
                           </span>{" "}
-                          영역 {b.number} ·{" "}
-                          {b.status === "eligible"
+                          영역 {b.number} · {planarBoundaryLabel(b)} ·{" "}
+                          {planarBoundaryCanRepair(b)
                             ? "평면 복구 가능"
                             : "지원하지 않음 · 검토 필요"}
                         </legend>
+                        {b.kind === "subcycle" && (
+                          <p className="gs-planar-boundary-note">
+                            갈라진 선에서 따로 찾은 닫힌 고리입니다. 남은 열린
+                            선은 별도로 유지하며, 이 고리만 검사 후 복구합니다.
+                          </p>
+                        )}
+                        {b.kind === "open-chain" && (
+                          <p className="gs-planar-boundary-note">
+                            고리로 닫히지 않은 선입니다. 자동으로 이어 막지
+                            않으며 열린 채 유지하세요.
+                          </p>
+                        )}
                         <button disabled={!glb} onClick={() => setFocus(b.id)}>
                           영역 {b.number} 확대
                         </button>
@@ -547,7 +676,9 @@ export function GraphicsPlanarReview({
                             type="radio"
                             name={b.id}
                             checked={decisions[b.id] === "repair"}
-                            disabled={b.status !== "eligible"}
+                            disabled={
+                              !currentInspection || !planarBoundaryCanRepair(b)
+                            }
                             onChange={() =>
                               setDecisions((d) => ({ ...d, [b.id]: "repair" }))
                             }
@@ -589,6 +720,15 @@ export function GraphicsPlanarReview({
                     aria-label="복구 실행 요약"
                   >
                     <strong>실행 전 확인</strong>
+                    {selectionConflict && (
+                      <p role="alert">
+                        선택한 고리가 같은 경계를 공유하거나 서로 겹칠 수
+                        있습니다. 함께 막지 말고 한쪽을 유지로 바꾸세요.
+                      </p>
+                    )}
+                    {!currentInspection && (
+                      <p>새 복구는 원본을 다시 검사한 뒤 선택할 수 있습니다.</p>
+                    )}
                     <p>
                       {source.label} · {source.id.slice(0, 8)}
                       <br />
@@ -609,7 +749,7 @@ export function GraphicsPlanarReview({
                       )}{" "}
                       삼각형 (게임 표시{" "}
                       {selected.reduce(
-                        (n, b) => n + (b.addedTriangles ?? 0),
+                        (n, b) => n + (b.addedFaces ?? 0) + (b.addedQuads ?? 0),
                         0,
                       )}{" "}
                       삼각형)

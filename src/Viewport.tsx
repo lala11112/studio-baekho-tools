@@ -23,7 +23,7 @@ import {
   Layers3,
 } from "lucide-react";
 import type { Project, Transform } from "../shared/types";
-export type BoundaryOverlay = { id: string; number: number; points: number[][]; color: string };
+export type BoundaryOverlay = { id: string; number: number; points: number[][]; color: string; closed?: boolean; segments?: number[][][] };
 type Props = {
   project: Project;
   selectedPart?: string;
@@ -464,8 +464,9 @@ export function Viewport({
     for (const boundary of boundaryOverlays) {
       if (boundary.points.length < 2) continue;
       const points = boundary.points.map(point => new THREE.Vector3(point[0], point[1], point[2]));
-      const geometry = new THREE.BufferGeometry().setFromPoints([...points, points[0]]);
-      const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: boundary.color, depthTest: false }));
+      const geometry = new THREE.BufferGeometry().setFromPoints(boundary.segments ? boundary.segments.flat().map(point => new THREE.Vector3(point[0],point[1],point[2])) : boundary.closed === false ? points : [...points, points[0]]);
+      const material = new THREE.LineBasicMaterial({ color: boundary.color, depthTest: false });
+      const line = boundary.segments ? new THREE.LineSegments(geometry, material) : new THREE.Line(geometry, material);
       line.renderOrder = 100; group.add(line);
       const canvas = document.createElement('canvas'); canvas.width=64; canvas.height=64;
       const context = canvas.getContext('2d');

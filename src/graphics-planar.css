@@ -465,3 +465,20 @@
 .graphics-studio.gs-planar-open .gs-creation-stages button > small {
   white-space: nowrap;
 }
+.gs-planar-history button {
+  display: block;
+  max-width: 100%;
+  margin-top: 6px;
+  text-align: left;
+}
+.gs-planar-inspection-update {
+  border-left: 3px solid #ffce62;
+  padding: 6px 10px;
+  background: #302d20;
+}
+.gs-planar-boundary-note {
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 6px 0;
+  color: #d5e3e6;
+}

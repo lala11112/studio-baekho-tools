@@ -14,8 +14,8 @@ import { restoreTripoPartPreservation } from './tripo-part-preservation';
 import { prepareTripoPartSource, preflightTripoPartSource } from './tripo-part-source';
 import { inspectGraphicsSurface } from './graphics-surface-preflight';
 import { repairGraphicsSurface } from './graphics-surface-repair';
-import { runGraphicsPlanar, validatePlanarReport } from './graphics-planar';
-import { validatePlanarSelection, type PlanarSelection, type PlanarInspection } from '../shared/graphics-planar';
+import { runGraphicsPlanar, validatePlanarReport, validateSavedPlanarCandidate } from './graphics-planar';
+import { validatePlanarSelection, type PlanarSelection, type PlanarInspection, CURRENT_PLANAR_ALGORITHM } from '../shared/graphics-planar';
 import { compileCreation, validateCreation, creationCompositionStrategy } from "../shared/graphics-creation";
 import { freezeUnityRigContract } from '../shared/graphics-rig';
 import { DEFAULT_MODEL_FACE_LIMIT, requireModelGeometry } from '../shared/graphics-model-geometry';
@@ -482,6 +482,7 @@ export class GraphicsEngine {
         // Verify the entire assembly before changing even one accepted slot.
         for (const candidate of candidates) {
           for (const file of candidate.files) this.verified(id, file);
+          validateSavedPlanarCandidate(this.store.directory(id),w,candidate);
           if (requiresPartSpaceRestoration(w, candidate)) throw Error('파트의 원래 크기·위치를 먼저 복원·검사하세요. API 원본은 별도로 보존합니다.');
           if (requiresPartSourcePreparation(w, candidate)) throw Error('파트 원본의 로컬 작업 사본을 먼저 준비하세요. API 원본은 별도로 보존합니다.');
         }
@@ -1133,6 +1134,7 @@ export class GraphicsEngine {
     return this.get(id);
   }
   private planar(id:string,versionId:string,selection?:PlanarSelection,recovery?:GraphicsTask) {
+    if(recovery&&recovery.settings.algorithmVersion!==CURRENT_PLANAR_ALGORITHM)throw Error('이전 평면 작업은 새 알고리즘으로 재실행하지 않습니다. 이미 저장된 완료 후보는 유지됩니다. 새 복구는 명시적으로 다시 검사하세요.');
     const w=this.get(id),source=w.versions.find(v=>v.id===versionId);
     if(!source || source.role!=='model')throw Error('검사할 정적 모델을 선택하세요.');
     const file=source.files.find(f=>/\.blend$/i.test(f.path))??source.files.find(f=>/\.fbx$/i.test(f.path));
@@ -1142,18 +1144,18 @@ export class GraphicsEngine {
     if(recovery&&recovery.settings.sourceSha256!==file.sha256)throw Error('중단된 로컬 작업의 고정 원본이 변경됐습니다.');
     if(selection){if(!inspection||inspection.sourceSha256!==file.sha256)throw Error('현재 원본의 경계 검사가 필요합니다.');validatePlanarSelection(inspection,selection);if(!inspection.reportFile)throw Error('저장된 경계 검사 파일이 없습니다.');this.verified(id,inspection.reportFile);const stored=JSON.parse(fs.readFileSync(this.store.file(id,inspection.reportFile.path),'utf8'));if(JSON.stringify(stored)!==JSON.stringify(Object.fromEntries(Object.entries(inspection).filter(([k])=>k!=='reportFile'))))throw Error('경계 검사 기록이 달라졌습니다.');}
     const frozen=selection?{versionId,inspectionId:selection.inspectionId,meshId:selection.meshId,selectedBoundaryIds:[...selection.selectedBoundaryIds],keptBoundaryIds:[...selection.keptBoundaryIds],materialPolicy:selection.materialPolicy}:undefined;
-    const requestHash=hash(JSON.stringify({source:versionId,sha:file.sha256,selection:frozen??null,inspectionReportSha256:inspection?.reportFile?.sha256??null,inspectionIdentity:inspection?.identity??null,algorithmVersion:inspection?.algorithmVersion??'planar-v1'}));
+    const requestHash=hash(JSON.stringify({source:versionId,sha:file.sha256,selection:frozen??null,inspectionReportSha256:inspection?.reportFile?.sha256??null,inspectionIdentity:inspection?.identity??null,algorithmVersion:inspection?.algorithmVersion??CURRENT_PLANAR_ALGORITHM}));
     const prior=w.tasks.find(t=>t.taskId==='LOCAL_PLANAR_REPAIR'&&t.requestHash===requestHash);
     if(prior&&!recovery)return w;
     if(this.isActive(id)||this.options.legacyActive?.(id)||this.engine.isProjectActive(id))throw Error('다른 제작이 실행 중입니다.');
-    const task=(recovery?w.tasks.find(t=>t.id===recovery.id):undefined)??{id:uid(),objectId:source.objectId,taskId:selection?'LOCAL_PLANAR_REPAIR':'LOCAL_PLANAR_INSPECT',createdAt:now(),updatedAt:now(),status:'running' as const,inputVersionIds:[versionId],settings:{algorithmVersion:'planar-v1',sourceSha256:file.sha256},instruction:'명시적으로 선택한 정적 평면 경계만 로컬 검사·보완',requestHash,outputVersionIds:[],backendJobIds:[],message:'로컬 검사 준비 · GPT 0 · 유료 제출 0',localOnly:true,...(frozen?{planarSelection:frozen,planarInspection:structuredClone(inspection!)}:{})};
+    const task=(recovery?w.tasks.find(t=>t.id===recovery.id):undefined)??{id:uid(),objectId:source.objectId,taskId:selection?'LOCAL_PLANAR_REPAIR':'LOCAL_PLANAR_INSPECT',createdAt:now(),updatedAt:now(),status:'running' as const,inputVersionIds:[versionId],settings:{algorithmVersion:CURRENT_PLANAR_ALGORITHM,sourceSha256:file.sha256},instruction:'명시적으로 선택한 정적 평면 경계만 로컬 검사·보완',requestHash,outputVersionIds:[],backendJobIds:[],message:'로컬 검사 준비 · GPT 0 · 유료 제출 0',localOnly:true,...(frozen?{planarSelection:frozen,planarInspection:structuredClone(inspection!)}:{})};
     if(!recovery)w.tasks.push(task);task.status='running';task.updatedAt=now();this.save(w);
     const controller=new AbortController();this.active.set(task.id,{projectId:id,controller});
     void(this.options.planar??runGraphicsPlanar)({projectRoot:this.store.directory(id),source:file,sourceVersionId:versionId,resources:this.options.resources,blenderPath:this.store.settings.blenderPath,signal:controller.signal,mode:selection?'repair':'inspect',inspectionAttempt:selection?undefined:task.id,selection:frozen,inspection:selection?inspection:undefined,recoveryOnly:!!recovery,onProgress:message=>{if(controller.signal.aborted)return;const current=this.get(id),t=current.tasks.find(t=>t.id===task.id);if(t?.status==='running'){t.message=message;t.updatedAt=now();this.save(current);}}}).then(result=>{
       controller.signal.throwIfAborted();const current=this.get(id),t=current.tasks.find(t=>t.id===task.id)!;if(t.status!=='running')throw Error('로컬 검사 상태가 변경됐습니다.');for(const f of source.files)this.verified(id,f);for(const f of result.files)this.verified(id,f);
       validatePlanarReport(result.report,{projectRoot:this.store.directory(id),source:file,sourceVersionId:versionId,resources:this.options.resources,blenderPath:this.store.settings.blenderPath,signal:controller.signal,mode:selection?'repair':'inspect',selection:frozen},result.report.identity);const reportFile=result.files.find(f=>f.kind==='report');if(!reportFile||result.report.passed!==true||result.report.sourceVersionId!==versionId||result.report.sourceSha256!==file.sha256||result.report.localOnly!==true||result.report.modelTurns!==0||result.report.paidSubmissions!==0||JSON.stringify(JSON.parse(fs.readFileSync(this.store.file(id,reportFile.path),'utf8')))!==JSON.stringify(result.report))throw Error('고정된 로컬 결과 기록이 다릅니다.');
       if(!selection){current.planarInspections??={};current.planarInspections[versionId]={...result.report,reportFile} as PlanarInspection;t.message='경계 검사 완료 · 검사 기록은 채택할 모델이 아닙니다.';}
-      else{if(!['.blend','.fbx','.glb'].every(ext=>result.files.some(f=>f.path.endsWith(ext))))throw Error('완전한 보완 파일이 없습니다.');const v:AssetVersion={id:uid(),objectId:source.objectId,role:source.role,slot:source.slot,label:source.label+' · 평면 경계 보완',files:result.files,createdAt:now(),sourceVersionIds:[versionId],provenance:{type:'local'},warnings:result.report.warnings??[],planarRepair:{schemaVersion:1,...frozen!,sourceSha256:file.sha256,identity:result.report.identity,algorithmVersion:'planar-v1',reportPath:reportFile.path}};current.versions.push(v);t.outputVersionIds.push(v.id);t.message='선택한 경계 보완 완료 · 원본은 보존됩니다. 결과를 검토하고 채택하세요.';}
+      else{if(!['.blend','.fbx','.glb'].every(ext=>result.files.some(f=>f.path.endsWith(ext))))throw Error('완전한 보완 파일이 없습니다.');const v:AssetVersion={id:uid(),objectId:source.objectId,role:source.role,slot:source.slot,label:source.label+' · 평면 경계 보완',files:result.files,createdAt:now(),sourceVersionIds:[versionId],provenance:{type:'local'},warnings:result.report.warnings??[],planarRepair:{schemaVersion:1,...frozen!,sourceSha256:file.sha256,identity:result.report.identity,algorithmVersion:CURRENT_PLANAR_ALGORITHM,reportPath:reportFile.path}};current.versions.push(v);t.outputVersionIds.push(v.id);t.message='선택한 경계 보완 완료 · 원본은 보존됩니다. 결과를 검토하고 채택하세요.';}
       t.status='review';t.updatedAt=now();this.save(current);
     }).catch(error=>{const current=this.get(id),t=current.tasks.find(t=>t.id===task.id);if(t&&t.status!=='cancelled'){t.status='failed';t.message='로컬 보완 보류 · '+(error instanceof Error?error.message:String(error));t.updatedAt=now();this.save(current);}}).finally(()=>this.active.delete(task.id));return this.get(id);
   }

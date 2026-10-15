@@ -52,6 +52,7 @@ function fixture(t: any) {
 function report(q: any) {
   return {
     schemaVersion: 1,
+    algorithmVersion:'planar-v2',
     ...q,
     passed: true,
     mode: q.mode,
@@ -65,6 +66,7 @@ function report(q: any) {
             id: "b1",
             number: 1,
             vertexIndices: [0, 1, 2],
+            kind:'loop',componentId:'component',edgeVertexPairs:[[0,1],[1,2],[2,0]],conflictsWith:[],
             worldVertices: [
               [0, 0, 0],
               [1, 0, 0],
@@ -191,6 +193,7 @@ test("repair validates required checks, freezes inspection, and cancelled recove
                 "oldUVLayersPreserved",
                 "oldCustomAttributesPreserved",
                 "oldCustomNormalsPreserved",
+          "keptBoundaryEdgesPreserved",
                 "otherMeshesPreserved",
                 "materialsAndImagesPreserved",
                 "intersectionValidation",
@@ -255,6 +258,7 @@ test("repair validates required checks, freezes inspection, and cancelled recove
     /보존 검사/,
   );
   const changed = { ...inspection, meshes: [] };
+  assert.throws(()=>validatePlanarReport({...recovered.report,checks:{...recovered.report.checks,keptBoundaryEdgesPreserved:false}},args,recovered.report.identity),/보존 검사/);
   await assert.rejects(runner({ ...args, inspection: changed }), /경계/);
   fs.appendFileSync(
     path.join(f.root, "resources", "blender", "graphics_planar_repair.py"),

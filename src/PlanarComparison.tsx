@@ -11,6 +11,7 @@ import {
   renderHeadComparison,
 } from "./head-comparison";
 import "./head-comparison.css";
+import { planarLoopNormal } from "./planar-review";
 
 type Props = {
   projectId: string;
@@ -169,7 +170,12 @@ export function PlanarComparison({
               ),
             )
           : undefined;
-        fit(camera.position.clone().sub(orbit.target));
+        const normal = planarLoopNormal(points);
+        fit(
+          normal
+            ? new THREE.Vector3(...normal)
+            : camera.position.clone().sub(orbit.target),
+        );
       },
     };
     const loader = new GLTFLoader();
@@ -223,7 +229,11 @@ export function PlanarComparison({
       .then((values) => {
         if (dead || values.some((value) => !value)) return;
         appearance(solidRef.current);
-        fit(new THREE.Vector3(1, 0, 0));
+        fit(
+          new THREE.Vector3(
+            ...(planarLoopNormal(focusBoundaries[0]?.points) ?? [1, 0, 0]),
+          ),
+        );
         setDisplay(values as { height: number; scale: number }[]);
         setReady(true);
       })

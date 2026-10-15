@@ -12,9 +12,22 @@ import binary from "electron";
 import type { AppState } from "../shared/types";
 import type { GraphicsWorkspace } from "../shared/graphics";
 const fixture = JSON.parse(
-  fs.readFileSync("artifacts/runtime/graphics-planar-fixture.json", "utf8"),
+  fs.readFileSync(
+    process.env.PARTSMITH_PLANAR_FIXTURE ??
+      "artifacts/runtime/graphics-planar-fixture.json",
+    "utf8",
+  ),
 );
-const evidence = path.resolve("artifacts/runtime/graphics-planar-app.json");
+// Reuse the isolated fixture while keeping each verification's evidence separate.
+const evidencePrefix =
+  process.env.PARTSMITH_PLANAR_EVIDENCE ?? "graphics-planar";
+assert(/^[a-z0-9-]+$/.test(evidencePrefix));
+const evidence = path.resolve(`artifacts/runtime/${evidencePrefix}-app.json`);
+const capture = (name: string) =>
+  `artifacts/runtime/${evidencePrefix}-${name}.png`;
+const packageVersion = JSON.parse(
+  fs.readFileSync("package.json", "utf8"),
+).version;
 const mode = process.argv[2] ?? "inspect";
 const packaged = process.argv.includes("--packaged");
 assert(
@@ -24,6 +37,7 @@ assert(
     "repair",
     "accept",
     "restart",
+    "review",
     "delivery",
     "delivery-result",
     "cancel-delivery",
@@ -80,7 +94,7 @@ async function open() {
   delete env.ELECTRON_RUN_AS_NODE;
   app = await electron.launch({
     executablePath: packaged
-      ? path.resolve("release/0.7.0-preview.29/win-unpacked/Partsmith.exe")
+      ? path.resolve(`release/${packageVersion}/win-unpacked/Partsmith.exe`)
       : (binary as unknown as string),
     args: packaged ? [] : [bootstrap],
     env,
@@ -98,7 +112,7 @@ async function open() {
       return { version: app.getVersion(), packaged: app.isPackaged };
     });
     assert.deepEqual(report.packaged, {
-      version: "0.7.0-preview.29",
+      version: packageVersion,
       packaged: true,
     });
   }
@@ -170,11 +184,38 @@ async function open() {
   await page.getByRole("button", { name: "수정하기", exact: true }).click();
   await page.getByRole("button", { name: "빠진 면 검사", exact: true }).click();
   await page.getByTestId("graphics-planar-review").waitFor();
+  if(report.candidate && ["accept","review","restart","layout","delivery"].includes(mode)){
+    const saved=page.locator('.gs-planar-history');
+    if(await saved.count()){
+      if(!(await saved.evaluate(el=>el.hasAttribute('open'))))await saved.locator('summary').click();
+      await saved.getByRole('button',{name:new RegExp(report.candidate.id.slice(0,8)+' 비교$')}).click();
+    }
+  }
 }
 try {
   await open();
   const before = await workspace(),
     panel = page.getByTestId("graphics-planar-review");
+  const priorFiles = [
+    ...new Map(
+      before.versions
+        .flatMap((version) => version.files)
+        .map((file) => [
+          file.path,
+          {
+            ...file,
+            absolute: path.join(
+              fixture.profile,
+              "projects",
+              fixture.projectId,
+              file.path,
+            ),
+          },
+        ]),
+    ).values(),
+  ];
+  for (const file of priorFiles)
+    assert.equal(digest(file.absolute), file.sha256);
   if (mode === "inspect" || mode === "inspect-again") {
     if (mode === "inspect-again")
       await panel
@@ -209,7 +250,7 @@ try {
     await page.waitForTimeout(500);
     assert.deepEqual(inspected.objects[0].accepted, before.objects[0].accepted);
     await panel.screenshot({
-      path: "artifacts/runtime/graphics-planar-inspection.png",
+      path: capture("inspection"),
     });
   }
   if (mode === "repair") {
@@ -218,8 +259,16 @@ try {
     const mesh = inspection.meshes[0];
     assert(mesh);
     // Explicit test choice: one eligible boundary; all others remain open.
+    const vertices = process.env.PARTSMITH_PLANAR_VERTICES?.split(",")
+      .map(Number)
+      .sort((a, b) => a - b);
     const requested = Number(process.argv[3] ?? 2),
-      chosen = mesh.boundaries.find((b) => b.number === requested);
+      chosen = mesh.boundaries.find((b) =>
+        vertices
+          ? JSON.stringify([...b.vertexIndices].sort((a, b) => a - b)) ===
+            JSON.stringify(vertices)
+          : b.number === requested,
+      );
     assert(chosen?.status === "eligible");
     for (const b of mesh.boundaries) {
       const field = panel.locator("fieldset").filter({
@@ -235,10 +284,13 @@ try {
         .check();
     }
     await panel
-      .getByRole("button", { name: "영역 " + requested + " 확대", exact: true })
+      .getByRole("button", {
+        name: "영역 " + chosen.number + " 확대",
+        exact: true,
+      })
       .click();
     await panel.screenshot({
-      path: "artifacts/runtime/graphics-planar-selected.png",
+      path: capture("selected"),
     });
     await panel
       .getByRole("button", { name: "선택한 부분 복구", exact: true })
@@ -272,8 +324,15 @@ try {
           .querySelector('[data-testid="graphics-head-comparison-canvas"]')
           ?.getAttribute("data-ready") === "true",
     );
+    await panel
+      .getByRole("button", {
+        name: `복구 영역 ${chosen.number} 확대`,
+        exact: true,
+      })
+      .click();
+    await page.waitForTimeout(250);
     await panel.screenshot({
-      path: "artifacts/runtime/graphics-planar-comparison.png",
+      path: capture("comparison"),
     });
   }
   if (mode === "accept") {
@@ -290,6 +349,49 @@ try {
       adopted.tasks.length,
       before.tasks.length,
       "Adoption cannot start a generation",
+    );
+  }
+  if (mode === "review") {
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    const comparison = panel.getByTestId("graphics-head-comparison");
+    await comparison.waitFor();
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector('[data-testid="graphics-head-comparison-canvas"]')
+          ?.getAttribute("data-ready") === "true",
+    );
+    const selected = report.inspection.meshes
+      .flatMap((mesh: any) => mesh.boundaries)
+      .find((b: any) =>
+        report.candidate.planarRepair.selectedBoundaryIds.includes(b.id),
+      );
+    assert(selected);
+    await comparison
+      .getByRole("button", {
+        name: `복구 영역 ${selected.number} 확대`,
+        exact: true,
+      })
+      .click();
+    await page.waitForTimeout(350);
+    await comparison.screenshot({ path: capture("review-face") });
+    for (const name of ["+Z 방향", "−X 방향", "사선"]) {
+      await comparison.getByRole("button", { name, exact: true }).click();
+      await page.waitForTimeout(350);
+      await comparison.screenshot({
+        path: capture(
+          "review-" +
+            { "+Z 방향": "z", "−X 방향": "minus-x", 사선: "oblique" }[name],
+        ),
+      });
+    }
+    await panel
+      .getByRole("button", { name: "이 복구본 사용", exact: true })
+      .waitFor();
+    assert(
+      await panel
+        .getByRole("button", { name: "이 복구본 사용", exact: true })
+        .isEnabled(),
     );
   }
   if (mode === "restart") {
@@ -333,7 +435,7 @@ try {
     );
     save();
     await page.screenshot({
-      path: "artifacts/runtime/graphics-planar-delivery-before.png",
+      path: capture("delivery-before"),
     });
     const retry = page.getByTestId("graphics-prepare");
     if (
@@ -351,7 +453,7 @@ try {
     }
     await page.waitForTimeout(300);
     await page.screenshot({
-      path: "artifacts/runtime/graphics-planar-delivery-after.png",
+      path: capture("delivery-after"),
     });
     const staged = await waitState(
       (w) =>
@@ -484,12 +586,31 @@ try {
           );
         report.layout.push({ width, zoom, metrics });
         await page.screenshot({
-          path: `artifacts/runtime/graphics-planar-layout-${width}-${zoom}.png`,
+          path: capture(`layout-${width}-${zoom}`),
         });
       }
   }
   for (const f of originalFiles) assert.equal(digest(f.absolute), f.sha256);
   const final = await workspace();
+  for (const version of before.versions)
+    assert.deepEqual(
+      final.versions.find((v) => v.id === version.id),
+      version,
+      "Existing candidate changed",
+    );
+  for (const file of priorFiles)
+    assert.equal(
+      digest(file.absolute),
+      file.sha256,
+      "Existing candidate file changed",
+    );
+  if (!["cancel-delivery", "delivery-result"].includes(mode))
+    for (const task of before.tasks)
+      assert.deepEqual(
+        final.tasks.find((t) => t.id === task.id),
+        task,
+        "Previous task history changed",
+      );
   assert.equal(
     (await state()).projects.find((p) => p.id === fixture.projectId)!.jobs
       .length,
@@ -506,6 +627,7 @@ try {
     taskCount: final.tasks.length,
     versionCount: final.versions.length,
     originalFilesPreserved: true,
+    priorVersionFilesPreserved: priorFiles.length,
     errors: [],
   });
   if (report.failure) {

@@ -9,7 +9,7 @@ def fixture(name,verts,faces,negative=False):
     m=bpy.data.meshes.new(name);m.from_pydata(verts,[],faces);m.update();o=bpy.data.objects.new(name,m);bpy.context.collection.objects.link(o)
     if negative:o.scale=(-1,2,1)
     f=root/(name+'.blend');bpy.ops.wm.save_as_mainfile(filepath=str(f))
-    return dict(source=str(f),sourceSha256=p.file_hash(f),sourceVersionId=name,identity=name,algorithmVersion='planar-v1')
+    return dict(source=str(f),sourceSha256=p.file_hash(f),sourceVersionId=name,identity=name,algorithmVersion='planar-v2')
 def prism(poly):
     n=len(poly);v=[(x,y,z) for z in (0,1) for x,y in poly];f=[list(reversed(range(n)))]+[[i,(i+1)%n,(i+1)%n+n,i+n] for i in range(n)];return v,f
 for name,poly in [('sharp-customnormals',[(0,0),(1,0),(1,1),(0,1)]),('tri',[(0,0),(1,0),(0,1)]),('quad',[(0,0),(1,0),(1,1),(0,1)]),('concave',[(0,0),(2,0),(2,2),(1,1),(0,2)]),('collinear',[(0,0),(1,0),(2,0),(2,1),(2,2),(1,2),(0,2)])]:
@@ -96,4 +96,21 @@ bpy.ops.wm.save_as_mainfile(filepath=q['source']);q['sourceSha256']=p.file_hash(
 bpy.ops.wm.read_factory_settings(use_empty=True);m=bpy.data.meshes.new('Nested');m.from_pydata([(-1,-1,0),(2,-1,0),(2,2,0),(-1,2,0),(0,0,0),(1,0,0),(1,1,0),(0,1,0)],[],[(0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7)]);m.update();o=bpy.data.objects.new('Nested',m);bpy.context.collection.objects.link(o);bs=p.boundaries(o);assert len(bs)==2 and all(b['status']=='blocked' and 'nested coplanar boundary' in b['reasons'] for b in bs);checks.append('nested-rejected')
 (root/'native-evidence.json').write_text(json.dumps({'passed':True,'checks':checks,'root':str(root),'localOnly':True,'modelTurns':0,'paidSubmissions':0},indent=2),encoding='utf8')
 print('PLANAR_NATIVE_EXTENDED_PASS',json.dumps({'checks':checks,'root':str(root)}))
+
+
+# The cyclic 2-core is repairable while dangling boundary edges are retained.
+v,f=prism([(0,0),(1,0),(1,1),(0,1)]);v += [(0,2,2),(-1,1,2),(-1,2,2),(-1,2,3)];f += [[7,8,9],[8,10,9],[8,9,11],[9,10,11],[10,8,11]]
+q=fixture('branch-leaves',v,f);q.update(mode='inspect',report=str(root/'branch-inspect.json'));r=p.run(q);bs=r['meshes'][0]['boundaries'];loops=[b for b in bs if b['status']=='eligible'];assert len(loops)==1 and loops[0]['kind']=='subcycle',bs
+residual=[b for b in bs if b['kind']=='open-chain'];assert len(residual)==1 and residual[0]['status']=='blocked';assert len(residual[0]['edgeVertexPairs'])==2
+q.update(mode='repair',inspectionId=r['inspectionId'],meshId=r['meshes'][0]['meshId'],selectedBoundaryIds=[loops[0]['id']],keptBoundaryIds=[b['id'] for b in bs if b!=loops[0]],materialPolicy='preserve',output=str(root/'branch'),report=str(root/'branch-report.json'));r=p.run(q);assert r['checks']['keptBoundaryEdgesPreserved'];checks.append('branch-pruned-subcycle-kept-leaves')
+# Two cycles sharing a vertex produce a branched cyclic core; no guessing.
+v,f=prism([(0,0),(1,0),(1,1),(0,1)]);v += [(-1,1,2),(0,2,2)];f += [[7,8,9]]
+q=fixture('ambiguous-core',v,f);q.update(mode='inspect',report=str(root/'ambiguous-inspect.json'));r=p.run(q);bs=r['meshes'][0]['boundaries'];assert not any(b['status']=='eligible' for b in bs) and any('ambiguous branched core' in reason for b in bs for reason in b['reasons']);checks.append('shared-vertex-complex-core-rejected')
+# Straddling old plane still permits only the actual shared endpoint.
+assert not p.intersects([(0,0,0),(1,0,0),(0,1,0)],[(0,0,0),(-1,0,-1),(0,-1,1)],1e-7,[(0,0,0)])
+assert p.intersects([(0,0,0),(1,0,0),(0,1,0)],[(0,0,0),(.5,.1,-1),(.1,.5,1)],1e-7,[(0,0,0)])
+assert p.intersects([(0,0,0),(1,0,0),(0,1,0)],[(0,0,0),(-1,0,-1),(0,-1,1)],1e-7)
+checks.append('straddling-endpoint-permitted-real-crossing-rejected')
+(root/'native-evidence.json').write_text(json.dumps({'passed':True,'checks':checks,'root':str(root),'localOnly':True,'modelTurns':0,'paidSubmissions':0},indent=2),encoding='utf8')
+print('PLANAR_V2_PASS',json.dumps({'checks':checks,'root':str(root)}))
 

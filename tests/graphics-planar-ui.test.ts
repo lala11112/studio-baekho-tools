@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { build } from "esbuild";
@@ -9,7 +10,7 @@ import binary from "electron";
 
 test(
   "planar review requires explicit partition, preserves default, and stays local at responsive widths",
-  { timeout: 60000 },
+  { timeout: 120000 },
   async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "partsmith-planar-ui-"));
     const source = {
@@ -23,6 +24,7 @@ test(
     };
     const report = {
       schemaVersion: 1,
+      algorithmVersion: "planar-v2",
       inspectionId: "inspection-frozen",
       sourceVersionId: source.id,
       sourceSha256: "a".repeat(64),
@@ -34,6 +36,17 @@ test(
           boundaries: [
             {
               id: "hole",
+              kind: "subcycle",
+              addedFaces: 1,
+              addedQuads: 1,
+              addedTriangles: 0,
+              componentId: "branched-component",
+              edgeVertexPairs: [
+                [0, 1],
+                [1, 2],
+                [2, 3],
+                [3, 0],
+              ],
               number: 1,
               vertexIndices: [0, 1, 2, 3],
               worldVertices: [
@@ -48,6 +61,11 @@ test(
             },
             {
               id: "opening",
+              kind: "open-chain",
+              edgeVertexPairs: [
+                [4, 5],
+                [5, 6],
+              ],
               number: 2,
               vertexIndices: [4, 5, 6],
               worldVertices: [
@@ -65,7 +83,7 @@ test(
     };
     await build({
       stdin: {
-        contents: `import${JSON.stringify(path.resolve("src/style.css"))};import React from 'react';import{createRoot}from'react-dom/client';import{GraphicsPlanarReview}from${JSON.stringify(path.resolve("src/GraphicsPlanarReview.tsx"))};import${JSON.stringify(path.resolve("src/graphics-studio.css"))};import${JSON.stringify(path.resolve("src/graphics-guide.css"))};window.calls=[];window.desktop={assetUrl:()=>''};const root=createRoot(document.getElementById('root'));let tasks=[],extraVersions=[],objects=[];window.injectObjects=value=>{objects=value;render()};window.injectVersions=value=>{extraVersions=value;render()};window.injectTasks=value=>{tasks=value;render()};function render(){root.render(<section className="graphics-studio gs-planar-open" style={{height:"100vh"}}><header className="gs-header" style={{height:160}}>Fixture project</header><aside className="gs-objects">Objects</aside><div className="gs-workspace"><div className="gs-command-area" style={{height:110}}><nav className="gs-creation-stages">{["이미지 사용 중","모델 결과 확인","재질","조립·수정","Unity 전달 사용 중"].map((label,index)=><button key={label}><span>{index+1}</span>{label}</button>)}</nav></div><main className="gs-main"><div className="gs-work-layout"><section className="gs-result"><GraphicsPlanarReview project={{id:'p',assets:[],parts:[]}} workspace={{objects,tasks,versions:[${JSON.stringify(source)},...extraVersions],planarInspections:{'source-exact':${JSON.stringify(report)}}}} source={${JSON.stringify(source)}} disabled={false} onAction={async action=>{window.calls.push(action)}} onClose={()=>window.closedReview=true} onAccept={()=>window.accepted=true}/></section><aside className="gs-guide">Competing guide</aside></div></main></div></section>);}render();`,
+        contents: `import${JSON.stringify(path.resolve("src/style.css"))};import React from 'react';import{createRoot}from'react-dom/client';import{GraphicsPlanarReview}from${JSON.stringify(path.resolve("src/GraphicsPlanarReview.tsx"))};import${JSON.stringify(path.resolve("src/graphics-studio.css"))};import${JSON.stringify(path.resolve("src/graphics-guide.css"))};window.calls=[];window.desktop={assetUrl:()=>''};const root=createRoot(document.getElementById('root'));let tasks=[],extraVersions=[],objects=[],inspection=${JSON.stringify(report)};window.injectInspection=value=>{inspection=value;render()};window.injectObjects=value=>{objects=value;render()};window.injectVersions=value=>{extraVersions=value;render()};window.injectTasks=value=>{tasks=value;render()};function render(){root.render(<section className="graphics-studio gs-planar-open" style={{height:"100vh"}}><header className="gs-header" style={{height:160}}>Fixture project</header><aside className="gs-objects">Objects</aside><div className="gs-workspace"><div className="gs-command-area" style={{height:110}}><nav className="gs-creation-stages">{["이미지 사용 중","모델 결과 확인","재질","조립·수정","Unity 전달 사용 중"].map((label,index)=><button key={label}><span>{index+1}</span>{label}</button>)}</nav></div><main className="gs-main"><div className="gs-work-layout"><section className="gs-result"><GraphicsPlanarReview key={inspection.reportFile.sha256} project={{id:'p',assets:[],parts:[]}} workspace={{objects,tasks,versions:[${JSON.stringify(source)},...extraVersions],planarInspections:{'source-exact':inspection}}} source={${JSON.stringify(source)}} disabled={false} onAction={async action=>{window.calls.push(action)}} onClose={()=>window.closedReview=true} onAccept={()=>window.accepted=true}/></section><aside className="gs-guide">Competing guide</aside></div></main></div></section>);}render();`,
         loader: "tsx",
         resolveDir: process.cwd(),
       },
@@ -220,10 +238,53 @@ test(
         { kind: "inspect-planar", versionId: "source-exact" },
       );
       assert.equal(await page.locator("input:checked").count(), 2);
+      const savedRepairReport = {
+        schemaVersion: 1,
+        mode: "repair",
+        passed: true,
+        sourceVersionId: "source-exact",
+        sourceSha256: "a".repeat(64),
+        identity: "saved-result-identity",
+        algorithmVersion: "planar-v1",
+        inspectionId: "inspection-frozen",
+        meshId: "mesh-1",
+        selectedBoundaryIds: ["hole"],
+        keptBoundaryIds: ["opening"],
+        materialPolicy: "reuse-existing-pattern",
+        warnings: ["Local candidate; inspect appearance before adoption."],
+        checks: {
+          staticOnly: true,
+          appendOnly: true,
+          oldVerticesPreserved: true,
+          oldUVLayersPreserved: true,
+          otherMeshesPreserved: true,
+          materialsAndImagesPreserved: true,
+          oldCustomAttributesPreserved: true,
+          oldCustomNormalsPreserved: true,
+          intersectionValidation: true,
+          fbxRoundTrip: true,
+          glbRoundTrip: true,
+          keptBoundaryEdgesPreserved: true,
+        },
+      };
       const oldCandidate = {
         ...source,
         id: "old-candidate",
+        files: [
+          ...source.files,
+          {
+            path: "old-report.json",
+            kind: "report",
+            bytes: Buffer.byteLength(JSON.stringify(savedRepairReport)),
+            sha256: createHash("sha256")
+              .update(JSON.stringify(savedRepairReport))
+              .digest("hex"),
+          },
+        ],
         planarRepair: {
+          algorithmVersion: "planar-v1",
+          sourceSha256: "a".repeat(64),
+          identity: "saved-result-identity",
           versionId: "source-exact",
           inspectionId: "inspection-frozen",
           meshId: "mesh-1",
@@ -257,28 +318,8 @@ test(
         0,
       );
       assert.equal(await page.getByLabel("새 면의 재질").isVisible(), true);
-      await page.evaluate(() => {
-        window.fetch = async () =>
-          new Response(
-            JSON.stringify({
-              warnings: [
-                "Local candidate; inspect appearance before adoption.",
-              ],
-              checks: {
-                staticOnly: true,
-                appendOnly: true,
-                oldVerticesPreserved: true,
-                oldUVLayersPreserved: true,
-                otherMeshesPreserved: true,
-                materialsAndImagesPreserved: true,
-                oldCustomAttributesPreserved: true,
-                oldCustomNormalsPreserved: true,
-                intersectionValidation: true,
-                fbxRoundTrip: true,
-                glbRoundTrip: true,
-              },
-            }),
-          );
+      await page.evaluate((value) => {
+        window.fetch = async () => new Response(JSON.stringify(value));
         (window as any).injectTasks([
           {
             id: "current-result-task",
@@ -290,7 +331,7 @@ test(
             planarInspection: { reportFile: { sha256: "current-report-hash" } },
           },
         ]);
-      });
+      }, savedRepairReport);
       await page
         .getByRole("button", { name: "이 복구본 사용", exact: true })
         .waitFor();
@@ -388,6 +429,67 @@ test(
           .getByRole("button", { name: "사용 중인 복구본", exact: true })
           .isDisabled(),
         true,
+      );
+      const callsBeforeHistory = await page.evaluate(
+        () => (window as any).calls.length,
+      );
+      await page.evaluate(() => (window as any).injectObjects([]));
+      await page.evaluate((value) => (window as any).injectInspection(value), {
+        ...report,
+        algorithmVersion: "planar-v1",
+        reportFile: {
+          path: "inspection-v1.json",
+          sha256: "legacy-report-hash",
+        },
+      });
+      await page
+        .getByText("이전 방식의 검사 기록입니다.", { exact: false })
+        .waitFor();
+      assert.equal(
+        await page
+          .getByRole("button", { name: "선택한 부분 복구", exact: true })
+          .isDisabled(),
+        true,
+      );
+      assert.equal(await page.locator("input:checked").count(), 0);
+      assert.equal(
+        await page
+          .locator("fieldset")
+          .first()
+          .getByLabel("막을 부분", { exact: true })
+          .isDisabled(),
+        true,
+      );
+      await page.getByText("저장된 복구본 1개", { exact: true }).click();
+      await page
+        .getByRole("button", { name: "원본 상자 · old-cand 비교", exact: true })
+        .click();
+      await page
+        .getByText("이전 검사 기준으로 만든 복구본입니다.", { exact: true })
+        .waitFor();
+      await page.waitForFunction(
+        () =>
+          ![...document.querySelectorAll("button")].find(
+            (button) => button.textContent?.trim() === "이 복구본 사용",
+          )?.disabled,
+      );
+      assert.equal(
+        await page.evaluate(() => (window as any).calls.length),
+        callsBeforeHistory,
+      );
+      await page
+        .getByRole("button", { name: "이 복구본 사용", exact: true })
+        .click();
+      assert.equal(await page.evaluate(() => (window as any).accepted), true);
+      await page
+        .getByRole("button", { name: "현재 검사로 돌아가기", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "이 원본 다시 검사", exact: true })
+        .click();
+      assert.deepEqual(
+        (await page.evaluate(() => (window as any).calls)).at(-1),
+        { kind: "inspect-planar", versionId: "source-exact" },
       );
     } finally {
       await app.close();

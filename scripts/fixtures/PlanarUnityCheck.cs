@@ -61,8 +61,8 @@ public static class PlanarUnityCheck
         var cameraObject=new GameObject("VerificationCamera");var camera=cameraObject.AddComponent<Camera>();camera.clearFlags=CameraClearFlags.SolidColor;camera.backgroundColor=new Color(.055f,.075f,.085f);camera.orthographic=true;camera.orthographicSize=bounds.size.magnitude*.55f;camera.nearClipPlane=.001f;camera.farClipPlane=Mathf.Max(20,bounds.size.magnitude*10);camera.enabled=false;
         cameraObject.AddComponent<UniversalAdditionalCameraData>();
         var lightObject=new GameObject("VerificationLight");var light=lightObject.AddComponent<Light>();light.type=LightType.Directional;light.intensity=2;lightObject.transform.rotation=Quaternion.Euler(35,-35,0);RenderSettings.ambientMode=AmbientMode.Flat;RenderSettings.ambientLight=new Color(.45f,.45f,.45f);
-        var directions=new[]{new Vector3(1,.4f,1),Vector3.right,Vector3.back,Vector3.forward};
-        var names=new[]{"oblique","x","minus-z","z"};string output=Path.Combine(Root,"PlanarEvidence");Directory.CreateDirectory(output);
+        var directions=new[]{new Vector3(1,.4f,1),Vector3.right,Vector3.left,Vector3.back,Vector3.forward};
+        var names=new[]{"oblique","x","minus-x","minus-z","z"};string output=Path.Combine(Root,"PlanarEvidence");Directory.CreateDirectory(output);
         for(int i=0;i<names.Length;i++) {
             camera.transform.position=bounds.center+directions[i].normalized*bounds.size.magnitude*2;camera.transform.LookAt(bounds.center);
             var rt=new RenderTexture(1024,768,24,RenderTextureFormat.ARGB32);rt.Create();

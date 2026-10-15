@@ -34,7 +34,7 @@ def project(points):
 def load(q):
     source=pathlib.Path(q['source']).resolve()
     if source.suffix.lower() not in ('.fbx','.blend') or file_hash(source)!=q['sourceSha256']: raise ValueError('source hash/type mismatch')
-    if q.get('algorithmVersion')!='planar-v1': raise ValueError('unsupported algorithm version')
+    if q.get('algorithmVersion')!='planar-v2': raise ValueError('unsupported algorithm version')
     bpy.ops.wm.read_factory_settings(use_empty=True)
     if source.suffix.lower()=='.blend': bpy.ops.wm.open_mainfile(filepath=str(source),load_ui=False)
     else: bpy.ops.import_scene.fbx(filepath=str(source),use_image_search=False)
@@ -47,52 +47,74 @@ def load(q):
     return sorted(objects,key=lambda o:o.name)
 
 def boundaries(obj):
-    mesh=obj.data; incidence={}; directed={}
-    for f in mesh.polygons:
-        vs=list(f.vertices)
+    mesh=obj.data;incidence={};directed={}
+    for face in mesh.polygons:
+        vs=list(face.vertices)
         for a,b in zip(vs,vs[1:]+vs[:1]):
-            key=tuple(sorted((a,b))); incidence.setdefault(key,[]).append(f.index); directed[key]=(a,b)
-    graph={}
-    for key,fs in incidence.items():
-        if len(fs)==1:
-            a,b=key; graph.setdefault(a,[]).append(b); graph.setdefault(b,[]).append(a)
-    unseen=set(graph); result=[]
-    while unseen:
-        seed=min(unseen); component={seed}; todo=[seed]
-        while todo:
-            for n in graph[todo.pop()]:
-                if n not in component: component.add(n);todo.append(n)
-        unseen-=component; reasons=[]; ordered=[]
-        if any(len(graph[v])!=2 for v in component): reasons.append('branched or open boundary')
-        elif not 3<=len(component)<=64: reasons.append('boundary must contain 3 to 64 vertices')
-        else:
-            ordered=[seed]; prev=None; cur=seed
+            key=tuple(sorted((a,b)));incidence.setdefault(key,[]).append(face.index);directed[key]=(a,b)
+    boundary_edges={key for key,faces in incidence.items() if len(faces)==1};graph={}
+    if len(boundary_edges)>4096:raise ValueError('bounded boundary graph limit exceeded')
+    for a,b in boundary_edges:graph.setdefault(a,set()).add(b);graph.setdefault(b,set()).add(a)
+    def connected(edges):
+        g={}
+        for a,b in edges:g.setdefault(a,set()).add(b);g.setdefault(b,set()).add(a)
+        unseen=set(g);parts=[]
+        while unseen:
+            todo=[min(unseen)];vertices=set(todo)
+            while todo:
+                for v in g[todo.pop()]:
+                    if v not in vertices:vertices.add(v);todo.append(v)
+            unseen-=vertices;parts.append((vertices,{e for e in edges if e[0] in vertices}))
+        return sorted(parts,key=lambda item:min(item[0]))
+    result=[]
+    for component,edges in connected(boundary_edges):
+        component_id=digest([obj.name,sorted(component),sorted(edges)])[:24]
+        core={v:set(graph[v]) for v in component};leaves=sorted(v for v in core if len(core[v])<2)
+        while leaves:
+            v=leaves.pop()
+            if v not in core:continue
+            for neighbor in list(core[v]):
+                core[neighbor].discard(v)
+                if len(core[neighbor])<2:leaves.append(neighbor)
+            del core[v]
+        core_edges={tuple(sorted((a,b))) for a in core for b in core[a]};parts=[]
+        for vertices,partedges in connected(core_edges):
+            if len(vertices)>64 or any(len(core[v])!=2 for v in vertices):
+                parts.append((sorted(vertices),partedges,'open-chain',['ambiguous branched core; explicit bounded simple loop unavailable']))
+                continue
+            ordered=[min(vertices)];previous=None;current=ordered[0]
             while True:
-                nxt=next(v for v in sorted(graph[cur]) if v!=prev)
-                if nxt==seed: break
-                ordered.append(nxt);prev,cur=cur,nxt
-                if len(ordered)>len(component): raise ValueError('invalid boundary traversal')
-            # New winding must reverse every old directed boundary edge.
-            if directed[tuple(sorted(ordered[:2]))]==tuple(ordered[:2]): ordered=[ordered[0]]+list(reversed(ordered[1:]))
-            if any(directed[tuple(sorted((a,b)))]!=(b,a) for a,b in zip(ordered,ordered[1:]+ordered[:1])): reasons.append('inconsistent source winding')
-        verts=ordered or sorted(component); world=[list(obj.matrix_world@mesh.vertices[v].co) for v in verts]
-        try:
-            _,normal,_,plane_epsilon=project(world);cloud=np.array(world);deviation=float(max(abs((cloud-cloud[0])@normal)))
-            measurement={'planarityRelativeTolerance':1e-6,'planarityAbsoluteTolerance':plane_epsilon,'maxPlaneDeviation':deviation,'boundaryDiagonal':float(np.linalg.norm(np.ptp(cloud,axis=0))),'relativePlaneDeviation':deviation/float(np.linalg.norm(np.ptp(cloud,axis=0)))}
-        except ValueError as e: reasons.append(str(e));measurement={}
-        adjacent=sorted({incidence[tuple(sorted((v,n)))][0] for v in component for n in graph[v]})
-        mats=sorted({mesh.polygons[i].material_index for i in adjacent})
-        if len(mats)!=1: reasons.append('ambiguous boundary material')
-        result.append({'id':digest([obj.name,verts,world])[:24],'number':len(result)+1,'vertexIndices':verts,'worldVertices':world,'polyline':world+[world[0]],'status':'blocked' if reasons else 'eligible','reasons':reasons,'adjacentFaces':adjacent,'materialIndex':mats[0] if len(mats)==1 else None,'materialOptions':['preserve','reuse-existing-pattern'],'measurement':measurement})
-    # Nested coplanar openings need polygon-with-holes semantics; do not cap them.
+                nxt=min(v for v in core[current] if v!=previous)
+                if nxt==ordered[0]:break
+                ordered.append(nxt);previous,current=current,nxt
+            if directed[tuple(sorted(ordered[:2]))]==tuple(ordered[:2]):ordered=[ordered[0]]+list(reversed(ordered[1:]))
+            reasons=[]
+            if any(directed[tuple(sorted((a,b)))]!=(b,a) for a,b in zip(ordered,ordered[1:]+ordered[:1])):reasons.append('inconsistent source winding')
+            parts.append((ordered,partedges,'loop' if core_edges==edges else 'subcycle',reasons))
+        for vertices,partedges in connected(edges-core_edges):parts.append((sorted(vertices),partedges,'open-chain',['open boundary chain retained']))
+        for vertices,partedges,kind,reasons in sorted(parts,key=lambda item:(min(item[0]),item[2],item[0])):
+            world=[list(obj.matrix_world@mesh.vertices[v].co) for v in vertices];measurement={}
+            if kind!='open-chain':
+                try:
+                    _,normal,_,epsilon=project(world);cloud=np.array(world);diagonal=float(np.linalg.norm(np.ptp(cloud,axis=0)));deviation=float(max(abs((cloud-cloud[0])@normal)))
+                    measurement={'planarityRelativeTolerance':1e-6,'planarityAbsoluteTolerance':epsilon,'maxPlaneDeviation':deviation,'boundaryDiagonal':diagonal,'relativePlaneDeviation':deviation/diagonal}
+                except ValueError as error:reasons.append(str(error))
+            adjacent=sorted({incidence[e][0] for e in partedges});materials=sorted({mesh.polygons[i].material_index for i in adjacent})
+            if len(materials)!=1:reasons.append('ambiguous boundary material')
+            # Edge sets and vertex-coordinate maps are canonical under traversal reversal/rotation.
+            canonical_world=[[v,list(obj.matrix_world@mesh.vertices[v].co)] for v in sorted(vertices)]
+            identity=digest([obj.name,sorted(partedges),canonical_world])[:24]
+            result.append({'id':identity,'number':len(result)+1,'kind':kind,'componentId':component_id,'edgeVertexPairs':[list(e) for e in sorted(partedges)],'conflictsWith':[],
+                'vertexIndices':vertices,'worldVertices':world,'polyline':world+([world[0]] if kind!='open-chain' else []),'status':'blocked' if reasons else 'eligible','reasons':reasons,
+                'adjacentFaces':adjacent,'materialIndex':materials[0] if len(materials)==1 else None,'materialOptions':['preserve','reuse-existing-pattern'] if not reasons else [],'measurement':measurement})
     for a in result:
-        if a['status']!='eligible': continue
-        flat,n,axes,eps=project(a['worldVertices']); origin=np.array(a['worldVertices'][0])
+        if a['status']!='eligible':continue
+        flat,normal,axes,eps=project(a['worldVertices']);origin=np.array(a['worldVertices'][0])
         for b in result:
-            if b is a: continue
-            p=np.array(b['worldVertices'])
-            if max(abs((p-origin)@n))<=eps and any(inside(v,flat,eps*eps) for v in p[:,axes].tolist()):
-                a['status']='blocked';a['reasons'].append('nested coplanar boundary'); b['status']='blocked';b['reasons'].append('nested coplanar boundary')
+            if b is a or b['kind']=='open-chain':continue
+            points=np.array(b['worldVertices'])
+            if max(abs((points-origin)@normal))<=eps and any(inside(v,flat,eps*eps) for v in points[:,axes].tolist()):
+                a['status']='blocked';a['reasons'].append('nested coplanar boundary');b['status']='blocked';b['reasons'].append('nested coplanar boundary')
     return result
 
 def triangles(points):
@@ -148,16 +170,34 @@ def intersects(new,old,eps,shared=()):
                     d=y-x;t=float(np.dot(point-x,d)/max(np.dot(d,d),1e-30))
                     if -eps<=t<=1+eps and np.linalg.norm(point-(x+t*d))<=eps: contact.append(point)
         return not (contact and all(permitted(v) for v in contact))
-    # For noncoplanar triangles shared vertices/edges alone are allowed, but
-    # only when all nonshared vertices lie strictly on one side of patch plane.
     if not coplanar:
-        distances=(b-a[0])@(na/np.linalg.norm(na)); non=[d for v,d in zip(b,distances) if min(np.linalg.norm(v-x) for x in a)>eps]
-        if non and (min(distances)>=-eps or max(distances)<=eps):
-            axes2=[i for i in range(3) if i!=int(np.argmax(abs(na)))];flat=a[:,axes2].tolist()
-            contact=[v for v,d in zip(b,distances) if abs(d)<=eps]
-            # Only common topology endpoints/edges may touch the patch.
-            relevant=[v for v in contact if inside(v[axes2].tolist(),flat,eps*eps) or any(np.linalg.norm(v-x)<=eps for x in a)]
-            if relevant and all(permitted(v) for v in relevant): return False
+        # SAT includes contact. Intersect the old triangle with the patch plane,
+        # then clip that segment against the patch triangle's exact half-planes.
+        # Only resulting shared topology points/edges may be permitted.
+        normal=na/np.linalg.norm(na);distances=(b-a[0])@normal;cuts=[]
+        for point,distance in zip(b,distances):
+            if abs(distance)<=eps:cuts.append(point)
+        for i in range(3):
+            j=(i+1)%3
+            if distances[i]*distances[j]<0:cuts.append(b[i]+(b[j]-b[i])*(-distances[i])/(distances[j]-distances[i]))
+        unique=[]
+        for point in cuts:
+            if not any(np.linalg.norm(point-other)<=eps for other in unique):unique.append(point)
+        if not unique:return False
+        if len(unique)>2:return True
+        start=unique[0];end=unique[-1];axes2=[i for i in range(3) if i!=int(np.argmax(abs(normal)))];flat=a[:,axes2].tolist();orientation=1 if area(flat)>0 else -1
+        lo,hi=0.,1.
+        for i in range(3):
+            x,y=np.array(flat[i]),np.array(flat[(i+1)%3]);edge=y-x
+            offset=float(orientation*np.cross(edge,start[axes2]-x));slope=float(orientation*np.cross(edge,end[axes2]-start[axes2]))
+            if abs(slope)<=1e-30:
+                if offset < -eps*np.linalg.norm(edge):return False
+            elif slope>0:lo=max(lo,-offset/slope)
+            else:hi=min(hi,-offset/slope)
+        length=float(np.linalg.norm(end-start));parameter_epsilon=eps/max(length,eps)
+        if hi<lo-parameter_epsilon:return False
+        lo=max(0.,min(1.,lo));hi=max(lo,min(1.,hi));first=start+(end-start)*lo;last=start+(end-start)*hi
+        return not (permitted(first) and permitted(last))
     return True
 
 def uv_mapping(obj,boundary,policy):
@@ -265,7 +305,7 @@ def run(q):
                 if not options: b['status']='blocked';b['reasons'].append('no compatible UV material continuation')
         records.append({'meshId':meshid,'name':obj.name,'boundaries':bs,'vertices':len(obj.data.vertices),'faces':len(obj.data.polygons)})
         internals[meshid]=(obj,bs)
-    inspection=digest([q['sourceSha256'],records,'planar-v1'])
+    inspection=digest([q['sourceSha256'],records,'planar-v2'])
     report={k:q.get(k) for k in ('identity','sourceVersionId','sourceSha256','algorithmVersion','meshId','selectedBoundaryIds','keptBoundaryIds','materialPolicy')}
     report.update(schemaVersion=1,mode=q['mode'],passed=True,inspectionId=inspection,meshes=records,localOnly=True,modelTurns=0,paidSubmissions=0,visualQualityVerified=False)
     if q['mode']=='repair':
@@ -273,6 +313,19 @@ def run(q):
         if q.get('meshId') not in internals: raise ValueError('explicit mesh selection required')
         obj,bs=internals[q['meshId']]; selected=q.get('selectedBoundaryIds',[]);kept=q.get('keptBoundaryIds',[])
         if not selected or len(set(selected))!=len(selected) or set(selected)&set(kept) or set(selected+kept)!={b['id'] for b in bs}: raise ValueError('every boundary needs explicit repair/keep choice')
+        chosen=[b for b in bs if b['id'] in selected]
+        for i,boundary in enumerate(chosen):
+            edges={tuple(e) for e in boundary['edgeVertexPairs']}
+            if any(edges & {tuple(e) for e in other['edgeVertexPairs']} or other['id'] in boundary['conflictsWith'] for other in chosen[:i]):raise ValueError('selected boundaries have conflicting edges')
+        def edge_incidence(mesh):
+            counts={}
+            for face in mesh.polygons:
+                vertices=list(face.vertices)
+                for a,b in zip(vertices,vertices[1:]+vertices[:1]):
+                    key=tuple(sorted((a,b)));counts[key]=counts.get(key,0)+1
+            return counts
+        old_incidence=edge_incidence(obj.data)
+        retained_edges={tuple(e) for b in bs if b['id'] in kept for e in b['edgeVertexPairs']}
         patches=[]; uvvalues={}
         for b in bs:
             if b['id'] not in selected: continue
@@ -299,6 +352,9 @@ def run(q):
         for b,indices in patches:
             f=bm.faces.new([bm.verts[i] for i in indices]);f.material_index=b['materialIndex']
         bm.to_mesh(obj.data);bm.free();obj.data.update()
+        new_incidence=edge_incidence(obj.data)
+        if any(new_incidence.get(e)!=old_incidence[e] for e in retained_edges):raise ValueError('kept boundary edge incidence changed')
+        if any(new_incidence.get(tuple(e))!=old_incidence[tuple(e)]+1 for b in chosen for e in b['edgeVertexPairs']):raise ValueError('selected boundary edge incidence invalid')
         current=mesh_snapshot(obj);original=before[obj.name];loops=sum(map(len,original['polygons']))
         for k in ('positions','matrix','stableId','partId','materialSlots'):
             if current[k]!=original[k]: raise ValueError('original identity/geometry changed: '+k)
@@ -433,7 +489,7 @@ def run(q):
             for o in imported:
                 layer=o.data.uv_layers.active
                 if layer is None or any(abs(area([list(layer.data[i].uv) for i in f.loop_indices]))<1e-12 for f in o.data.polygons): raise ValueError('export contains invalid UV faces')
-        report.update(originalFaces=oldfaces,addedFaces=len(patches),faces=oldfaces+len(patches),preservedVertices=len(original['positions']),customNormalMaxDeviation=normal_max_deviation,customNormalTolerance=1e-6,glbImages=glb_images,textures=materials['textures'],tolerance={'planarityRelative':1e-6,'intersectionRelative':1e-7,'exportRelative':2e-6,'exportAbsoluteFloor':1e-7,'uvAbsolute':2e-6},files=['asset.blend','asset.fbx','asset.glb','report.json'],checks={'staticOnly':True,'appendOnly':True,'oldVerticesPreserved':True,'oldUVLayersPreserved':True,'oldCustomAttributesPreserved':True,'oldCustomNormalsPreserved':True,'otherMeshesPreserved':True,'materialsAndImagesPreserved':True,'intersectionValidation':True,'fbxRoundTrip':True,'glbRoundTrip':True},newUvLayerGenerated=not textured,warnings=['Local candidate; inspect appearance before adoption.'])
+        report.update(originalFaces=oldfaces,addedFaces=len(patches),faces=oldfaces+len(patches),preservedVertices=len(original['positions']),customNormalMaxDeviation=normal_max_deviation,customNormalTolerance=1e-6,glbImages=glb_images,textures=materials['textures'],tolerance={'planarityRelative':1e-6,'intersectionRelative':1e-7,'exportRelative':2e-6,'exportAbsoluteFloor':1e-7,'uvAbsolute':2e-6},files=['asset.blend','asset.fbx','asset.glb','report.json'],checks={'staticOnly':True,'appendOnly':True,'oldVerticesPreserved':True,'oldUVLayersPreserved':True,'oldCustomAttributesPreserved':True,'oldCustomNormalsPreserved':True,'otherMeshesPreserved':True,'materialsAndImagesPreserved':True,'intersectionValidation':True,'keptBoundaryEdgesPreserved':True,'fbxRoundTrip':True,'glbRoundTrip':True},newUvLayerGenerated=not textured,warnings=['Local candidate; inspect appearance before adoption.'])
     elif q['mode']!='inspect': raise ValueError('unsupported mode')
     if file_hash(q['source'])!=q['sourceSha256']: raise ValueError('source changed')
     pathlib.Path(q['report']).parent.mkdir(parents=True,exist_ok=True)
@@ -441,26 +497,3 @@ def run(q):
     return report
 
 if __name__=='__main__': run(json.loads(pathlib.Path(sys.argv[sys.argv.index('--')+1]).read_text(encoding='utf-8-sig')))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

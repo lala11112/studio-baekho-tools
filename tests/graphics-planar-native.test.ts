@@ -13,7 +13,7 @@ test('offline planar native fixtures preserve geometry and validate exports', { 
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const evidence = JSON.parse(fs.readFileSync(path.join(root, 'native-evidence.json'), 'utf8'));
   assert.equal(evidence.passed, true);
-  assert(evidence.checks.length >= 12);
+  assert(evidence.checks.length >= 25);
   assert.equal(evidence.modelTurns, 0);
   assert.equal(evidence.paidSubmissions, 0);
   fs.mkdirSync(path.resolve('artifacts/runtime'), { recursive: true });

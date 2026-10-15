@@ -10,10 +10,17 @@ import type { AssetVersion, UnityDelivery } from "../shared/graphics";
 const repo = process.cwd(),
   runtime = path.resolve("artifacts/runtime"),
   fixture = JSON.parse(
-    fs.readFileSync(path.join(runtime, "graphics-planar-fixture.json"), "utf8"),
+    fs.readFileSync(
+      process.env.PARTSMITH_PLANAR_FIXTURE ??
+        path.join(runtime, "graphics-planar-fixture.json"),
+      "utf8",
+    ),
   );
-const appPath = path.join(runtime, "graphics-planar-app.json"),
-  evidencePath = path.join(runtime, "graphics-planar-unity.json");
+const evidencePrefix =
+  process.env.PARTSMITH_PLANAR_EVIDENCE ?? "graphics-planar";
+assert(/^[a-z0-9-]+$/.test(evidencePrefix));
+const appPath = path.join(runtime, `${evidencePrefix}-app.json`),
+  evidencePath = path.join(runtime, `${evidencePrefix}-unity.json`);
 const mode = process.argv[2] ?? "all";
 assert(["first", "redeliver", "all"].includes(mode), "Use first|redeliver|all");
 const sha = (file: string) =>
@@ -173,11 +180,11 @@ try {
   );
   await command(
     ["status", "--format", "json"],
-    path.join(runtime, "graphics-planar-unity-status.log"),
+    path.join(runtime, `${evidencePrefix}-unity-status.log`),
   );
   // status output is retained; refuse a live instance for this exact isolated project before batch editing.
   const statusText = fs.readFileSync(
-    path.join(runtime, "graphics-planar-unity-status.log"),
+    path.join(runtime, `${evidencePrefix}-unity-status.log`),
     "utf8",
   );
   assert(
@@ -221,9 +228,9 @@ try {
         "-executeMethod",
         "PlanarUnityCheck.Run",
         "-logFile",
-        path.join(runtime, "graphics-planar-unity-" + label + "-editor.log"),
+        path.join(runtime, evidencePrefix + "-unity-" + label + "-editor.log"),
       ],
-      path.join(runtime, "graphics-planar-unity-" + label + "-cli.log"),
+      path.join(runtime, evidencePrefix + "-unity-" + label + "-cli.log"),
     );
     const result = read(
       inside(unity, path.join(unity, "PlanarEvidence", label + ".json")),
@@ -329,7 +336,7 @@ try {
   evidence.passed = true;
   evidence.renderFiles = [];
   for (const phase of ["import", "reimport"])
-    for (const name of ["oblique", "x", "minus-z", "z"]) {
+    for (const name of ["oblique", "x", "minus-x", "minus-z", "z"]) {
       const from = inside(
         unity,
         path.join(unity, "PlanarEvidence", phase + "-" + name + ".png"),
@@ -337,7 +344,7 @@ try {
       if (fs.existsSync(from)) {
         const to = path.join(
           runtime,
-          "graphics-planar-unity-" + phase + "-" + name + ".png",
+          evidencePrefix + "-unity-" + phase + "-" + name + ".png",
         );
         fs.copyFileSync(from, to);
         evidence.renderFiles.push({

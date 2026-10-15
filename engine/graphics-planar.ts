@@ -3,12 +3,19 @@ import path from "node:path";
 import os from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import type { GraphicsFile } from "../shared/graphics";
+import type {
+  GraphicsFile,
+  GraphicsWorkspace,
+  AssetVersion,
+} from "../shared/graphics";
 import type {
   PlanarInspection,
   PlanarSelection,
 } from "../shared/graphics-planar";
-import { validatePlanarSelection } from "../shared/graphics-planar";
+import {
+  validatePlanarSelection,
+  CURRENT_PLANAR_ALGORITHM,
+} from "../shared/graphics-planar";
 export type PlanarArgs = {
   projectRoot: string;
   source: GraphicsFile;
@@ -33,6 +40,7 @@ const requiredChecks = [
   "oldUVLayersPreserved",
   "oldCustomAttributesPreserved",
   "oldCustomNormalsPreserved",
+  "keptBoundaryEdgesPreserved",
   "otherMeshesPreserved",
   "materialsAndImagesPreserved",
   "intersectionValidation",
@@ -86,8 +94,10 @@ export function validatePlanarReport(
     report?.schemaVersion !== 1 ||
     report.mode !== args.mode ||
     report.passed !== true ||
+    typeof report.identity !== "string" ||
+    !report.identity ||
     report.identity !== identity ||
-    report.algorithmVersion !== "planar-v1" ||
+    report.algorithmVersion !== CURRENT_PLANAR_ALGORITHM ||
     report.sourceVersionId !== args.sourceVersionId ||
     report.sourceSha256 !== args.source.sha256 ||
     report.localOnly !== true ||
@@ -99,15 +109,19 @@ export function validatePlanarReport(
     if (
       typeof report.inspectionId !== "string" ||
       !report.inspectionId ||
-      !Array.isArray(report.meshes)
+      !Array.isArray(report.meshes) ||
+      report.meshes.length > 64
     )
       throw Error("경계 검사 기록이 없습니다.");
     const ids = new Set<string>();
     for (const mesh of report.meshes) {
       if (
         typeof mesh.meshId !== "string" ||
+        !mesh.meshId ||
+        mesh.meshId.length > 500 ||
         ids.has(mesh.meshId) ||
-        !Array.isArray(mesh.boundaries)
+        !Array.isArray(mesh.boundaries) ||
+        mesh.boundaries.length > 10000
       )
         throw Error("메시 검사 기록이 잘못됐습니다.");
       ids.add(mesh.meshId);
@@ -115,12 +129,68 @@ export function validatePlanarReport(
       for (const b of mesh.boundaries) {
         if (
           typeof b.id !== "string" ||
+          !b.id ||
+          b.id.length > 500 ||
+          b.kind === undefined ||
+          b.componentId === undefined ||
+          b.edgeVertexPairs === undefined ||
+          b.conflictsWith === undefined ||
           bs.has(b.id) ||
           !["eligible", "blocked"].includes(b.status) ||
           !Array.isArray(b.reasons) ||
+          b.reasons.some((reason: unknown) => typeof reason !== "string") ||
           !Array.isArray(b.materialOptions) ||
+          b.materialOptions.some(
+            (policy: unknown) =>
+              !["preserve", "reuse-existing-pattern"].includes(
+                policy as string,
+              ),
+          ) ||
+          !Array.isArray(b.vertexIndices) ||
+          b.vertexIndices.some(
+            (index: unknown) =>
+              !Number.isSafeInteger(index) || (index as number) < 0,
+          ) ||
+          new Set(b.vertexIndices).size !== b.vertexIndices.length ||
           !Array.isArray(b.worldVertices) ||
-          (b.status === "eligible" && b.worldVertices.length < 3) ||
+          b.worldVertices.length !== b.vertexIndices.length ||
+          b.worldVertices.length > 100000 ||
+          (b.status === "eligible" &&
+            (b.worldVertices.length < 3 || b.worldVertices.length > 64)) ||
+          (b.kind !== undefined &&
+            !["loop", "subcycle", "open-chain"].includes(b.kind)) ||
+          (b.kind === "open-chain" && b.status === "eligible") ||
+          (b.componentId !== undefined &&
+            (typeof b.componentId !== "string" ||
+              !b.componentId ||
+              b.componentId.length > 500)) ||
+          (b.edgeVertexPairs !== undefined &&
+            (!Array.isArray(b.edgeVertexPairs) ||
+              !b.edgeVertexPairs.length ||
+              b.edgeVertexPairs.length > 100000 ||
+              b.edgeVertexPairs.some(
+                (pair: any) =>
+                  !Array.isArray(pair) ||
+                  pair.length !== 2 ||
+                  pair[0] === pair[1] ||
+                  pair.some(
+                    (index: unknown) =>
+                      !Number.isSafeInteger(index) ||
+                      (index as number) < 0 ||
+                      !b.vertexIndices.includes(index),
+                  ),
+              ) ||
+              new Set(
+                b.edgeVertexPairs.map((pair: number[]) =>
+                  [...pair].sort((a, b) => a - b).join(":"),
+                ),
+              ).size !== b.edgeVertexPairs.length)) ||
+          (b.conflictsWith !== undefined &&
+            (!Array.isArray(b.conflictsWith) ||
+              b.conflictsWith.some(
+                (id: unknown) => typeof id !== "string" || id === b.id,
+              ) ||
+              new Set(b.conflictsWith).size !== b.conflictsWith.length)) ||
           b.worldVertices.some(
             (v: any) =>
               !Array.isArray(v) ||
@@ -130,7 +200,27 @@ export function validatePlanarReport(
         )
           throw Error("경계 좌표 기록이 잘못됐습니다.");
         bs.add(b.id);
+        if (b.status === "eligible" && b.edgeVertexPairs) {
+          const expected = new Set(
+            b.vertexIndices.map((vertex: number, index: number) =>
+              [vertex, b.vertexIndices[(index + 1) % b.vertexIndices.length]]
+                .sort((a, b) => a - b)
+                .join(":"),
+            ),
+          );
+          if (
+            b.edgeVertexPairs.length !== expected.size ||
+            b.edgeVertexPairs.some(
+              (pair: number[]) =>
+                !expected.has([...pair].sort((a, b) => a - b).join(":")),
+            )
+          )
+            throw Error("복구 순환 경계선 기록이 정점 순서와 다릅니다.");
+        }
       }
+      for (const boundary of mesh.boundaries)
+        if (boundary.conflictsWith?.some((id: string) => !bs.has(id)))
+          throw Error("충돌 경계 기록이 현재 메시와 다릅니다.");
     }
   } else {
     const s = args.selection!;
@@ -150,6 +240,165 @@ export function validatePlanarReport(
     )
       throw Error("원본 보존 검사에 실패했습니다.");
   }
+}
+/** Adoption verifies the already saved result only; it never runs Blender or upgrades historical checks. */
+export function validateSavedPlanarCandidate(
+  root: string,
+  workspace: GraphicsWorkspace,
+  candidate: AssetVersion,
+) {
+  const p = candidate.planarRepair;
+  if (!p) return;
+  if (candidate.provenance.type !== "local")
+    throw Error("평면 복구 결과의 로컬 출처가 다릅니다.");
+  const algorithm = p.algorithmVersion;
+  if (!["planar-v1", "planar-v2"].includes(algorithm))
+    throw Error("저장된 평면 복구 알고리즘이 지원되지 않습니다.");
+  const sources = workspace.versions.filter((v) => v.id === p.versionId),
+    source = sources[0];
+  if (
+    sources.length !== 1 ||
+    source.objectId !== candidate.objectId ||
+    source.role !== "model" ||
+    source.slot !== candidate.slot ||
+    candidate.role !== "model" ||
+    JSON.stringify(candidate.sourceVersionIds) !== JSON.stringify([source.id])
+  )
+    throw Error("평면 복구 후보의 정확한 원본 연결이 다릅니다.");
+  const input =
+    source.files.find((f) => /\.blend$/i.test(f.path)) ??
+    source.files.find((f) => /\.fbx$/i.test(f.path));
+  if (!input || input.sha256 !== p.sourceSha256)
+    throw Error("평면 복구 원본의 해시가 다릅니다.");
+  for (const file of [...source.files, ...candidate.files]) verify(root, file);
+  const reports = candidate.files.filter(
+    (f) =>
+      f.path === p.reportPath && f.kind === "report" && /\.json$/i.test(f.path),
+  );
+  if (
+    reports.length !== 1 ||
+    ![".blend", ".fbx", ".glb"].every((ext) =>
+      candidate.files.some((f) => f.path.toLowerCase().endsWith(ext)),
+    )
+  )
+    throw Error("평면 복구 후보 자신의 검사 기록·모델 파일이 없습니다.");
+  const report = json(root, verify(root, reports[0]));
+  const selection: PlanarSelection = {
+    versionId: p.versionId,
+    inspectionId: p.inspectionId,
+    meshId: p.meshId,
+    selectedBoundaryIds: p.selectedBoundaryIds,
+    keptBoundaryIds: p.keptBoundaryIds,
+    materialPolicy: p.materialPolicy,
+  };
+  const producers = workspace.tasks.filter(
+    (t) =>
+      t.taskId === "LOCAL_PLANAR_REPAIR" &&
+      t.outputVersionIds.includes(candidate.id),
+  );
+  const producer = producers[0];
+  if (
+    producers.length !== 1 ||
+    producer.objectId !== candidate.objectId ||
+    producer.status !== "review" ||
+    !producer.localOnly ||
+    producer.paidApproval ||
+    producer.quoteId ||
+    producer.backendJobIds.length ||
+    producer.settings.algorithmVersion !== algorithm ||
+    producer.settings.sourceSha256 !== input.sha256 ||
+    JSON.stringify(producer.inputVersionIds) !== JSON.stringify([source.id]) ||
+    JSON.stringify(producer.planarSelection) !== JSON.stringify(selection)
+  )
+    throw Error("평면 복구의 저장된 로컬 제작 작업·선택이 다릅니다.");
+  const inspection = producer.planarInspection;
+  if (
+    !inspection?.reportFile ||
+    inspection.algorithmVersion !== algorithm ||
+    inspection.sourceVersionId !== source.id ||
+    inspection.sourceSha256 !== input.sha256 ||
+    inspection.inspectionId !== p.inspectionId
+  )
+    throw Error("평면 복구에 고정된 원래 경계 검사가 없습니다.");
+  const stored = json(root, verify(root, inspection.reportFile));
+  if (
+    JSON.stringify(stored) !==
+    JSON.stringify(
+      Object.fromEntries(
+        Object.entries(inspection).filter(([key]) => key !== "reportFile"),
+      ),
+    )
+  )
+    throw Error("고정된 경계 검사 파일과 저장 내용이 다릅니다.");
+  const expectedHash = hash(
+    JSON.stringify({
+      source: source.id,
+      sha: input.sha256,
+      selection,
+      inspectionReportSha256: inspection.reportFile.sha256,
+      inspectionIdentity: inspection.identity,
+      algorithmVersion: algorithm,
+    }),
+  );
+  if (producer.requestHash !== expectedHash)
+    throw Error("평면 복구 요청 해시와 고정된 검사·선택이 다릅니다.");
+  const mesh = inspection.meshes.find((m) => m.meshId === selection.meshId),
+    all = [...selection.selectedBoundaryIds, ...selection.keptBoundaryIds];
+  if (
+    inspection.schemaVersion !== 1 ||
+    inspection.mode !== "inspect" ||
+    inspection.passed !== true ||
+    !inspection.localOnly ||
+    inspection.modelTurns !== 0 ||
+    inspection.paidSubmissions !== 0 ||
+    !mesh ||
+    !selection.selectedBoundaryIds.length ||
+    new Set(all).size !== all.length ||
+    all.length !== mesh.boundaries.length ||
+    all.some((id) => !mesh.boundaries.some((b) => b.id === id)) ||
+    selection.selectedBoundaryIds.some(
+      (id) =>
+        !mesh.boundaries.some(
+          (b) =>
+            b.id === id &&
+            b.status === "eligible" &&
+            b.materialOptions.includes(selection.materialPolicy),
+        ),
+    )
+  )
+    throw Error("저장된 평면 복구의 경계 선택이 유효하지 않습니다.");
+  if (algorithm === CURRENT_PLANAR_ALGORITHM)
+    validatePlanarSelection(inspection, selection);
+  const checks =
+    algorithm === "planar-v1"
+      ? requiredChecks.filter((key) => key !== "keptBoundaryEdgesPreserved")
+      : requiredChecks;
+  if (
+    report.schemaVersion !== 1 ||
+    report.mode !== "repair" ||
+    report.passed !== true ||
+    report.algorithmVersion !== algorithm ||
+    report.identity !== p.identity ||
+    report.sourceVersionId !== source.id ||
+    report.sourceSha256 !== input.sha256 ||
+    report.localOnly !== true ||
+    report.modelTurns !== 0 ||
+    report.paidSubmissions !== 0 ||
+    !Array.isArray(report.warnings) ||
+    checks.some((key) => report.checks?.[key] !== true) ||
+    [
+      "inspectionId",
+      "meshId",
+      "materialPolicy",
+      "selectedBoundaryIds",
+      "keptBoundaryIds",
+    ].some(
+      (key) =>
+        JSON.stringify(report[key]) !==
+        JSON.stringify(selection[key as keyof PlanarSelection]),
+    )
+  )
+    throw Error("평면 복구 후보의 원본·검사·선택 기록이 다릅니다.");
 }
 type Run = (
   binary: string,
@@ -224,7 +473,7 @@ export function createGraphicsPlanarRunner(deps: { runBlender?: Run } = {}) {
       binarySha256 = hash(fs.readFileSync(binary));
     const identity = hash(
       JSON.stringify({
-        algorithmVersion: "planar-v1",
+        algorithmVersion: "planar-v2",
         sourceVersionId: args.sourceVersionId,
         sourceSha256: args.source.sha256,
         mode: args.mode,
@@ -331,7 +580,7 @@ export function createGraphicsPlanarRunner(deps: { runBlender?: Run } = {}) {
         sourceVersionId: args.sourceVersionId,
         sourceSha256: args.source.sha256,
         identity,
-        algorithmVersion: "planar-v1",
+        algorithmVersion: "planar-v2",
         ...args.selection,
       };
       const requestFile = path.join(staging, "request.json");
