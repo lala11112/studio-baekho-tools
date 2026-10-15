@@ -1,0 +1,68 @@
+{
+  "name": "baekho-map-forge",
+  "version": "0.5.1",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "AI blueprint to Unity map prefab — Studio Baekho desktop app",
+  "author": "Studio Baekho",
+  "main": "dist-electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc --noEmit && vite build && node scripts/build-electron.mjs",
+    "start": "electron .",
+    "test": "tsx --test tests/*.test.ts",
+    "test:desktop": "node scripts/smoke-desktop.mjs",
+    "test:packaged": "node scripts/smoke-packaged.mjs",
+    "test:portable": "node scripts/smoke-portable.mjs",
+    "package:win": "node scripts/package-win.mjs",
+    "test:designer": "node scripts/smoke-designer.mjs",
+    "test:unity": "node scripts/smoke-unity-navmesh.mjs && node scripts/smoke-unity-v4.mjs",
+    "test:unity:navmesh": "node scripts/smoke-unity-navmesh.mjs",
+    "test:fixes": "node scripts/smoke-v041.mjs",
+    "test:variants": "node scripts/smoke-variants.mjs",
+    "test:v5": "node scripts/smoke-v5.mjs",
+    "test:v051": "node scripts/smoke-v051.mjs",
+    "test:level-design-ai": "tsx scripts/smoke-level-design-ai.ts"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/three": "^0.180.0",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.56.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.1.0"
+  },
+  "build": {
+    "appId": "com.studiobaekho.mapforge",
+    "productName": "Baekho Map Forge",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "unity-importer",
+        "to": "unity-importer"
+      }
+    ],
+    "win": {
+      "target": "portable",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "Baekho-Map-Forge-${version}-Windows.exe"
+    }
+  }
+}

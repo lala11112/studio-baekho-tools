@@ -25,6 +25,7 @@ function rendererFixture() {
     showNotice(message, kind) { errors.push({ message, kind }); } });
   vm.runInContext(source.slice(source.indexOf('  const api ='), source.indexOf('  function showNotice(')), context);
   vm.runInContext(source.slice(source.indexOf('  function acceptState('), source.indexOf('  async function run(')), context);
+  vm.runInContext(source.slice(source.indexOf('  function resetSearch('), source.indexOf('  function renderSearch(')), context);
   vm.runInContext(source.slice(source.indexOf('  function switchTab('), source.indexOf('  function togglePlayback(')), context);
   const run = code => vm.runInContext(code, context);
   return { context, api, run, errors, classes, element, elements };

@@ -63,6 +63,7 @@ const pageCopy: Record<StudioPage, { title: string; subtitle: string }> = {
   },
 };
 const toolNames: Record<StudioTool, string> = {
+  map: "맵 제작",
   modeling: "3D 모델링",
   combat: "타격감 찾기",
   "hit-timing": "타격 타이밍",
@@ -70,6 +71,7 @@ const toolNames: Record<StudioTool, string> = {
   "four-tiger-items": "사인검 아이템",
 };
 const toolOrder = [
+  "map",
   "modeling",
   "four-tiger-items",
   "bgm",
@@ -86,6 +88,13 @@ const toolCopy: Record<
     output: string;
   }
 > = {
+  map: {
+    category: "MAP FORGE",
+    description: "맵을 편집하고 레벨 디자인을 검토하세요.",
+    flow: "별도 작업실 · 편집 → 검토 → Unity 번들",
+    input: "입력: 맵 설계·Unity 모듈",
+    output: "결과: 맵 JSON·Unity 가져오기 ZIP",
+  },
   "four-tiger-items": {
     category: "ITEM WORKSHOP",
     description: "20개 아이템과 아이콘을 만들고 검토.",
@@ -152,7 +161,7 @@ function dateLabel(value: string) {
 }
 
 function ToolIcon({ tool, size = 19 }: { tool: StudioTool; size?: number }) {
-  return tool === "modeling" ? (
+  return tool === "map" ? <Grid2X2 size={size} aria-hidden="true" /> : tool === "modeling" ? (
     <Box size={size} aria-hidden="true" />
   ) : tool === "hit-timing" ? (
     <Clock3 size={size} aria-hidden="true" />
@@ -190,6 +199,7 @@ function TigerMark() {
 }
 
 function ToolArt({ tool }: { tool: StudioTool }) {
+  if (tool === "map") return <div className="bkh-tool-art" aria-hidden="true" style={{ display: "grid", placeItems: "center" }}><Grid2X2 size={88} strokeWidth={1} /></div>;
   if (tool === "bgm")
     return (
       <div className="bkh-tool-art bkh-tool-art-bgm" aria-hidden="true">
@@ -681,6 +691,10 @@ export function StudioShell() {
     (target: StudioTarget) => {
       if (!bridge) return;
       setActionError("");
+      if (target.tool === "map") {
+        void window.studio.openMap().catch((error: unknown) => setActionError(errorText(error)));
+        return;
+      }
       // Issue hide before changing React state so rapid native-to-native switches
       // cannot leave the previous view over the newly selected workspace.
       hideNativeTools();

@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("bgm", Object.freeze({
 const itemMethods: (keyof FourTigerItemsApi)[] = ['list','create','read','patchItem','reviewItems','updatePolicies','adoptPolicies','acknowledgeDescription','repairReferenceIds','updateIconStyle','generateIcons','cancelPending','reconcile','abandonUnknown','selectIcon','readIcon','validate','exportPackage','probe','restorePrevious'];
 contextBridge.exposeInMainWorld('fourTigerItems',Object.freeze(Object.fromEntries(itemMethods.map(method=>[method,async(input:unknown)=>{const result=await ipcRenderer.invoke(`four-tiger-items:${method}`,input);if(!result.ok)throw Object.assign(new Error(result.error),{code:result.code});return result.value;}]))));
 contextBridge.exposeInMainWorld("studio", Object.freeze({
+  openMap: () => ipcRenderer.invoke("studio:open-map"),
   summary: () => ipcRenderer.invoke("studio:summary"),
   showCombat: (bounds: StudioBounds, target?: StudioTarget) => ipcRenderer.invoke("studio:show-combat", bounds, target),
   hideCombat: () => ipcRenderer.invoke("studio:hide-combat"),

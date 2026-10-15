@@ -1,5 +1,5 @@
 export type StudioTool =
-  "modeling" | "combat" | "hit-timing" | "bgm" | "four-tiger-items";
+  "map" | "modeling" | "combat" | "hit-timing" | "bgm" | "four-tiger-items";
 export type StudioNativeTool = "combat" | "hit-timing";
 export type StudioPage = "home" | "tools" | "runs" | "results" | "settings";
 export interface StudioTarget {
@@ -59,6 +59,7 @@ export interface StudioBounds {
   height: number;
 }
 export interface StudioApi {
+  openMap(): Promise<void>;
   summary(): Promise<StudioSummary>;
   showCombat(bounds: StudioBounds, target?: StudioTarget): Promise<void>;
   hideCombat(): Promise<void>;

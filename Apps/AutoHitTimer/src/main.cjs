@@ -46,7 +46,7 @@ function validateDraft(value, filename) {
 function summarize(state, error = '') {
   return {
     projectPath: state.projectPath || '', projectName: state.projectPath ? path.basename(state.projectPath) : '',
-    connected: state.connection?.ready === true, busy: state.busy === true,
+    connected: state.connection?.ready === true, busy: state.busy === true || state.search?.busy === true,
     error: error || state.notice || (!state.connection?.ready && state.projectPath ? state.connection?.message || '' : ''),
     jobs: (Array.isArray(state.jobs) ? state.jobs : []).filter(job => job && typeof job.id === 'string').map(job => ({
       id: job.id, clipName: String(job.clip?.name || '애니메이션'), status: String(job.status || 'draft'),

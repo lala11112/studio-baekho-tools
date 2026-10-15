@@ -124,10 +124,12 @@ test('exact repaired texture offers one explicit local UV recovery and leaves ac
     assert.deepEqual(await page.evaluate(() => (window as any).actions), [{ kind: 'repair-surface-uv', versionId: 'texture' }]);
     assert.deepEqual(await page.evaluate(() => (window as any).workspace.objects[0].accepted), object.accepted);
     await page.evaluate(() => (window as any).setRecoveryStatus('cancelled'));
+    await page.waitForFunction(() => document.querySelector('[data-testid="graphics-current-task-t03"]')?.textContent?.includes('로컬 빈 면 UV 복구 중지'));
     assert.equal(await status.isVisible(), true);
     assert.match(await status.innerText(), /로컬 빈 면 UV 복구 중지/);
     assert.doesNotMatch(await status.innerText(), /원격 상태 확인 필요|과금 취소/);
     await page.evaluate(() => (window as any).setRecoveryStatus('failed'));
+    await page.waitForFunction(() => document.querySelector('[data-testid="graphics-current-task-t03"]')?.textContent?.includes('로컬 빈 면 UV 복구 실패'));
     assert.match(await status.innerText(), /로컬 빈 면 UV 복구 실패/);
     assert.equal(await page.getByTestId('graphics-recover-t03').innerText(), '저장된 빈 면 UV 복구 · 무료');
     await page.getByTestId('graphics-recover-t03').click();

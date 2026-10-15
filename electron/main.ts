@@ -872,6 +872,7 @@ app.whenReady().then(async () => {
   let shutdownStarted = false;
   let shutdownComplete = false;
   app.on("before-quit", event => {
+    if (host.mapOpen()) { event.preventDefault(); host.focusMap(); return; }
     if (shutdownComplete) return;
     event.preventDefault();
     if (shutdownStarted) return;

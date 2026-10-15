@@ -1,6 +1,6 @@
 {
   "name": "partsmith",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "description": "Studio Baekho workspace for graphics, SainGeom items, background music and combat tools",
   "author": "Studio Baekho",
@@ -9,7 +9,7 @@
   "main": "dist-electron/main.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "tsc --noEmit && vite build && node scripts/build.mjs",
+    "build": "npm run build:map && tsc --noEmit && vite build && node scripts/build.mjs",
     "start": "electron .",
     "start:partsmith": "electron . --partsmith",
     "test": "tsx --test tests/*.test.ts",
@@ -17,7 +17,9 @@
     "test:hit-timer": "node --test Apps/AutoHitTimer/tests/*.test.cjs",
     "test:integration": "node scripts/studio-smoke.mjs",
     "test:ui": "node scripts/smoke.mjs",
-    "package": "npm run build && electron-builder --win dir"
+    "package": "npm run build && electron-builder --win dir",
+    "build:map": "node scripts/build-map.mjs",
+    "test:map": "npm --prefix Apps/AutoMapPrefabMaker test"
   },
   "dependencies": {
     "ffmpeg-static": "5.3.0",
@@ -27,7 +29,8 @@
     "react-dom": "^19.2.0",
     "sql.js": "^1.13.0",
     "three": "^0.180.0",
-    "zod": "^4.1.0"
+    "zod": "^4.1.0",
+    "fflate": "^0.8.2"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -61,7 +64,9 @@
       "Apps/AutoHitTimer/renderer/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm",
       "!node_modules/ffmpeg-static/**/*",
-      "package.json"
+      "package.json",
+      "Apps/AutoMapPrefabMaker/dist/**/*",
+      "Apps/AutoMapPrefabMaker/dist-electron/**/*"
     ],
     "extraResources": [
       {
@@ -105,6 +110,10 @@
         "filter": [
           "*.ps1"
         ]
+      },
+      {
+        "from": "Apps/AutoMapPrefabMaker/unity-importer",
+        "to": "map-forge/unity-importer"
       }
     ],
     "win": {

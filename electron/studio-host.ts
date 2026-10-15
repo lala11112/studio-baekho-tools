@@ -26,6 +26,13 @@ export function installStudioHost(options: { window: BrowserWindow; root: string
   const require = createRequire(__filename);
   const { createCombatService } = require(path.join(app.getAppPath(), "Desktop/src/main.cjs")) as { createCombatService: CombatFactory };
   const { createAutoHitTimerService } = require(path.join(app.getAppPath(), "Apps/AutoHitTimer/src/main.cjs")) as { createAutoHitTimerService: HitTimerFactory };
+  const mapRoot = path.join(app.getAppPath(), 'Apps/AutoMapPrefabMaker');
+  const { createMapWindowService } = require(path.join(mapRoot, 'dist-electron/window-service.cjs')) as {
+    createMapWindowService(options: { dataRoot: string; resourceRoot: string; integrated: boolean }): {
+      open(): void; isOpen(): boolean; focus(): void; shutdown(): void;
+    };
+  };
+  const map = createMapWindowService({ dataRoot: path.join(options.root, 'map-forge'), resourceRoot: app.isPackaged ? path.join(process.resourcesPath, 'map-forge') : mapRoot, integrated: true });
   const entries = {} as Record<StudioNativeTool, Entry>;
   let intent = 0, disposed = false;
   let visibleTool: StudioNativeTool | null = null;
@@ -114,6 +121,7 @@ export function installStudioHost(options: { window: BrowserWindow; root: string
     try{itemProjects=await options.itemProjects();}catch{warnings.push('사인검 아이템 기록 확인 필요');}
     return buildStudioSummary({ ...options.modeling(), itemProjects, version: app.getVersion(), combat: combatSnapshot, hitTimer: hitSnapshot, storage: { modeling: options.root, combat: path.dirname(settingsPath), hitTimer: hitTimerRoot, fourTigerItems:path.join(options.root,'four-tiger-items') }, warnings });
   });
+  handle("open-map", () => map.open());
   handle("show-tool", show); handle("hide-tools", hideAll); handle("resize-tool", resize);
   // Compatibility for existing 0.7 diagnostics.
   handle("show-combat", (bounds, target) => show("combat", bounds, target));
@@ -124,6 +132,7 @@ export function installStudioHost(options: { window: BrowserWindow; root: string
   win.on("resize", layout); win.on("restore", layout); win.on("show", layout);
   let allowClose = false, closePrompt = false;
   win.on("close", event => {
+    if (map.isOpen()) { event.preventDefault(); map.focus(); void dialog.showMessageBox(win, { type: 'info', message: '맵 작업실을 먼저 닫아 주세요.', detail: '맵을 저장한 뒤 작업실을 닫으면 백호툴을 종료할 수 있습니다.' }); return; }
     if (allowClose || disposed || (!combat.hasActiveWork() && !hitTimer.hasActiveWork() && !options.modelingBusy() && !options.itemsBusy())) return;
     event.preventDefault(); if (closePrompt) return; closePrompt = true;
     void dialog.showMessageBox(win, { type: "warning", title: "진행 중인 작업이 있습니다", message: "백호툴을 종료할까요?", detail: "로컬 분석을 중단하고 저장된 초안을 유지합니다. 이미 제출한 원격 작업이나 Unity 저장은 계속될 수 있으며 결과는 다음 연결에서 확인합니다.", buttons: ["계속 작업", "앱 종료"], defaultId: 0, cancelId: 0 })
@@ -131,6 +140,7 @@ export function installStudioHost(options: { window: BrowserWindow; root: string
   });
   function shutdown(): Promise<void> {
     if (shutdownPromise) return shutdownPromise;
+    map.shutdown();
     disposed = true; hideAll();
     for (const entry of Object.values(entries)) { if (entry.view && !entry.view.webContents.isDestroyed()) entry.view.webContents.close(); entry.view = undefined; }
     for (const channel of channels) ipcMain.removeHandler(channel);
@@ -139,5 +149,5 @@ export function installStudioHost(options: { window: BrowserWindow; root: string
     });
     return shutdownPromise;
   }
-  return { shutdown };
+  return { shutdown, mapOpen: () => map.isOpen(), focusMap: () => map.focus() };
 }

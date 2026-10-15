@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import electron from "electron";
+await import("./build-map.mjs");
 await import("./build.mjs");
 const vite = spawn(process.execPath, ["node_modules/vite/bin/vite.js"], {
   stdio: "inherit",

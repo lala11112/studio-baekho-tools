@@ -277,6 +277,19 @@ test('shutdown with only an unresolved save never sends cancellation or replay c
   await f.service.shutdown(); assert.ok(!f.calls.some(call => call.startsWith('unity:'))); assert.equal(fs.readFileSync(filename, 'utf8'), before);
 });
 
+test('semantic search remains cancellable through the integrated bridge and blocks shutdown while active', async t => {
+  const f = fixture(t); f.service.initialize(); await f.service.activate();
+  const controller = f.controller();
+  controller.searchAbortController = new AbortController();
+  controller.state.search = { busy: true, progressText: 'fixture search' };
+  assert.equal(f.service.hasActiveWork(), true);
+  assert.equal(f.service.getSummary().busy, true);
+  const result = await f.invoke('cancelAnimationSearch');
+  assert.equal(result.ok, true);
+  assert.equal(controller.searchAbortController.signal.aborted, true);
+  await f.service.shutdown();
+});
+
 test('frame grants remain project-contained and enforce the existing 8 MiB limit', async t => {
   const f = fixture(t), project = f.project(), folder = path.join(project, 'Library', 'AutoHitTimerBridge');
   fs.mkdirSync(folder, { recursive: true });
