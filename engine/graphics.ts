@@ -1,3 +1,8 @@
+import { runGraphicsExternalRig } from './graphics-external-rig';
+import { runGraphicsAutoRig, inspectSavedGraphicsAutoRig, probeGraphicsAutoRig } from './graphics-auto-rig';
+import { autoRigOrientation, validateAutoRigRepairs, type AutoRigAction, type AutoRigRun, type AutoRigInspection } from '../shared/graphics-auto-rig';
+import type { ExternalRigAction, ExternalRigWorkspaceHandoff } from '../shared/graphics-external-rig';
+import { validateUnityRigContract, type UnityRigContract } from '../shared/graphics-rig';
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -74,6 +79,9 @@ type Options = {
   preflightPartSource?: typeof preflightTripoPartSource;
   inspectSurface?: typeof inspectGraphicsSurface;
   repairSurface?: typeof repairGraphicsSurface;
+  externalRig?: typeof runGraphicsExternalRig;
+  autoRig?: typeof runGraphicsAutoRig;
+  autoRigProbe?: typeof probeGraphicsAutoRig;
   planar?: typeof runGraphicsPlanar;
   legacyActive?: (id: string) => boolean;
   probe?: () => Promise<NonNullable<GraphicsWorkspace["connections"]>>;
@@ -117,6 +125,8 @@ export class GraphicsEngine {
         }
         changed = true;
       }
+      for(const h of w.externalRigHandoffs??[]){if(['preparing','inspecting'].includes(h.state)){h.state='failed';h.error='앱 종료로 중단됐습니다. 저장된 완전한 결과만 명시적으로 복구할 수 있습니다.';h.updatedAt=now();changed=true;}}
+      for(const run of w.autoRigRuns??[])if(run.state==='running'){run.state='failed';run.message='앱 종료로 중단됐습니다. 저장된 결과만 복구할 수 있으며 자동으로 리깅하지 않습니다.';run.updatedAt=now();changed=true;}
       if (changed) this.save(w);
     }
   }
@@ -394,6 +404,160 @@ export class GraphicsEngine {
       return this.save(w);
     } finally { this.active.delete(versionId); }
   }
+  private async externalRigAction(id: string, action: ExternalRigAction): Promise<GraphicsWorkspace> {
+    const w=this.get(id), object=this.object(w,action.objectId); let h:ExternalRigWorkspaceHandoff;
+    if(action.kind==='prepare-external-rig') {
+      if(this.isActive(id)||this.engine.isProjectActive(id))throw Error('현재 작업을 먼저 완료하세요.');
+      const v=w.versions.find(v=>v.id===action.versionId&&v.objectId===object.id&&v.role==='model'&&v.slot==='main');
+      if(!v||object.accepted['model:main']!==v.id||object.kind!=='character'||object.creation?.subject!=='human')throw Error('채택한 사람 전체 모델이 필요합니다.');
+      if(w.externalRigHandoffs?.some(v=>v.objectId===object.id&&!['failed','blocked','cancelled'].includes(v.state)&&!v.candidateVersionId))throw Error('기존 외부 리그 전달을 먼저 확인하세요.');
+      for(const f of v.files)this.verified(id,f);
+      const source=v.files.find(f=>/\.blend$/i.test(f.path))??v.files.find(f=>/\.fbx$/i.test(f.path)); if(!source)throw Error('원본 BLEND 또는 FBX가 필요합니다.');
+      h={id:uid(),objectId:object.id,sourceVersionId:v.id,source,requiredParts:(object.creation?.parts??[]).filter(p=>p.enabled).map(p=>p.id).sort(),state:'preparing',operation:'prepare',createdAt:now(),updatedAt:now()};
+      (w.externalRigHandoffs??=[]).push(h);this.save(w);
+    } else {
+      h=w.externalRigHandoffs?.find(v=>v.id===action.handoffId&&v.objectId===object.id)!;if(!h)throw Error('전달 기록이 없습니다.');
+      if(action.kind==='cancel-external-rig'){this.active.get(h.id)?.controller.abort();h.state='cancelled';h.updatedAt=now();return this.save(w);}
+      if(h.state==='cancelled'||h.candidateVersionId)throw Error('취소되거나 완료한 전달은 반복하지 않습니다.');
+      if(this.isActive(id)||this.engine.isProjectActive(id))throw Error('현재 작업을 먼저 완료하세요.');this.verified(id,h.source);
+      if(action.kind==='inspect-external-rig') {
+        if(h.preparation?.state!=='awaiting-external'||h.returnedFbx)throw Error('준비 완료 후 반환 파일 한 개를 선택하세요.');
+        if(action.sourceToReturnedMatrix!==undefined&&(!Array.isArray(action.sourceToReturnedMatrix)||action.sourceToReturnedMatrix.length!==4||action.sourceToReturnedMatrix.some(r=>!Array.isArray(r)||r.length!==4||r.some(v=>typeof v!=='number'||!Number.isFinite(v)))))throw Error('명시적인 좌표 변환 행렬을 확인하세요.');
+        h.sourceToReturnedMatrix=action.sourceToReturnedMatrix&&structuredClone(action.sourceToReturnedMatrix);
+        const returned=path.resolve(action.returnedPath);if(!/\.fbx$/i.test(returned)||!fs.statSync(returned).isFile()||fs.lstatSync(returned).isSymbolicLink())throw Error('반환 FBX를 선택하세요.');
+        const rel='graphics/external-rig/'+h.id+'/returned-original.fbx',dest=this.store.file(id,rel);fs.mkdirSync(path.dirname(dest),{recursive:true});if(fs.existsSync(dest)){if(hash(fs.readFileSync(dest))!==hash(fs.readFileSync(returned)))throw Error('저장된 반환 원본과 선택한 FBX가 다릅니다.');}else fs.copyFileSync(returned,dest,fs.constants.COPYFILE_EXCL);h.returnedFbx=this.file(id,rel,'returned-fbx');h.operation='inspect-return';
+      }
+      if(action.kind==='import-external-rig') {
+        if(h.inspection?.state!=='review'||!h.returnedFbx)throw Error('반환 검사와 명시적인 본 매핑이 필요합니다.');
+        const reportFile=h.inspection.files.find(f=>f.kind==='report')!;const report=JSON.parse(fs.readFileSync(this.verified(id,reportFile),'utf8'));
+        const names=new Set((report.bones??[]).map((b:{name:string})=>b.name));
+        if(!Array.isArray(action.humanBones)||action.humanBones.some(b=>!names.has(b.boneName)))throw Error('검사된 실제 본 이름만 매핑하세요.');
+        const contract:UnityRigContract={schemaVersion:2,versionId:h.id,producerVersionId:h.id,producerTaskId:h.id,rigType:'humanoid',fingers:action.fingers,hairBinding:'head',requiredParts:h.requiredParts,humanBones:action.humanBones};validateUnityRigContract([{id:h.id,role:'rig'} as AssetVersion],contract);
+        h.humanBones=structuredClone(action.humanBones);h.fingers=action.fingers;h.operation='import-return';
+      }
+      h.state=h.operation==='prepare'?'preparing':'inspecting';h.updatedAt=now();delete h.error;this.save(w);
+    }
+    const controller=new AbortController();this.active.set(h.id,{projectId:id,controller});
+    try {
+      const result=await(this.options.externalRig??runGraphicsExternalRig)({projectRoot:this.store.directory(id),handoffId:h.id,sourceVersionId:h.sourceVersionId,source:h.source,operation:h.operation,blenderPath:this.store.settings.blenderPath,workerPath:path.join(this.options.resources,'blender','graphics_external_rig.py'),signal:controller.signal,preparationReport:h.preparation?.files.find(f=>f.kind==='report'),returnedFbx:h.returnedFbx,sourceToReturnedMatrix:h.sourceToReturnedMatrix,humanBones:h.humanBones,fingers:h.fingers,recoveryOnly:action.kind==='recover-external-rig'});
+      const latest=this.get(id),current=latest.externalRigHandoffs!.find(v=>v.id===h.id)!;if(controller.signal.aborted||current.state==='cancelled')throw Error('전달을 취소했습니다.');
+      current.state=result.handoff.state;current.error=result.handoff.error;current.updatedAt=now();
+      if(h.operation==='prepare')current.preparation=result.handoff;else if(h.operation==='inspect-return')current.inspection=result.handoff;else {
+        current.imported=result.handoff;
+        if(result.handoff.state==='review') {
+          if(!current.humanBones)throw Error('확인한 본 매핑이 없습니다.');
+          const versionId=uid(),contract:UnityRigContract={schemaVersion:2,versionId,producerVersionId:versionId,producerTaskId:current.id,rigType:'humanoid',fingers:current.fingers===true,hairBinding:'head',requiredParts:current.requiredParts,humanBones:current.humanBones};
+          const candidate:AssetVersion={id:versionId,objectId:object.id,role:'rig',slot:'main',label:'외부 반환 리그 · 검토 필요',files:result.files,createdAt:now(),sourceVersionIds:[current.sourceVersionId],provenance:{type:'local',jobId:current.id},warnings:['구조 검사만 완료했습니다. 관절 배치·포즈 변형·국소 웨이트 및 Unity Humanoid 검증은 아직 완료하지 않았습니다.'],externalRig:{schemaVersion:1,handoffId:current.id,reportPath:result.handoff.reportPath!,reportSha256:result.handoff.reportSha256,sourceSha256:current.source.sha256,returnedFbxSha256:current.returnedFbx?.sha256,contract}};
+          validateUnityRigContract([candidate],contract);latest.versions.push(candidate);current.candidateVersionId=versionId;
+        }
+      }return this.save(latest);
+    }catch(error){const latest=this.get(id),current=latest.externalRigHandoffs!.find(v=>v.id===h.id)!;current.state=controller.signal.aborted||current.state==='cancelled'?'cancelled':'failed';current.error=error instanceof Error?error.message:String(error);current.updatedAt=now();this.save(latest);throw error;}finally{this.active.delete(h.id);}
+  }
+  private autoRigFingerprint(run: AutoRigRun) {
+    return hash(JSON.stringify({objectId:run.objectId,sourceVersionId:run.sourceVersionId,source:run.source,operation:run.operation,settings:run.settings,repairs:run.repairs,inspectionRunId:run.inspectionRunId,toolSha256:run.toolSha256}));
+  }
+  private autoRigOutput(id:string, run:AutoRigRun) { return this.store.file(id,`graphics/auto-rig/${run.id}`); }
+  private checkAutoRigInspection(value:unknown, operation:AutoRigRun['operation']): AutoRigInspection {
+    const v=value as AutoRigInspection;
+    const text=(s:unknown):s is string=>typeof s==='string'&&s.length>0&&s.length<1000;
+    const required=operation==='rig'?['sourceHashBound','restGeometry','topology','uv','attributes','materials','images','allWeighted','normalized','exportedBoneNames']:['sourceHashBound','geometryAndUV','outsideWeights','attributes','materials','images','skeleton','exportedBoneNames'];
+    if(!v||!Array.isArray(v.checks)||required.some(id=>!v.checks.some(c=>c.id===id&&c.passed===true))||v.checks.some(c=>c.passed!==true)||!Array.isArray(v.humanBones)||!Array.isArray(v.warnings)||v.warnings.some(s=>!text(s))||!Array.isArray(v.boneNames)||!v.boneNames.length||v.boneNames.some(s=>!text(s))||new Set(v.boneNames).size!==v.boneNames.length||!Array.isArray(v.islands)||!v.islands.length||v.islands.length>100000)throw Error('자동 리그의 필수 보존 검사와 본·부위 기록이 완전하지 않습니다.');
+    const ids=new Set<string>();
+    for(const island of v.islands){const key=JSON.stringify([island.mesh,island.islandId]);if(!text(island.mesh)||!text(island.islandId)||ids.has(key)||!Number.isSafeInteger(island.vertices)||island.vertices<1||!Array.isArray(island.bones)||island.bones.some(b=>!text(b.name)||!Number.isFinite(b.meanWeight)||b.meanWeight<0||!Number.isFinite(b.maxWeight)||b.maxWeight<0))throw Error('검사한 연결 부위의 식별자·웨이트 기록이 잘못됐습니다.');
+      if(island.vertexIndices!==undefined){const vertices=island.vertexIndices;if(!Array.isArray(vertices)||vertices.length!==island.vertices||vertices.some((value,index)=>!Number.isSafeInteger(value)||value<0||index>0&&value<=vertices[index-1])||hash('['+vertices.join(', ')+']')!==island.islandId)throw Error('검사한 부위의 정확한 정점 목록·해시가 다릅니다.');}
+      ids.add(key);}
+    return structuredClone(v);
+  }
+  private validateAutoRigCandidate(id:string,w:GraphicsWorkspace,candidate:AssetVersion){
+    const meta=candidate.autoRig;if(!meta)return;
+    if(candidate.role!=='rig'||candidate.slot!=='main')throw Error('자동 리그는 검사한 전체 리그 슬롯으로만 사용할 수 있습니다.');
+    const run=w.autoRigRuns?.find(r=>r.id===meta.runId&&r.objectId===candidate.objectId&&r.candidateVersionId===candidate.id);
+    if(!run||run.state!=='review'||run.operation==='inspect'||run.requestHash!==this.autoRigFingerprint(run)||meta.sourceSha256!==run.source.sha256||JSON.stringify(run.files)!==JSON.stringify(candidate.files)||JSON.stringify(run.reportFile)!==JSON.stringify(meta.reportFile)||candidate.provenance.jobId!==run.id||JSON.stringify(candidate.sourceVersionIds)!==JSON.stringify([run.sourceVersionId]))throw Error('자동 리그의 고정 원본·결과·실행 기록이 다릅니다.');
+    const sourceVersion=w.versions.find(v=>v.id===run.sourceVersionId&&v.objectId===candidate.objectId);
+    if(!sourceVersion?.files.some(f=>JSON.stringify(f)===JSON.stringify(run.source)))throw Error('자동 리그의 원본 버전·파일 연결이 변경됐습니다.');
+    const inherited=sourceVersion.autoRig?.contract??sourceVersion.externalRig?.contract;
+    if(meta.contract.fingers!==run.settings.fingers||meta.contract.hairBinding!=='head'||JSON.stringify(meta.contract.requiredParts)!==JSON.stringify(inherited?.requiredParts??[]))throw Error('자동 리그의 손가락·파트 설정이 고정 원본과 다릅니다.');
+    this.verified(id,run.source);for(const file of run.files)this.verified(id,file);this.verified(id,meta.reportFile);
+    const saved=inspectSavedGraphicsAutoRig(this.autoRigOutput(id,run));
+    if(run.toolSha256!==undefined&&saved.toolSha256!==run.toolSha256)throw Error('자동 리그의 고정 작업 도구가 변경됐습니다.');
+    const request=JSON.parse(fs.readFileSync(saved.requestPath,'utf8'));
+    if(request.sourceSha256!==run.source.sha256||request.operation!==run.operation||request.fingers!==run.settings.fingers||JSON.stringify(request.repairs)!==JSON.stringify(run.repairs)||JSON.stringify(request.sourceToRigMatrix)!==JSON.stringify(run.operation==='rig'?autoRigOrientation(run.settings.frontAxis):undefined))throw Error('저장된 자동 리그 요청이 변경됐습니다.');
+    const inspection=this.checkAutoRigInspection(saved.report.inspection,run.operation);
+    if(JSON.stringify(inspection)!==JSON.stringify(run.inspection)||JSON.stringify(meta.contract.humanBones)!==JSON.stringify(inspection.humanBones)||meta.contract.producerTaskId!==run.id||meta.contract.versionId!==candidate.id||meta.contract.producerVersionId!==candidate.id||meta.contract.exportPolicy!=='auto-rig-fbx'||!candidate.files.some(f=>JSON.stringify(f)===JSON.stringify(meta.exportFbx)&&/\.fbx$/i.test(f.path)))throw Error('확인한 본 매핑·내보내기 결과가 변경됐습니다.');
+    validateUnityRigContract([candidate],meta.contract);
+  }
+  private async autoRigAction(id:string,action:AutoRigAction):Promise<GraphicsWorkspace>{
+    if(action.kind==='probe-auto-rig'){
+      if(this.isActive(id)||this.engine.isProjectActive(id))throw Error('실행이 끝난 후 설치를 확인하세요.');
+      const result=await(this.options.autoRigProbe??probeGraphicsAutoRig)(this.store.settings.blenderPath,path.join(this.options.resources,'blender','graphics_auto_rig.py'));
+      const latest=this.get(id);latest.autoRigReadiness=result;return this.save(latest);
+    }
+    const w=this.get(id),object=this.object(w,action.objectId);let run:AutoRigRun;
+    if(action.kind==='cancel-auto-rig'||action.kind==='recover-auto-rig'){
+      const current=w.autoRigRuns?.find(r=>r.id===action.runId&&r.objectId===object.id);if(!current)throw Error('자동 리그 실행 기록이 없습니다.');run=current;
+      if(action.kind==='cancel-auto-rig'){
+        if(run.state!=='running')throw Error('현재 실행 중인 작업만 중단할 수 있습니다.');
+        this.active.get(run.id)?.controller.abort();run.state='cancelled';run.message='로컬 작업을 중단했습니다. 기존 원본과 채택본은 유지합니다.';run.updatedAt=now();return this.save(w);
+      }
+      if(run.candidateVersionId||run.state==='review')return w;
+      if(run.state==='cancelled')throw Error('취소한 실행은 복구·재실행하지 않습니다. 기존 결과를 사용하세요.');
+      if(run.requestHash!==this.autoRigFingerprint(run))throw Error('복구할 고정 요청이 변경됐습니다.');
+    }else{
+      if(!('versionId' in action))throw Error('지원하지 않는 자동 리그 명령입니다.');
+      const version=w.versions.find(v=>v.id===action.versionId&&v.objectId===object.id&&v.slot==='main');
+      if(!version||object.kind!=='character'||object.creation?.subject!=='human')throw Error('사람 형태의 전체 모델 또는 리그가 필요합니다.');
+      if(action.kind==='start-auto-rig'&&(!['model','material'].includes(version.role)||object.accepted[`${version.role}:main`]!==version.id||!['neg-y','pos-y','pos-x','neg-x'].includes(action.frontAxis)||typeof action.fingers!=='boolean'))throw Error('채택한 전체 모델과 앞 방향·손가락 설정을 확인하세요.');
+      if(action.kind!=='start-auto-rig'&&version.role!=='rig')throw Error('검사·보정할 리그 결과를 선택하세요.');
+      for(const file of version.files)this.verified(id,file);
+      const source=version.files.find(f=>/\.blend$/i.test(f.path))??(action.kind==='start-auto-rig'?version.files.find(f=>/\.fbx$/i.test(f.path)):undefined);
+      if(!source)throw Error('자동 리깅은 BLEND·FBX, 기존 리그 보정은 편집 가능한 Auto-Rig Pro BLEND가 필요합니다.');
+      let repairs:AutoRigRun['repairs']=[];
+      if(action.kind==='repair-auto-rig'){
+        const inspection=w.autoRigRuns?.find(r=>r.id===action.inspectionRunId&&r.objectId===object.id&&r.sourceVersionId===version.id&&r.operation==='inspect'&&r.state==='review');
+        if(!inspection?.inspection||!inspection.reportFile||inspection.source.sha256!==source.sha256||inspection.requestHash!==this.autoRigFingerprint(inspection))throw Error('현재 원본을 검사한 부위·본 기록이 필요합니다.');
+        this.verified(id,inspection.reportFile);this.verified(id,inspection.source);
+        const saved=inspectSavedGraphicsAutoRig(this.autoRigOutput(id,inspection));
+        if(inspection.toolSha256!==undefined&&saved.toolSha256!==inspection.toolSha256)throw Error('부위 검사의 고정 작업 도구가 변경됐습니다.');
+        const request=JSON.parse(fs.readFileSync(saved.requestPath,'utf8'));
+        if(request.sourceSha256!==inspection.source.sha256||request.operation!=='inspect'||JSON.stringify(request.repairs)!==JSON.stringify([])||request.sourceToRigMatrix!==undefined||request.fingers!==inspection.settings.fingers||JSON.stringify(saved.report.inspection)!==JSON.stringify(inspection.inspection))throw Error('저장된 부위 검사가 변경됐습니다.');
+        repairs=validateAutoRigRepairs(inspection.inspection,action.repairs);
+      }
+      const inherited=version.autoRig?.contract??version.externalRig?.contract;
+      run={id:uid(),objectId:object.id,sourceVersionId:version.id,source:structuredClone(source),operation:action.kind==='start-auto-rig'?'rig':action.kind==='inspect-auto-rig'?'inspect':'repair',state:'running',createdAt:now(),updatedAt:now(),message:'로컬 작업을 접수했습니다. 정확한 원본과 설치된 도구를 확인합니다.',settings:{frontAxis:action.kind==='start-auto-rig'?action.frontAxis:'neg-y',fingers:action.kind==='start-auto-rig'?action.fingers:inherited?.fingers??true},repairs,files:[],...(action.kind==='repair-auto-rig'?{inspectionRunId:action.inspectionRunId}:{})};
+      run.toolSha256=hash(fs.readFileSync(path.join(this.options.resources,'blender','graphics_auto_rig.py')));
+      run.requestHash=this.autoRigFingerprint(run);
+      const existing=w.autoRigRuns?.find(r=>r.requestHash===run.requestHash&&['running','review'].includes(r.state));
+      if(existing)return w;
+    }
+    if(this.isActive(id)||this.engine.isProjectActive(id)||this.options.legacyActive?.(id))throw Error('현재 실행이 끝난 후 자동 리깅을 진행하세요.');
+    this.verified(id,run.source);
+    if(!w.autoRigRuns?.some(r=>r.id===run.id))(w.autoRigRuns??=[]).push(run);
+    run.state='running';delete run.error;run.updatedAt=now();this.save(w);
+    const controller=new AbortController();this.active.set(run.id,{projectId:id,controller});
+    try{
+      const result=await(this.options.autoRig??runGraphicsAutoRig)({blenderPath:this.store.settings.blenderPath,workerPath:path.join(this.options.resources,'blender','graphics_auto_rig.py'),sourceBlend:this.verified(id,run.source),sourceSha256:run.source.sha256,outputDir:this.autoRigOutput(id,run),operation:run.operation,fingers:run.settings.fingers,repairs:run.repairs,sourceToRigMatrix:run.operation==='rig'?autoRigOrientation(run.settings.frontAxis):undefined,recoveryOnly:action.kind==='recover-auto-rig'},{signal:controller.signal,onProgress:message=>{
+        const latest=this.get(id),current=latest.autoRigRuns?.find(r=>r.id===run.id);if(current?.state==='running'&&current.message!==message&&!controller.signal.aborted){current.message=message;current.updatedAt=now();this.save(latest);}
+      }});
+      const latest=this.get(id),current=latest.autoRigRuns!.find(r=>r.id===run.id)!;
+      if(controller.signal.aborted||current.state==='cancelled')throw Error('작업을 중단했습니다.');
+      if(current.requestHash!==this.autoRigFingerprint(current))throw Error('실행 도중 고정 요청이 변경됐습니다.');
+      if(current.toolSha256!==undefined&&result.toolSha256!==current.toolSha256)throw Error('고정한 작업 도구와 실행·복구 결과가 다릅니다.');
+      this.verified(id,current.source);
+      if(result.report.sourceSha256!==current.source.sha256||result.report.operation!==current.operation||result.report.osInputUsed!==false||result.report.paidSubmissions!==0||result.report.status!=='exported-review-pending')throw Error('작업 결과와 고정 원본이 일치하지 않습니다.');
+      const inspection=this.checkAutoRigInspection(result.report.inspection,current.operation);
+      const register=(absolute:string,kind:string)=>{const rel=path.relative(this.store.directory(id),absolute);if(!rel||rel.startsWith('..')||path.isAbsolute(rel)||!path.resolve(absolute).startsWith(path.resolve(this.autoRigOutput(id,current))+path.sep))throw Error('작업 폴더 밖의 결과입니다.');return this.file(id,rel,kind);};
+      const files=[register(result.blendPath,'blend'),register(result.fbxPath,'fbx'),register(result.glbPath,'glb')];
+      current.files=files;current.reportFile=register(result.reportPath,'auto-rig-report');current.inspection=inspection;
+      if(current.operation!=='inspect'){
+        const versionId=uid(),sourceVersion=latest.versions.find(v=>v.id===current.sourceVersionId&&v.objectId===object.id)!;
+        const oldContract=sourceVersion.autoRig?.contract??sourceVersion.externalRig?.contract;
+        const contract:UnityRigContract={schemaVersion:2,versionId,producerVersionId:versionId,producerTaskId:current.id,rigType:'humanoid',fingers:current.settings.fingers,hairBinding:'head',requiredParts:structuredClone(oldContract?.requiredParts??[]),humanBones:inspection.humanBones,exportPolicy:'auto-rig-fbx'};
+        const candidate:AssetVersion={id:versionId,objectId:object.id,role:'rig',slot:'main',label:current.operation==='repair'?'선택 부위 웨이트 보정 · 외형 검토 대기':'Auto-Rig Pro · 외형 검토 대기',files,createdAt:now(),sourceVersionIds:[current.sourceVersionId],provenance:{type:'local',jobId:current.id},warnings:['시험 동작은 검사 전용이며 게임용 애니메이션으로 전달하지 않습니다.','구조 검사와 외형 검토는 별개입니다. 어깨·무릎·장식의 변형을 확인하세요.'],autoRig:{schemaVersion:1,runId:current.id,sourceSha256:current.source.sha256,reportFile:current.reportFile,exportFbx:files[1],contract}};
+        validateUnityRigContract([candidate],contract);latest.versions.push(candidate);current.candidateVersionId=versionId;
+      }
+      current.state='review';current.message=current.operation==='inspect'?'연결 부위·본 영향 검사를 저장했습니다. 보정할 부위를 선택하세요.':'구조 검사 통과 · 외형 검토 대기. 결과 사용과 내보내기는 직접 선택하세요.';current.updatedAt=now();return this.save(latest);
+    }catch(error){const latest=this.get(id),current=latest.autoRigRuns!.find(r=>r.id===run.id)!;current.state=controller.signal.aborted||current.state==='cancelled'?'cancelled':'failed';current.error=error instanceof Error?error.message:String(error);current.message=current.state==='cancelled'?'작업을 중단했습니다. 원본과 이전 채택을 유지합니다.':'로컬 작업이 완료되지 않았습니다. 기존 결과는 보존됩니다.';current.updatedAt=now();this.save(latest);throw error;}finally{this.active.delete(run.id);}
+  }
   async action(id: string, action: GraphicsAction): Promise<GraphicsWorkspace> {
     if(action?.kind==='inspect-planar'||action?.kind==='repair-planar'){
       const identifier=(value:unknown)=>typeof value==='string'&&value.length>0&&value.length<=500;
@@ -402,6 +566,8 @@ export class GraphicsEngine {
     }
     const w = this.get(id);
     switch (action.kind) {
+      case 'probe-auto-rig': case 'start-auto-rig': case 'inspect-auto-rig': case 'repair-auto-rig': case 'recover-auto-rig': case 'cancel-auto-rig': return this.autoRigAction(id,action);
+      case 'prepare-external-rig': case 'inspect-external-rig': case 'import-external-rig': case 'recover-external-rig': case 'cancel-external-rig': return this.externalRigAction(id, action);
       case "create-object": {
         if (!["character", "weapon", "prop", "environment", "sprite", "ui", "vfx"].includes(action.objectKind)) throw Error("잘못된 대상 종류입니다.");
         const name = action.name.trim(); if (!name || name.length > 100) throw Error("이름을 1–100자로 입력하세요.");
@@ -481,6 +647,14 @@ export class GraphicsEngine {
         }
         // Verify the entire assembly before changing even one accepted slot.
         for (const candidate of candidates) {
+          this.validateAutoRigCandidate(id,w,candidate);
+          if(candidate.externalRig){
+            const meta=candidate.externalRig, handoff=w.externalRigHandoffs?.find(h=>h.id===meta.handoffId&&h.candidateVersionId===candidate.id&&h.objectId===candidate.objectId);
+            if(!handoff?.imported||handoff.imported.state!=='review'||handoff.imported.reportPath!==meta.reportPath||handoff.imported.reportSha256!==meta.reportSha256||handoff.source.sha256!==meta.sourceSha256||handoff.returnedFbx?.sha256!==meta.returnedFbxSha256||JSON.stringify(handoff.imported.files)!==JSON.stringify(candidate.files))throw Error('외부 리그의 저장된 검사 출처가 다릅니다.');
+            for(const f of [...handoff.preparation!.files,...handoff.inspection!.files,...handoff.imported.files,handoff.source,handoff.returnedFbx!])this.verified(id,f);
+            validateUnityRigContract([candidate],meta.contract);
+            if(JSON.stringify(meta.contract.humanBones)!==JSON.stringify(handoff.humanBones))throw Error('확인한 본 매핑이 변경됐습니다.');
+          }
           for (const file of candidate.files) this.verified(id, file);
           validateSavedPlanarCandidate(this.store.directory(id),w,candidate);
           if (requiresPartSpaceRestoration(w, candidate)) throw Error('파트의 원래 크기·위치를 먼저 복원·검사하세요. API 원본은 별도로 보존합니다.');

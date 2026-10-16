@@ -205,6 +205,7 @@ export type ChatGptStatus = {
   diagnostic?: { code: string; host?: string; path?: string };
 };
 export type Command =
+  | { type: 'graphics.external-rig-open'; id: string; handoffId: string; target: 'file' | 'application' }
   | { type: "graphics.topology"; id: string; versionId: string }
   | { type: "state" }
   | { type: "graphics.action"; id: string; action: import("./graphics").GraphicsAction }

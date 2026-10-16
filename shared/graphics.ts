@@ -15,6 +15,8 @@ export type AssetVersion = {
   partSource?: { schemaVersion: 1; providerVersionId: string; reportPath: string };
   /** Explicit local recovery reuses existing material pixels; it does not generate texture detail. */
   surfaceRepair?: { schemaVersion: 1; providerVersionId: string; repairVersionId: string; originalVersionId: string; reportPath: string };
+  externalRig?: import('./graphics-rig').ExternalRigMetadata;
+  autoRig?: import('./graphics-auto-rig').AutoRigMetadata;
   planarRepair?: import('./graphics-planar').PlanarRepairProvenance;
   /** Analysis is review-only; repaired main and placed parts are adopted atomically. */
   contact?: import('./graphics-contact').GraphicsContactReview;
@@ -92,6 +94,10 @@ export type GraphicsWorkspace = {
   legacyPreview?: { versions: AssetVersion[]; fingerprint: string; objectName: string };
   /** Transient, read-only storage inspection; never persisted with production state. */
   storageReport?: import('./graphics-storage').GraphicsStorageReport;
+  externalRigHandoffs?: import('./graphics-external-rig').ExternalRigWorkspaceHandoff[];
+  autoRigRuns?: import('./graphics-auto-rig').AutoRigRun[];
+  /** Transient, read-only installation readiness; does not authorize generation. */
+  autoRigReadiness?: import('./graphics-auto-rig').AutoRigReadiness;
   planarInspections?: Record<string, import('./graphics-planar').PlanarInspection>;
 };
 
@@ -148,6 +154,8 @@ export function surfaceRepairSources(workspace: GraphicsWorkspace, provider: Ass
 }
 
 export type GraphicsAction =
+  | import('./graphics-auto-rig').AutoRigAction
+  | import('./graphics-external-rig').ExternalRigAction
   | { kind: 'prepare-contact'; versionId: string; phase: 'analyze' | 'repair' | 'reconstruct' }
   | { kind: 'recover-contact-procedure'; taskId: string }
   | { kind: "create-object"; name: string; objectKind: GraphicsKind; creation?: CreationSpec }

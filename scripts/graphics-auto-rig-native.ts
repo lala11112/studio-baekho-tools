@@ -1,0 +1,27 @@
+// Isolated native smoke test: no AI invocation, no production workspace/adoption.
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { runGraphicsAutoRig, probeGraphicsAutoRig } from '../engine/graphics-auto-rig';
+const blender='C:/Program Files/Blender Foundation/Blender 5.0/blender.exe';
+const worker=path.resolve('integrations/blender/graphics_auto_rig.py');
+const source=path.resolve(process.argv[2]??'artifacts/runtime/graphics-arp-knee-ornament-result/human-rig-revised.blend');
+const sha=(file:string)=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const sourceSha256=sha(source),root=fs.mkdtempSync(path.join(os.tmpdir(),'ps-arp-native-app-'));
+const ready=await probeGraphicsAutoRig(blender,worker); assert.equal(ready.available,true);
+const args={blenderPath:blender,workerPath:worker,sourceBlend:source,sourceSha256,outputDir:path.join(root,'inspect'),operation:'inspect' as const};
+const inspected=await runGraphicsAutoRig(args);
+assert.equal(inspected.report.inspection.poses.length,4);
+const glb=fs.readFileSync(inspected.glbPath),json=JSON.parse(glb.subarray(20,20+glb.readUInt32LE(12)).toString());
+assert.equal(json.animations.length,4); assert.ok(json.meshes[0].primitives[0].attributes.WEIGHTS_1!==undefined);
+assert.ok(json.meshes[0].primitives[0].attributes._PARTSMITH_VERTEX!==undefined);
+assert.ok(inspected.report.inspection.islands.every((v:{vertices:number;vertexIndices:number[]})=>v.vertexIndices.length===v.vertices));
+const island=[...inspected.report.inspection.islands].filter(v=>v.bones.length && !v.warnings.some((w:string)=>w.includes('Invalid'))).sort((a,b)=>a.vertices-b.vertices)[0];
+const repaired=await runGraphicsAutoRig({...args,operation:'repair',outputDir:path.join(root,'repair'),repairs:[{mesh:island.mesh,islandId:island.islandId,kind:'normalize'}]});
+assert.equal(repaired.report.changedVertices,island.vertices);assert.ok(Object.values(repaired.report.preservationChecks).every(v=>v===true));
+assert.equal((await runGraphicsAutoRig({...args,recoveryOnly:true})).requestSha256,inspected.requestSha256);
+assert.equal(sha(source),sourceSha256);
+const evidence={root,ready,source,sourceSha256,inspection:inspected.reportPath,repair:repaired.reportPath,clips:json.animations.map((a:{name:string})=>a.name),islandCount:inspected.report.inspection.islands.length,changedVertices:repaired.report.changedVertices,checks:{sourceUnchanged:true,savedRecovery:true,nativePreservation:true,fourPreviewClips:true,allInfluencesPreview:true},qualityReview:'pending',aiCalls:0,osInputUsed:false};
+fs.writeFileSync('artifacts/runtime/graphics-auto-rig-native.json',JSON.stringify(evidence,null,2));console.log(JSON.stringify(evidence,null,2));

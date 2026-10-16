@@ -59,6 +59,10 @@ export function meshEntries(root: THREE.Object3D, sourceId: string, identities?:
       // Clone the render object, NOT a static WireframeGeometry: the very same geometry,
       // skeleton/bind matrices and current morph weights drive both render passes.
       const wire = node.clone(false) as THREE.Mesh;
+      if (node.userData.partsmithFullSkin && wire instanceof THREE.SkinnedMesh) {
+        (wire as unknown as { isSkinnedMesh: boolean }).isSkinnedMesh = false;
+        wire.applyBoneTransform = (_index, target) => target;
+      }
       wire.material = wireMaterial;
       wire.matrixAutoUpdate = false;
       wire.frustumCulled = false;

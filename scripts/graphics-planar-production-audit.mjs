@@ -7,7 +7,7 @@ import initSqlJs from "sql.js";
 
 const profile = path.join(process.env.APPDATA, "partsmith");
 const evidence = path.resolve(
-  "artifacts/runtime/graphics-planar-production.json",
+  process.env.PARTSMITH_PRODUCTION_AUDIT ?? "artifacts/runtime/graphics-planar-production.json",
 );
 const sha = (file) =>
   createHash("sha256").update(fs.readFileSync(file)).digest("hex");
@@ -28,11 +28,14 @@ while (query.step()) {
 query.free();
 db.close();
 for (const record of records) {
-  if (record.kind === "graphics")
+  if (record.kind === "graphics") {
     assert(
       !record.data.tasks.some((task) => task.status === "running"),
       "Graphics production is active",
     );
+    assert(!(record.data.autoRigRuns ?? []).some(run => run.state === "running"), "Automatic rigging is active");
+    assert(!(record.data.externalRigHandoffs ?? []).some(run => run.state === "preparing" || run.state === "inspecting"), "External rig processing is active");
+  }
   if (record.kind === "project")
     assert(
       !record.data.jobs.some((task) =>

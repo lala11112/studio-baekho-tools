@@ -22,6 +22,8 @@ import { restoreProductionArchives } from "../engine/production-backup";
 import { WorkbenchEngine } from "../engine/workbench";
 import { GraphicsEngine } from "../engine/graphics";
 import { NativeTopologyManager } from "./native-topology";
+import { externalRigPreparedFile } from './external-rig';
+import { autoRigInspectionPreviewAllowed } from './auto-rig-preview';
 import { createGraphicsVideoExecutor } from "../engine/graphics-video";
 import { probeGraphicsConnections } from "../engine/graphics-connections";
 import { CodexWorkbenchExecutor } from "../engine/workbench-executor";
@@ -129,6 +131,16 @@ const projectPatch = z
 async function dispatch(c: Command): Promise<unknown> {
   if (!c || typeof c.type !== "string") throw new Error("잘못된 명령");
   switch (c.type) {
+    case 'graphics.external-rig-open': {
+      const file = externalRigPreparedFile(store.directory(c.id), graphics.get(c.id), c.handoffId);
+      if (c.target === 'file') { shell.showItemInFolder(file); return '준비한 FBX를 선택했습니다.'; }
+      if (c.target !== 'application') throw Error('잘못된 리깅 열기 요청입니다.');
+      const executable = path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'AccuRIG', 'AccuRIG.exe');
+      if (!fs.existsSync(executable)) throw Error('AccuRIG 설치를 찾지 못했습니다. 준비한 파일을 설치된 AccuRIG에서 직접 열어 주세요.');
+      const error = await shell.openPath(executable);
+      if (error) throw Error(error);
+      return 'AccuRIG에서 준비한 FBX를 불러오고 관절 위치를 확인해 주세요.';
+    }
     case "state":
       return {
         projects: store.projects(),
@@ -143,6 +155,14 @@ async function dispatch(c: Command): Promise<unknown> {
     case "graphics.topology":
       return nativeTopology.inspect(c.id, c.versionId);
     case "graphics.action": {
+      if (c.action.kind === 'inspect-external-rig') {
+        const selected = await dialog.showOpenDialog(win, {
+          title: 'AccuRIG에서 내보낸 캐릭터 전용 FBX 선택',
+          properties: ['openFile'], filters: [{ name: '리깅 결과 FBX', extensions: ['fbx'] }],
+        });
+        if (selected.canceled || !selected.filePaths[0]) return graphics.get(c.id);
+        return graphics.action(c.id, { ...c.action, returnedPath: selected.filePaths[0] });
+      }
       if (c.action.kind === "import") {
         const animation = c.action.role === "animation";
         const motion = c.action.role === 'motion-reference';
@@ -762,6 +782,7 @@ app.whenReady().then(async () => {
         !knownProductionArtifact &&
         !knownWorkbenchArtifact &&
         !graphics.get(id).versions.some(v => v.files.some(f => store.file(id, f.path) === file)) &&
+        !autoRigInspectionPreviewAllowed(store.directory(id), graphics.get(id), file) &&
         !nativeTopology.isAllowed(id, file)
       )
         return new Response("", { status: 403 });

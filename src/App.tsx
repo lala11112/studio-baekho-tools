@@ -202,6 +202,9 @@ export function App() {
       return result;
     } catch (e) {
       setError(e instanceof Error ? e.message : "작업 실패");
+      // A rejected command may still have persisted a failed/cancelled job.
+      // Refresh immediately so the panel does not retain its earlier running state.
+      try { await refresh(); } catch { /* Keep the original action error visible. */ }
       return undefined;
     } finally {
       setBusy(false);

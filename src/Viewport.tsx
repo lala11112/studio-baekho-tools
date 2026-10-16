@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { registerFullSkinPreview, type FullSkinPreview } from './viewport-full-skin';
+import { rigRegionOverlay, type RigRegion } from './viewport-rig-region';
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
@@ -40,6 +42,9 @@ type Props = {
   nativeVersionId?: string;
   boundaryOverlays?: BoundaryOverlay[];
   focusedBoundaryId?: string;
+  rigRegion?: RigRegion;
+  onRigRegionStatus?: (status: { ready: boolean; message: string }) => void;
+  previewNotice?: string;
 };
 export function Viewport({
   project,
@@ -48,7 +53,7 @@ export function Viewport({
   onSelect,
   onTransform,
   animation,
-  boundaryOverlays, focusedBoundaryId, onMeshSelect, onBounds, previewTransform, physicalSize, unitsKnown = false, nativePolygonCount, nativeVersionId,
+  boundaryOverlays, focusedBoundaryId, onMeshSelect, onBounds, previewTransform, physicalSize, unitsKnown = false, nativePolygonCount, nativeVersionId, rigRegion, onRigRegionStatus, previewNotice,
 }: Props) {
   const host = useRef<HTMLDivElement>(null),
     api = useRef<any>(null);
@@ -65,6 +70,10 @@ export function Viewport({
   const [hiddenMeshes, setHiddenMeshes] = useState<string[]>([]);
   const [solid, setSolid] = useState(false), [wire, setWire] = useState(false), [guides, setGuides] = useState(false);
   const [hasAnimation, setHasAnimation] = useState(false);
+  const [fullSkinInfluences, setFullSkinInfluences] = useState(0);
+  const [regionMessage, setRegionMessage] = useState('');
+  const regionOverlay = useRef<ReturnType<typeof rigRegionOverlay> | undefined>(undefined);
+  const regionStatusCallback = useRef(onRigRegionStatus); regionStatusCallback.current=onRigRegionStatus;
   const [wireMode, setWireMode] = useState<'game' | 'native'>('game');
   const [topology, setTopology] = useState<NativeTopologyResult>();
   const [topologyLoading, setTopologyLoading] = useState(false), [topologyError, setTopologyError] = useState('');
@@ -264,8 +273,11 @@ export function Viewport({
       if (!dead) setError("모델 또는 텍스처를 읽지 못했습니다. 원본 파일과 앱의 리소스 접근 설정을 확인하세요.");
     };
     const loader = new GLTFLoader(manager);
+    const fullSkins: FullSkinPreview[] = [];
+    registerFullSkinPreview(loader, fullSkins);
     setError("");
     setClips([]);
+    setFullSkinInfluences(0);
     const allClips: string[] = [];
     for (const [i, s] of sources.entries()) {
       if (!s.asset) continue;
@@ -276,6 +288,7 @@ export function Viewport({
             });
             return;
           }
+          setFullSkinInfluences(Math.max(0, ...fullSkins.map(preview => preview.influences)));
           const group = new THREE.Group();
           group.userData.partId = s.id;
           group.add(gltf.scene);
@@ -428,7 +441,15 @@ export function Viewport({
       skeletons.forEach(s => { if (s.overlay.visible) s.update(); });
       orbit.update();
       scene.updateMatrixWorld(true);
+      try { fullSkins.forEach(preview => preview.update()); }
+      catch (cause) {
+        mixers.forEach(mixer => mixer.stopAllAction());
+        fullSkins.forEach(preview => { preview.mesh.visible = false; });
+        setError(cause instanceof Error ? cause.message : '전체 가중치 동작 미리보기를 표시하지 못했습니다.');
+        fullSkins.length = 0;
+      }
       entries.forEach(entry => syncMeshWire(entry, appearance.current.wire && appearance.current.wireMode === 'game'));
+      regionOverlay.current?.update();
       nativeViews.forEach(view => syncNativeEdgeView(view, appearance.current.wire && appearance.current.wireMode === 'native'));
       renderer.render(scene, camera);
     };
@@ -482,6 +503,16 @@ export function Viewport({
     current.previewRoot.add(group);
     return () => { group.removeFromParent(); group.traverse((node: any) => { node.geometry?.dispose(); node.material?.map?.dispose(); node.material?.dispose(); }); };
   }, [boundaryOverlays, focusedBoundaryId, meshList]);
+  useEffect(() => {
+    regionOverlay.current?.dispose(); regionOverlay.current=undefined;
+    if(!rigRegion || !api.current) { setRegionMessage('');regionStatusCallback.current?.({ready:false,message:''});return; }
+    try {
+      const overlay=rigRegionOverlay(meshList,rigRegion);regionOverlay.current=overlay;api.current.scene.add(overlay.points);overlay.update();
+      const message=`선택 부위 강조 · ${overlay.coveredVertices}개 원본 정점${overlay.coveredVertices<rigRegion.vertexIndices.length ? ' · 면에 사용되지 않는 정점은 화면에 표시되지 않습니다.' : ''}`;
+      setRegionMessage(message);regionStatusCallback.current?.({ready:true,message});
+    } catch(cause) { const message=cause instanceof Error?cause.message:String(cause);setRegionMessage(message);regionStatusCallback.current?.({ready:false,message}); }
+    return()=>{regionOverlay.current?.dispose();regionOverlay.current=undefined;};
+  }, [rigRegion,meshList]);
   useEffect(() => { api.current?.applyInspection(); }, [solid, selectedMesh, hiddenMeshes]);
   const transformSignature = JSON.stringify(effectiveTransform);
   useEffect(() => { api.current?.applyPreview(); api.current?.fitModels(); }, [transformSignature, calibrated]);
@@ -515,7 +546,7 @@ export function Viewport({
   const selectedCounts = topology?.status === 'ready' && nativeLoaded ? nativeCounts(topology.map, selectedMesh, meshList) : undefined;
   const unavailable = topology?.status === 'unavailable' ? topology.reason : topologyError;
   return (
-    <div className="viewport inspection-viewport" data-bone-count={boneCount} data-skeleton-visible={boneCount > 0 && showSkeleton}
+    <div className="viewport inspection-viewport" data-bone-count={boneCount} data-full-skin-influences={fullSkinInfluences} data-skeleton-visible={boneCount > 0 && showSkeleton}
       data-mesh-count={meshList.length} data-wire-visible={wire} data-wire-mode={wireMode} data-display-mode={solid ? "solid" : "material"}>
       <div className="viewport-top">
         <span className="viewport-label">
@@ -563,6 +594,8 @@ export function Viewport({
         {topologyLoading ? '원본 면 검사 중 · 로컬 처리 · 추가 생성 비용 없음' : unavailable ? `${unavailable} 게임용 삼각형 선을 표시합니다.` : counts ? `원본 면: 사각형 ${counts.quads.toLocaleString()} · 삼각형 ${counts.triangles.toLocaleString()} · 다각형 ${counts.ngons.toLocaleString()}` : '원본 면 미리보기 불러오는 중'}
       </div>}
       <div className="inspection-canvas-wrap"><div className="canvas" ref={host} />
+      {previewNotice && <div className="topology-status" role="status" data-testid="viewport-rig-inspection-preview">{previewNotice}</div>}
+      {regionMessage && <div role="status" data-testid="viewport-rig-region">{regionMessage}</div>}
       {!previewId && !!onTransform && <div className="viewport-tools">
         {(
           [

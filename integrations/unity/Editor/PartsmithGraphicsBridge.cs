@@ -105,11 +105,27 @@ namespace Partsmith.Graphics {
    q=q??new DeliveryRequest();JsonUtility.FromJsonOverwrite(json,q);
    if(!HasRootProperty(json,"rigContract"))q.rigContract=null;
    if(q.rigContract!=null){var c=q.rigContract;
-    if(c.schemaVersion!=1||string.IsNullOrWhiteSpace(c.versionId)||string.IsNullOrWhiteSpace(c.producerVersionId)||string.IsNullOrWhiteSpace(c.producerTaskId)||
+    if((c.schemaVersion!=1&&c.schemaVersion!=2)||string.IsNullOrWhiteSpace(c.versionId)||string.IsNullOrWhiteSpace(c.producerVersionId)||string.IsNullOrWhiteSpace(c.producerTaskId)||
        (c.rigType!="generic"&&c.rigType!="humanoid")||(c.hairBinding!="head"&&c.hairBinding!="controls")||c.requiredParts==null||c.humanBones==null)
      throw new Exception("Supplied rig contract is incomplete");
+    if(c.schemaVersion==2)ValidateExternalMapping(c);
    }
    return q;
+  }
+  static Dictionary<string,string> ExternalParents(RigContract c){
+   var map=c.humanBones.ToDictionary(b=>b.humanName,b=>b.boneName);var p=new Dictionary<string,string>{{"Spine","Hips"},{"Chest","Spine"},{"UpperChest","Chest"},{"Neck",map.ContainsKey("UpperChest")?"UpperChest":"Chest"},{"Head","Neck"},{"LeftEye","Head"},{"RightEye","Head"},{"Jaw","Head"}};
+   foreach(var side in new[]{"Left","Right"}){
+    string torso=map.ContainsKey("UpperChest")?"UpperChest":"Chest";
+    p[side+"Shoulder"]=torso;p[side+"UpperArm"]=map.ContainsKey(side+"Shoulder")?side+"Shoulder":torso;p[side+"LowerArm"]=side+"UpperArm";p[side+"Hand"]=side+"LowerArm";p[side+"UpperLeg"]="Hips";p[side+"LowerLeg"]=side+"UpperLeg";p[side+"Foot"]=side+"LowerLeg";p[side+"Toes"]=side+"Foot";
+    foreach(var finger in new[]{"Thumb","Index","Middle","Ring","Little"}){string previous=side+"Hand";foreach(var joint in new[]{"Proximal","Intermediate","Distal"}){string human=side+finger+joint;p[human]=previous;previous=human;}}
+   }return p;
+  }
+  static void ValidateExternalMapping(RigContract c){
+   if(c.rigType!="humanoid"||c.humanBones.Any(b=>b==null||string.IsNullOrWhiteSpace(b.boneName)||string.IsNullOrWhiteSpace(b.humanName))||c.humanBones.Select(b=>b.boneName).Distinct().Count()!=c.humanBones.Length||c.humanBones.Select(b=>b.humanName).Distinct().Count()!=c.humanBones.Length)throw new Exception("External Humanoid mapping must be explicit and unique");
+   var names=new HashSet<string>(c.humanBones.Select(b=>b.humanName));var p=ExternalParents(c);
+   var required=new List<string>{"Hips","Spine","Chest","Neck","Head"};
+   foreach(var side in new[]{"Left","Right"}){required.AddRange(new[]{"UpperArm","LowerArm","Hand","UpperLeg","LowerLeg","Foot"}.Select(n=>side+n));if(c.fingers)foreach(var finger in new[]{"Thumb","Index","Middle","Ring","Little"})required.AddRange(new[]{"Proximal","Intermediate","Distal"}.Select(n=>side+finger+n));}
+   if(required.Any(n=>!names.Contains(n))||names.Any(n=>n!="Hips"&&(!p.ContainsKey(n)||!names.Contains(p[n]))))throw new Exception("External Humanoid mapping is incomplete or unsupported");
   }
   static void Process(string requestFile){
    DeliveryRequest q=null;
@@ -353,6 +369,10 @@ namespace Partsmith.Graphics {
   static ImportedRig VerifyHumanoid(DeliveryRequest q,GameObject model,ModelImporter importer,Avatar avatar){
    var evidence=ReadRigManifest(q);
    if(importer.animationType!=ModelImporterAnimationType.Human||!avatar||!avatar.isValid||!avatar.isHuman)throw new Exception("Humanoid Avatar validity/human checks failed");
+   if(q.rigContract.schemaVersion==2){
+    ValidateExternalMapping(q.rigContract);var mapping=q.rigContract.humanBones.ToDictionary(b=>b.humanName,b=>b.boneName);var transforms=model.GetComponentsInChildren<Transform>(true);var parents=ExternalParents(q.rigContract);
+    foreach(var pair in parents.Where(p=>mapping.ContainsKey(p.Key)&&mapping.ContainsKey(p.Value))){var bone=transforms.Single(t=>t.name==mapping[pair.Key]);var ancestor=bone.parent;while(ancestor&&ancestor.name!=mapping[pair.Value]){if(mapping.Values.Contains(ancestor.name))throw new Exception("Unexpected mapped anatomical ancestor: "+pair.Key);ancestor=ancestor.parent;}if(!ancestor)throw new Exception("External Humanoid anatomical ancestry differs: "+pair.Key);}
+   }
    foreach(var binding in q.rigContract.humanBones){
     var human=(HumanBodyBones)Enum.Parse(typeof(HumanBodyBones),binding.humanName);
     if(!importer.humanDescription.human.Any(b=>b.boneName==binding.boneName&&b.humanName==HumanTrait.BoneName[(int)human]))throw new Exception("Imported HumanDescription differs from canonical mapping");
@@ -364,11 +384,15 @@ namespace Partsmith.Graphics {
     var matches=skins.Where(s=>s.name==part.meshName).ToArray();
     if(matches.Length!=1||!matches[0].sharedMesh||matches[0].bones.Length<1||matches[0].bones.Any(b=>!b))throw new Exception("Humanoid part skin/bone references missing: "+part.meshName);
     var skin=matches[0];var mesh=skin.sharedMesh;
+    if(q.rigContract.schemaVersion==2){
+     if(mesh.bindposes.Length!=skin.bones.Length)throw new Exception("External Humanoid bind pose inventory differs");
+     for(int i=0;i<skin.bones.Length;i++){var expected=skin.bones[i].worldToLocalMatrix*skin.transform.localToWorldMatrix;var actual=mesh.bindposes[i];for(int row=0;row<4;row++)for(int column=0;column<4;column++)if(float.IsNaN(actual[row,column])||float.IsInfinity(actual[row,column])||Math.Abs(actual[row,column]-expected[row,column])>.002f)throw new Exception("External Humanoid rest/bind matrix differs: "+skin.bones[i].name);}
+    }
     if(mesh.vertexCount<part.vertices)throw new Exception("Humanoid source vertices missing: "+part.meshName);
     var counts=mesh.GetBonesPerVertex();var weights=mesh.GetAllBoneWeights();int cursor=0;
     try{
      if(counts.Length!=mesh.vertexCount)throw new Exception("Humanoid skin weights are inaccessible");
-     foreach(var count in counts){float total=0;for(int index=0;index<count;index++){var weight=weights[cursor++];if(float.IsNaN(weight.weight)||float.IsInfinity(weight.weight)||weight.weight<0||weight.boneIndex<0||weight.boneIndex>=skin.bones.Length)throw new Exception("Invalid imported Humanoid weight");total+=weight.weight;if(part.partId=="hair"&&q.rigContract.hairBinding=="head"&&weight.weight>.000001f&&skin.bones[weight.boneIndex].name!="head")throw new Exception("Hair no longer follows Head exclusively");}if(Math.Abs(total-1)>.001f)throw new Exception("Imported Humanoid weights are not normalized");}
+     foreach(var count in counts){float total=0;for(int index=0;index<count;index++){var weight=weights[cursor++];if(float.IsNaN(weight.weight)||float.IsInfinity(weight.weight)||weight.weight<0||weight.boneIndex<0||weight.boneIndex>=skin.bones.Length)throw new Exception("Invalid imported Humanoid weight");total+=weight.weight;if(part.partId=="hair"&&q.rigContract.hairBinding=="head"&&weight.weight>.000001f&&skin.bones[weight.boneIndex].name!=(q.rigContract.schemaVersion==2?q.rigContract.humanBones.Single(b=>b.humanName=="Head").boneName:"head"))throw new Exception("Hair no longer follows Head exclusively");}if(Math.Abs(total-1)>.001f)throw new Exception("Imported Humanoid weights are not normalized");}
     }finally{counts.Dispose();weights.Dispose();}
     parts.Add(new RigPart{meshName=part.meshName,meshId=part.meshId,partId=part.partId,armatureName=part.armatureName,vertices=mesh.vertexCount,boneCount=skin.bones.Length,normalizedWeights=true});
    }

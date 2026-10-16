@@ -162,6 +162,18 @@ function assertRequestBinding(root:string, delivery:UnityDelivery, q:QueueReques
   }
 }
 export type PrepareUnityDeliveryArgs = { projectRoot: string; object: GraphicsObject; versions: AssetVersion[]; profile: UnityTargetProfile; blenderPath: string; resources: string; signal?: AbortSignal; clipSettings?:UnityClipSettings[]; rigContract?:UnityRigContract };
+/** ARP's native controllers are editable sources, not a game export skeleton. */
+export function autoRigUnityExport(version: AssetVersion, versions: AssetVersion[], settings: GraphicsObject['settings'], contract?: UnityRigContract): GraphicsFile | undefined {
+  if(!version.autoRig&&contract?.exportPolicy!=='auto-rig-fbx')return undefined;
+  if(version.role!=='rig'||!version.autoRig)throw Error('자동 리그 수정본의 검증된 FBX가 없습니다. 해당 수정본을 다시 검사·내보내세요.');
+  const meta=version.autoRig, output=meta.exportFbx;
+  const frozen=validateUnityRigContract([version],meta.contract);
+  if(!contract||contract.schemaVersion!==2||contract.versionId!==version.id||JSON.stringify({...frozen,exportPolicy:'auto-rig-fbx'})!==JSON.stringify({...contract,exportPolicy:'auto-rig-fbx'}))throw Error('자동 리그의 정확한 Unity 본 매핑 계약이 필요합니다.');
+  if(!output||! /\.fbx$/i.test(output.path)||version.files.filter(file=>file.path===output.path&&file.sha256===output.sha256&&file.bytes===output.bytes&&file.kind===output.kind).length!==1)throw Error('자동 리그의 검증된 FBX 출력이 없거나 변경됐습니다.');
+  const size=normalizePhysicalSize(settings.physicalSize);
+  if(versions.length!==1||versions.some(item=>item.role==='animation')||graphicsUnityOptimization(settings).lodEnabled||size.mode!=='keep'||size.pivot!=='keep')throw Error('자동 리그는 검증된 FBX 그대로 전달합니다. 동작 합성·LOD·크기 또는 피벗 변경은 아직 지원하지 않습니다.');
+  return output;
+}
 const busy = new Set<string>();
 const objectFolder = (id: string) => /^[a-zA-Z0-9_-]{1,64}$/.test(id) ? id : "object-" + digest(id).slice(0,24);
 function validateSources(projectRoot: string, object: GraphicsObject, versions: AssetVersion[]): Input[] {
@@ -216,6 +228,12 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
   const models = inputs.filter(i=>/\.(fbx|blend|glb|obj)$/i.test(i.path));
   // A version may contain preview GLB beside its editable/native source.
   const preferred = a.versions.map(v=>{
+    const autoExport=autoRigUnityExport(v,a.versions,a.object.settings,a.rigContract);
+    if(autoExport){
+      const selected=models.find(input=>input.versionId===v.id&&input.path===autoExport.path&&input.sha256===autoExport.sha256);
+      if(!selected)throw Error('자동 리그 FBX가 검증된 Unity 입력에 없습니다.');
+      return selected;
+    }
     const ranked=models.filter(m=>m.versionId===v.id).sort((x,y)=>[".blend",".fbx",".glb",".obj"].indexOf(path.extname(x.path).toLowerCase())-[".blend",".fbx",".glb",".obj"].indexOf(path.extname(y.path).toLowerCase()));
     if(ranked.length>1 && path.extname(ranked[0].path).toLowerCase()===path.extname(ranked[1].path).toLowerCase())throw Error("같은 형식의 원본 모델이 여러 개입니다. Unity에 보낼 원본 하나를 지정하세요.");
     return ranked[0];
@@ -320,10 +338,15 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
         await runProcess(a.blenderPath,["--background","--factory-startup","--disable-autoexec","--python-exit-code","1","--python",converterSource,"--",spec]);
         a.signal?.throwIfAborted();
         const converted=json(path.join(temp,"export/inspection.json"));
+        if(rigContract?.exportPolicy==='auto-rig-fbx'&&sha(path.join(temp,'export/Asset.fbx'))!==source.sha256)throw Error('자동 리그의 검증된 FBX가 변환 중 다시 인코딩됐습니다.');
         if(!converted.structure || !Array.isArray(converted.clips)) throw Error("Blender 구조 검사 결과가 없습니다.");
         if(activeUvOnly&&(!Array.isArray(converted.exportUv)||!converted.exportUv.length||converted.exportUv.some((item:{uv0MatchesActive?:boolean;sourceLayersPreserved?:boolean})=>item.uv0MatchesActive!==true||item.sourceLayersPreserved!==true)))throw Error('평면 보완 원본의 활성 UV0·편집 레이어 보존 검사 기록이 없습니다.');
         if(rigType==='humanoid'){
           const evidence=json(path.join(temp,"export/rig.json"));
+          if(rigContract?.exportPolicy==='auto-rig-fbx'){
+            const bound=evidence.importBindRoundoff;
+            if(!bound||bound.posePreserved!==true||bound.basisTolerance!==2e-4||bound.worldVertexTolerance!==1e-5||!Number.isFinite(bound.maximumBasisError)||bound.maximumBasisError>bound.basisTolerance||!Number.isFinite(bound.maximumWorldVertexDelta)||bound.maximumWorldVertexDelta>bound.worldVertexTolerance)throw Error('자동 리그 FBX의 바인드 포즈 허용 오차 검사 기록이 없습니다.');
+          }
           if(evidence.schemaVersion!==1||evidence.sourceSha256!==sha(nativeSource)||JSON.stringify(evidence.contract)!==JSON.stringify(rigContract)||evidence.armatureCount!==1||!evidence.armatureName||!Array.isArray(evidence.parts)||evidence.parts.length!==converted.structure.meshes.length||evidence.parts.some((part:{meshName:string;vertices:number;normalizedWeights:boolean;armatureName:string})=>!part.normalizedWeights||part.armatureName!==evidence.armatureName||!converted.structure.meshes.some((mesh:{name:string;vertices:number})=>mesh.name===part.meshName&&mesh.vertices===part.vertices)))throw Error("Humanoid의 단일 리그·파트·웨이트 검사 근거가 없습니다.");
         }
         const sizeEvidence=json(path.join(temp,"export/physical-size.json"));
