@@ -1,6 +1,11 @@
 import type { AssetVersion, GraphicsFile } from '../shared/graphics';
 import type { AutoRigRun } from '../shared/graphics-auto-rig';
 
+export function rigInspectionForCandidate(candidate: AssetVersion | undefined, runs: AutoRigRun[]): AutoRigRun | undefined {
+  if(!candidate)return;
+  return [...runs].reverse().find(run=>run.operation==='inspect' && run.state==='review' && run.objectId===candidate.objectId && run.sourceVersionId===candidate.id && !!run.inspection);
+}
+
 /** Read-only display derivative. Adoption and delivery still use the candidate files. */
 export function inspectedRigPreview(candidate: AssetVersion | undefined, inspection: AutoRigRun | undefined): GraphicsFile | undefined {
   if(!candidate || !inspection || inspection.operation!=='inspect' || inspection.state!=='review' || inspection.sourceVersionId!==candidate.id || inspection.objectId!==candidate.objectId) return;

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { AssetVersion, GraphicsObject } from '../shared/graphics';
 import type { AutoRigIsland, AutoRigRepair } from '../shared/graphics-auto-rig';
@@ -17,6 +17,7 @@ export type AutoRigView = {
   correctionAvailable: boolean;
   highlightReady?: boolean;
   hasMotionPreview?: boolean;
+  inspectionId?: string;
 };
 export type AutoRigDraft = { versionId: string; frontAxis: '+X' | '-X' | '+Y' | '-Y'; fingers: boolean };
 type Props = {
@@ -39,6 +40,7 @@ export function GraphicsAutoRig(props: Props) {
   const [meshId, setMeshId] = useState('');
   const [bone, setBone] = useState('');
   const [repairKind, setRepairKind] = useState<AutoRigRepair['kind']>('normalize');
+  useEffect(()=>{setMeshId('');setBone('');setRepairKind('normalize');props.onRegion?.(undefined);},[view.candidate?.id,view.inspectionId]);
   const selectedIsland = view.islands.find(island => JSON.stringify([island.mesh, island.islandId]) === meshId);
   const source = sources.find(version => version.id === sourceId);
   const sourcePreviewAvailable = !!source?.files.some(file=>/\.glb$/i.test(file.path));
@@ -59,7 +61,7 @@ export function GraphicsAutoRig(props: Props) {
     </section>
     <form id="graphics-auto-rig-form" onSubmit={event => { event.preventDefault(); if (runEnabled && frontAxis) void invoke(() => props.onRun({ versionId: source!.id, frontAxis, fingers })); }}>
       <section className="gs-auto-rig-input" aria-label="자동 리깅 원본">
-        <label>실행할 전체 모델<select aria-label="자동 리깅 원본" value={sourceId} disabled={locked || submitting} onChange={event => setSourceId(event.target.value)}><option value="">전체 모델 선택</option>{sources.map(version => <option key={version.id} value={version.id}>{version.label} · {version.role === 'material' ? '채택 재질 모델' : '채택 모델'}</option>)}</select></label>
+        <label>실행할 전체 모델<select aria-label="자동 리깅 원본" value={sourceId} disabled={locked || submitting} onChange={event => { setSourceId(event.target.value);setFrontAxis(''); }}><option value="">전체 모델 선택</option>{sources.map(version => <option key={version.id} value={version.id}>{version.label} · {version.role === 'material' ? '채택 재질 모델' : '채택 모델'}</option>)}</select></label>
         {sources.length > 1 && <small>채택 모델과 재질 모델이 있습니다. 색·텍스처를 포함할 정확한 원본을 선택하세요.</small>}
         {source && <><small data-testid="auto-rig-source-id">{source.id}</small><code>{source.files.find(file => /\.(blend|fbx|glb)$/i.test(file.path))?.sha256}</code></>}
         {source && sourcePreviewAvailable && <button type="button" onClick={()=>props.onShow(source)}>실행 원본 3D 보기</button>}
@@ -71,7 +73,7 @@ export function GraphicsAutoRig(props: Props) {
       {view.candidate && <div className="gs-auto-rig-actions"><button type="submit" data-testid="auto-rig-run-new" disabled={!runEnabled || submitting}>이 설정으로 새 리그 만들기</button><small>기존 리그 결과는 보존하고 새 후보를 만듭니다.</small></div>}
     </form>
     </details>
-    {(view.state || view.error) && <section className="gs-auto-rig-status" role="status" aria-live="polite"><strong>{view.state}</strong><p>{view.progress}</p>{view.sourceLabel && <small>고정 원본: {view.sourceLabel}</small>}{view.sourceSha256 && <code>{view.sourceSha256}</code>}{view.error && <p role="alert">{view.error}</p>}<div className="gs-auto-rig-actions">{view.recoverable && !view.running && <button type="button" disabled={disabled || submitting} onClick={() => void invoke(props.onRecover)}>저장된 결과만 복구</button>}</div><small>중단·재시작 후 자동 재실행하지 않습니다. 복구는 저장된 결과만 확인합니다.</small></section>}
+    {(view.state || view.error) && <section className="gs-auto-rig-status" role="status" aria-live="polite"><strong>최근 작업 · {view.state}</strong><p>{view.progress}</p>{view.sourceLabel && <small>고정 원본: {view.sourceLabel}</small>}{view.sourceSha256 && <code>{view.sourceSha256}</code>}{view.error && <p role="alert">{view.error}</p>}<div className="gs-auto-rig-actions">{view.recoverable && !view.running && <button type="button" disabled={disabled || submitting} onClick={() => void invoke(props.onRecover)}>저장된 결과만 복구</button>}</div><small>중단·재시작 후 자동 재실행하지 않습니다. 복구는 저장된 결과만 확인합니다.</small></section>}
     {view.candidate && <section aria-label="자동 리그 결과 검토" data-testid="auto-rig-review">
       <strong>{view.adopted ? '현재 사용하는 리그' : '새 리그 후보 · 아직 사용하지 않음'}</strong><p>{view.candidate.label}</p>
       <button type="button" onClick={() => props.onShow(view.candidate!)}>3D 결과 보기</button>
@@ -99,4 +101,3 @@ export function GraphicsAutoRig(props: Props) {
     {props.footerHost ? createPortal(primary,props.footerHost) : <div className="gs-auto-rig-footer">{primary}</div>}
   </div>;
 }
-

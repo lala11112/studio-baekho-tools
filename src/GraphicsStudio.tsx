@@ -42,7 +42,7 @@ import { catalog } from "../shared/catalog";
 import { Viewport } from "./Viewport";
 import { GraphicsPlanarReview } from './GraphicsPlanarReview';
 import { GraphicsAutoRig, type AutoRigView } from './GraphicsAutoRig';
-import { inspectedRigPreview, autoRigPresentation } from './graphics-auto-rig-preview';
+import { inspectedRigPreview, autoRigPresentation, rigInspectionForCandidate } from './graphics-auto-rig-preview';
 import { HeadComparison } from './HeadComparison';
 import { GraphicsContactReview } from './GraphicsContactReview';
 import { CreationOptions } from "./CreationOptions";
@@ -1494,13 +1494,14 @@ export function GraphicsStudio({
     <small>{guideTask?.status === 'awaiting_approval' ? '위 카드의 고정된 요청만 실행합니다.' : '화면 이동·후보 비교만으로 생성하거나 과금하지 않습니다.'}</small>
   </footer>;
   const autoRigRuns = workspace?.autoRigRuns?.filter(item => item.objectId === objectId) ?? [];
-  const autoRigRun = autoRigRuns.at(-1);
-  const autoRigResultRun = [...autoRigRuns].reverse().find(item => item.candidateVersionId);
-  const autoRigCandidate = versions.find(version => version.id === autoRigResultRun?.candidateVersionId)
-    ?? (shownVersion?.role === 'rig' ? shownVersion : undefined);
-  const autoRigInspectionRun = [...autoRigRuns].reverse().find(item => item.inspection && item.sourceVersionId === autoRigCandidate?.id && item.state === 'review');
-  const autoRigInspection = autoRigInspectionRun?.inspection ?? autoRigRun?.inspection;
+  const autoRigRun = autoRigRuns.find(item=>item.state==='running') ?? autoRigRuns.at(-1);
+  const autoRigLatestResultRun = [...autoRigRuns].reverse().find(item => item.candidateVersionId);
+  // History selection is the edit/adoption target. Never use an unseen latest result.
+  const autoRigCandidate = shownVersion?.role === 'rig' ? shownVersion : undefined;
+  const autoRigResultRun = [...autoRigRuns].reverse().find(item => item.candidateVersionId === autoRigCandidate?.id);
+  const autoRigInspectionRun = rigInspectionForCandidate(autoRigCandidate,autoRigRuns);
   const autoRigInspectedPreview = inspectedRigPreview(autoRigCandidate,autoRigInspectionRun);
+  const autoRigInspection = autoRigInspectedPreview ? autoRigInspectionRun?.inspection : autoRigResultRun?.inspection;
   const autoRigView: AutoRigView = {
     ready: workspace?.autoRigReadiness?.available === true && creation.subject === 'human',
     checked: !!workspace?.autoRigReadiness,
@@ -1510,24 +1511,26 @@ export function GraphicsStudio({
     progress: autoRigRun?.message, error: autoRigRun?.error,
     sourceLabel: versions.find(version => version.id === autoRigRun?.sourceVersionId)?.label,
     sourceSha256: autoRigRun?.source.sha256, runId: autoRigRun?.id,
-    recoverable: !!autoRigRun && ['failed', 'cancelled', 'blocked'].includes(autoRigRun.state),
+    recoverable: !!autoRigRun && ['failed', 'blocked'].includes(autoRigRun.state),
     candidate: autoRigCandidate, adopted: !!autoRigCandidate && object?.accepted[`rig:${autoRigCandidate.slot}`] === autoRigCandidate.id,
     videos: (autoRigResultRun?.files ?? []).filter(file => /\.(mp4|webm)$/i.test(file.path)).map(file => ({ label: /before|after|compar/i.test(file.path) ? '수정 전후 · 같은 동작 비교' : '팔·손가락·양쪽 무릎 동작 검토', url: window.desktop.assetUrl(project.id, file.path) })),
     checks: (autoRigInspection?.checks ?? []).map(check => ({ label: autoRigPresentation(check.message ?? check.id), passed: check.passed })),
     warnings: [...new Set([...(creation.subject !== 'human' ? ['자동 리깅은 현재 사람 형태의 전체 모델만 지원합니다. 다른 형태는 기타 도구를 선택하세요.'] : []), ...(autoRigInspection?.warnings ?? []).map(autoRigPresentation)])],
     poses: autoRigInspection?.poses?.map(pose=>({...pose,label:autoRigPresentation(pose.label),warning:pose.warning?autoRigPresentation(pose.warning):undefined})),
     bones: autoRigInspection?.boneNames ?? [], islands: autoRigInspection?.islands ?? [],
-    correctionAvailable: !!autoRigInspectionRun && !!autoRigCandidate,
+    correctionAvailable: !!autoRigInspectedPreview && !!autoRigCandidate,
     highlightReady: rigRegionReady && rigRegion?.versionId === autoRigCandidate?.id && shownVersion?.id === autoRigCandidate?.id,
     hasMotionPreview: !!autoRigInspectedPreview || !!autoRigCandidate?.files.some(file=>/\.glb$/i.test(file.path)),
+    inspectionId: autoRigInspectionRun?.id,
   };
   const useAutoRig = stage === 'rig' && !legacyRig;
   useEffect(()=>{
-    const key=`${objectId}:${autoRigResultRun?.id ?? ''}:${autoRigCandidate?.id ?? ''}`;
-    if(autoRigSeenCandidate.current===key)return;
+    const key=`${objectId}:${autoRigLatestResultRun?.id ?? ''}`;
+    const previous=autoRigSeenCandidate.current;
     autoRigSeenCandidate.current=key;
-    if(stage==='rig' && autoRigResultRun?.objectId===objectId && autoRigCandidate) setShownVersionId(autoRigCandidate.id);
-  },[objectId,stage,autoRigResultRun?.id,autoRigCandidate?.id]);
+    const newResult=previous.startsWith(`${objectId}:`) && previous!==key;
+    if(stage==='rig' && (newResult || !shownVersionId) && autoRigLatestResultRun?.objectId===objectId && autoRigLatestResultRun.candidateVersionId) setShownVersionId(autoRigLatestResultRun.candidateVersionId);
+  },[objectId,stage,autoRigLatestResultRun?.id]);
   const autoRigPanel = object && <GraphicsAutoRig key={object.id} object={object} versions={versions} view={autoRigView} disabled={disabled || active}
     footerHost={autoRigFooterHost}
     onCheck={async () => { await run({ kind: 'probe-auto-rig' }); }}
@@ -1535,7 +1538,7 @@ export function GraphicsStudio({
     onCancel={async () => { const running = autoRigRuns.find(item => item.state === 'running'); if (running) { try { await onAction({ kind: 'cancel-auto-rig', objectId: object.id, runId: running.id }); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } } }}
     onRecover={async () => { if (autoRigRun) await run({ kind: 'recover-auto-rig', objectId: object.id, runId: autoRigRun.id }); }}
     onInspect={async () => { if (autoRigCandidate) await run({ kind: 'inspect-auto-rig', objectId: object.id, versionId: autoRigCandidate.id }); }}
-    onCorrect={async repair => { if (autoRigCandidate && autoRigInspectionRun) await run({ kind: 'repair-auto-rig', objectId: object.id, versionId: autoRigCandidate.id, inspectionRunId: autoRigInspectionRun.id, repairs: [repair] }); }}
+    onCorrect={async repair => { if (autoRigCandidate && autoRigInspectionRun && autoRigInspectedPreview && rigRegionReady && rigRegion?.versionId===autoRigCandidate.id && rigRegion.mesh===repair.mesh && rigRegion.islandId===repair.islandId) await run({ kind: 'repair-auto-rig', objectId: object.id, versionId: autoRigCandidate.id, inspectionRunId: autoRigInspectionRun.id, repairs: [repair] }); }}
     onShow={version => { setShownVersionId(version.id); document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' }); }}
     onAdopt={async () => { if (autoRigCandidate && await run({ kind: 'accept', objectId: object.id, versionId: autoRigCandidate.id }, '이 리그를 사용할 원본으로 저장했습니다.')) changeStage('unity'); }}
     onUnity={() => changeStage('unity')}

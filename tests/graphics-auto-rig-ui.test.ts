@@ -12,10 +12,11 @@ test('automatic rig UI requires explicit orientation, keeps recovery local, and 
     const version={id:'whole',objectId:'human',role:'model',slot:'main',label:'채택 전체 사람',files:[{path:'source.blend',sha256:'exact-source'},{path:'source.glb',sha256:'preview-exact'}]};
     const object={id:'human',accepted:{'model:main':'whole'}};const root=createRoot(document.getElementById('root'));
     const action=async(kind,value)=>{window.actions.push({kind,...(value===undefined?{}:{value})});};
-    window.render=()=>root.render(<GraphicsAutoRig object={object} versions={[version,{...version,id:'unaccepted',label:'다른 후보'},{...version,id:'part',slot:'part-head'}]} view={window.view} disabled={false}
+    window.addMaterialSource=()=>{object.accepted['material:main']='material';window.extraSources=[{...version,id:'material',role:'material',label:'새 재질 모델'}];window.render();};
+    window.render=()=>root.render(<GraphicsAutoRig object={object} versions={[version,...(window.extraSources??[]),{...version,id:'unaccepted',label:'다른 후보'},{...version,id:'part',slot:'part-head'}]} view={window.view} disabled={false}
       onCheck={async()=>{await action('check');window.view={...window.view,ready:true,checked:true,readiness:['설치 확인 완료']};window.render();}}
       onRun={async draft=>{await action('start',draft);window.view={...window.view,running:true,state:'진행 중',sourceSha256:'exact-source',progress:'뼈 감지'};window.render();await new Promise(resolve=>window.finishRun=resolve);}}
-      onCancel={async()=>{await action('cancel');window.finishRun();window.view={...window.view,running:false,recoverable:true,state:'작업 중단됨'};window.render();}}
+      onCancel={async()=>{await action('cancel');window.finishRun();window.view={...window.view,running:false,recoverable:false,state:'작업 중단됨'};window.render();}}
       onRecover={async()=>{await action('recover');window.view={...window.view,recoverable:false,candidate:{...version,id:'rig',role:'rig',label:'자동 리그 후보'},state:'결과 검토'};window.render();}}
       onInspect={async()=>{await action('inspect');window.view={...window.view,correctionAvailable:true,highlightReady:true,bones:['spine_02','arm.L'],islands:[{mesh:'jacket',islandId:'island-7',vertices:12,vertexIndices:[0,1,2,3,4,5,6,7,8,9,10,11],bones:[{name:'arm.L',meanWeight:0.3,maxWeight:0.8}]}]};window.render();}}
       onCorrect={async selection=>{await action('repair',selection);}} onShow={version=>window.actions.push({kind:'show',value:version.id})}
@@ -38,6 +39,8 @@ test('automatic rig UI requires explicit orientation, keeps recovery local, and 
     await start.click(); await page.getByRole('button', { name: '작업 중단' }).waitFor();
     assert.deepEqual(await page.evaluate(() => (window as any).actions.at(-1)), { kind: 'start', value: { versionId: 'whole', frontAxis: '+X', fingers: true } });
     await page.getByRole('button', { name: '작업 중단', exact: true }).click();
+    assert.equal(await page.getByRole('button',{name:'저장된 결과만 복구'}).count(),0,'Cancelled work never offers unsupported recovery');
+    await page.evaluate(()=>{const w=window as any;w.view={...w.view,recoverable:true,state:'저장된 완료 파일이 있는 실패 작업'};w.render();});
     await page.getByRole('button', { name: '저장된 결과만 복구' }).click();
     await page.getByTestId('auto-rig-review').waitFor();
     assert.match(await page.getByTestId('auto-rig-review').innerText(), /아직 사용하지 않음/);
@@ -58,11 +61,15 @@ test('automatic rig UI requires explicit orientation, keeps recovery local, and 
     assert.deepEqual(await page.evaluate(() => (window as any).actions.slice(-2)), [{ kind: 'accept' }, { kind: 'unity-settings' }]);
     await page.getByText('실행 원본·설치 설정', { exact:true }).click();
     const previousActions=await page.evaluate(()=>(window as any).actions.length);
+    await page.evaluate(()=>(window as any).addMaterialSource());
+    await page.locator('select[aria-label="자동 리깅 원본"]').selectOption('material');
+    assert.equal(await page.getByLabel('모델 앞 방향').inputValue(),'','New source requires its own orientation confirmation');
+    assert.equal(await page.getByTestId('auto-rig-run-new').isDisabled(),true);
     await page.getByLabel('모델 앞 방향').selectOption('-Y');
     assert.equal(await page.evaluate(()=>(window as any).actions.length),previousActions,'Changing settings never starts another rig');
     const rerun=page.getByTestId('auto-rig-run-new');assert.equal(await rerun.isEnabled(),true);
     await rerun.click();await page.getByRole('button',{name:'작업 중단',exact:true}).waitFor();
-    assert.deepEqual(await page.evaluate(()=>(window as any).actions.at(-1)),{kind:'start',value:{versionId:'whole',frontAxis:'-Y',fingers:true}});
+    assert.deepEqual(await page.evaluate(()=>(window as any).actions.at(-1)),{kind:'start',value:{versionId:'material',frontAxis:'-Y',fingers:true}});
     assert.equal(await page.evaluate(()=>(window as any).actions.filter((item:any)=>item.kind==='start').length),2);
     assert.equal(await page.evaluate(()=>(window as any).view.candidate.id),'rig','Previous candidate remains saved');
     await page.getByRole('button',{name:'작업 중단',exact:true}).click();
@@ -107,12 +114,21 @@ test('studio makes automatic rigging primary and adoption opens Unity settings w
     await page.getByTestId('auto-rig-run').click();
     await page.getByTestId('auto-rig-review').waitFor();
     assert.deepEqual(await page.evaluate(() => (window as any).actions), [{ kind: 'probe-auto-rig' }, { kind: 'start-auto-rig', objectId: 'human', versionId: 'whole', frontAxis: 'pos-x', fingers: true }]);
+    await page.evaluate(()=>{const w=window as any;w.fixture.versions.push({...w.fixture.versions[0],id:'historical-rig',role:'rig',label:'이전 리그 후보'});w.fixture.autoRigRuns[0].inspection={islands:[],boneNames:['ONLY_NEW_BONE'],checks:[],warnings:[],humanBones:[]};w.render();});
+    await page.locator('.gs-version-history > summary').click();
+    await page.getByTestId('graphics-version-whole').click();
+    assert.equal(await page.getByTestId('auto-rig-adopt').count(),0,'Model history preview cannot adopt an unseen rig');
+    await page.getByTestId('graphics-version-historical-rig').click();
+    assert.match(await page.getByTestId('auto-rig-review').innerText(),/이전 리그 후보/);
+    assert.doesNotMatch(await page.getByTestId('auto-rig-review').innerText(),/自動リグ候補/);
+    await page.getByText('선택 영역만 가중치 보정 · 선택 사항',{exact:true}).click();
+    assert.equal(await page.getByLabel('보정 기준 뼈').locator('option').count(),1,'Historical rig never inherits latest rig bone inspection');
+    await page.getByRole('button',{name:'부위·뼈 영향 검사',exact:true}).click();
+    assert.deepEqual(await page.evaluate(()=>(window as any).actions.at(-1)),{kind:'inspect-auto-rig',objectId:'human',versionId:'historical-rig'});
+    assert.equal(await page.getByRole('button',{name:'선택 부위 보정 후보 만들기',exact:true}).isDisabled(),true);
     await page.getByTestId('auto-rig-adopt').click();
     await page.getByRole('heading', { name: 'Unity로 가져와요', exact: true }).waitFor();
-    assert.deepEqual(await page.evaluate(() => (window as any).actions.at(-1)), { kind: 'accept', objectId: 'human', versionId: 'rig-result' });
+    assert.deepEqual(await page.evaluate(() => (window as any).actions.at(-1)), { kind: 'accept', objectId: 'human', versionId: 'historical-rig' });
     assert.equal(await page.evaluate(() => (window as any).actions.some((action: any) => ['prepare', 'export', 'approve', 'deliver'].includes(action.kind))), false);
   } finally { await app.close(); }
 });
-
-
-
