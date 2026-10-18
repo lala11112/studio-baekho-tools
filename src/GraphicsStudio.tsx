@@ -28,6 +28,7 @@ import type {
   GraphicsFile,
 } from "../shared/graphics";
 import { graphicsLegacyUnlinkProblem, importedModelSourceProblem, requiresPartSourcePreparation, requiresPartSpaceRestoration, surfaceRepairSources } from "../shared/graphics";
+import { queuedUnityOpenTarget } from '../shared/graphics-unity-open';
 import {
   filterGraphicsTasks,
   findGraphicsTask,
@@ -745,6 +746,7 @@ export function GraphicsStudio({
   const [referenceRole, setReferenceRole] =
     useState<GraphicsObject["references"][number]["role"]>("appearance");
   const [pending, setPending] = useState(false);
+  const unityOpening = useRef(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [clock, setClock] = useState(Date.now());
@@ -1493,7 +1495,9 @@ export function GraphicsStudio({
   const unityOperationTaskId = guideTask && ['running', 'awaiting_approval', 'submission_unknown'].includes(guideTask.status) && ['X04', 'X05'].includes(guideTask.taskId) ? guideTask.taskId : taskId;
   const fileExport = stage === 'unity' && unityOperationTaskId === 'X04';
   const autoRigFileExport = fileExport && Boolean(journey?.inputReadiness.inputs.some(input => input.version?.role === 'rig' && input.version.autoRig));
-  const waitingForUnity = guideTask?.taskId === 'X05' && workspace?.deliveries.some(delivery => delivery.id === guideTask.deliveryId && delivery.objectId === object?.id && delivery.status === 'queued');
+  const queuedUnityOpen = stage==='unity'&&!fileExport&&workspace&&object&&guideTask?.deliveryId ? queuedUnityOpenTarget(workspace,project.id,object.id,guideTask.id,guideTask.deliveryId) : undefined;
+  const waitingForUnity = !!queuedUnityOpen;
+  const shownUnityDelivery = queuedUnityOpen?.delivery ?? journey?.delivery;
   const deliveryCurrent = stage === 'unity' && !fileExport && journey?.stages.find(item => item.id === 'unity')?.status === 'complete';
   const currentDeliveryMessage = deliveryCurrent && journey?.delivery?.status === 'imported'
     ? [...objectTasks].reverse().find(task => task.taskId === 'X05' && task.status === 'review' && task.deliveryId === journey.delivery!.id && task.objectId === object?.id && task.objectId === journey.delivery!.objectId && JSON.stringify([...task.inputVersionIds].sort()) === JSON.stringify([...journey.delivery!.versionIds].sort()))?.message
@@ -1552,14 +1556,16 @@ export function GraphicsStudio({
     {!waiting.length && (exactInputs.length ? exactInputs.map(input => <button key={`${input.key}:${input.versionId}`} onClick={() => { if (input.version) { setShownVersionId(input.version.id); revealResult(); } }}><Check size={13} /><span>{input.version?.label ?? '원본 확인 필요'}<small>{roles[input.version?.role ?? 'model']} · 현재 사용 중</small></span></button>) : <p>{stage === 'design' ? '새 디자인을 준비합니다. 참고 자료는 아래에서 연결할 수 있습니다.' : '이 단계에 사용할 결과를 먼저 선택해 주세요.'}</p>)}
     {journey && journey.parts.length > 0 && <details><summary>파트별 준비 상태 · {journey.parts.length}개</summary>{journey.parts.map(part => <button key={part.id} aria-pressed={creation.activePartId === part.id} onClick={() => { setCreation(current => ({ ...current, activePartId: part.id })); setShownVersionId(''); }}><span>{part.label}<small>{part.reason}</small></span></button>)}</details>}
   </div>;
-  async function openUnity() {
+  async function openUnity(queued=false) {
+    if(pending||unityOpening.current||queued&&!queuedUnityOpen)return;
+    unityOpening.current=true;
     setPending(true); setError('');
-    try { setNotice(String(await window.desktop.call({type:'unity.open',id:project.id}))); }
+    try { setNotice(String(await window.desktop.call({type:'unity.open',id:project.id,...(queued&&queuedUnityOpen?{deliveryId:queuedUnityOpen.delivery.id,taskId:queuedUnityOpen.task.id,objectId:queuedUnityOpen.task.objectId}:{})}))); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-    finally { setPending(false); }
+    finally { unityOpening.current=false;setPending(false); }
   }
   const guideFooter = <footer className="gs-guide-footer">
-    {shownImportProblem && !active ? <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled} onClick={openSingleSourceImport}>사용할 모델 다시 가져오기</button> : deliveryCurrent && !active ? <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled} onClick={() => void openUnity()}>Unity에서 확인</button> : guideAction && <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled || guideAction.intent === 'prepare' && prepareDisabled || guideTask?.status === 'awaiting_approval' && graphicsApprovalState(guideTask, clock) === 'blocked'} onClick={() => handleGuide(guideAction)}>{pending ? <><LoaderCircle size={15} className="gs-spin" /> 요청 처리 중…</> : actionLabel}</button>}
+    {queuedUnityOpen ? <button type="button" className="gs-primary" data-testid="graphics-guide-primary" data-unity-open-delivery={queuedUnityOpen.delivery.id} disabled={pending} onClick={() => void openUnity(true)}>{pending?'Unity 여는 중…':'Unity 열고 가져오기'}</button> : shownImportProblem && !active ? <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled} onClick={openSingleSourceImport}>사용할 모델 다시 가져오기</button> : deliveryCurrent && !active ? <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled} onClick={() => void openUnity()}>Unity에서 확인</button> : guideAction && <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled || guideAction.intent === 'prepare' && prepareDisabled || guideTask?.status === 'awaiting_approval' && graphicsApprovalState(guideTask, clock) === 'blocked'} onClick={() => handleGuide(guideAction)}>{pending ? <><LoaderCircle size={15} className="gs-spin" /> 요청 처리 중…</> : actionLabel}</button>}
     <div className="gs-guide-secondary">
       {(guideAction?.intent !== 'prepare' || deliveryCurrent) && !active && !shownContact && !contactPartProducer && <button data-testid="graphics-prepare" disabled={prepareDisabled} onClick={() => void prepare()}>{deliveryCurrent ? 'Unity 전달 다시 준비' : `새 ${stage === 'design' ? '이미지' : stage === 'model' ? '모델' : '작업'} 준비`}</button>}
       {journey?.secondaryActions.filter(action => action.intent === 'navigate').map(action => <button key={action.label} onClick={() => handleGuide(action)}>{action.label}</button>)}
@@ -2581,12 +2587,13 @@ export function GraphicsStudio({
                     {approvalCards}
                     {active || journey?.task?.status === 'failed' || journey?.task?.status === 'submission_unknown' ? currentJobs : <details className="gs-recent-status"><summary>최근 작업 상태와 복구</summary>{currentJobs}</details>}
                     {guideInputs}
-                    {stage === 'unity' && !fileExport && journey?.delivery && <section className="gs-guide-inputs" aria-label="Unity 전달 확인">
-                      <strong>{deliveryCurrent ? '현재 결과 가져오기 완료' : '이전 전달 기록 · 현재 원본과 다시 확인 필요'}</strong>
+                    {stage === 'unity' && !fileExport && shownUnityDelivery && <section className="gs-guide-inputs" aria-label="Unity 전달 확인">
+                      <strong>{queuedUnityOpen ? '현재 요청 · Unity 가져오기 대기' : deliveryCurrent ? '현재 결과 가져오기 완료' : '이전 전달 기록 · 현재 원본과 다시 확인 필요'}</strong>
                       {currentDeliveryMessage && <p className="gs-fine" data-testid="graphics-unity-delivery-message">{currentDeliveryMessage}</p>}
-                      <p>{journey.delivery.prefabPath ?? journey.delivery.destination}</p>
-                      <p>{journey.delivery.playbackVerified ? '재생 검사 기록 있음' : 'Play Mode 재생 검사는 별도입니다.'}</p>
-                      <small>{journey.delivery.status === 'imported' ? 'Unity에서 확인된 가져오기 기록' : '파일 준비와 Unity 가져오기 완료는 다릅니다.'}</small>
+                      <p>{shownUnityDelivery.prefabPath ?? shownUnityDelivery.destination}</p>
+                      {queuedUnityOpen&&<p data-testid="graphics-unity-queued-target">{queuedUnityOpen.target.projectPath}</p>}
+                      <p>{shownUnityDelivery.playbackVerified ? '재생 검사 기록 있음' : 'Play Mode 재생 검사는 별도입니다.'}</p>
+                      <small>{shownUnityDelivery.status === 'imported' ? 'Unity에서 확인된 가져오기 기록' : '파일 준비와 Unity 가져오기 완료는 다릅니다.'}</small>
                     </section>}
                     <section className="gs-instruction" aria-label="현재 작업 설정">
                   {["model", "unity"].includes(stage) && <GraphicsSizePanel key={object.id} value={creation.physicalSize} bounds={!shownVersion?.slot.startsWith("part-") && shownVersion?.files.some(file => /\.glb$/i.test(file.path)) ? modelBounds : undefined} restricted={object.kind === "character" || Boolean(modelBounds?.hasSkin || modelBounds?.hasMorph || modelBounds?.hasAnimation)} disabled={disabled || active} onValidityChange={setSizeInputsValid} onChange={physicalSize => setCreation(current => ({ ...current, physicalSize }))} onSave={() => void run({ kind: "update-object", objectId: object.id, patch: { creation } }, "크기 설정을 저장했습니다. 새 생성은 없습니다.")} onApply={creation.attributes.composition !== "parts" && (object.accepted["model:main"] || object.accepted["rig:main"]) ? () => void prepareSizeCopy() : undefined} />}

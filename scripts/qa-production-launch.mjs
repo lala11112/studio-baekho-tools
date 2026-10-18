@@ -34,6 +34,9 @@ try{
   assert.equal(digest(fs.readFileSync(path.join(path.dirname(asar),'integrations/blender',file))),original);
   report.nativeResources[file]=original;
  }
+ const unityBridge='integrations/unity/Editor/PartsmithGraphicsBridge.cs';
+ report.unityBridgeSha=digest(fs.readFileSync(unityBridge));
+ assert.equal(digest(fs.readFileSync(path.join(path.dirname(asar),unityBridge))),report.unityBridgeSha);
  report.passed=true;
 }catch(error){report.failure=String(error);throw error;}
 finally{fs.writeFileSync(process.env.PARTSMITH_QA_LAUNCH_REPORT ?? 'artifacts/runtime/qa-20261018-production-launch.json',JSON.stringify(report,null,2));await app.close();}

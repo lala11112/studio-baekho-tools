@@ -7,6 +7,7 @@ import { runProcess } from "./local";
 import { isGraphicsClipName, type AssetVersion, type GraphicsFile, type GraphicsObject, type UnityClipSettings, type UnityDelivery, type UnityTargetProfile } from "../shared/graphics";
 import { normalizePhysicalSize, type PhysicalSize, type SizeVector } from "../shared/graphics-size";
 import { validateUnityRigContract, type UnityRigContract } from "../shared/graphics-rig";
+import {normalizeUnityLinearIntensity,serializedUnityColorSpace,validUnityTargetProfilePolicy,unityTargetProfileMatches,parseUnityProfileRequest,type UnityTargetProfilePolicy} from '../shared/graphics-unity-profile';
 
 export const GRAPHICS_UNITY_CONVERTER = "graphics-unity-1";
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -14,6 +15,7 @@ const sha = (file: string) => digest(fs.readFileSync(file));
 const json = (file: string) => JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
 const slash = (p: string) => p.replaceAll("\\", "/");
 const read = (file: string) => fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+const profileRequest=(file:string)=>parseUnityProfileRequest(read(file)) as QueueRequest;
 const write = (file: string, value: unknown) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file + ".tmp", JSON.stringify(value, null, 2));
@@ -94,8 +96,17 @@ export function readUnityTarget(projectPath: string): UnityTargetProfile {
     if (pipeline === "unknown") warnings.push("지정된 렌더 파이프라인 GUID의 에셋 종류를 확인하지 못했습니다.");
   } else if (pipeline === "unknown") warnings.push("렌더 파이프라인 설정을 읽지 못했습니다. Built-in으로 추정하지 않습니다.");
   const lockFile = safePath(root, "Packages/packages-lock.json");
-  const fingerprint = digest(JSON.stringify({ root: root.toLowerCase(), version, graphics, quality, packages, packageLock: fs.existsSync(lockFile) ? sha(lockFile) : null, evidence, platform: "pc" }));
-  return { id: "unity-" + digest(root.toLowerCase()).slice(0,24), projectPath: root, unityVersion: version, pipeline, platform: "pc", packages, inspectedAt: new Date().toISOString(), fingerprint, warnings };
+  const legacyRawFingerprint = digest(JSON.stringify({ root: root.toLowerCase(), version, graphics, quality, packages, packageLock: fs.existsSync(lockFile) ? sha(lockFile) : null, evidence, platform: "pc" }));
+  const playerFile=safePath(root,'ProjectSettings/ProjectSettings.asset');
+  const playerSettingsSha256=fs.existsSync(playerFile)?sha(playerFile):null;
+  const activeColorSpace=playerSettingsSha256?serializedUnityColorSpace(read(playerFile)):undefined;
+  const graphicsRaw=fs.existsSync(graphicFile)?fs.readFileSync(graphicFile,'utf8'):'';
+  const normalized=activeColorSpace?normalizeUnityLinearIntensity(graphicsRaw,activeColorSpace):undefined;
+  let lockedUrp:unknown;try{if(fs.existsSync(lockFile))lockedUrp=json(lockFile).dependencies?.['com.unity.render-pipelines.universal']?.version;}catch{/* Unreadable version evidence disables normalization; raw fingerprint remains strict. */}
+  const profilePolicy:UnityTargetProfilePolicy|undefined=pipeline==='urp'&&packages['com.unity.render-pipelines.universal']==='17.3.0'&&(!fs.existsSync(lockFile)||lockedUrp==='17.3.0')&&activeColorSpace&&playerSettingsSha256&&normalized!==undefined?{schemaVersion:1,kind:'urp-linear-intensity-v1',urpVersion:'17.3.0',activeColorSpace,playerSettingsSha256}:undefined;
+  if(pipeline==='urp'&&!profilePolicy)warnings.push('색공간·URP 버전의 제한된 정규화 근거가 없어 대상 설정 원문을 엄격하게 비교합니다.');
+  const fingerprint=digest(JSON.stringify({fingerprintVersion:2,root:root.toLowerCase(),version,graphics:profilePolicy?normalized:graphicsRaw,quality:fs.existsSync(qualityFile)?fs.readFileSync(qualityFile,'utf8'):'',packages,packageManifestSha256:fs.existsSync(packageFile)?sha(packageFile):null,packageLock:fs.existsSync(lockFile)?sha(lockFile):null,evidence,platform:'pc',playerSettingsSha256,activeColorSpace:activeColorSpace??null,profilePolicy:profilePolicy??null}));
+  return { id: "unity-" + digest(root.toLowerCase()).slice(0,24), projectPath: root, unityVersion: version, pipeline, platform: "pc", packages, inspectedAt: new Date().toISOString(), fingerprint,fingerprintVersion:2,legacyRawFingerprint,...(activeColorSpace?{activeColorSpace}:{}),...(profilePolicy?{profilePolicy}:{}),warnings };
 }
 
 type Input = GraphicsFile & { absolute: string; versionId: string };
@@ -125,7 +136,7 @@ type QueueRequest = {
   destination: string; resultPath: string; profileFingerprint: string; unityVersion: string;
   pipeline: string; converterVersion: string; structure: string; rigType: string;
   mode: string; files: Output[]; expectedClips: string[]; sources: { path: string; sha256: string }[];
-  profileFiles: { path: string; sha256: string }[]; spritePixelsPerUnit: number; materialManifest?: string; optimization?:GraphicsUnityOptimization; clipSettings?:UnityClipSettings[];
+  profileFiles: { path: string; sha256: string; normalizedSha256?:string;absent?:boolean }[]; profileFingerprintVersion?:2;profilePolicy?:UnityTargetProfilePolicy;spritePixelsPerUnit: number; materialManifest?: string; optimization?:GraphicsUnityOptimization; clipSettings?:UnityClipSettings[];
   physicalSize?:PhysicalSize;
   rigContract?:UnityRigContract;
 };
@@ -198,30 +209,60 @@ function validateSources(projectRoot: string, object: GraphicsObject, versions: 
     });
   });
 }
-function profileFiles(root: string) {
+function profileFiles(root: string,profile:UnityTargetProfile) {
   const base = ["ProjectSettings/ProjectVersion.txt", "ProjectSettings/GraphicsSettings.asset", "ProjectSettings/QualitySettings.asset", "Packages/manifest.json", "Packages/packages-lock.json"];
   const graphics = read(safePath(root,"ProjectSettings/GraphicsSettings.asset"));
   const quality = read(safePath(root,"ProjectSettings/QualitySettings.asset"));
   const guids = new Set([...graphics.matchAll(/m_CustomRenderPipeline:\s*\{[^}]*guid:\s*([a-f\d]{32})/gi), ...quality.matchAll(/customRenderPipeline:\s*\{[^}]*guid:\s*([a-f\d]{32})/gi)].map(m=>m[1]));
   for (const file of [...files(safePath(root,"Assets")),...files(safePath(root,"Packages"))]) if (file.endsWith(".meta")) { const guid = read(file).match(/^guid:\s*([a-f\d]{32})/m)?.[1]; if(guid && guids.has(guid)) base.push(slash(path.relative(root,file.slice(0,-5))),slash(path.relative(root,file))); }
-  return [...new Set(base)].filter(p=>fs.existsSync(safePath(root,p))).map(p=>({path:p,sha256:sha(safePath(root,p))}));
+  base.push('ProjectSettings/ProjectSettings.asset');
+  return [...new Set(base)].filter(p=>p==='ProjectSettings/ProjectSettings.asset'||fs.existsSync(safePath(root,p))).map(p=>{
+    const file=safePath(root,p);if(!fs.existsSync(file))return {path:p,sha256:'',absent:true};
+    const normalized=p==='ProjectSettings/GraphicsSettings.asset'&&profile.profilePolicy?normalizeUnityLinearIntensity(fs.readFileSync(file,'utf8'),profile.profilePolicy.activeColorSpace):undefined;
+    return {path:p,sha256:sha(file),...(normalized!==undefined?{normalizedSha256:digest(normalized)}:{})};
+  });
+}
+
+/** Same restricted policy as the Editor's pre-import check; raw SHA remains frozen separately. */
+export function unityProfileInventoryMatches(root:string,q:Pick<QueueRequest,'profileFiles'|'profileFingerprintVersion'|'profilePolicy'|'pipeline'>):boolean {
+  const inventory=q.profileFiles,policy=q.profilePolicy;
+  if(!Array.isArray(inventory)||new Set(inventory.map(f=>f.path)).size!==inventory.length)return false;
+  if(q.profileFingerprintVersion!==undefined&&q.profileFingerprintVersion!==2)return false;
+  if(q.profileFingerprintVersion===2&&['ProjectSettings/ProjectVersion.txt','ProjectSettings/GraphicsSettings.asset','ProjectSettings/QualitySettings.asset','Packages/manifest.json','ProjectSettings/ProjectSettings.asset'].some(p=>!inventory.some(f=>f.path===p)))return false;
+  if(policy!==undefined){
+    if(q.profileFingerprintVersion!==2||q.pipeline!=='urp'||!validUnityTargetProfilePolicy(policy))return false;
+    const player=inventory.filter(f=>f.path==='ProjectSettings/ProjectSettings.asset');
+    if(player.length!==1||player[0].absent||player[0].sha256!==policy.playerSettingsSha256)return false;
+    const file=safePath(root,player[0].path);
+    if(!fs.existsSync(file)||sha(file)!==policy.playerSettingsSha256||serializedUnityColorSpace(read(file))!==policy.activeColorSpace)return false;
+    const packageFile=safePath(root,'Packages/manifest.json'),lockFile=safePath(root,'Packages/packages-lock.json');
+    if(!fs.existsSync(packageFile)||json(packageFile).dependencies?.['com.unity.render-pipelines.universal']!=='17.3.0'||fs.existsSync(lockFile)&&json(lockFile).dependencies?.['com.unity.render-pipelines.universal']?.version!=='17.3.0')return false;
+    if(inventory.filter(f=>f.path==='ProjectSettings/GraphicsSettings.asset'&&f.normalizedSha256&&/^[a-f\d]{64}$/.test(f.normalizedSha256)).length!==1)return false;
+  }
+  for(const f of inventory){
+    const file=safePath(root,f.path);
+    if(f.absent){if(q.profileFingerprintVersion!==2||f.path!=='ProjectSettings/ProjectSettings.asset'||f.sha256!==''||f.normalizedSha256!==undefined||fs.existsSync(file))return false;continue;}
+    if(!fs.existsSync(file)||!/^[a-f\d]{64}$/.test(f.sha256))return false;
+    if(f.normalizedSha256!==undefined){
+      if(!policy||f.path!=='ProjectSettings/GraphicsSettings.asset')return false;
+      const raw=fs.readFileSync(file,'utf8'),normalized=normalizeUnityLinearIntensity(raw,policy.activeColorSpace);
+      if(normalized===undefined||digest(normalized)!==f.normalizedSha256||!['gamma','linear'].some(c=>digest(normalizeUnityLinearIntensity(raw,c as 'gamma'|'linear')!)===f.sha256))return false;
+    }else if(sha(file)!==f.sha256)return false;
+  }
+  return true;
 }
 
 /** Pending imports need only their small frozen profile inventory, not an Assets tree walk. */
 function pendingProfileMatches(root:string, delivery:UnityDelivery):boolean {
   const requestPath=safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/request.json`);
-  if(!fs.existsSync(requestPath))return readUnityTarget(root).fingerprint===delivery.profileFingerprint;
-  const q=json(requestPath) as QueueRequest;
+  if(!fs.existsSync(requestPath))return unityTargetProfileMatches(readUnityTarget(root),{fingerprint:delivery.profileFingerprint});
+  const q=profileRequest(requestPath);
   assertRequestBinding(root,delivery,q);
   const inventory=q.profileFiles;
   const required=["ProjectSettings/ProjectVersion.txt","ProjectSettings/GraphicsSettings.asset","ProjectSettings/QualitySettings.asset","Packages/manifest.json"];
   // Older requests lack GUID metadata. Keep their complete profile check until explicitly prepared anew.
-  if(!Array.isArray(inventory)||required.some(p=>!inventory.some(f=>f.path===p))||(q.pipeline!=="builtin"&&!inventory.some(f=>f.path.endsWith(".meta"))))return readUnityTarget(root).fingerprint===delivery.profileFingerprint;
-  for(const file of inventory){
-    const absolute=safePath(root,file.path);
-    if(!fs.existsSync(absolute)||sha(absolute)!==file.sha256)return false;
-  }
-  return true;
+  if(!Array.isArray(inventory)||required.some(p=>!inventory.some(f=>f.path===p))||(q.pipeline!=="builtin"&&!inventory.some(f=>f.path.endsWith(".meta"))))return q.profileFingerprintVersion===undefined&&!q.profilePolicy&&unityTargetProfileMatches(readUnityTarget(root),{fingerprint:delivery.profileFingerprint});
+  return unityProfileInventoryMatches(root,q);
 }
 
 /** Freezes and stages exact source bytes, then queues import only. Never enters Play Mode. */
@@ -229,7 +270,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
   a.signal?.throwIfAborted();
   if(a.approvedTaskId!==undefined&&!/^[a-zA-Z0-9_-]{1,160}$/.test(a.approvedTaskId))throw Error("새 Unity 작업 승인 식별자가 잘못됐습니다.");
   const target = readUnityTarget(a.profile.projectPath), root = target.projectPath;
-  if (target.fingerprint !== a.profile.fingerprint || a.profile.platform !== "pc") throw Error("Unity 대상 설정이 바뀌었습니다. 프로젝트를 다시 확인하세요.");
+  if (a.profile.fingerprintVersion!==2||!unityTargetProfileMatches(target,a.profile)||a.profile.platform !== "pc") throw Error("Unity 대상 설정이 바뀌었습니다. 프로젝트를 다시 확인하세요.");
   if (target.pipeline === "unknown") throw Error("렌더 파이프라인을 확인한 뒤 Unity로 보낼 수 있습니다.");
   const inputs = validateSources(a.projectRoot, a.object, a.versions);
   const sprite = a.object.kind === "sprite" || a.object.kind === "ui";
@@ -318,7 +359,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
       try{retryLock=fs.openSync(lockPath,"wx");fs.writeFileSync(retryLock,JSON.stringify({pid:process.pid,id:cached.id}));}catch{throw Error("Unity 전달 잠금이 있습니다. 다른 작업이 끝났는지 확인하세요.");}
       const latest=cachedDelivery();if(!latest||latest.id!==cached.id)return latest?inspectUnityDelivery(root,latest):inspected;
       const current=inspectUnityDelivery(root,latest);if(!retryable(latest,current))return current;
-      const oldStage=safePath(root,`Library/PartsmithGraphicsStaging/${cached.id}`),request=json(path.join(oldStage,"request.json")) as QueueRequest;assertRequestBinding(root,cached,request);
+      const oldStage=safePath(root,`Library/PartsmithGraphicsStaging/${cached.id}`),request=profileRequest(path.join(oldStage,"request.json"));assertRequestBinding(root,cached,request);
       if(JSON.stringify(request.sources)!==JSON.stringify(inputs.map(i=>({path:i.absolute,sha256:i.sha256}))))throw Error("취소된 Unity 요청의 원본 목록이 다릅니다.");
       const inbox=safePath(root,"Library/PartsmithGraphicsInbox");if(files(inbox).some(f=>f.endsWith(".json")))throw Error("이미 대기 중인 Unity 전달이 있습니다. 먼저 기존 결과를 확인하세요.");
       const bridge=safePath(root,"Assets/PartsmithGraphicsBridge/Editor/PartsmithGraphicsBridge.cs");if(!fs.existsSync(bridge)||sha(bridge)!==sha(bridgeSource))throw Error("Unity 브리지 변경을 보존했습니다. 취소 요청을 재전송하지 않습니다.");
@@ -362,7 +403,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
       if(prior.objectId!==a.object.id) { delivery.status="conflict";delivery.errors.push("기존 출력의 오브젝트가 다릅니다.");return delivery; }
       if(prior.profileFingerprint!==target.fingerprint){
         const priorRequest=typeof prior.requestId==="string"&&/^[a-f\d]{32}$/.test(prior.requestId)?safePath(root,`Library/PartsmithGraphicsStaging/${prior.requestId}/request.json`):undefined;
-        const priorProfile=prior.pipeline?prior:priorRequest&&fs.existsSync(priorRequest)?json(priorRequest):{};
+        const priorProfile=prior.pipeline?prior:priorRequest&&fs.existsSync(priorRequest)?profileRequest(priorRequest):{};
         if(priorProfile.pipeline!==target.pipeline || String(priorProfile.unityVersion).split(".")[0]!==target.unityVersion.split(".")[0]){delivery.status="conflict";delivery.errors.push("기존 출력의 렌더 파이프라인 또는 Unity 주 버전이 달라 호환성을 확인해야 합니다.");return delivery;}
         delivery.warnings.push("호환되는 Unity 대상 설정 변경을 새 전달에 반영합니다. 원본과 사용자 프리팹은 보존합니다.");
       }
@@ -453,7 +494,7 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
     validateSources(a.projectRoot,a.object,a.versions);
     if(readUnityTarget(root).fingerprint!==target.fingerprint)throw Error("처리 중 Unity 대상 설정이 변경됐습니다.");
     a.signal?.throwIfAborted();
-    const request: QueueRequest={schemaVersion:1,requestId:id,objectId:a.object.id,objectName:a.object.name,destination:dest,resultPath,profileFingerprint:target.fingerprint,unityVersion:target.unityVersion,pipeline:target.pipeline,converterVersion,structure,rigType,rigContract,mode:sprite?"sprite":"model",files:outputs,expectedClips,sources:inputs.map(i=>({path:i.absolute,sha256:i.sha256})),profileFiles:profileFiles(root),spritePixelsPerUnit,optimization,clipSettings,...(!sprite?{materialManifest:dest+"/Generated/materials.json",physicalSize}:{})};
+    const request: QueueRequest={schemaVersion:1,requestId:id,objectId:a.object.id,objectName:a.object.name,destination:dest,resultPath,profileFingerprint:target.fingerprint,unityVersion:target.unityVersion,pipeline:target.pipeline,converterVersion,structure,rigType,rigContract,mode:sprite?"sprite":"model",files:outputs,expectedClips,sources:inputs.map(i=>({path:i.absolute,sha256:i.sha256})),profileFiles:profileFiles(root,target),profileFingerprintVersion:2,...(target.profilePolicy?{profilePolicy:target.profilePolicy}:{}),spritePixelsPerUnit,optimization,clipSettings,...(!sprite?{materialManifest:dest+"/Generated/materials.json",physicalSize}:{})};
     // User code is not overwritten. Existing .meta files are deliberately never replaced.
     if(!fs.existsSync(bridgeDest)||sha(bridgeDest)!==bridgeHash){fs.mkdirSync(path.dirname(bridgeDest),{recursive:true});fs.copyFileSync(bridgeSource,bridgeDest);}
     write(bridgeRecord,{sha256:bridgeHash,converterVersion});
@@ -483,7 +524,7 @@ export function cancelUnityDelivery(projectPath: string, delivery: UnityDelivery
   if(saved.id!==delivery.id||saved.objectId!==delivery.objectId||saved.profileFingerprint!==delivery.profileFingerprint||saved.converterVersion!==delivery.converterVersion)throw Error("취소 대상 Unity 전달 기록이 일치하지 않습니다.");
   const savedRequest=safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/request.json`);
   if(!fs.existsSync(savedRequest))throw Error("취소 대상의 고정 Unity 요청이 없습니다.");
-  assertRequestBinding(root,delivery,json(savedRequest));
+  assertRequestBinding(root,delivery,profileRequest(savedRequest));
   if(fs.existsSync(queue)){
     const request=json(queue);
     assertRequestBinding(root,delivery,request);
@@ -510,9 +551,9 @@ export function inspectUnityDelivery(projectPath: string, delivery: UnityDeliver
     }
     const requestPath=safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/request.json`);
     if(!fs.existsSync(requestPath))throw Error("Unity 결과에 대응하는 고정 요청이 없습니다.");
-    const request:QueueRequest=json(requestPath);assertRequestBinding(root,delivery,request);
+    const request=profileRequest(requestPath);assertRequestBinding(root,delivery,request);
     // Completion still resolves GUIDs and computes the full target fingerprint before accepting evidence.
-    if(readUnityTarget(root).fingerprint!==delivery.profileFingerprint){result.status="conflict";result.errors.push("Unity 대상 프로필이 바뀌어 이전 검증을 재사용하지 않습니다.");return result;}
+    if(!unityTargetProfileMatches(readUnityTarget(root),{fingerprint:delivery.profileFingerprint,fingerprintVersion:request.profileFingerprintVersion})||request.profileFingerprintVersion===2&&!unityProfileInventoryMatches(root,request)){result.status="conflict";result.errors.push("Unity 대상 프로필이 바뀌어 이전 검증을 재사용하지 않습니다.");return result;}
     const r=json(reportFile);
     if(r.requestId!==delivery.id || r.objectId!==delivery.objectId || r.profileFingerprint!==delivery.profileFingerprint || r.converterVersion!==delivery.converterVersion || !["imported","failed","conflict"].includes(r.status))throw Error("Unity 결과와 고정한 전달 요청이 다릅니다.");
     // Keep cancellation history in its immutable marker; a late valid receipt may win.

@@ -21,6 +21,9 @@ import { ProductionEngine } from "../engine/production";
 import { restoreProductionArchives } from "../engine/production-backup";
 import { WorkbenchEngine } from "../engine/workbench";
 import { GraphicsEngine } from "../engine/graphics";
+import { readUnityTarget } from '../engine/graphics-unity';
+import { queuedUnityOpenTarget } from '../shared/graphics-unity-open';
+import { unityTargetProfileMatches } from '../shared/graphics-unity-profile';
 import { NativeTopologyManager } from "./native-topology";
 import { externalRigPreparedFile } from './external-rig';
 import { autoRigInspectionPreviewAllowed } from './auto-rig-preview';
@@ -637,15 +640,22 @@ async function dispatch(c: Command): Promise<unknown> {
       return local.result(c.id);
     case "unity.open": {
       const project = store.project(c.id), editor = store.settings.unityEditorPath;
-      if (!project.unityPath || !fs.existsSync(path.join(project.unityPath, "ProjectSettings", "ProjectVersion.txt")))
+      let unityPath=project.unityPath;
+      if(c.deliveryId!==undefined||c.taskId!==undefined||c.objectId!==undefined){
+        if(!c.deliveryId||!c.taskId||!c.objectId)throw new Error('Unity를 열 현재 전달 요청을 다시 확인하세요.');
+        const queued=queuedUnityOpenTarget(graphics.get(c.id),c.id,c.objectId,c.taskId,c.deliveryId);
+        if(!queued||!unityTargetProfileMatches(readUnityTarget(queued.target.projectPath),queued.target))throw new Error('고정한 Unity 전달 요청·대상 프로젝트가 일치하지 않습니다.');
+        unityPath=queued.target.projectPath;
+      }
+      if (!unityPath || !fs.existsSync(path.join(unityPath, "ProjectSettings", "ProjectVersion.txt")))
         throw new Error("연결 설정에서 Unity 프로젝트 폴더를 확인하세요.");
       if (!editor || !fs.existsSync(editor) || path.basename(editor).toLowerCase() !== "unity.exe")
         throw new Error("연결 설정에서 Unity Editor 실행 파일을 확인하세요.");
       // An open editor already owns the project; never launch another import or Play Mode run.
-      if (fs.existsSync(path.join(project.unityPath, "Temp", "UnityLockfile")))
+      if (fs.existsSync(path.join(unityPath, "Temp", "UnityLockfile")))
         return "이 프로젝트가 Unity에 열려 있습니다. Unity 창에서 전달된 프리팹을 확인하세요.";
       await new Promise<void>((resolve, reject) => {
-        const child = spawn(editor, ["-projectPath", project.unityPath], { detached: true, stdio: "ignore", windowsHide: true, shell: false });
+        const child = spawn(editor, ["-projectPath", unityPath], { detached: true, stdio: "ignore", windowsHide: true, shell: false });
         child.once("error", reject);
         child.once("spawn", () => { child.unref(); resolve(); });
       });

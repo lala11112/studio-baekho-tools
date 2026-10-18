@@ -52,9 +52,23 @@ from graphics_auto_rig_parts import policy as part_policy,identities as part_ide
 namespace=dict(globals());namespace.update({'ROOT':root,'REQUEST':{'partPolicy':policy},'REPORT':{'inspection':{'humanBones':[{'humanName':'Head','boneName':'head.x'}],'checks':[]}},'part_policy':part_policy,'part_identities':part_identities,'part_snapshot':part_snapshot,'verify_part_export':verify_part_export})
 exec(compile(definitions,'graphics_auto_rig.py','exec'),namespace)
 error=None
+native_materials={m.as_pointer():m.name for m in bpy.data.materials};native_meshes={m.as_pointer():m.name for m in bpy.data.meshes}
 try:namespace['verify_exported_names']();checks.append('real FBX exact three part IDs topology UV/material slots world geometry and hair Head1 passed')
 except Exception as e:error=repr(e)
 if error is None:
+    assert {m.as_pointer():m.name for m in bpy.data.materials}==native_materials
+    assert {m.as_pointer():m.name for m in bpy.data.meshes}==native_meshes
+    checks.append('validation removes only new orphan meshes/materials and restores exact original names')
+    saved_verify=namespace['verify_part_export']
+    def forced_failure(*args):raise AssertionError('forced validation failure')
+    namespace['verify_part_export']=forced_failure
+    try:namespace['verify_exported_names']()
+    except AssertionError as failure:assert str(failure)=='forced validation failure'
+    else:raise AssertionError('forced validation failure missing')
+    finally:namespace['verify_part_export']=saved_verify
+    assert {m.as_pointer():m.name for m in bpy.data.materials}==native_materials
+    assert {m.as_pointer():m.name for m in bpy.data.meshes}==native_meshes
+    checks.append('post-import failure cleans validation data and restores all original material names')
     expected=snapshot(meshes,policy)
     mutations=[('UV',lambda: setattr(meshes[0].data.uv_layers[0].data[0],'uv',(.123,.456)),lambda: setattr(meshes[0].data.uv_layers[0].data[0],'uv',expected['synthetic-id-body']['uv'][meshes[0].data.uv_layers[0].name][0])),
       ('geometry',lambda:setattr(meshes[0].data.vertices[0].co,'x',meshes[0].data.vertices[0].co.x+.01),lambda:setattr(meshes[0].data.vertices[0].co,'x',meshes[0].data.vertices[0].co.x-.01)),

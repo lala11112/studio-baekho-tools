@@ -288,6 +288,7 @@ def verify_exported_names():
     # Avoid Blender's automatic .001 name suffixes when comparing exact exported
     # material slots. No export or saved native file uses these temporary names.
     renamed=[]
+    original_mesh_data={mesh.as_pointer() for mesh in bpy.data.meshes}
     if frozen_parts:
         for index,material in enumerate(list(bpy.data.materials)):
             renamed.append((material,material.name));material.name='__PARTSMITH_NATIVE_MATERIAL_'+str(index)
@@ -316,9 +317,15 @@ def verify_exported_names():
         # original exact names; otherwise Blender would rename the originals.
         old={m.as_pointer() for m,_ in renamed}
         if frozen_parts:
+            # Removing imported objects does not remove their mesh datablocks.
+            # Those orphan meshes keep material users alive and would steal the
+            # original names during restoration. Never remove source mesh data.
+            for mesh in list(bpy.data.meshes):
+                if mesh.as_pointer() not in original_mesh_data and mesh.users==0:bpy.data.meshes.remove(mesh)
             for material in list(bpy.data.materials):
                 if material.as_pointer() not in old and material.users==0:bpy.data.materials.remove(material)
             for material,name in renamed:material.name=name
+            assert all(material.name==name for material,name in renamed),'Native material names changed during FBX validation cleanup'
 
 
 def inspect_repair():

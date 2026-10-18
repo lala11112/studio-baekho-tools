@@ -35,6 +35,11 @@ export type UnityTargetProfile = {
   id: string; projectPath: string; unityVersion: string;
   pipeline: "urp" | "hdrp" | "builtin" | "unknown"; platform: "pc";
   packages: Record<string, string>; inspectedAt: string; fingerprint: string; warnings: string[];
+  fingerprintVersion?: 2;
+  /** Only for exact legacy reads; never a canonicalized legacy fallback. */
+  legacyRawFingerprint?: string;
+  activeColorSpace?: 'gamma'|'linear';
+  profilePolicy?: import('./graphics-unity-profile').UnityTargetProfilePolicy;
 };
 /** Frozen settings from the exact accepted animation's producing task, never current object controls. */
 export type UnityClipSettings = { versionId: string; name: string; loop: boolean; rootMotion: boolean; fps: number };
