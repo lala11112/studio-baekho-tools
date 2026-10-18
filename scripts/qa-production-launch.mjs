@@ -29,7 +29,7 @@ try{
  report.mainSha=digest(fs.readFileSync('dist-electron/main.cjs'));
  assert.equal(digest(extractFile(asar,'dist-electron/main.cjs')),report.mainSha);
  report.nativeResources={};
- for(const file of ['graphics_local.py','graphics_planar_repair.py','tripo_part_preservation.py']){
+ for(const file of ['graphics_local.py','graphics_procedural.py','graphics_glb.py','graphics_planar_repair.py','tripo_part_preservation.py']){
   const original=digest(fs.readFileSync(path.join('integrations/blender',file)));
   assert.equal(digest(fs.readFileSync(path.join(path.dirname(asar),'integrations/blender',file))),original);
   report.nativeResources[file]=original;

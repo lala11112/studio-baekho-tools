@@ -7,7 +7,7 @@ import pathlib
 import sys
 from mathutils import Matrix, Vector
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from graphics_glb import export_packed_glb
+from graphics_glb import export_packed_glb, active_uv_first_export
 from graphics_size import apply_physical_size
 from graphics_source_images import import_fbx_deferred, pack_registered_companions
 
@@ -103,17 +103,18 @@ for obj in selected:
 bpy.context.view_layer.objects.active = meshes[0]
 bpy.ops.wm.save_as_mainfile(filepath=str(out / 'asset.blend'), compress=False)
 files.append('asset.blend')
-if q['format'] in ('glb', 'both'):
-    glb_images = export_packed_glb(out / 'asset.glb', use_selection=True, export_animations=True)
-    files.append('asset.glb')
-if q['format'] in ('fbx', 'both'):
-    bpy.ops.export_scene.fbx(filepath=str(out / 'asset.fbx'), use_selection=True,
-        object_types={'ARMATURE', 'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y',
-        apply_unit_scale=True, apply_scale_options='FBX_SCALE_UNITS', add_leaf_bones=False,
-        use_custom_props=True,
-        bake_anim=True, bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False,
-        bake_anim_simplify_factor=0.0, path_mode='COPY', embed_textures=True)
-    files.append('asset.fbx')
+with active_uv_first_export(meshes, fbx=q['format'] in ('fbx','both')) as export_uv:
+    if q['format'] in ('glb', 'both'):
+        glb_images = export_packed_glb(out / 'asset.glb', use_selection=True, export_animations=True)
+        files.append('asset.glb')
+    if q['format'] in ('fbx', 'both'):
+        bpy.ops.export_scene.fbx(filepath=str(out / 'asset.fbx'), use_selection=True,
+            object_types={'ARMATURE', 'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y',
+            apply_unit_scale=True, apply_scale_options='FBX_SCALE_UNITS', add_leaf_bones=False,
+            use_custom_props=True,
+            bake_anim=True, bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False,
+            bake_anim_simplify_factor=0.0, path_mode='COPY', embed_textures=True)
+        files.append('asset.fbx')
 if hashlib.sha256(source.read_bytes()).hexdigest() != original_hash:
     raise RuntimeError('Original source changed during local export')
 report = {'schemaVersion': 1, 'identity': q['identity'], 'operation': operation,
@@ -123,6 +124,7 @@ report = {'schemaVersion': 1, 'identity': q['identity'], 'operation': operation,
     'geometryAuthored': False, 'motionAuthored': False, 'unityPlaybackVerified': False,
     'warnings': warnings, 'glbImages': glb_images}
 report['physicalSize'] = physical_size
+report['exportUV'] = export_uv
 if q.get('sourceManifestVersion') == 1:
     report['sourceManifestVersion'] = 1
     report['sourceCompanions'] = q.get('sourceCompanions', [])

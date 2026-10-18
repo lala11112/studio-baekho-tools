@@ -3,7 +3,8 @@ import bpy, json, pathlib, sys, math, hashlib, re, unicodedata
 from mathutils import Vector
 from mathutils.kdtree import KDTree
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from graphics_glb import export_packed_glb
+from graphics_glb import export_packed_glb, active_uv_first_export
+from contextlib import nullcontext
 
 def image_name(value):
     return unicodedata.normalize('NFC', str(value).replace('\\','/').rsplit('/',1)[-1]).casefold()
@@ -284,9 +285,11 @@ try:
                 copy.materials[index] = export_materials[key]
             export_uv.append({'mesh': obj.name, 'sourceLayer': selected.name, 'exportLayer': chosen.name, 'layerCount': 1})
             if not valid_uv(obj): raise RuntimeError('Selected export UV contains a degenerate face')
-    bpy.ops.export_scene.fbx(filepath=str(out/'Asset.fbx'), use_selection=True, object_types={'MESH','ARMATURE','EMPTY'}, add_leaf_bones=False,
-        bake_anim=bool(bpy.data.actions), bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False, bake_anim_simplify_factor=0.0, path_mode='COPY', embed_textures=True)
-    glb_images=export_packed_glb(out/'Asset.glb', use_selection=True, export_animations=True)
+    with (nullcontext([]) if operation=='T02' and s.get('uvMode','local')!='keep' else active_uv_first_export(meshes,fbx=True)) as ordered_uv:
+        if ordered_uv: export_uv.extend(ordered_uv)
+        bpy.ops.export_scene.fbx(filepath=str(out/'Asset.fbx'), use_selection=True, object_types={'MESH','ARMATURE','EMPTY'}, add_leaf_bones=False,
+            bake_anim=bool(bpy.data.actions), bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False, bake_anim_simplify_factor=0.0, path_mode='COPY', embed_textures=True)
+        glb_images=export_packed_glb(out/'Asset.glb', use_selection=True, export_animations=True)
 finally:
     for obj, original, copy in export_copies:
         obj.data = original; bpy.data.meshes.remove(copy)
