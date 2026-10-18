@@ -17,6 +17,7 @@ export function inspectedRigPreview(candidate: AssetVersion | undefined, inspect
 
 export function autoRigPresentation(message: string): string {
   const known: Record<string,string> = {
+    'Small disconnected island has finger influences; inspect motion before correction':'작은 분리 부위가 손가락 본의 영향을 받습니다. 움직임을 확인한 뒤 보정할 영향을 선택하세요.',
     'Visual review required; no collision or natural-deformation certification':'겹침과 자연스러운 변형은 실제 동작으로 확인하세요.',
     'FBX mapping uses installed ARP Unity exporter conventions; actual Unity validation remains required':'Unity 본 매핑을 준비했습니다. 실제 Unity 가져오기 검사는 별도입니다.',
     sourceHashBound:'실행 원본 해시 일치',geometryAndUV:'원본 형태·UV 보존',outsideWeights:'선택 밖 가중치 보존',attributes:'메시 속성 보존',materials:'재질 보존',images:'이미지 보존',skeleton:'뼈대 보존',exportedBoneNames:'내보낸 실제 본 이름 확인',

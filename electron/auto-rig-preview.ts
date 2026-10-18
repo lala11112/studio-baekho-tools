@@ -22,13 +22,13 @@ export function autoRigInspectionPreviewAllowed(projectRoot:string, workspace:Gr
    const glbs=run.files.filter(file=>/\.glb$/i.test(file.path));if(glbs.length!==1||path.resolve(root,glbs[0].path)!==wanted)continue;
    const version=workspace.versions.find(v=>v.id===run.sourceVersionId&&v.objectId===run.objectId&&v.role==='rig');
    if(!version?.files.some(file=>JSON.stringify(file)===JSON.stringify(run.source)))return false;
-   const fingerprint=hash(JSON.stringify({objectId:run.objectId,sourceVersionId:run.sourceVersionId,source:run.source,operation:run.operation,settings:run.settings,repairs:run.repairs,inspectionRunId:run.inspectionRunId,toolSha256:run.toolSha256}));
+   const fingerprint=hash(JSON.stringify({objectId:run.objectId,sourceVersionId:run.sourceVersionId,source:run.source,operation:run.operation,settings:run.settings,repairs:run.repairs,inspectionRunId:run.inspectionRunId,toolSha256:run.toolSha256,...(run.partPolicy?{partPolicy:run.partPolicy}:{}),...(run.toolDependencies?{toolDependencies:run.toolDependencies}:{})}));
    if(run.requestHash!==fingerprint)return false;
    verify(run.source);verify(run.reportFile);for(const file of run.files)verify(file);
    const folder=path.join('graphics','auto-rig',run.id);
    for(const name of ['dispatch.json','request.json','worker.py','source.blend','output/run-report.json'])safe(path.join(folder,name));
    const request=JSON.parse(fs.readFileSync(safe(path.join(folder,'request.json')),'utf8'));
-   if(request.sourceBlend!==path.join(root,folder,'source.blend')||request.sourceSha256!==run.source.sha256||request.operation!=='inspect'||request.fingers!==run.settings.fingers||JSON.stringify(request.repairs)!==JSON.stringify(run.repairs)||request.sourceToRigMatrix!==undefined)return false;
+   if(request.sourceBlend!==path.join(root,folder,'source.blend')||request.sourceSha256!==run.source.sha256||request.operation!=='inspect'||request.fingers!==run.settings.fingers||JSON.stringify(request.repairs)!==JSON.stringify(run.repairs)||request.sourceToRigMatrix!==undefined||JSON.stringify(request.partPolicy)!==JSON.stringify(run.partPolicy)||JSON.stringify(request.workerResources)!==JSON.stringify(run.toolDependencies))return false;
    const saved=inspectSavedGraphicsAutoRig(path.join(root,folder));
    if(run.toolSha256!==undefined&&saved.toolSha256!==run.toolSha256)return false;
    if(saved.reportPath!==verify(run.reportFile)||saved.glbPath!==wanted||JSON.stringify(saved.report.inspection)!==JSON.stringify(run.inspection))return false;

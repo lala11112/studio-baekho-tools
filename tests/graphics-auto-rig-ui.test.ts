@@ -53,7 +53,7 @@ test('automatic rig UI requires explicit orientation, keeps recovery local, and 
     await page.getByLabel('보정 대상 부위').selectOption(JSON.stringify(['jacket', 'island-7']));
     await page.getByLabel('가중치 보정 방식').selectOption('remove-influence');
     assert.equal(await repair.isDisabled(), true);
-    await page.getByLabel('보정 기준 뼈').selectOption('arm.L');
+    await page.getByLabel('제거할 뼈 arm.L',{exact:true}).check();
     await repair.click();
     assert.deepEqual(await page.evaluate(() => (window as any).actions.at(-1)), { kind: 'repair', value: { mesh: 'jacket', islandId: 'island-7', kind: 'remove-influence', bones: ['arm.L'] } });
     assert.equal(await page.evaluate(() => (window as any).actions.some((item: any) => item.kind === 'accept')), false);
@@ -131,6 +131,7 @@ test('studio makes automatic rigging primary and adoption opens Unity settings w
     assert.match(await page.getByTestId('auto-rig-review').innerText(),/이전 리그 후보/);
     assert.doesNotMatch(await page.getByTestId('auto-rig-review').innerText(),/自動リグ候補/);
     await page.getByText('선택 영역만 가중치 보정 · 선택 사항',{exact:true}).click();
+    await page.getByLabel('가중치 보정 방식').selectOption('rigid-bind');
     assert.equal(await page.getByLabel('보정 기준 뼈').locator('option').count(),1,'Historical rig never inherits latest rig bone inspection');
     await page.getByRole('button',{name:'부위·뼈 영향 검사',exact:true}).click();
     assert.deepEqual(await page.evaluate(()=>(window as any).actions.at(-1)),{kind:'inspect-auto-rig',objectId:'human',versionId:'historical-rig'});

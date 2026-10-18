@@ -50,6 +50,24 @@ test('whole imported source does not infer part policy from editable enabled par
  await f.engine.action('p',start);assert.equal(f.requests()[0].partPolicy,undefined);assert.deepEqual(f.get().versions.at(-1)!.autoRig?.contract.requiredParts,[]);
  const v=f.get().versions.at(-1)!;await f.engine.action('p',{kind:'inspect-auto-rig',objectId:'o',versionId:v.id});assert.equal(f.requests().at(-1).partPolicy,undefined);
 });
+
+test('four-island multipart repair freezes one inspection and recovers all-or-nothing without changing adoption',async t=>{
+ const f=assembledFixture(t);f.changeInspection(v=>{const bone=v.boneNames[0];v.islands=Array.from({length:4},(_,i)=>({mesh:'mesh',islandId:hash('['+(i*2)+', '+(i*2+1)+']'),vertices:2,vertexIndices:[i*2,i*2+1],bones:[{name:bone,meanWeight:1,maxWeight:1}]}));});
+ await f.engine.action('p',start);const source=f.get().versions.at(-1)!;
+ await f.engine.action('p',{kind:'accept',objectId:'o',versionId:source.id});
+ await f.engine.action('p',{kind:'inspect-auto-rig',objectId:'o',versionId:source.id});const inspection=f.get().autoRigRuns!.at(-1)!;
+ // Historical inspection retains its own staged worker; a new correction can use an updated worker without reinspection.
+ fs.writeFileSync(path.join(f.root,'blender','graphics_auto_rig.py'),'updated-batch-worker');
+ const repairs=inspection.inspection!.islands.map(i=>({mesh:i.mesh,islandId:i.islandId,kind:'remove-influence' as const,bones:[inspection.inspection!.boneNames[0]]}));
+ const beforeVersions=f.get().versions.length,accepted=structuredClone(f.get().objects[0].accepted),sourceFiles=structuredClone(source.files);
+ // Simulate process interruption after all files were saved: never register a partial candidate.
+ f.fail();await assert.rejects(f.engine.action('p',{kind:'repair-auto-rig',objectId:'o',versionId:source.id,inspectionRunId:inspection.id,repairs}));
+ const run=f.get().autoRigRuns!.at(-1)!;assert.equal(run.state,'failed');assert.notEqual(run.toolSha256,inspection.toolSha256);assert.equal(f.get().versions.length,beforeVersions);assert.deepEqual(f.get().objects[0].accepted,accepted);
+ const writes=f.writes();await f.make().action('p',{kind:'recover-auto-rig',objectId:'o',runId:run.id});
+ assert.equal(f.writes(),writes);assert.equal(f.get().versions.length,beforeVersions+1);const candidate=f.get().versions.at(-1)!;
+ assert.deepEqual(candidate.sourceVersionIds,[source.id]);assert.deepEqual(candidate.autoRig?.partPolicy,source.autoRig?.partPolicy);assert.equal(candidate.autoRig?.contract.hairBinding,'head');
+ assert.deepEqual(f.get().autoRigRuns!.at(-1)!.repairs,repairs);assert.equal(run.inspectionRunId,inspection.id);assert.equal(run.source.sha256,inspection.source.sha256);assert.deepEqual(f.get().objects[0].accepted,accepted);assert.deepEqual(source.files,sourceFiles);
+});
 test('helper revision is frozen independently while old staged candidates remain valid',async t=>{
  const f=fixture(t),helper=path.join(f.root,'blender','graphics_auto_rig_parts.py');fs.writeFileSync(helper,'helper-one');await f.engine.action('p',start);
  const candidate=f.get().versions.at(-1)!,original=structuredClone(f.get().autoRigRuns![0]);assert.deepEqual(original.toolDependencies,{'graphics_auto_rig_parts.py':hash('helper-one')});

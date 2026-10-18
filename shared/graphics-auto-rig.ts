@@ -77,11 +77,17 @@ export function autoRigOrientation(front: AutoRigFront): number[][] {
 export function validateAutoRigRepairs(inspection: AutoRigInspection, repairs: AutoRigRepair[]): AutoRigRepair[] {
   if (!Array.isArray(repairs) || !repairs.length || repairs.length > 32) throw Error('보정할 부위와 방식을 선택하세요.');
   const used = new Set<string>();
+  const touched = new Map<string,Set<number>>();
   return repairs.map(value => {
     if (!value || !['normalize','remove-influence','rigid-bind'].includes(value.kind)) throw Error('지원하는 웨이트 보정 방식을 선택하세요.');
     const key = JSON.stringify([value.mesh, value.islandId]);
     if (used.has(key) || !inspection.islands.some(item => item.mesh === value.mesh && item.islandId === value.islandId)) throw Error('검사한 부위를 한 번씩만 선택하세요.');
     used.add(key);
+    const island=inspection.islands.find(item=>item.mesh===value.mesh&&item.islandId===value.islandId)!;
+    const vertices=touched.get(value.mesh)??new Set<number>();
+    if(island.vertexIndices?.some(index=>vertices.has(index)))throw Error('겹치는 부위는 한 번에 보정할 수 없습니다.');
+    for(const index of island.vertexIndices??[])vertices.add(index);
+    touched.set(value.mesh,vertices);
     if (value.kind === 'rigid-bind' && (!value.targetBone || !inspection.boneNames.includes(value.targetBone))) throw Error('검사된 실제 본을 선택하세요.');
     if (value.kind === 'remove-influence' && (!value.bones?.length || new Set(value.bones).size !== value.bones.length || value.bones.some(bone => !inspection.boneNames.includes(bone)))) throw Error('제거할 실제 본 영향을 선택하세요.');
     return { mesh:value.mesh,islandId:value.islandId,kind:value.kind,...(value.kind==='rigid-bind'?{targetBone:value.targetBone}:{}),...(value.kind==='remove-influence'?{bones:[...value.bones!]}:{}) };

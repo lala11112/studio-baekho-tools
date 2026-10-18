@@ -42,7 +42,7 @@ import {
 import { catalog } from "../shared/catalog";
 import { Viewport } from "./Viewport";
 import { GraphicsPlanarReview } from './GraphicsPlanarReview';
-import { GraphicsAutoRig, type AutoRigView } from './GraphicsAutoRig';
+import { GraphicsAutoRig, type AutoRigView, type AutoRigCorrection } from './GraphicsAutoRig';
 import { inspectedRigPreview, autoRigPresentation, rigInspectionForCandidate } from './graphics-auto-rig-preview';
 import { HeadComparison } from './HeadComparison';
 import { GraphicsContactReview } from './GraphicsContactReview';
@@ -650,6 +650,9 @@ export function GraphicsStudio({
   const [legacyRig, setLegacyRig] = useState(false);
   const [rigRegion, setRigRegion] = useState<(RigRegion & { versionId: string }) | undefined>(undefined);
   const [rigRegionReady, setRigRegionReady] = useState(false);
+  const rigCorrectionReceipts=useRef(new Map<string,{item:AutoRigCorrection;indices:number[];previewPath:string;previewSha:string;sourceSha:string}>());
+  const rigCorrectionSequence=useRef(0);
+  const rigCorrectionDispatching=useRef(false);
   const [autoRigFooterHost, setAutoRigFooterHost] = useState<HTMLDivElement | null>(null);
   const autoRigSeenCandidate = useRef('');
   const [editOpen, setEditOpen] = useState(false);
@@ -1582,6 +1585,28 @@ export function GraphicsStudio({
   const autoRigInspectionRun = rigInspectionForCandidate(autoRigCandidate,autoRigRuns);
   const autoRigInspectedPreview = inspectedRigPreview(autoRigCandidate,autoRigInspectionRun);
   const autoRigInspection = autoRigInspectedPreview ? autoRigInspectionRun?.inspection : autoRigResultRun?.inspection;
+  useEffect(()=>{rigCorrectionReceipts.current.clear();setRigRegionReady(false);},[autoRigCandidate?.id,autoRigInspectionRun?.id]);
+  function confirmRigCorrection(repair:AutoRigCorrection['repair']):AutoRigCorrection|undefined {
+    const island=autoRigInspectionRun?.inspection?.islands.find(item=>item.mesh===repair.mesh&&item.islandId===repair.islandId);
+    if(!autoRigCandidate||!autoRigInspectionRun||!autoRigInspectedPreview||shownVersion?.id!==autoRigCandidate.id||!rigRegionReady||rigRegion?.versionId!==autoRigCandidate.id||rigRegion.mesh!==repair.mesh||rigRegion.islandId!==repair.islandId||!island?.vertexIndices?.length||JSON.stringify(rigRegion.vertexIndices)!==JSON.stringify(island.vertexIndices))return;
+    const known=autoRigInspectionRun.inspection!.boneNames;
+    if(repair.kind==='remove-influence'&&(!repair.bones?.length||new Set(repair.bones).size!==repair.bones.length||repair.bones.some(name=>!known.includes(name)||!island.bones.some(bone=>bone.name===name)))||repair.kind==='rigid-bind'&&(!repair.targetBone||!known.includes(repair.targetBone)))return;
+    const item:AutoRigCorrection={repair:structuredClone(repair),confirmationId:String(++rigCorrectionSequence.current),versionId:autoRigCandidate.id,inspectionId:autoRigInspectionRun.id};
+    rigCorrectionReceipts.current.set(item.confirmationId,{item:structuredClone(item),indices:[...island.vertexIndices],previewPath:autoRigInspectedPreview.path,previewSha:autoRigInspectedPreview.sha256,sourceSha:autoRigInspectionRun.source.sha256});
+    return item;
+  }
+  async function correctRigBatch(items:AutoRigCorrection[]) {
+    if(rigCorrectionDispatching.current)return false;
+    const seen=new Set<string>();
+    const valid=!!autoRigCandidate&&!!autoRigInspectionRun&&!!autoRigInspectedPreview&&shownVersion?.id===autoRigCandidate.id&&autoRigInspectionRun.operation==='inspect'&&autoRigInspectionRun.state==='review'&&items.length>0&&items.length<=32&&items.every(item=>{
+      const receipt=rigCorrectionReceipts.current.get(item.confirmationId),island=autoRigInspectionRun.inspection?.islands.find(value=>value.mesh===item.repair.mesh&&value.islandId===item.repair.islandId),key=JSON.stringify([item.repair.mesh,item.repair.islandId]);
+      if(seen.has(key))return false;seen.add(key);
+      return !!receipt&&JSON.stringify(receipt.item)===JSON.stringify(item)&&item.versionId===autoRigCandidate.id&&item.inspectionId===autoRigInspectionRun.id&&receipt.previewPath===autoRigInspectedPreview.path&&receipt.previewSha===autoRigInspectedPreview.sha256&&receipt.sourceSha===autoRigInspectionRun.source.sha256&&JSON.stringify(receipt.indices)===JSON.stringify(island?.vertexIndices);
+    });
+    if(!valid){setError('현재 리그와 검사에서 강조 확인한 보정 목록만 실행할 수 있습니다. 부위를 다시 확인하세요.');return false;}
+    rigCorrectionDispatching.current=true;
+    try {const result=await run({kind:'repair-auto-rig',objectId:object!.id,versionId:autoRigCandidate!.id,inspectionRunId:autoRigInspectionRun!.id,repairs:items.map(item=>structuredClone(item.repair))});if(result)rigCorrectionReceipts.current.clear();return result;}finally{rigCorrectionDispatching.current=false;}
+  }
   const autoRigView: AutoRigView = {
     ready: workspace?.autoRigReadiness?.available === true && creation.subject === 'human',
     checked: !!workspace?.autoRigReadiness,
@@ -1619,7 +1644,10 @@ export function GraphicsStudio({
     onCancel={async () => { const running = autoRigRuns.find(item => item.state === 'running'); if (running) { try { await onAction({ kind: 'cancel-auto-rig', objectId: object.id, runId: running.id }); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } } }}
     onRecover={async () => { if (autoRigRun) await run({ kind: 'recover-auto-rig', objectId: object.id, runId: autoRigRun.id }); }}
     onInspect={async () => { if (autoRigCandidate) await run({ kind: 'inspect-auto-rig', objectId: object.id, versionId: autoRigCandidate.id }); }}
-    onCorrect={async repair => { if (autoRigCandidate && autoRigInspectionRun && autoRigInspectedPreview && rigRegionReady && rigRegion?.versionId===autoRigCandidate.id && rigRegion.mesh===repair.mesh && rigRegion.islandId===repair.islandId) await run({ kind: 'repair-auto-rig', objectId: object.id, versionId: autoRigCandidate.id, inspectionRunId: autoRigInspectionRun.id, repairs: [repair] }); }}
+    onConfirmCorrection={async repair=>confirmRigCorrection(repair)}
+    onCorrectBatch={correctRigBatch}
+    onCorrect={async repair=>{const item=confirmRigCorrection(repair);if(item)await correctRigBatch([item]);}}
+
     onShow={version => { setShownVersionId(version.id); revealResult(); }}
     onAdopt={async () => { if (autoRigCandidate && await run({ kind: 'accept', objectId: object.id, versionId: autoRigCandidate.id }, '이 리그를 사용할 원본으로 저장했습니다.')) changeStage('unity'); }}
     onUnity={() => changeStage('unity')}

@@ -328,6 +328,32 @@ def verify_exported_names():
             assert all(material.name==name for material,name in renamed),'Native material names changed during FBX validation cleanup'
 
 
+def plan_repairs(before, selection, repairs, deform_bones):
+    # Validate every row before mutating any Blender data. Auxiliary groups are
+    # not skin influences and cannot rescue a row whose last deform weight was removed.
+    assert isinstance(repairs,list) and len(repairs)<=32, 'Invalid repair batch'
+    touched={name:set() for name in before}; planned={name:{} for name in before}
+    for repair in repairs:
+        name=repair['mesh']; ids=selection[(name,repair['islandId'])]
+        assert not touched[name].intersection(ids), 'Overlapping repair selections'
+        touched[name].update(ids)
+        kind=repair['kind']; assert kind in ['normalize','remove-influence','rigid-bind'], 'Unsupported repair'
+        if kind=='remove-influence':
+            bones=repair.get('bones')
+            assert isinstance(bones,list) and bones and all(isinstance(b,str) and b in deform_bones for b in bones) and len(set(bones))==len(bones), 'Explicit deform bone removal required'
+        if kind=='rigid-bind':
+            assert repair.get('targetBone') in deform_bones, 'Target must be deform bone'
+        for i in ids:
+            original=before[name][i]
+            row={b:w for b,w in original.items() if b in deform_bones}
+            if kind=='remove-influence':
+                for bone in bones:row.pop(bone,None)
+            if kind=='rigid-bind':row={repair['targetBone']:1.0}
+            total=sum(row.values())
+            assert math.isfinite(total) and total>0 and all(math.isfinite(w) and w>=0 for w in row.values()), 'Repair has no valid remaining mass'
+            planned[name][i]={**{b:w for b,w in original.items() if b not in deform_bones},**{b:w/total for b,w in row.items()}}
+    return touched,planned
+
 def inspect_repair():
     source=Path(REQUEST['sourceBlend']); assert sha(source)==REQUEST['sourceSha256']
     bpy.ops.wm.open_mainfile(filepath=str(source),load_ui=False)
@@ -350,28 +376,16 @@ def inspect_repair():
                 for bone,w in row.items(): weights[bone]=weights.get(bone,0)+w
             selection[(obj.name,component['id'])]=component['vertices']
             inventory.append({'mesh':obj.name,'islandId':component['id'],'vertexCount':len(component['vertices']),'invalidWeightRows':invalid,'influenceMass':weights,'reviewRequired':True})
-    touched={o.name:set() for o in meshes}
     repairs=REQUEST.get('repairs',[])
     assert REQUEST['operation']=='repair' or not repairs
     assert REQUEST['operation']!='repair' or repairs, 'Explicit repairs required'
-    for repair in repairs:
-        obj=bpy.data.objects[repair['mesh']]; ids=selection[(obj.name,repair['islandId'])]
-        assert not touched[obj.name].intersection(ids), 'Overlapping repair selections'
-        touched[obj.name].update(ids)
-        kind=repair['kind']; assert kind in ['normalize','remove-influence','rigid-bind'], 'Unsupported repair'
-        for i in ids:
-            row=before[obj.name][i].copy()
-            if kind=='remove-influence':
-                assert repair.get('bones'), 'Explicit bone removal required'
-                for bone in repair['bones']: row.pop(bone,None)
-            if kind=='rigid-bind':
-                bone=repair['targetBone']; assert bone in rigs[0].data.bones and rigs[0].data.bones[bone].use_deform, 'Target must be deform bone'
-                row={bone:1.0}
-            total=sum(row.values()); assert total>0 and all(math.isfinite(w) and w>=0 for w in row.values()), 'Repair has no valid remaining mass'
+    touched,planned=plan_repairs(before,selection,repairs,{b.name for b in rigs[0].data.bones if b.use_deform})
+    for obj in meshes:
+        for i,row in planned[obj.name].items():
             for group in obj.vertex_groups: group.remove([i])
             for bone,w in row.items():
                 group=obj.vertex_groups.get(bone) or obj.vertex_groups.new(name=bone)
-                group.add([i],w/total,'REPLACE')
+                group.add([i],w,'REPLACE')
     for obj in meshes:
         after=rows(obj)
         assert all(after[i]==row for i,row in enumerate(before[obj.name]) if i not in touched[obj.name]), 'Outside weights changed'

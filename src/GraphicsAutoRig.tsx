@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { importedModelSourceProblem, type AssetVersion, type GraphicsObject } from '../shared/graphics';
 import type { AutoRigIsland, AutoRigRepair } from '../shared/graphics-auto-rig';
 import './graphics-auto-rig.css';
+import {autoRigPresentation} from './graphics-auto-rig-preview';
 
 export type AutoRigView = {
   ready: boolean; checked: boolean; readiness: string[];
@@ -20,12 +21,15 @@ export type AutoRigView = {
   inspectionId?: string;
 };
 export type AutoRigDraft = { versionId: string; frontAxis: '+X' | '-X' | '+Y' | '-Y'; fingers: boolean };
+export type AutoRigCorrection = { repair: AutoRigRepair; confirmationId: string; versionId: string; inspectionId: string };
 type Props = {
   object: GraphicsObject; versions: AssetVersion[]; view: AutoRigView; disabled: boolean;
   onCheck: () => Promise<void>; onRun: (draft: AutoRigDraft) => Promise<void>;
   onCancel: () => Promise<void>; onRecover: () => Promise<void>; onInspect: () => Promise<void>;
   onShow: (version: AssetVersion) => void; onAdopt: () => Promise<void>; onUnity: () => void;
   onCorrect: (selection: AutoRigRepair) => Promise<void>;
+  onConfirmCorrection?: (repair: AutoRigRepair) => Promise<AutoRigCorrection | undefined>;
+  onCorrectBatch?: (items: AutoRigCorrection[]) => Promise<boolean | void>;
   onRegion?: (selection: AutoRigIsland | undefined) => void;
   footerHost?: HTMLElement | null;
   previewVersionId?: string;
@@ -40,8 +44,12 @@ export function GraphicsAutoRig(props: Props) {
   const [fingers, setFingers] = useState(true);
   const [meshId, setMeshId] = useState('');
   const [bone, setBone] = useState('');
+  const [removeBones, setRemoveBones] = useState<string[]>([]);
+  const [queue, setQueue] = useState<AutoRigCorrection[]>([]);
   const [repairKind, setRepairKind] = useState<AutoRigRepair['kind']>('normalize');
-  useEffect(()=>{setMeshId('');setBone('');setRepairKind('normalize');props.onRegion?.(undefined);},[view.candidate?.id,view.inspectionId]);
+  useEffect(()=>{setMeshId('');setBone('');setRemoveBones([]);setQueue([]);setRepairKind('normalize');props.onRegion?.(undefined);},[view.candidate?.id,view.inspectionId]);
+  const queueContext=String(view.candidate?.id)+':'+String(view.inspectionId);
+  const queueContextRef=useRef(queueContext);queueContextRef.current=queueContext;
   const selectedIsland = view.islands.find(island => JSON.stringify([island.mesh, island.islandId]) === meshId);
   const source = sources.find(version => version.id === sourceId);
   const sourceProblem = source && importedModelSourceProblem(source);
@@ -50,8 +58,16 @@ export function GraphicsAutoRig(props: Props) {
   const locked = disabled || view.running;
   const runEnabled = !locked && view.ready && !!source && sourcePreviewAvailable && sourcePreviewCurrent && !!frontAxis;
   const [submitting, setSubmitting] = useState(false);
-  const invoke = async (callback: () => Promise<void>) => { if (submitting) return; setSubmitting(true); try { await callback(); } finally { setSubmitting(false); } };
-  const primary = view.running ? <div className="gs-auto-rig-running"><strong role="status">{view.progress || '로컬 작업 진행 중'}</strong><button type="button" onClick={() => void props.onCancel()}>작업 중단</button></div> : view.candidate ? view.adopted ? <button type="button" className="gs-primary" disabled={locked} onClick={props.onUnity}>Unity 내보내기 설정</button> : <button type="button" className="gs-primary" data-testid="auto-rig-adopt" disabled={disabled || submitting || view.running} onClick={() => void invoke(props.onAdopt)}>이 리그 사용</button> : <button form="graphics-auto-rig-form" type="submit" className="gs-primary" data-testid="auto-rig-run" disabled={!runEnabled || submitting}>{submitting ? '요청 처리 중' : '이 모델 자동 리깅'}</button>;
+  const submittingRef = useRef(false);
+  const invoke = async (callback: () => Promise<void>) => { if (submittingRef.current) return; submittingRef.current=true;setSubmitting(true); try { await callback(); } finally { submittingRef.current=false;setSubmitting(false); } };
+  const selectedRepair: AutoRigRepair | undefined = selectedIsland ? {mesh:selectedIsland.mesh,islandId:selectedIsland.islandId,kind:repairKind,...(repairKind==='rigid-bind'?{targetBone:bone}:repairKind==='remove-influence'?{bones:[...removeBones]}:{})} : undefined;
+  const correctionEnabled = !locked&&!submitting&&view.correctionAvailable&&view.highlightReady&&!!selectedIsland?.vertexIndices?.length&&(repairKind==='normalize'||repairKind==='rigid-bind'&&view.bones.includes(bone)||repairKind==='remove-influence'&&removeBones.length>0&&removeBones.every(name=>selectedIsland.bones.some(b=>b.name===name)&&view.bones.includes(name)));
+  const queueVertices=queue.reduce((sum,item)=>sum+(view.islands.find(island=>island.mesh===item.repair.mesh&&island.islandId===item.repair.islandId)?.vertices??0),0);
+  const duplicate = queue.some(item=>item.repair.mesh===selectedIsland?.mesh&&item.repair.islandId===selectedIsland?.islandId);
+  const repairSummary=(repair:AutoRigRepair)=>repair.kind==='remove-influence'?'뼈 영향 제거: '+repair.bones?.join(', '):repair.kind==='rigid-bind'?'한 뼈에 고정: '+repair.targetBone:'가중치 합 정규화';
+  const batchDisabled=locked||submitting||!view.correctionAvailable||props.previewVersionId!==view.candidate?.id||queue.some(item=>item.versionId!==view.candidate?.id||item.inspectionId!==view.inspectionId);
+  const submitBatch=()=>void invoke(async()=>{if(await props.onCorrectBatch!(queue)!==false)setQueue([]);});
+  const primary = view.running ? <div className="gs-auto-rig-running"><strong role="status">{view.progress || '로컬 작업 진행 중'}</strong><button type="button" onClick={() => void props.onCancel()}>작업 중단</button></div> : queue.length&&props.onCorrectBatch ? <button type="button" className="gs-primary" data-testid="auto-rig-correct-batch" disabled={batchDisabled} onClick={submitBatch}>선택 {queue.length}개 · 총 {queueVertices}정점 보정 후보 만들기</button> : view.candidate ? view.adopted ? <button type="button" className="gs-primary" disabled={locked} onClick={props.onUnity}>Unity 내보내기 설정</button> : <button type="button" className="gs-primary" data-testid="auto-rig-adopt" disabled={disabled || submitting || view.running} onClick={() => void invoke(props.onAdopt)}>이 리그 사용</button> : <button form="graphics-auto-rig-form" type="submit" className="gs-primary" data-testid="auto-rig-run" disabled={!runEnabled || submitting}>{submitting ? '요청 처리 중' : '이 모델 자동 리깅'}</button>;
   return <div className="gs-auto-rig" data-testid="graphics-auto-rig">
     <header><h3>자동 사람 리깅</h3><p>이 PC의 Auto-Rig Pro로 뼈대와 가중치를 만듭니다.</p><small>로컬 실행 · API 비용 0 · GPT 호출 0</small></header>
     {!!view.warnings?.length && <details><summary>지원 범위와 별도 확인 사항</summary>{view.warnings.map((warning,index)=><p role="note" key={index}>{warning}</p>)}</details>}
@@ -90,15 +106,22 @@ export function GraphicsAutoRig(props: Props) {
       <details><summary>선택 영역만 가중치 보정 · 선택 사항</summary><section>
         <p>연결된 부위와 뼈 영향을 검사한 뒤 선택한 부위만 별도 후보로 보정합니다. 무릎 형태·토폴로지를 자동 교체하지 않습니다.</p>
         <button type="button" disabled={locked || submitting} onClick={() => void invoke(props.onInspect)}>부위·뼈 영향 검사</button>
-        <label>대상 부위<select aria-label="보정 대상 부위" value={meshId} disabled={locked} onChange={event => { setMeshId(event.target.value); setBone(''); props.onRegion?.(view.islands.find(island => JSON.stringify([island.mesh,island.islandId]) === event.target.value)); }}><option value="">검사된 연결 부위 선택</option>{view.islands.map((island,index) => <option key={JSON.stringify([island.mesh,island.islandId])} value={JSON.stringify([island.mesh,island.islandId])}>{island.label ?? island.mesh} · 부위 {index+1} · {island.vertices}정점 · 주요 뼈 {island.bones.slice().sort((a,b)=>b.meanWeight-a.meanWeight)[0]?.name ?? '없음'}</option>)}</select></label>
-        {selectedIsland && <><small>현재 뼈 영향: {selectedIsland.bones.map(item => `${item.name} ${Math.round(item.meanWeight * 100)}%`).join(' · ')}</small>{selectedIsland.warnings?.map((warning, index) => <p key={index}>{warning}</p>)}</>}
-        <label>보정 방식<select aria-label="가중치 보정 방식" value={repairKind} disabled={locked} onChange={event => setRepairKind(event.target.value as AutoRigRepair['kind'])}><option value="normalize">현재 가중치 합 정규화</option><option value="remove-influence">선택한 뼈 영향 제거</option><option value="rigid-bind">선택한 뼈에 부위 전체 고정</option></select></label>
-        <label>기준 뼈<select aria-label="보정 기준 뼈" value={bone} disabled={locked} onChange={event => setBone(event.target.value)}><option value="">검사된 뼈 선택</option>{view.bones.map(name => <option key={name} value={name}>{name}</option>)}</select></label>
+        <label>대상 부위<select aria-label="보정 대상 부위" value={meshId} disabled={locked||submitting} onChange={event => { setMeshId(event.target.value); setBone('');setRemoveBones([]); props.onRegion?.(view.islands.find(island => JSON.stringify([island.mesh,island.islandId]) === event.target.value)); }}><option value="">검사된 연결 부위 선택</option>{view.islands.map((island,index) => <option key={JSON.stringify([island.mesh,island.islandId])} value={JSON.stringify([island.mesh,island.islandId])}>{island.label ?? island.mesh} · 부위 {index+1} · {island.vertices}정점 · 주요 뼈 {island.bones.slice().sort((a,b)=>b.meanWeight-a.meanWeight)[0]?.name ?? '없음'}</option>)}</select></label>
+        {selectedIsland && <><small>현재 뼈 영향: {selectedIsland.bones.map(item => `${item.name} ${Math.round(item.meanWeight * 100)}%`).join(' · ')}</small>{selectedIsland.warnings?.map((warning, index) => <p key={index}>{autoRigPresentation(warning)}</p>)}</>}
+        <label>보정 방식<select aria-label="가중치 보정 방식" value={repairKind} disabled={locked||submitting} onChange={event => {setRepairKind(event.target.value as AutoRigRepair['kind']);setBone('');setRemoveBones([]);}} ><option value="normalize">현재 가중치 합 정규화</option><option value="remove-influence">선택한 뼈 영향 제거</option><option value="rigid-bind">선택한 뼈에 부위 전체 고정</option></select></label>
+        {repairKind==='remove-influence'&&<fieldset><legend>제거할 뼈 영향 · 여러 개 선택</legend>{selectedIsland?.bones.filter(item=>view.bones.includes(item.name)).map(item=><label className="gs-auto-rig-check" key={item.name}><input type="checkbox" aria-label={'제거할 뼈 '+item.name} checked={removeBones.includes(item.name)} disabled={locked||submitting} onChange={event=>setRemoveBones(current=>event.target.checked?[...current,item.name]:current.filter(name=>name!==item.name))}/>{item.name} · 평균 {Math.round(item.meanWeight*100)}% · 최대 {Math.round(item.maxWeight*100)}%</label>)}</fieldset>}
+        {repairKind==='rigid-bind'&&<label>기준 뼈<select aria-label="보정 기준 뼈" value={bone} disabled={locked||submitting} onChange={event => setBone(event.target.value)}><option value="">검사된 뼈 선택</option>{view.bones.map(name => <option key={name} value={name}>{name}</option>)}</select></label>}
         {repairKind === 'rigid-bind' && <p role="alert">이 부위의 기존 가중치를 선택한 뼈 100%로 바꿉니다. 관절을 가로지르는 부위에는 부적합합니다.</p>}
         {selectedIsland && selectedIsland.vertices > 500 && repairKind === 'rigid-bind' && <p role="alert"><strong>큰 연결 부위 전체를 한 뼈에 고정합니다.</strong> 몸통·팔·다리가 하나로 연결되어 있으면 함께 굳어집니다. 강조된 범위를 확인하세요.</p>}
         {selectedIsland && !selectedIsland.vertexIndices?.length && <p role="alert">이전 검사는 정확한 강조 영역 정보가 없습니다. 부위·뼈 영향 검사를 다시 실행하세요.</p>}
         {!!selectedIsland?.vertexIndices?.length && !view.highlightReady && <small>왼쪽 3D 화면에 정확한 선택 범위가 표시되어야 보정을 시작할 수 있습니다.</small>}
-        <button type="button" disabled={locked || submitting || !view.correctionAvailable || !view.highlightReady || !selectedIsland?.vertexIndices?.length || (repairKind !== 'normalize' && !view.bones.includes(bone))} onClick={() => void invoke(() => props.onCorrect({ mesh: selectedIsland!.mesh, islandId: selectedIsland!.islandId, kind: repairKind, ...(repairKind === 'rigid-bind' ? { targetBone: bone } : repairKind === 'remove-influence' ? { bones: [bone] } : {}) }))}>선택 부위 보정 후보 만들기</button>
+        <button type="button" disabled={!correctionEnabled||queue.length>0} onClick={() => void invoke(() => props.onCorrect(selectedRepair!))}>선택 부위 보정 후보 만들기</button>
+        {props.onConfirmCorrection&&props.onCorrectBatch&&<>
+          <button type="button" disabled={!correctionEnabled||duplicate||queue.length>=32} onClick={()=>void invoke(async()=>{const context=queueContext;const item=await props.onConfirmCorrection!(selectedRepair!);if(queueContextRef.current===context&&item&&item.versionId===view.candidate?.id&&item.inspectionId===view.inspectionId)setQueue(current=>current.some(old=>old.repair.mesh===item.repair.mesh&&old.repair.islandId===item.repair.islandId)||current.length>=32?current:[...current,item]);})}>보정 목록에 추가</button>
+          {queue.length>=32&&<small role="status">최대 32개 부위까지 담을 수 있습니다.</small>}
+          {duplicate&&<small role="status">이미 목록에 있는 부위입니다. 삭제한 뒤 다시 확인하세요.</small>}
+          {!!queue.length&&<section aria-label="확인한 보정 목록" data-testid="auto-rig-correction-queue"><strong>선택 {queue.length}개 · 총 {queueVertices}정점</strong><ol>{queue.map((item,index)=><li key={item.confirmationId}>{view.islands.find(island=>island.mesh===item.repair.mesh&&island.islandId===item.repair.islandId)?.label??item.repair.mesh} · {repairSummary(item.repair)} <button type="button" disabled={locked||submitting} aria-label={'보정 항목 '+(index+1)+' 삭제'} onClick={()=>setQueue(current=>current.filter(entry=>entry.confirmationId!==item.confirmationId))}>삭제</button></li>)}</ol><small>확인한 부위만 한 번에 로컬 보정합니다. 추가 API 비용 0 · GPT 호출 0</small><button type="button" disabled={locked||submitting} onClick={()=>setQueue([])}>보정 목록 전체 취소</button><small>아래 고정 버튼에서 보정 후보를 만드세요. 아직 원본은 바뀌지 않았습니다.</small></section>}
+        </>}
         {!view.correctionAvailable && <small>이 결과에서 검증된 선택 영역 보정을 지원하지 않습니다.</small>}
       </section></details>
       <small>리그 사용 후 Unity 설정으로 이동합니다. 내보내기·가져오기는 별도로 실행합니다.</small>
