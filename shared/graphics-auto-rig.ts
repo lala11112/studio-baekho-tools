@@ -25,6 +25,25 @@ export type AutoRigReadiness = {
   available: boolean; checkedAt: string; message: string;
   blenderVersion?: string; addonVersion?: string; aiVersion?: string;
 };
+export type AutoRigPartPolicy = { schemaVersion: 1; requiredParts: string[]; headBoundParts: string[] };
+export function validateAutoRigPartPolicy(value: unknown): AutoRigPartPolicy {
+  const p=value as AutoRigPartPolicy;
+  const ids=(v:unknown):v is string[]=>Array.isArray(v)&&v.length<=100&&v.every((s,i)=>typeof s==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(s)&&!s.startsWith('part-')&&(i===0||v[i-1]<s));
+  if(!p||Object.keys(p).some(k=>!['schemaVersion','requiredParts','headBoundParts'].includes(k))||p.schemaVersion!==1||!ids(p.requiredParts)||!p.requiredParts.length||!ids(p.headBoundParts)||p.headBoundParts.some(id=>!p.requiredParts.includes(id)))throw Error('고정한 자동 리그 파트 정책이 잘못됐습니다.');
+  return {schemaVersion:1,requiredParts:[...p.requiredParts],headBoundParts:[...p.headBoundParts]};
+}
+export function validateAutoRigPartReport(policy: AutoRigPartPolicy|undefined, report: any) {
+  if(policy===undefined){if(report.partPolicy!==undefined)throw Error('요청하지 않은 파트 정책이 결과에 있습니다.');return;}
+  const p=validateAutoRigPartPolicy(policy);
+  if(JSON.stringify(report.partPolicy)!==JSON.stringify(p)||!Array.isArray(report.partChecks)||report.partChecks.length!==p.requiredParts.length)throw Error('결과의 파트 정책·검사가 고정 요청과 다릅니다.');
+  const meshIds=new Set<string>();
+  for(let i=0;i<p.requiredParts.length;i++){
+    const c=report.partChecks[i];
+    if(c?.partId!==p.requiredParts[i]||c.present!==true||c.headBound!==p.headBoundParts.includes(c.partId)||!Array.isArray(c.meshIds)||!c.meshIds.length||c.meshIds.some((id:unknown,j:number)=>typeof id!=='string'||!id.length||id.length>1000||j>0&&c.meshIds[j-1]>=id||meshIds.has(id)))throw Error('필수 파트의 정확한 메시·머리 연결 검사가 없습니다.');
+    for(const id of c.meshIds)meshIds.add(id);
+  }
+  for(const id of ['partIdentity','partExport','headBinding'])if(report.inspection?.checks?.filter((c:any)=>c.id===id&&c.passed===true).length!==1)throw Error('필수 파트의 원본·내보내기·머리 연결 검사가 통과하지 않았습니다.');
+}
 export type AutoRigRun = {
   id: string; objectId: string; sourceVersionId: string; source: GraphicsFile;
   operation: AutoRigOperation; state: 'running' | 'review' | 'blocked' | 'failed' | 'cancelled';
@@ -33,12 +52,15 @@ export type AutoRigRun = {
   repairs: AutoRigRepair[]; inspectionRunId?: string;
   files: GraphicsFile[]; reportFile?: GraphicsFile; requestHash?: string; toolSha256?: string;
   inspection?: AutoRigInspection; candidateVersionId?: string;
+  partPolicy?: AutoRigPartPolicy;
+  toolDependencies?: Record<string,string>;
 };
 export type AutoRigMetadata = {
   schemaVersion: 1; runId: string; reportFile: GraphicsFile;
   sourceSha256: string; exportFbx: GraphicsFile; contract: UnityRigContract;
   /** Exact X04 file copy; original run/report proof stays on the validated parent. */
   derivedFromVersionId?: string;
+  partPolicy?: AutoRigPartPolicy;
 };
 export type AutoRigAction =
   | { kind: 'probe-auto-rig' }

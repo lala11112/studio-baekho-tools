@@ -5,6 +5,8 @@ No operating-system input; addon and AI files remain outside the app package.
 import bpy, addon_utils, sys, os, json, hashlib, traceback, time, math
 from pathlib import Path
 from mathutils import Matrix, Vector
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+from graphics_auto_rig_parts import policy as part_policy, identities as part_identities, head_binding, snapshot as part_snapshot, verify_export as verify_part_export
 
 if '--probe' in sys.argv:
     try:
@@ -69,7 +71,8 @@ def protected_mesh(obj):
                 try: return list(v)
                 except TypeError: return v
         raise ValueError('Unsupported protected mesh attribute')
-    return {'topology':[[int(i) for i in p.vertices] for p in data.polygons],
+    return {'partIdentity':[obj.get('partsmith_id'),obj.get('partsmith_part_id')],
+            'topology':[[int(i) for i in p.vertices] for p in data.polygons],
             'edges':[list(e.vertices) for e in data.edges],
             'uv':{uv.name:[list(v.uv) for v in uv.data] for uv in data.uv_layers},
             'attributes':{a.name:[value(v) for v in a.data] for a in data.attributes if not a.name.startswith('.') and a.name!='position'},
@@ -128,6 +131,9 @@ def main():
     assert meshes and not any(o.type=='ARMATURE' for o in bpy.context.scene.objects)
     assert all(not o.modifiers and not o.data.shape_keys and not o.vertex_groups and not o.animation_data and not o.constraints and (not o.parent or o.parent.type=='EMPTY') for o in meshes), 'Input not a fresh static mesh'
     assert not bpy.data.actions, 'Animated input is unsupported for a new rig'
+    frozen_parts=part_policy(REQUEST.get('partPolicy'))
+    part_identities(meshes,frozen_parts)  # Must precede the first AI/Smart operation.
+    if frozen_parts:REPORT['partPolicy']=frozen_parts
     source_matrix=Matrix(REQUEST['sourceToRigMatrix'])
     protected={o.name:protected_mesh(o) for o in meshes}; images=protected_images()
     expected={o.name:[source_matrix @ o.matrix_world @ v.co for v in o.data.vertices] for o in meshes}
@@ -179,6 +185,7 @@ def main():
                 total=sum(w for _,w in values)
                 assert total>0 and all(math.isfinite(w) and w>=0 for _,w in values), 'Invalid or unweighted vertex'
                 for group,w in values: obj.vertex_groups[group].add([vertex.index],w/total,'REPLACE')
+        head_binding(meshes,rig,frozen_parts,apply=True)
         REPORT['rig']=rig.name
         REPORT['bones']=[{'name':b.name,'deform':b.use_deform,'parent':b.parent.name if b.parent else None} for b in rig.data.bones]
         set_fk(rig)
@@ -273,10 +280,21 @@ def preview_motion(meshes,rig):
 
 def verify_exported_names():
     original=bpy.context.window.scene
+    frozen_parts=part_policy(REQUEST.get('partPolicy'))
+    native_rigs=[o for o in original.objects if o.type=='ARMATURE']
+    native_meshes=skin_meshes(native_rigs[0]) if frozen_parts else []
+    expected_parts=part_snapshot(native_meshes,frozen_parts)
+    if frozen_parts:head_binding(native_meshes,native_rigs[0],frozen_parts)
+    # Avoid Blender's automatic .001 name suffixes when comparing exact exported
+    # material slots. No export or saved native file uses these temporary names.
+    renamed=[]
+    if frozen_parts:
+        for index,material in enumerate(list(bpy.data.materials)):
+            renamed.append((material,material.name));material.name='__PARTSMITH_NATIVE_MATERIAL_'+str(index)
     scene=bpy.data.scenes.new('PartsmithFBXValidation')
     try:
         bpy.context.window.scene=scene
-        bpy.ops.import_scene.fbx(filepath=str(ROOT/'character.fbx'),use_anim=False)
+        bpy.ops.import_scene.fbx(filepath=str(ROOT/'character.fbx'),use_anim=False,use_image_search=False)
         exported=[o for o in scene.objects if o.type=='ARMATURE']
         assert len(exported)==1, 'FBX must contain one export skeleton'
         names={b.name for b in exported[0].data.bones}
@@ -286,10 +304,21 @@ def verify_exported_names():
         REPORT['exportedBoneNames']=sorted(names)
         REPORT['exportedParts']=[{'name':o.name,'meshName':o.data.name,'partId':str(o.get('partsmith_part_id','')),'sourceId':str(o.get('partsmith_id','')),'vertices':len(o.data.vertices),'polygons':len(o.data.polygons)} for o in scene.objects if o.type=='MESH']
         assert REPORT['exportedParts'], 'Exported FBX contains no meshes'
+        if frozen_parts:
+            REPORT['partPolicy']=frozen_parts
+            REPORT['partChecks']=verify_part_export([o for o in scene.objects if o.type=='MESH'],exported[0],frozen_parts,expected_parts)
+            REPORT['inspection']['checks'].extend({'id':name,'passed':True} for name in ['partIdentity','partExport','headBinding'])
     finally:
         for obj in list(scene.objects): bpy.data.objects.remove(obj,do_unlink=True)
         bpy.context.window.scene=original
         bpy.data.scenes.remove(scene)
+        # Remove only imported, now-unused validation materials before restoring
+        # original exact names; otherwise Blender would rename the originals.
+        old={m.as_pointer() for m,_ in renamed}
+        if frozen_parts:
+            for material in list(bpy.data.materials):
+                if material.as_pointer() not in old and material.users==0:bpy.data.materials.remove(material)
+            for material,name in renamed:material.name=name
 
 
 def inspect_repair():
@@ -298,6 +327,9 @@ def inspect_repair():
     rigs=[o for o in bpy.context.scene.objects if o.type=='ARMATURE']
     assert len(rigs)==1, 'Exactly one existing rig required'
     meshes=skin_meshes(rigs[0])
+    frozen_parts=part_policy(REQUEST.get('partPolicy'))
+    part_identities(meshes,frozen_parts)
+    if frozen_parts:REPORT['partPolicy']=frozen_parts
     protected={o.name:protected_mesh(o) for o in meshes}; images=protected_images()
     skeleton=[(b.name,b.parent.name if b.parent else None,tuple(b.head_local),tuple(b.tail_local),b.use_deform,tuple(tuple(row) for row in b.matrix_local)) for b in rigs[0].data.bones]
     inventory=[]; selection={}; before={o.name:rows(o) for o in meshes}
@@ -341,6 +373,7 @@ def inspect_repair():
         assert protected_mesh(obj)==protected[obj.name], 'Topology/UV/attributes/materials changed'
     assert protected_images(images)==images, 'Source image bytes changed'
     assert skeleton==[(b.name,b.parent.name if b.parent else None,tuple(b.head_local),tuple(b.tail_local),b.use_deform,tuple(tuple(row) for row in b.matrix_local)) for b in rigs[0].data.bones], 'Skeleton changed'
+    head_binding(meshes,rigs[0],frozen_parts)  # Verify only; explicit repair selections are the sole edits.
     REPORT.update({'inventory':inventory,'changedVertices':sum(len(v) for v in touched.values()),'preservationChecks':{'geometryAndUV':True,'outsideWeights':True,'attributes':True,'materials':True,'images':True,'skeleton':True},'qualityReview':'pending','fullPosedExportEquivalence':'unverified'})
     bpy.ops.wm.save_as_mainfile(filepath=str(ROOT/'rigged.blend'))
     # ARP export uses installed licensed addon; never bundle it.

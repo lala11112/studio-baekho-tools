@@ -3,9 +3,10 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import type { AutoRigReadiness } from '../shared/graphics-auto-rig';
+import { validateAutoRigPartPolicy, validateAutoRigPartReport, type AutoRigPartPolicy } from '../shared/graphics-auto-rig';
 const sha = (p: string) => createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 export type AutoRigRepair = { mesh: string; islandId: string; kind: 'normalize' | 'remove-influence' | 'rigid-bind'; bones?: string[]; targetBone?: string };
-export type GraphicsAutoRigArgs = { blenderPath: string; workerPath: string; sourceBlend: string; sourceSha256: string; outputDir: string; operation: 'rig' | 'inspect' | 'repair'; sourceToRigMatrix?: number[][]; fingers?: boolean; repairs?: AutoRigRepair[]; recoveryOnly?: boolean };
+export type GraphicsAutoRigArgs = { blenderPath: string; workerPath: string; sourceBlend: string; sourceSha256: string; outputDir: string; operation: 'rig' | 'inspect' | 'repair'; sourceToRigMatrix?: number[][]; fingers?: boolean; repairs?: AutoRigRepair[]; recoveryOnly?: boolean; partPolicy?: AutoRigPartPolicy; workerResources?: Record<string,string> };
 type Hooks = { signal?: AbortSignal; onProgress?: (message: string) => void };
 const progressLabels: Record<string,string> = {
   'prepare-smart-copy':'자동 리깅용 작업 사본을 준비합니다.',
@@ -57,12 +58,17 @@ export function inspectSavedGraphicsAutoRig(outputDir: string) {
   const requestPath = path.join(root, 'request.json');
   if (sha(requestPath) !== journal.requestSha256 || sha(path.join(root, 'worker.py')) !== journal.toolSha256) throw Error('고정한 작업 도구 또는 요청이 변경됐습니다.');
   const request = JSON.parse(fs.readFileSync(requestPath, 'utf8'));
+  if(request.workerResources!==undefined){
+    if(!request.workerResources||Array.isArray(request.workerResources)||Object.keys(request.workerResources).some(n=>n!=='graphics_auto_rig_parts.py'))throw Error('고정 작업 도구의 리소스 명세가 잘못됐습니다.');
+    for(const [name,expected] of Object.entries(request.workerResources))if(typeof expected!=='string'||sha(confined(root,path.join(root,name)))!==expected)throw Error('고정 작업 도구의 리소스가 변경됐습니다.');
+  }
   if (sha(request.sourceBlend) !== request.sourceSha256) throw Error('작업 사본의 원본 파일이 변경됐습니다.');
   const reportPath = path.join(root, 'output', 'run-report.json');
   const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
   if (report.requestSha256 !== journal.requestSha256 || report.sourceSha256 !== request.sourceSha256 || report.operation !== request.operation || report.osInputUsed !== false || report.paidSubmissions !== 0) throw Error('결과 기록이 고정한 원본·요청과 일치하지 않습니다.');
   if (report.status === 'failed') throw Error(nativeFailure(report.error));
   if (report.status !== 'exported-review-pending' || !Array.isArray(report.files) || report.files.length !== 3) throw Error('완전한 결과가 저장되지 않았습니다. 저장된 실행 기록을 확인하세요.');
+  validateAutoRigPartReport(request.partPolicy,report);
   const expected = ['rigged.blend', 'character.fbx', 'character.glb'];
   for (const name of expected) {
     const file = report.files.find((v: { path: string }) => path.basename(v.path) === name);
@@ -73,6 +79,7 @@ export function inspectSavedGraphicsAutoRig(outputDir: string) {
   return { blendPath: path.join(root, 'output', expected[0]), fbxPath: path.join(root, 'output', expected[1]), glbPath: path.join(root, 'output', expected[2]), reportPath, requestPath, requestSha256: journal.requestSha256 as string, toolSha256: journal.toolSha256 as string, report };
 }
 export async function runGraphicsAutoRig(args: GraphicsAutoRigArgs, hooks: Hooks = {}) {
+  if(args.partPolicy!==undefined)validateAutoRigPartPolicy(args.partPolicy);
   if (!['rig', 'inspect', 'repair'].includes(args.operation) || !/\.(blend|fbx)$/i.test(args.sourceBlend) || args.operation !== 'rig' && !/\.blend$/i.test(args.sourceBlend)) throw Error('자동 리깅 작업 또는 원본 파일 형식이 잘못됐습니다.');
   if (hooks.signal?.aborted) throw Error('작업을 중단했습니다.');
   if (sha(args.sourceBlend) !== args.sourceSha256) throw Error('원본 파일이 변경됐습니다.');
@@ -81,18 +88,27 @@ export async function runGraphicsAutoRig(args: GraphicsAutoRigArgs, hooks: Hooks
   const root = path.resolve(args.outputDir);
   if (fs.existsSync(path.join(root, 'dispatch.json'))) {
     const request = JSON.parse(fs.readFileSync(path.join(root, 'request.json'), 'utf8'));
-    if (request.sourceSha256 !== args.sourceSha256 || request.operation !== args.operation || JSON.stringify(request.repairs) !== JSON.stringify(args.repairs) || JSON.stringify(request.sourceToRigMatrix) !== JSON.stringify(args.sourceToRigMatrix) || request.fingers !== args.fingers) throw Error('저장된 요청과 현재 선택이 다릅니다.');
+    if (request.sourceSha256 !== args.sourceSha256 || request.operation !== args.operation || JSON.stringify(request.repairs) !== JSON.stringify(args.repairs) || JSON.stringify(request.sourceToRigMatrix) !== JSON.stringify(args.sourceToRigMatrix) || request.fingers !== args.fingers || JSON.stringify(request.partPolicy)!==JSON.stringify(args.partPolicy)||args.workerResources!==undefined&&JSON.stringify(request.workerResources)!==JSON.stringify(args.workerResources)) throw Error('저장된 요청과 현재 선택이 다릅니다.');
     return inspectSavedGraphicsAutoRig(root);
   }
   if (args.recoveryOnly) throw Error('복구할 저장 실행 기록이 없습니다.');
+  if(args.workerResources===undefined){const helper=path.join(path.dirname(args.workerPath),'graphics_auto_rig_parts.py');if(fs.existsSync(helper))args={...args,workerResources:{'graphics_auto_rig_parts.py':sha(helper)}};}
   fs.mkdirSync(root, { recursive: true });
   if (fs.readdirSync(root).length) throw Error('새 실행의 작업 폴더가 비어 있지 않습니다.');
   fs.mkdirSync(path.join(root, 'output'));
   const staged = path.join(root, 'source' + path.extname(args.sourceBlend).toLowerCase()), worker = path.join(root, 'worker.py');
   fs.copyFileSync(args.sourceBlend, staged, fs.constants.COPYFILE_EXCL);
   fs.copyFileSync(args.workerPath, worker, fs.constants.COPYFILE_EXCL);
+  if(args.workerResources!==undefined){
+    if(!args.workerResources||Array.isArray(args.workerResources)||Object.keys(args.workerResources).some(n=>n!=='graphics_auto_rig_parts.py'))throw Error('작업 도구의 리소스 명세가 잘못됐습니다.');
+    for(const [name,expected] of Object.entries(args.workerResources)){
+      const original=path.join(path.dirname(args.workerPath),name);
+      if(sha(original)!==expected)throw Error('고정한 작업 도구의 리소스가 변경됐습니다.');
+      fs.copyFileSync(original,path.join(root,name),fs.constants.COPYFILE_EXCL);
+    }
+  }
   const requestPath = path.join(root, 'request.json');
-  durable(requestPath, { schemaVersion: 1, operation: args.operation, sourceBlend: staged, sourceSha256: args.sourceSha256, sourceToRigMatrix: args.sourceToRigMatrix, fingers: args.fingers, repairs: args.repairs });
+  durable(requestPath, { schemaVersion: 1, operation: args.operation, sourceBlend: staged, sourceSha256: args.sourceSha256, sourceToRigMatrix: args.sourceToRigMatrix, fingers: args.fingers, repairs: args.repairs, ...(args.partPolicy?{partPolicy:args.partPolicy}:{}),...(args.workerResources?{workerResources:args.workerResources}:{}) });
   durable(path.join(root, 'dispatch.json'), { requestSha256: sha(requestPath), toolSha256: sha(worker), blenderSha256: sha(args.blenderPath), startedAt: new Date().toISOString(), automaticRetries: 0, osInputUsed: false, paidSubmissions: 0 });
   hooks.onProgress?.('설치된 Auto-Rig Pro로 로컬 작업을 시작합니다.');
   await new Promise<void>((resolve, reject) => {

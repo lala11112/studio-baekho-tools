@@ -218,11 +218,21 @@ def material_binding(material):
                 raise UnsupportedMaterial('Normal requires an unmodified tangent-space Normal Map node')
             if normal.uv_map and any(len(o.data.uv_layers)!=1 or o.data.uv_layers[0].name!=normal.uv_map for o in meshes if material in o.data.materials[:]):
                 raise UnsupportedMaterial('Normal Map UV name does not match the single exported UV map')
-            normal_image = image_input(normal.inputs['Color'],'Non-Color')
-            record['normalTexture'] = image_files[normal_image.name]['path']
             record['normalScale'] = float(normal.inputs['Strength'].default_value)
             if not math.isfinite(record['normalScale']) or not 0<=record['normalScale']<=8:
                 raise UnsupportedMaterial('Normal strength is outside the supported 0..8 range')
+            if normal.inputs['Color'].is_linked:
+                normal_image = image_input(normal.inputs['Color'],'Non-Color')
+                record['normalTexture'] = image_files[normal_image.name]['path']
+            else:
+                # Blender's FBX importer leaves a connected Normal Map node even
+                # when the FBX has no normal texture. Its constant tangent-space
+                # (0.5, 0.5, 1) is exactly the unperturbed surface normal; do not
+                # discard the independently valid base-color image in that case.
+                color = list(normal.inputs['Color'].default_value)
+                if len(color)!=4 or any(not math.isfinite(v) or v!=expected for v,expected in zip(color,[0.5,0.5,1.0,1.0])):
+                    raise UnsupportedMaterial('Unlinked Normal Map color must be the neutral tangent normal')
+                record['normalSource'] = {'kind':'neutral-tangent','color':color,'strength':record['normalScale']}
         metallic,roughness = scalar_input(inputs['Metallic']),scalar_input(inputs['Roughness'])
         if record['normalTexture'] and any('image' in value and image_files[value['image'].name]['path']==record['normalTexture'] for value in (metallic,roughness)):
             raise UnsupportedMaterial('One texture used as both normal and scalar data needs distinct Unity importer assets')

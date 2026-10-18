@@ -1,7 +1,7 @@
 import { importedModelSourceProblem, isGraphicsProductionFile } from '../shared/graphics';
 import { runGraphicsExternalRig } from './graphics-external-rig';
 import { runGraphicsAutoRig, inspectSavedGraphicsAutoRig, probeGraphicsAutoRig } from './graphics-auto-rig';
-import { autoRigOrientation, validateAutoRigRepairs, type AutoRigAction, type AutoRigRun, type AutoRigInspection } from '../shared/graphics-auto-rig';
+import { autoRigOrientation, validateAutoRigRepairs, validateAutoRigPartPolicy, validateAutoRigPartReport, type AutoRigPartPolicy, type AutoRigAction, type AutoRigRun, type AutoRigInspection } from '../shared/graphics-auto-rig';
 import type { ExternalRigAction, ExternalRigWorkspaceHandoff } from '../shared/graphics-external-rig';
 import { validateUnityRigContract, type UnityRigContract } from '../shared/graphics-rig';
 import fs from "node:fs";
@@ -518,7 +518,32 @@ export class GraphicsEngine {
     }catch(error){const latest=this.get(id),current=latest.externalRigHandoffs!.find(v=>v.id===h.id)!;current.state=controller.signal.aborted||current.state==='cancelled'?'cancelled':'failed';current.error=error instanceof Error?error.message:String(error);current.updatedAt=now();this.save(latest);throw error;}finally{this.active.delete(h.id);}
   }
   private autoRigFingerprint(run: AutoRigRun) {
-    return hash(JSON.stringify({objectId:run.objectId,sourceVersionId:run.sourceVersionId,source:run.source,operation:run.operation,settings:run.settings,repairs:run.repairs,inspectionRunId:run.inspectionRunId,toolSha256:run.toolSha256}));
+    return hash(JSON.stringify({objectId:run.objectId,sourceVersionId:run.sourceVersionId,source:run.source,operation:run.operation,settings:run.settings,repairs:run.repairs,inspectionRunId:run.inspectionRunId,toolSha256:run.toolSha256,...(run.partPolicy?{partPolicy:run.partPolicy}:{}),...(run.toolDependencies?{toolDependencies:run.toolDependencies}:{})}));
+  }
+  private assembledAutoRigPartPolicy(w:GraphicsWorkspace, source:AssetVersion, seen=new Set<string>()):AutoRigPartPolicy|undefined {
+    if(seen.has(source.id))throw Error('자동 리그 원본 파트 출처가 순환합니다.');seen.add(source.id);
+    const producers=w.tasks.filter(t=>t.id===source.provenance.jobId&&t.objectId===source.objectId&&t.taskId==='M08');
+    if(producers.length){
+      const t=producers[0],snapshot=t.objectSnapshot,parts=snapshot?.creation?.parts.filter(p=>p.enabled).map(p=>p.id).sort();
+      const frozen={taskId:t.taskId,objectId:t.objectId,inputVersionIds:t.inputVersionIds,settings:t.settings,instruction:t.instruction};
+      if(producers.length!==1||t.status!=='review'||!t.outputVersionIds.includes(source.id)||!snapshot||snapshot.creation?.attributes.composition!=='parts'||!parts?.length||t.requestHash!==hash(JSON.stringify({...frozen,object:snapshot,target:t.targetProfile}))||JSON.stringify(source.sourceVersionIds)!==JSON.stringify(t.inputVersionIds))throw Error('조립 원본의 고정 파트·제작 기록이 없습니다. 조립 결과를 다시 확인하세요.');
+      const inputs=t.inputVersionIds.map(id=>w.versions.find(v=>v.id===id&&v.objectId===source.objectId));
+      const geometry=inputs.filter((v):v is AssetVersion=>!!v&&['model','material'].includes(v.role)&&/^part-[A-Za-z0-9_-]+$/.test(v.slot));
+      const references=inputs.filter(v=>!v||!geometry.includes(v));
+      if(references.length>1||references.some(v=>!v||v.role!=='design'||v.slot!=='main'||snapshot.accepted['design:main']!==v.id)||geometry.some(v=>snapshot.accepted[`${v.role}:${v.slot}`]!==v.id))throw Error('조립 원본의 정확한 채택 파트·외형 참조가 없습니다.');
+      const ids=geometry.map(v=>v.slot.slice(5)).sort();
+      if(JSON.stringify(ids)!==JSON.stringify(parts))throw Error('조립 원본의 필수 파트가 고정 입력과 다릅니다.');
+      return validateAutoRigPartPolicy({schemaVersion:1,requiredParts:ids,headBoundParts:ids.filter(id=>id==='hair')});
+    }
+    if(source.sourceVersionIds.some(id=>w.versions.some(v=>v.id===id&&v.objectId===source.objectId&&v.slot.startsWith('part-')&&['model','material'].includes(v.role))))throw Error('조립 원본의 고정 제작 기록이 없습니다. 조립 결과를 다시 확인하세요.');
+    if(source.provenance.type==='import')return;
+    // Follow the geometry source only; later inputs may be appearance references.
+    const producer=w.tasks.find(t=>t.id===source.provenance.jobId&&t.objectId===source.objectId);
+    if(producer&&(producer.status!=='review'||!producer.outputVersionIds.includes(source.id)||JSON.stringify(source.sourceVersionIds)!==JSON.stringify(producer.inputVersionIds)))throw Error('전체 원본의 고정 제작 입력이 변경됐습니다.');
+    const parentId=typeof producer?.settings.sourceVersionId==='string'?producer.settings.sourceVersionId:source.sourceVersionIds[0];
+    if(parentId!==undefined&&!source.sourceVersionIds.includes(parentId))throw Error('전체 원본의 형상 출처가 고정 입력과 다릅니다.');
+    const parent=w.versions.find(v=>v.id===parentId&&v.objectId===source.objectId&&v.slot==='main'&&['model','material'].includes(v.role));
+    return parent?this.assembledAutoRigPartPolicy(w,parent,new Set(seen)):undefined;
   }
   private autoRigOutput(id:string, run:AutoRigRun) { return this.store.file(id,`graphics/auto-rig/${run.id}`); }
   private checkAutoRigInspection(value:unknown, operation:AutoRigRun['operation']): AutoRigInspection {
@@ -551,12 +576,13 @@ export class GraphicsEngine {
     const sourceVersion=w.versions.find(v=>v.id===run.sourceVersionId&&v.objectId===candidate.objectId);
     if(!sourceVersion?.files.some(f=>JSON.stringify(f)===JSON.stringify(run.source)))throw Error('자동 리그의 원본 버전·파일 연결이 변경됐습니다.');
     const inherited=sourceVersion.autoRig?.contract??sourceVersion.externalRig?.contract;
-    if(meta.contract.fingers!==run.settings.fingers||meta.contract.hairBinding!=='head'||JSON.stringify(meta.contract.requiredParts)!==JSON.stringify(inherited?.requiredParts??[]))throw Error('자동 리그의 손가락·파트 설정이 고정 원본과 다릅니다.');
+    if(run.partPolicy&&JSON.stringify(run.partPolicy)!==JSON.stringify(run.operation==='rig'?this.assembledAutoRigPartPolicy(w,sourceVersion):sourceVersion.autoRig?.partPolicy))throw Error('자동 리그의 고정 파트 출처가 변경됐습니다.');
+    if(meta.contract.fingers!==run.settings.fingers||meta.contract.hairBinding!=='head'||JSON.stringify(meta.contract.requiredParts)!==JSON.stringify(run.partPolicy?.requiredParts??inherited?.requiredParts??[])||JSON.stringify(meta.partPolicy)!==JSON.stringify(run.partPolicy))throw Error('자동 리그의 손가락·파트 설정이 고정 원본과 다릅니다.');
     this.verified(id,run.source);for(const file of run.files)this.verified(id,file);this.verified(id,meta.reportFile);
     const saved=inspectSavedGraphicsAutoRig(this.autoRigOutput(id,run));
     if(run.toolSha256!==undefined&&saved.toolSha256!==run.toolSha256)throw Error('자동 리그의 고정 작업 도구가 변경됐습니다.');
     const request=JSON.parse(fs.readFileSync(saved.requestPath,'utf8'));
-    if(request.sourceSha256!==run.source.sha256||request.operation!==run.operation||request.fingers!==run.settings.fingers||JSON.stringify(request.repairs)!==JSON.stringify(run.repairs)||JSON.stringify(request.sourceToRigMatrix)!==JSON.stringify(run.operation==='rig'?autoRigOrientation(run.settings.frontAxis):undefined))throw Error('저장된 자동 리그 요청이 변경됐습니다.');
+    if(request.sourceSha256!==run.source.sha256||request.operation!==run.operation||request.fingers!==run.settings.fingers||JSON.stringify(request.repairs)!==JSON.stringify(run.repairs)||JSON.stringify(request.sourceToRigMatrix)!==JSON.stringify(run.operation==='rig'?autoRigOrientation(run.settings.frontAxis):undefined)||JSON.stringify(request.partPolicy)!==JSON.stringify(run.partPolicy)||JSON.stringify(request.workerResources)!==JSON.stringify(run.toolDependencies))throw Error('저장된 자동 리그 요청이 변경됐습니다.');
     const inspection=this.checkAutoRigInspection(saved.report.inspection,run.operation);
     if(JSON.stringify(inspection)!==JSON.stringify(run.inspection)||JSON.stringify(meta.contract.humanBones)!==JSON.stringify(inspection.humanBones)||meta.contract.producerTaskId!==run.id||meta.contract.versionId!==candidate.id||meta.contract.producerVersionId!==candidate.id||meta.contract.exportPolicy!=='auto-rig-fbx'||!candidate.files.some(f=>JSON.stringify(f)===JSON.stringify(meta.exportFbx)&&/\.fbx$/i.test(f.path)))throw Error('확인한 본 매핑·내보내기 결과가 변경됐습니다.');
     validateUnityRigContract([candidate],meta.contract);
@@ -609,6 +635,7 @@ export class GraphicsEngine {
       this.assertImportedSource(version);
       if(action.kind==='start-auto-rig'&&(!['model','material'].includes(version.role)||object.accepted[`${version.role}:main`]!==version.id||!['neg-y','pos-y','pos-x','neg-x'].includes(action.frontAxis)||typeof action.fingers!=='boolean'))throw Error('채택한 전체 모델과 앞 방향·손가락 설정을 확인하세요.');
       if(action.kind!=='start-auto-rig'&&version.role!=='rig')throw Error('검사·보정할 리그 결과를 선택하세요.');
+      if(action.kind!=='start-auto-rig'&&version.autoRig)this.validateAutoRigCandidate(id,w,version);
       for(const file of version.files)this.verified(id,file);
       const source=version.files.find(f=>isGraphicsProductionFile(f)&&/\.blend$/i.test(f.path))??(action.kind==='start-auto-rig'?version.files.find(f=>isGraphicsProductionFile(f)&&/\.fbx$/i.test(f.path)):undefined);
       if(!source)throw Error('자동 리깅은 BLEND·FBX, 기존 리그 보정은 편집 가능한 Auto-Rig Pro BLEND가 필요합니다.');
@@ -620,12 +647,16 @@ export class GraphicsEngine {
         const saved=inspectSavedGraphicsAutoRig(this.autoRigOutput(id,inspection));
         if(inspection.toolSha256!==undefined&&saved.toolSha256!==inspection.toolSha256)throw Error('부위 검사의 고정 작업 도구가 변경됐습니다.');
         const request=JSON.parse(fs.readFileSync(saved.requestPath,'utf8'));
-        if(request.sourceSha256!==inspection.source.sha256||request.operation!=='inspect'||JSON.stringify(request.repairs)!==JSON.stringify([])||request.sourceToRigMatrix!==undefined||request.fingers!==inspection.settings.fingers||JSON.stringify(saved.report.inspection)!==JSON.stringify(inspection.inspection))throw Error('저장된 부위 검사가 변경됐습니다.');
+        if(request.sourceSha256!==inspection.source.sha256||request.operation!=='inspect'||JSON.stringify(request.repairs)!==JSON.stringify([])||request.sourceToRigMatrix!==undefined||request.fingers!==inspection.settings.fingers||JSON.stringify(request.partPolicy)!==JSON.stringify(inspection.partPolicy)||JSON.stringify(request.workerResources)!==JSON.stringify(inspection.toolDependencies)||JSON.stringify(saved.report.inspection)!==JSON.stringify(inspection.inspection))throw Error('저장된 부위 검사가 변경됐습니다.');
         repairs=validateAutoRigRepairs(inspection.inspection,action.repairs);
       }
       const inherited=version.autoRig?.contract??version.externalRig?.contract;
-      run={id:uid(),objectId:object.id,sourceVersionId:version.id,source:structuredClone(source),operation:action.kind==='start-auto-rig'?'rig':action.kind==='inspect-auto-rig'?'inspect':'repair',state:'running',createdAt:now(),updatedAt:now(),message:'로컬 작업을 접수했습니다. 정확한 원본과 설치된 도구를 확인합니다.',settings:{frontAxis:action.kind==='start-auto-rig'?action.frontAxis:'neg-y',fingers:action.kind==='start-auto-rig'?action.fingers:inherited?.fingers??true},repairs,files:[],...(action.kind==='repair-auto-rig'?{inspectionRunId:action.inspectionRunId}:{})};
+      const partPolicy=action.kind==='start-auto-rig'?this.assembledAutoRigPartPolicy(w,version):version.autoRig?.partPolicy;
+      if(partPolicy)validateAutoRigPartPolicy(partPolicy);
+      run={id:uid(),objectId:object.id,sourceVersionId:version.id,source:structuredClone(source),operation:action.kind==='start-auto-rig'?'rig':action.kind==='inspect-auto-rig'?'inspect':'repair',state:'running',createdAt:now(),updatedAt:now(),message:'로컬 작업을 접수했습니다. 정확한 원본과 설치된 도구를 확인합니다.',settings:{frontAxis:action.kind==='start-auto-rig'?action.frontAxis:'neg-y',fingers:action.kind==='start-auto-rig'?action.fingers:inherited?.fingers??true},repairs,files:[],...(partPolicy?{partPolicy:structuredClone(partPolicy)}:{}),...(action.kind==='repair-auto-rig'?{inspectionRunId:action.inspectionRunId}:{})};
       run.toolSha256=hash(fs.readFileSync(path.join(this.options.resources,'blender','graphics_auto_rig.py')));
+      const partHelper=path.join(this.options.resources,'blender','graphics_auto_rig_parts.py');
+      if(fs.existsSync(partHelper))run.toolDependencies={'graphics_auto_rig_parts.py':hash(fs.readFileSync(partHelper))};
       run.requestHash=this.autoRigFingerprint(run);
       const existing=w.autoRigRuns?.find(r=>r.requestHash===run.requestHash&&['running','review'].includes(r.state));
       if(existing)return w;
@@ -636,7 +667,7 @@ export class GraphicsEngine {
     run.state='running';delete run.error;run.updatedAt=now();this.save(w);
     const controller=new AbortController();this.active.set(run.id,{projectId:id,controller});
     try{
-      const result=await(this.options.autoRig??runGraphicsAutoRig)({blenderPath:this.store.settings.blenderPath,workerPath:path.join(this.options.resources,'blender','graphics_auto_rig.py'),sourceBlend:this.verified(id,run.source),sourceSha256:run.source.sha256,outputDir:this.autoRigOutput(id,run),operation:run.operation,fingers:run.settings.fingers,repairs:run.repairs,sourceToRigMatrix:run.operation==='rig'?autoRigOrientation(run.settings.frontAxis):undefined,recoveryOnly:action.kind==='recover-auto-rig'},{signal:controller.signal,onProgress:message=>{
+      const result=await(this.options.autoRig??runGraphicsAutoRig)({blenderPath:this.store.settings.blenderPath,workerPath:path.join(this.options.resources,'blender','graphics_auto_rig.py'),sourceBlend:this.verified(id,run.source),sourceSha256:run.source.sha256,outputDir:this.autoRigOutput(id,run),operation:run.operation,fingers:run.settings.fingers,repairs:run.repairs,...(run.partPolicy?{partPolicy:run.partPolicy}:{}),...(run.toolDependencies?{workerResources:run.toolDependencies}:{}),sourceToRigMatrix:run.operation==='rig'?autoRigOrientation(run.settings.frontAxis):undefined,recoveryOnly:action.kind==='recover-auto-rig'},{signal:controller.signal,onProgress:message=>{
         const latest=this.get(id),current=latest.autoRigRuns?.find(r=>r.id===run.id);if(current?.state==='running'&&current.message!==message&&!controller.signal.aborted){current.message=message;current.updatedAt=now();this.save(latest);}
       }});
       const latest=this.get(id),current=latest.autoRigRuns!.find(r=>r.id===run.id)!;
@@ -645,6 +676,7 @@ export class GraphicsEngine {
       if(current.toolSha256!==undefined&&result.toolSha256!==current.toolSha256)throw Error('고정한 작업 도구와 실행·복구 결과가 다릅니다.');
       this.verified(id,current.source);
       if(result.report.sourceSha256!==current.source.sha256||result.report.operation!==current.operation||result.report.osInputUsed!==false||result.report.paidSubmissions!==0||result.report.status!=='exported-review-pending')throw Error('작업 결과와 고정 원본이 일치하지 않습니다.');
+      validateAutoRigPartReport(current.partPolicy,result.report);
       const inspection=this.checkAutoRigInspection(result.report.inspection,current.operation);
       const register=(absolute:string,kind:string)=>{const rel=path.relative(this.store.directory(id),absolute);if(!rel||rel.startsWith('..')||path.isAbsolute(rel)||!path.resolve(absolute).startsWith(path.resolve(this.autoRigOutput(id,current))+path.sep))throw Error('작업 폴더 밖의 결과입니다.');return this.file(id,rel,kind);};
       const files=[register(result.blendPath,'blend'),register(result.fbxPath,'fbx'),register(result.glbPath,'glb')];
@@ -652,8 +684,8 @@ export class GraphicsEngine {
       if(current.operation!=='inspect'){
         const versionId=uid(),sourceVersion=latest.versions.find(v=>v.id===current.sourceVersionId&&v.objectId===object.id)!;
         const oldContract=sourceVersion.autoRig?.contract??sourceVersion.externalRig?.contract;
-        const contract:UnityRigContract={schemaVersion:2,versionId,producerVersionId:versionId,producerTaskId:current.id,rigType:'humanoid',fingers:current.settings.fingers,hairBinding:'head',requiredParts:structuredClone(oldContract?.requiredParts??[]),humanBones:inspection.humanBones,exportPolicy:'auto-rig-fbx'};
-        const candidate:AssetVersion={id:versionId,objectId:object.id,role:'rig',slot:'main',label:current.operation==='repair'?'선택 부위 웨이트 보정 · 외형 검토 대기':'Auto-Rig Pro · 외형 검토 대기',files,createdAt:now(),sourceVersionIds:[current.sourceVersionId],provenance:{type:'local',jobId:current.id},warnings:['시험 동작은 검사 전용이며 게임용 애니메이션으로 전달하지 않습니다.','구조 검사와 외형 검토는 별개입니다. 어깨·무릎·장식의 변형을 확인하세요.'],autoRig:{schemaVersion:1,runId:current.id,sourceSha256:current.source.sha256,reportFile:current.reportFile,exportFbx:files[1],contract}};
+        const contract:UnityRigContract={schemaVersion:2,versionId,producerVersionId:versionId,producerTaskId:current.id,rigType:'humanoid',fingers:current.settings.fingers,hairBinding:'head',requiredParts:structuredClone(current.partPolicy?.requiredParts??oldContract?.requiredParts??[]),humanBones:inspection.humanBones,exportPolicy:'auto-rig-fbx'};
+        const candidate:AssetVersion={id:versionId,objectId:object.id,role:'rig',slot:'main',label:current.operation==='repair'?'선택 부위 웨이트 보정 · 외형 검토 대기':'Auto-Rig Pro · 외형 검토 대기',files,createdAt:now(),sourceVersionIds:[current.sourceVersionId],provenance:{type:'local',jobId:current.id},warnings:['시험 동작은 검사 전용이며 게임용 애니메이션으로 전달하지 않습니다.','구조 검사와 외형 검토는 별개입니다. 어깨·무릎·장식의 변형을 확인하세요.'],autoRig:{schemaVersion:1,runId:current.id,sourceSha256:current.source.sha256,reportFile:current.reportFile,exportFbx:files[1],contract,...(current.partPolicy?{partPolicy:structuredClone(current.partPolicy)}:{})}};
         validateUnityRigContract([candidate],contract);latest.versions.push(candidate);current.candidateVersionId=versionId;
       }
       current.state='review';current.message=current.operation==='inspect'?'연결 부위·본 영향 검사를 저장했습니다. 보정할 부위를 선택하세요.':'구조 검사 통과 · 외형 검토 대기. 결과 사용과 내보내기는 직접 선택하세요.';current.updatedAt=now();return this.save(latest);

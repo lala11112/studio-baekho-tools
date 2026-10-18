@@ -20,6 +20,7 @@ export function autoRigPresentation(message: string): string {
     'Visual review required; no collision or natural-deformation certification':'겹침과 자연스러운 변형은 실제 동작으로 확인하세요.',
     'FBX mapping uses installed ARP Unity exporter conventions; actual Unity validation remains required':'Unity 본 매핑을 준비했습니다. 실제 Unity 가져오기 검사는 별도입니다.',
     sourceHashBound:'실행 원본 해시 일치',geometryAndUV:'원본 형태·UV 보존',outsideWeights:'선택 밖 가중치 보존',attributes:'메시 속성 보존',materials:'재질 보존',images:'이미지 보존',skeleton:'뼈대 보존',exportedBoneNames:'내보낸 실제 본 이름 확인',
+    partIdentity:'필수 파트·메시 식별자 보존',partExport:'FBX 파트 형상·UV·재질 할당 확인',headBinding:'지정한 파트의 머리 본 연결 확인',
     'Diagnostic motion only; not a natural motion quality guarantee':'검사용 동작입니다. 자연스러운 변형 여부는 직접 확인하세요.',
     'Arms spread':'양팔 벌리기', 'Elbows bend':'양팔꿈치 굽히기', 'Left knee bend':'왼쪽 무릎 굽히기', 'Right knee bend':'오른쪽 무릎 굽히기',
     'Invalid or nonnormalized weight rows':'가중치가 없거나 합이 맞지 않는 정점이 있습니다.',
