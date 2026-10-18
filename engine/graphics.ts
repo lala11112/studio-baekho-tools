@@ -24,6 +24,7 @@ import { runGraphicsPlanar, validatePlanarReport, validateSavedPlanarCandidate, 
 import { validatePlanarSelection, type PlanarSelection, type PlanarInspection, CURRENT_PLANAR_ALGORITHM } from '../shared/graphics-planar';
 import { compileCreation, validateCreation, creationCompositionStrategy } from "../shared/graphics-creation";
 import { freezeUnityRigContract } from '../shared/graphics-rig';
+import { prepareAutoRigExport } from './graphics-auto-rig-export';
 import { DEFAULT_MODEL_FACE_LIMIT, requireModelGeometry } from '../shared/graphics-model-geometry';
 import { graphicsInputSupportProblem } from '../shared/graphics-input-support';
 import { executeGraphicsProcedural, proceduralProblem } from "./graphics-procedural";
@@ -531,9 +532,20 @@ export class GraphicsEngine {
       ids.add(key);}
     return structuredClone(v);
   }
-  private validateAutoRigCandidate(id:string,w:GraphicsWorkspace,candidate:AssetVersion){
+  private validateAutoRigCandidate(id:string,w:GraphicsWorkspace,candidate:AssetVersion,seen=new Set<string>()){
     const meta=candidate.autoRig;if(!meta)return;
     if(candidate.role!=='rig'||candidate.slot!=='main')throw Error('자동 리그는 검사한 전체 리그 슬롯으로만 사용할 수 있습니다.');
+    if(seen.has(candidate.id))throw Error('자동 리그의 복사본 출처가 순환합니다.');seen.add(candidate.id);
+    if(meta.derivedFromVersionId){
+      const parents=w.versions.filter(v=>v.id===meta.derivedFromVersionId&&v.objectId===candidate.objectId);
+      if(parents.length!==1||!parents[0].autoRig||JSON.stringify(candidate.sourceVersionIds)!==JSON.stringify([parents[0].id]))throw Error('자동 리그 복사본의 정확한 원본이 없습니다.');
+      const parent=parents[0];this.validateAutoRigCandidate(id,w,parent,seen);
+      const producers=w.tasks.filter(t=>t.id===candidate.provenance.jobId&&t.objectId===candidate.objectId&&t.taskId==='X04'&&t.status==='review'&&t.outputVersionIds.includes(candidate.id));
+      if(producers.length!==1||JSON.stringify(producers[0].inputVersionIds)!==JSON.stringify([parent.id])||JSON.stringify(validateUnityRigContract([parent],producers[0].unityRigContract))!==JSON.stringify(validateUnityRigContract([parent],parent.autoRig!.contract)))throw Error('자동 리그 복사본의 고정 내보내기 기록이 다릅니다.');
+      const copied=this.autoRigCopyMetadata(id,parent,candidate,producers[0]);
+      if(JSON.stringify(meta)!==JSON.stringify(copied))throw Error('자동 리그 복사본의 검사·본 매핑 출처가 다릅니다.');
+      validateUnityRigContract([candidate],meta.contract);return;
+    }
     const run=w.autoRigRuns?.find(r=>r.id===meta.runId&&r.objectId===candidate.objectId&&r.candidateVersionId===candidate.id);
     if(!run||run.state!=='review'||run.operation==='inspect'||run.requestHash!==this.autoRigFingerprint(run)||meta.sourceSha256!==run.source.sha256||JSON.stringify(run.files)!==JSON.stringify(candidate.files)||JSON.stringify(run.reportFile)!==JSON.stringify(meta.reportFile)||candidate.provenance.jobId!==run.id||JSON.stringify(candidate.sourceVersionIds)!==JSON.stringify([run.sourceVersionId]))throw Error('자동 리그의 고정 원본·결과·실행 기록이 다릅니다.');
     const sourceVersion=w.versions.find(v=>v.id===run.sourceVersionId&&v.objectId===candidate.objectId);
@@ -548,6 +560,31 @@ export class GraphicsEngine {
     const inspection=this.checkAutoRigInspection(saved.report.inspection,run.operation);
     if(JSON.stringify(inspection)!==JSON.stringify(run.inspection)||JSON.stringify(meta.contract.humanBones)!==JSON.stringify(inspection.humanBones)||meta.contract.producerTaskId!==run.id||meta.contract.versionId!==candidate.id||meta.contract.producerVersionId!==candidate.id||meta.contract.exportPolicy!=='auto-rig-fbx'||!candidate.files.some(f=>JSON.stringify(f)===JSON.stringify(meta.exportFbx)&&/\.fbx$/i.test(f.path)))throw Error('확인한 본 매핑·내보내기 결과가 변경됐습니다.');
     validateUnityRigContract([candidate],meta.contract);
+  }
+  private autoRigCopyMetadata(id:string,parent:AssetVersion,candidate:AssetVersion,task:GraphicsTask){
+    if(!parent.autoRig||candidate.role!=='rig'||candidate.slot!==parent.slot||task.taskId!=='X04')throw Error('자동 리그 복사본의 종류·슬롯이 다릅니다.');
+    const plan=prepareAutoRigExport({projectRoot:this.store.directory(id),object:this.object(this.get(id),parent.objectId),inputs:[parent],task,resources:this.options.resources,workspacePath:this.store.file(id,'graphics/workspace.json'),blenderPath:this.store.settings.blenderPath,signal:new AbortController().signal,onProgress:()=>{}});
+    if(!plan)throw Error('검증된 자동 리그 복사 요청이 아닙니다.');
+    const modelFiles=candidate.files.filter(f=>isGraphicsProductionFile(f)&&/\.(blend|fbx|glb)$/i.test(f.path)||f.kind==='preview'&&f.path.endsWith('/diagnostic.glb'));
+    if(modelFiles.length!==plan.files.length)throw Error('자동 리그 복사본의 파일 수가 다릅니다.');
+    for(const item of plan.files){const matches=modelFiles.filter(f=>f.path.endsWith('/'+item.name)&&f.sha256===item.file.sha256&&f.bytes===item.file.bytes);if(matches.length!==1)throw Error('자동 리그의 검증된 파일과 복사본이 다릅니다.');this.verified(id,matches[0]);}
+    const reportFile=candidate.files.find(f=>f.kind==='report'&&f.path.endsWith('/report.json'));
+    if(!reportFile)throw Error('자동 리그 복사 검사 기록이 없습니다.');
+    const report=JSON.parse(fs.readFileSync(this.verified(id,reportFile),'utf8'));
+    if(report.schemaVersion!==1||JSON.stringify(report.metadata)!==JSON.stringify(parent.autoRig)||report.format!==plan.format||JSON.stringify(report.outputFiles)!==JSON.stringify(plan.files.map(item=>{const f=modelFiles.find(f=>f.path.endsWith('/'+item.name))!;return {path:f.path,sha256:f.sha256,bytes:f.bytes};}))||report.operation!=='X04'||report.policy!==plan.policy||report.sourceVersionId!==parent.id||report.originalPreserved!==true||report.diagnosticGlb!==(plan.format==='both')||JSON.stringify(report.sourceFiles)!==JSON.stringify(plan.files.map(item=>item.file)))throw Error('자동 리그 복사 검사와 고정 원본이 다릅니다.');
+    const exportFbx=modelFiles.find(f=>f.path.endsWith('/asset.fbx'))!;
+    return {...structuredClone(parent.autoRig),derivedFromVersionId:parent.id,exportFbx,contract:{...validateUnityRigContract([parent],parent.autoRig.contract)!,versionId:candidate.id,producerVersionId:candidate.id}};
+  }
+  private assertA05Rig(object:GraphicsObject,w:GraphicsWorkspace,inputs:AssetVersion[]){
+    const frozen={...w,objects:w.objects.map(o=>o.id===object.id?object:o)};
+    if(inputs.some(v=>v.autoRig)||freezeUnityRigContract(frozen,inputs)?.exportPolicy==='auto-rig-fbx')throw Error('자동 리그의 크기·피벗 보정은 아직 지원하지 않습니다. 모델 단계에서 크기·피벗을 먼저 맞춘 뒤 리깅하세요.');
+  }
+  private x04RigContract(id:string,w:GraphicsWorkspace,object:GraphicsObject,inputs:AssetVersion[],task:GraphicsTask){
+    const frozen={...w,objects:w.objects.map(o=>o.id===object.id?object:o)};
+    const contract=freezeUnityRigContract(frozen,inputs);
+    for(const source of inputs)if(source.autoRig)this.validateAutoRigCandidate(id,w,source);
+    prepareAutoRigExport({projectRoot:this.store.directory(id),workspacePath:this.store.file(id,'graphics/workspace.json'),object,inputs,task:{...task,unityRigContract:contract},resources:this.options.resources,blenderPath:this.store.settings.blenderPath,signal:new AbortController().signal,onProgress:()=>{}});
+    return contract;
   }
   private async autoRigAction(id:string,action:AutoRigAction):Promise<GraphicsWorkspace>{
     if(action.kind==='probe-auto-rig'){
@@ -929,6 +966,7 @@ export class GraphicsEngine {
     if (graphicsProceduralTasks.has(taskId)) { const problem = proceduralProblem({ ...o.settings, count: 1 }, taskId); if (problem) throw Error(problem); }
     if (w.tasks.some(t => t.objectId === o.id && ["awaiting_approval", "running", "submission_unknown"].includes(t.status))) throw Error("이 대상의 기존 작업을 확인하거나 취소한 뒤 새 작업을 준비하세요.");
     const inputs = this.inputs(w, o, taskId);
+    if(taskId==='A05')this.assertA05Rig(o,w,inputs);
     const inputSupportProblem = graphicsInputSupportProblem(taskId, inputs, o.kind);
     if (inputSupportProblem) throw Error(inputSupportProblem);
     if (inputs.some(version => requiresPartSpaceRestoration(w, version))) throw Error('API 파트 결과의 원래 크기·위치 복원을 먼저 완료하세요. 원본은 유지됩니다.');
@@ -974,6 +1012,7 @@ export class GraphicsEngine {
     const t: GraphicsTask = { ...snapshot, id: uid(), createdAt: now(), updatedAt: now(), status: "awaiting_approval", requestHash: hash(JSON.stringify(snapshot)), outputVersionIds: [], backendJobIds: [], localOnly: definition.executor === "local", message: "요청을 저장했습니다. 실행 전까지 작업자·유료 서비스 호출은 없습니다." };
     if (taskId === 'M08' && t.settings.assemblyPlacement === 'keep') t.localOnly = true;
     t.objectSnapshot = { name: o.name, kind: o.kind, references: structuredClone(o.references), accepted: structuredClone(o.accepted), ...(o.creation ? { creation: structuredClone(o.creation) } : {}) };
+    if(taskId==='X04')t.unityRigContract=this.x04RigContract(id,w,o,inputs,t);
     if (taskId === "X05") { t.targetProfile = structuredClone(w.target); t.unityClipSettings = freezeUnityClipSettings(w, inputs); t.unityRigContract = freezeUnityRigContract(w, inputs); }
     t.requestHash = hash(JSON.stringify({ ...snapshot, object: t.objectSnapshot, target: t.targetProfile, ...(t.unityClipSettings ? { unityClipSettings: t.unityClipSettings } : {}), ...(t.unityRigContract ? { unityRigContract: t.unityRigContract } : {}) }));
     if (API.has(taskId)) {
@@ -1029,6 +1068,8 @@ export class GraphicsEngine {
     if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error("다른 제작이 진행 중입니다. 완료 후 실행하세요.");
     const o = { ...this.object(w, t.objectId), ...t.objectSnapshot }, inputs = t.inputVersionIds.map(vid => w.versions.find(v => v.id === vid)!);
     for (const v of inputs) { if (!v) throw Error("고정 입력 버전이 없습니다."); this.assertImportedSource(v); for (const f of v.files) this.verified(id, f); }
+    if(t.taskId==='A05')this.assertA05Rig(o,w,inputs);
+    if(t.taskId==='X04'&&JSON.stringify(this.x04RigContract(id,w,o,inputs,t))!==JSON.stringify(t.unityRigContract))throw Error('파일 내보내기의 고정 리그 계약이 다릅니다. 새 작업으로 다시 준비하세요.');
     if (t.taskId === "X05") {
       if (!t.objectSnapshot?.accepted) throw Error("이전 Unity 요청에 채택 버전의 고정 기록이 없습니다. 기존 요청을 취소하고 전달을 다시 준비하세요.");
       const issues = getGraphicsCompatibility(o, w.versions);
@@ -1147,6 +1188,8 @@ export class GraphicsEngine {
     let w = this.get(id); const t = w.tasks.find(t => t.id === taskId)!;
     const o = { ...this.object(w, t.objectId), ...t.objectSnapshot }, inputs = t.inputVersionIds.map(vid => w.versions.find(v => v.id === vid)!);
     if(!recoveryOnly)for(const version of inputs)this.assertImportedSource(version);
+    if(t.taskId==='A05'&&!recoveryOnly)this.assertA05Rig(o,w,inputs);
+    if(t.taskId==='X04'&&!recoveryOnly&&JSON.stringify(this.x04RigContract(id,w,o,inputs,t))!==JSON.stringify(t.unityRigContract))throw Error('파일 내보내기의 고정 리그 계약이 다릅니다.');
     if (t.taskId === "X05") {
       if (!t.targetProfile) throw Error("고정된 Unity 프로젝트 설정이 없습니다.");
       const saved=t.deliveryId?w.deliveries.find(d=>d.id===t.deliveryId):undefined;
@@ -1175,6 +1218,7 @@ export class GraphicsEngine {
         onProgress: message => { const latest = this.get(id), task = latest.tasks.find(x => x.id === taskId)!; if (task.status === "running" && !task.runtimeApproval) { task.message = `${executions.length > 1 ? `후보 ${candidateIndex + 1}/${executions.length} · ` : ''}${message}`; task.updatedAt = now(); this.save(latest); } } });
       if (signal.aborted) return;
       w = this.get(id); const current = w.tasks.find(x => x.id === taskId)!;
+      if(t.taskId==='X04'&&t.unityRigContract?.exportPolicy==='auto-rig-fbx'&&!result.autoRigSourceVersionId)throw Error('자동 리그 내보내기 결과의 검증된 출처가 없습니다.');
       const files = result.files.map(f => this.file(id, f.path, f.kind));
       const groups = result.candidates ?? (["I01", "I02", "I03", "I05", "I06", "I07", "I08"].includes(t.taskId)
         ? files.filter(f => image.test(f.path)).map(f => ({ files: [f], role: result.role, slot: result.slot, label: result.imageCandidates?.find(c => c.path === f.path)?.label ?? result.label, warnings: result.warnings }))
@@ -1191,10 +1235,16 @@ export class GraphicsEngine {
               contact.phase === 'reconstruct' && (t.settings.contactTopologyReconstructionConfirmed !== true || t.settings['lock.topology'] !== false))
             throw Error('접합 결과가 고정한 요청·원본·파트와 다릅니다. 기존 채택은 유지됩니다.');
         }
-        return { id: uid(), objectId: o.id, role: group.role, slot: t.settings.partId && ['design','model','material'].includes(group.role) ? `part-${t.settings.partId}` : group.slot,
+        const candidate:AssetVersion={ id: uid(), objectId: o.id, role: group.role, slot: t.settings.partId && ['design','model','material'].includes(group.role) ? `part-${t.settings.partId}` : group.slot,
           label: `${group.label}${executions.length > 1 ? ` · 후보 ${candidateIndex + 1}` : ''}`, files: verified, createdAt: now(), sourceVersionIds: t.inputVersionIds,
           provenance: { type: t.localOnly ? "local" : graphicsVideoTasks.has(t.taskId) ? "runway" : "codex", jobId: child.id },
           preview: group.role === "motion-reference" ? verified.find(f => /\.(mp4|webm)$/i.test(f.path))?.path : verified.find(f => image.test(f.path))?.path, warnings: group.warnings, ...(contact ? { contact } : {}) };
+        if(result.autoRigSourceVersionId){
+          const parent=inputs.length===1&&inputs[0].id===result.autoRigSourceVersionId?inputs[0]:undefined;
+          if(t.taskId!=='X04'||groups.length!==1||!parent?.autoRig)throw Error('자동 리그 복사본의 고정 원본이 다릅니다.');
+          this.validateAutoRigCandidate(id,w,parent);candidate.autoRig=this.autoRigCopyMetadata(id,parent,candidate,t);
+        }
+        return candidate;
       });
       if (t.settings.contactPhase && !versions.some(version => version.contact)) throw Error('접합 검토 결과가 누락됐습니다. 기존 원본·채택은 유지됩니다.');
       if (t.settings.contactPhase === 'reconstruct') {

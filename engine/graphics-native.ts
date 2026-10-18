@@ -9,6 +9,7 @@ import type { ProductionRun, ProductionStage } from "../shared/production";
 import type { AssetVersion, GraphicsObject, GraphicsRole, GraphicsTask } from "../shared/graphics";
 import type { WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from "../shared/workbench";
 import { normalizePhysicalSize } from "../shared/graphics-size";
+import { prepareAutoRigExport } from './graphics-auto-rig-export';
 
 export type GraphicsNativeArgs = {
   projectRoot: string;
@@ -28,6 +29,8 @@ export type GraphicsNativeArgs = {
   onProgress: (message: string) => void;
 };
 export type GraphicsNativeResult = {
+  /** Verified byte-preserving derivative; registration must rebind and validate metadata. */
+  autoRigSourceVersionId?: string;
   contact?: import('../shared/graphics-contact').GraphicsContactReview;
   files: { path: string; kind: string }[];
   label: string;
@@ -398,13 +401,19 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
     if (!/^[a-zA-Z0-9_-]{1,120}$/.test(task.id)) throw Error("그래픽 작업 ID가 잘못됐습니다.");
     if (!["I01", "I02", "I03", "I05", "I06", "I07", "I08", "A05", "X04"].includes(task.taskId)) throw Error("이 그래픽 작업의 실행기는 아직 연결되지 않았습니다.");
     const inputs = verifyInputs(args, root);
+    if (task.taskId === 'A05' && !args.recoveryOnly && (args.inputs.some(v=>v.autoRig) || task.unityRigContract?.exportPolicy === 'auto-rig-fbx')) throw Error('자동 리그의 크기·피벗 보정은 아직 지원하지 않습니다. 모델 단계에서 크기를 설정한 뒤 리깅하세요.');
+    const autoRigExport = prepareAutoRigExport(args);
     const folder = path.join(root, "graphics", "jobs", task.id), work = path.join(folder, "work"), output = path.join(folder, "outputs");
+    const autoRigResult: GraphicsNativeResult | undefined = autoRigExport ? {files:[...autoRigExport.files.map(item=>({path:relative(root,path.join(output,item.name)),kind:item.name.endsWith('.blend')?'blend':item.name.endsWith('.fbx')?'fbx':'preview'})),{path:relative(root,path.join(output,'report.json')),kind:'report'}],autoRigSourceVersionId:autoRigExport.source.id,label:'검증된 자동 리그 파일 내보내기',role:'rig',slot:autoRigExport.source.slot,warnings:autoRigExport.format==='both'?['GLB는 변형 검사용입니다. 게임용 리그는 검증된 FBX를 사용합니다.']:[]} : undefined;
     ownedDirectory(root, work); ownedDirectory(root, output);
     const checkpointFile = path.join(folder, "checkpoint.json"), dispatchFile = path.join(folder, "dispatch.json");
-    const identity = digest(JSON.stringify({ taskId: task.taskId, requestHash: task.requestHash, objectId: task.objectId, instruction: task.instruction, settings: task.settings, inputs: inputs.map(file => ({ path: file.path, sha256: file.sha256, versionId: file.versionId })), ...(["I05", "I06", "I07"].includes(task.taskId) ? { objectSnapshot: task.objectSnapshot } : {}) }));
+    const identity = digest(JSON.stringify({ taskId: task.taskId, requestHash: task.requestHash, objectId: task.objectId, instruction: task.instruction, settings: task.settings, inputs: inputs.map(file => ({ path: file.path, sha256: file.sha256, versionId: file.versionId })), ...(autoRigExport ? {autoRigCopy:{policy:autoRigExport.policy,metadata:autoRigExport.metadata,contract:task.unityRigContract}} : {}), ...(["I05", "I06", "I07"].includes(task.taskId) ? { objectSnapshot: task.objectSnapshot } : {}) }));
     if (fs.existsSync(checkpointFile)) {
       const cached = read(checkpointFile);
       if (cached.identity !== identity || !Array.isArray(cached.files)) throw Error("저장된 그래픽 결과의 요청 정보가 다릅니다. 자동 재실행하지 않습니다.");
+      if (autoRigExport && JSON.stringify(cached.result) !== JSON.stringify(autoRigResult)) throw Error('저장된 자동 리그 내보내기의 검증된 출처·파일·역할이 다릅니다.');
+      if (autoRigExport && JSON.stringify(cached.files.map((f:{path:string;kind:string})=>({path:f.path,kind:f.kind}))) !== JSON.stringify(autoRigResult!.files)) throw Error('저장된 자동 리그 파일 목록이 다릅니다.');
+      if (autoRigExport) for (const item of autoRigExport.files) {const file=path.join(output,item.name);if(fileHash(verifiedFile(root,relative(root,file)))!==item.file.sha256)throw Error('저장된 자동 리그 파일이 검증된 원본과 다릅니다.');}
       for (const file of cached.files) {
         const localPath = verifiedFile(root, file.path);
         if (fileHash(localPath) !== file.sha256 || fs.statSync(localPath).size !== file.bytes) throw Error("저장된 그래픽 결과가 변경됐습니다. 자동 재생성하지 않습니다.");
@@ -420,6 +429,27 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
       write(checkpointFile, { schemaVersion: 1, identity, createdAt: new Date().toISOString(), files, result });
       return result;
     };
+    if (autoRigExport) {
+      const reportPath=path.join(output,'report.json');
+      const expectedManifest=autoRigExport.files.map(item=>({path:relative(root,path.join(output,item.name)),sha256:item.file.sha256,bytes:item.file.bytes}));
+      const binding={schemaVersion:1,identity,operation:'X04',policy:autoRigExport.policy,sourceVersionId:autoRigExport.source.id,sourceFiles:autoRigExport.files.map(item=>item.file),metadata:autoRigExport.metadata,format:autoRigExport.format,outputFiles:expectedManifest,diagnosticGlb:autoRigExport.format==='both',originalPreserved:true};
+      if(fs.existsSync(reportPath)) {
+        verifiedFile(root,relative(root,reportPath));
+        if(JSON.stringify(read(reportPath))!==JSON.stringify(binding))throw Error('저장된 자동 리그 완료 보고서의 고정 원본·계약·출력 목록이 다릅니다.');
+        for(const file of expectedManifest){const local=verifiedFile(root,file.path);if(fs.statSync(local).size!==file.bytes||fileHash(local)!==file.sha256)throw Error('저장된 자동 리그 출력 SHA가 다릅니다.');}
+        return finish(autoRigResult!);
+      }
+      if (args.recoveryOnly) throw Error('저장된 완전한 자동 리그 내보내기가 없습니다. 복구에서 새 복사를 시작하지 않습니다.');
+      // Pre-read and verify every source before creating any output; never invoke Blender.
+      const contents = autoRigExport.files.map(item => ({...item,bytes:fs.readFileSync(item.absolute)}));
+      for (const item of contents) if (digest(item.bytes) !== item.file.sha256 || item.bytes.length !== item.file.bytes) throw Error('자동 리그 복사 직전 원본 SHA가 다릅니다.');
+      for (const item of contents) {
+        const target = path.join(output,item.name);
+        fs.writeFileSync(target,item.bytes,{flag:'wx'});
+      }
+      write(reportPath,binding);
+      return finish(autoRigResult!);
+    }
     if (task.taskId === "A05" || task.taskId === "X04") {
       const modelFiles = inputs.filter(file => [".blend", ".fbx", ".glb"].includes(path.extname(file.localPath).toLowerCase()));
       const sources = [...new Set(modelFiles.map(file => file.versionId))];

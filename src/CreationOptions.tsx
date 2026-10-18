@@ -22,6 +22,8 @@ import './creation-options-guide.css';
 
 type Value = string | number | boolean;
 type Props = {
+  taskId?: string;
+  autoRigFileExport?: boolean;
   kind: GraphicsKind;
   spec: CreationSpec;
   stage: CreationStage;
@@ -76,6 +78,8 @@ function Choices({
   );
 }
 export function CreationOptions({
+  taskId,
+  autoRigFileExport,
   kind,
   spec,
   stage,
@@ -143,7 +147,7 @@ export function CreationOptions({
       className="gs-creation-options"
       data-testid="graphics-creation-options"
     >
-      <h2>{stageQuestions[stage]}</h2>
+      <h2>{stage === 'unity' && taskId === 'X04' ? '파일을 어떻게 내보낼까요?' : stageQuestions[stage]}</h2>
       {splitWhole && <section className="gs-human-workflow" aria-label="인간형 파트 제작 순서">
         <strong>전체 제작 후 3파트 분리</strong>
         <p>전체 모델을 만든 뒤 머리·몸통·머리카락을 분리합니다. 각 결과를 확인하고 채택하며 진행하세요.</p>
@@ -645,11 +649,13 @@ export function CreationOptions({
             ["files", "FBX · GLB 파일 내보내기"],
           ])}
           <p>
-            {settings.deliveryMode === "files"
+            {taskId === "X04"
               ? "채택한 결과를 로컬 FBX · GLB 파일로 내보냅니다. 원본은 유지하며 Unity 프로젝트 임포트는 실행하지 않습니다."
               : "채택한 모델·재질·리그·클립을 연결된 Unity 프로젝트에 전달합니다. 기존 원본은 유지하며, 기본 동작은 임포트입니다."}
           </p>
-          {choice("충돌체", "collider", "none", [
+          {taskId === 'X04' && autoRigFileExport && <p className="gs-fine" data-testid="graphics-auto-rig-export-note">게임용 리그는 이전에 검증한 FBX를 그대로 복사합니다. 함께 내보내는 GLB는 변형 검사용이며 게임용 본 구조를 보장하지 않습니다. FBX 또는 FBX + 변형 검사용 GLB를 선택하세요.</p>}
+          {taskId === 'X04' && autoRigFileExport && settings.exportFormat === 'glb' && <p role="alert">자동 리그는 GLB만 내보낼 수 없습니다. 출력 형식을 FBX 또는 FBX + 변형 검사용 GLB로 바꾸세요.</p>}
+          {taskId !== 'X04' && <>{choice("충돌체", "collider", "none", [
             ["none", "추가 안 함"],
             ["box", "상자"],
             ["mesh", "메시"],
@@ -714,6 +720,7 @@ export function CreationOptions({
               원본은 그대로 두고 Unity 전달본에만 적용합니다.
             </p>
           </details>
+          </>}
         </>
       )}
     </div>

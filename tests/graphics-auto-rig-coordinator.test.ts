@@ -7,6 +7,11 @@ import {createHash} from 'node:crypto';
 import {GraphicsEngine} from '../engine/graphics';
 import {inspectSavedGraphicsAutoRig} from '../engine/graphics-auto-rig';
 import {humanoidBoneMap} from '../shared/graphics-rig';
+import {freezeUnityRigContract} from '../shared/graphics-rig';
+import {defaultCreation} from '../shared/graphics-creation';
+import {getJourneyReadiness} from '../shared/graphics-journey';
+import {createGraphicsNativeExecutor} from '../engine/graphics-native';
+import {autoRigUnityExport} from '../engine/graphics-unity';
 import type {GraphicsWorkspace} from '../shared/graphics';
 const hash=(v:string|Buffer)=>createHash('sha256').update(v).digest('hex');
 function fixture(t:any,role:'model'|'material'='model'){
@@ -20,6 +25,63 @@ function fixture(t:any,role:'model'|'material'='model'){
  const make=()=>new GraphicsEngine(store,{isProjectActive:()=>false} as any,options);const engine=make();return {engine,make,get:()=>w,root,calls:()=>calls,writes:()=>writes,hold:()=>{wait=new Promise(r=>{release=r;});},release:()=>{release();wait=undefined;},fail:()=>{fail=true;},corrupt:()=>{corrupt=true;},changeInspection:(fn:(v:any)=>void)=>{inspectionChange=fn;}};
 }
 const start={kind:'start-auto-rig' as const,objectId:'o',versionId:'v',frontAxis:'pos-x' as const,fingers:true};
+
+async function exportFixture(t:any){
+ const f=fixture(t);f.changeInspection(inspection=>{inspection.humanBones=inspection.humanBones.map((b:any)=>({humanName:b.humanName,boneName:b.boneName}));});
+ await f.engine.action('p',start);const source=f.get().versions.at(-1)!;
+ await f.engine.action('p',{kind:'accept',objectId:'o',versionId:source.id});
+ const creation=defaultCreation('character');creation.subject='human';creation.stageSettings.unity!.values.deliveryMode='files';creation.stageSettings.unity!.values.exportFormat='both';
+ f.get().objects[0].creation=creation;f.get().objects[0].accepted={'model:main':'v','rig:main':source.id};
+ let nativeCalls=0;
+ (f.engine as any).native=createGraphicsNativeExecutor({runBlender:async()=>{nativeCalls++;throw Error('Blender forbidden');}});
+ return {...f,source,nativeCalls:()=>nativeCalls};
+}
+async function finishExport(f:Awaited<ReturnType<typeof exportFixture>>,taskId:string){
+ await f.engine.action('p',{kind:'approve',taskId});
+ for(let i=0;i<100&&f.engine.isActive('p');i++)await new Promise(resolve=>setImmediate(resolve));
+ const task=f.get().tasks.find(task=>task.id===taskId)!;assert.equal(task.status,'review',task.message);
+ return f.get().versions.find(v=>v.id===task.outputVersionIds[0])!;
+}
+test('X04 exact auto-rig copies preserve producer proof through frozen approval, adoption, Unity contract and repeated copy',async t=>{
+ const f=await exportFixture(t),prepared=await f.engine.action('p',{kind:'prepare',objectId:'o',taskId:'X04'}),task=prepared.tasks.at(-1)!;
+ assert.equal(task.unityRigContract?.exportPolicy,'auto-rig-fbx');
+ assert.equal(Object.keys(f.source.autoRig!.contract.humanBones[0])[0],'humanName');
+ assert.equal(Object.keys(task.unityRigContract!.humanBones[0])[0],'boneName');
+ // A new selected rig must not rebind this already frozen request.
+ const other={...structuredClone(f.source),id:'other-rig',autoRig:undefined,files:f.source.files.filter(file=>file.kind==='blend'),sourceVersionIds:[],provenance:{type:'import' as const}};
+ f.get().versions.push(other);await f.engine.action('p',{kind:'accept',objectId:'o',versionId:other.id});
+ const copied=await finishExport(f,task.id);
+ assert.equal(f.get().objects[0].accepted['rig:main'],other.id);
+ assert.equal(copied.autoRig?.derivedFromVersionId,f.source.id);assert.deepEqual(copied.autoRig!.reportFile,f.source.autoRig!.reportFile);
+ assert.equal(copied.autoRig!.exportFbx.sha256,f.source.autoRig!.exportFbx.sha256);assert.equal(copied.autoRig!.contract.versionId,copied.id);
+ assert.equal(copied.autoRig!.contract.producerVersionId,copied.id);assert.equal(copied.autoRig!.contract.producerTaskId,f.source.autoRig!.runId);
+ assert(copied.files.some(file=>file.kind==='preview'&&file.path.endsWith('/diagnostic.glb')));
+ await f.engine.action('p',{kind:'accept',objectId:'o',versionId:copied.id});
+ const contract=freezeUnityRigContract(f.get(),[copied]);assert.equal(autoRigUnityExport(copied,[copied],{},contract)?.sha256,f.source.autoRig!.exportFbx.sha256);
+ const next=await f.engine.action('p',{kind:'prepare',objectId:'o',taskId:'X04'}),second=await finishExport(f,next.tasks.at(-1)!.id);
+ assert.equal(second.autoRig?.derivedFromVersionId,copied.id);await f.engine.action('p',{kind:'accept',objectId:'o',versionId:second.id});
+ assert.equal(f.nativeCalls(),0);assert.equal(f.calls(),1);
+});
+test('auto-rig A05 and diagnostic-only X04 stop at readiness/prepare; unknown generic rig support remains',async t=>{
+ const f=await exportFixture(t),w=f.get(),draft=w.objects[0].creation!;
+ assert(getJourneyReadiness(w,'o',draft,{stage:'unity',taskOverride:'A05'}).problems.some(p=>/모델 단계/.test(p.reason)));
+ await assert.rejects(f.engine.action('p',{kind:'prepare',objectId:'o',taskId:'A05'}),/모델 단계/);
+ draft.stageSettings.unity!.values.exportFormat='glb';
+ assert(getJourneyReadiness(w,'o',draft,{stage:'unity',taskOverride:'X04'}).problems.some(p=>/진단용/.test(p.reason)));
+ await assert.rejects(f.engine.action('p',{kind:'prepare',objectId:'o',taskId:'X04'}),/진단용/);
+ assert.equal(f.get().tasks.length,0);assert.equal(f.nativeCalls(),0);
+ const legacy={...structuredClone(f.source),id:'unsafe-old-export',autoRig:undefined,sourceVersionIds:[f.source.id],provenance:{type:'local' as const}};
+ f.get().versions.push(legacy);f.get().objects[0].accepted['rig:main']=legacy.id;draft.stageSettings.unity!.values.exportFormat='both';
+ await assert.rejects(f.engine.action('p',{kind:'prepare',objectId:'o',taskId:'X04'}),/검증된/);
+ await assert.rejects(f.engine.action('p',{kind:'prepare',objectId:'o',taskId:'A05'}),/모델 단계/);
+});
+for(const tamper of ['copied-fbx','parent-report','producer-contract'] as const)test('X04 derived rig adoption rejects '+tamper,async t=>{
+ const f=await exportFixture(t),w=await f.engine.action('p',{kind:'prepare',objectId:'o',taskId:'X04'}),taskId=w.tasks.at(-1)!.id,copied=await finishExport(f,taskId),before=structuredClone(f.get().objects[0].accepted);
+ if(tamper==='copied-fbx')fs.appendFileSync(path.join(f.root,copied.autoRig!.exportFbx.path),'tampered');
+ if(tamper==='parent-report')fs.appendFileSync(path.join(f.root,f.source.autoRig!.reportFile.path),'tampered');
+ if(tamper==='producer-contract')f.get().tasks.find(t=>t.id===taskId)!.unityRigContract!.humanBones[0].boneName='wrong';
+ await assert.rejects(f.engine.action('p',{kind:'accept',objectId:'o',versionId:copied.id}));assert.deepEqual(f.get().objects[0].accepted,before);assert.equal(f.nativeCalls(),0);
+});
 for(const role of ['model','material'] as const)test(`exact adopted ${role} source creates unadopted candidate and preserves slots`,async t=>{const f=fixture(t,role),accepted=structuredClone(f.get().objects[0].accepted);const w=await f.engine.action('p',start);assert.equal(w.autoRigRuns![0].state,'review');assert.deepEqual(w.objects[0].accepted,accepted);const candidate=w.versions.at(-1)!;const adopted=await f.engine.action('p',{kind:'accept',objectId:'o',versionId:candidate.id});assert.equal(adopted.objects[0].accepted['rig:main'],candidate.id);assert.equal(adopted.objects[0].accepted['model:part-hair'],'hair');assert.equal(f.writes(),1);});
 test('duplicate concurrent start dispatches once',async t=>{const f=fixture(t);f.hold();const first=f.engine.action('p',start);await f.engine.action('p',start);assert.equal(f.calls(),1);f.release();await first;assert.equal(f.get().autoRigRuns!.length,1);});
 test('unaccepted and part sources reject before worker',async t=>{const f=fixture(t);delete f.get().objects[0].accepted['model:main'];await assert.rejects(f.engine.action('p',start));assert.equal(f.calls(),0);f.get().objects[0].accepted['model:main']='v';f.get().versions[0].slot='part-head';await assert.rejects(f.engine.action('p',start));assert.equal(f.calls(),0);});

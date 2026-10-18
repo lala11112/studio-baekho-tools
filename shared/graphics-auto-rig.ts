@@ -37,6 +37,8 @@ export type AutoRigRun = {
 export type AutoRigMetadata = {
   schemaVersion: 1; runId: string; reportFile: GraphicsFile;
   sourceSha256: string; exportFbx: GraphicsFile; contract: UnityRigContract;
+  /** Exact X04 file copy; original run/report proof stays on the validated parent. */
+  derivedFromVersionId?: string;
 };
 export type AutoRigAction =
   | { kind: 'probe-auto-rig' }

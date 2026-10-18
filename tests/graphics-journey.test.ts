@@ -70,6 +70,44 @@ test('delivery files do not prove Unity import; imported receipt does',()=>{
   let j=deriveJourney(workspace,'o',draft,{stage:'unity'}); assert.equal(j.stages.find(s=>s.id==='unity')?.status,'missing'); assert.match(j.stages.find(s=>s.id==='unity')!.reason,/아직/);
   workspace.deliveries[0].status='imported'; j=deriveJourney(workspace,'o',draft,{stage:'unity'}); assert.equal(j.stages.find(s=>s.id==='unity')?.status,'complete');
 });
+
+test('file-only export ignores Unity receipts and unrelated accepted Unity output',()=>{
+  const {workspace,draft}=setup();draft.stageSettings.unity!.values.deliveryMode='files';
+  workspace.versions[0].files=[{path:'a.blend',kind:'blend',bytes:1,sha256:'a'.repeat(64)}];
+  const unity={...version('old-unity'),role:'unity' as const};workspace.versions.push(unity);workspace.objects[0].accepted['unity:main']=unity.id;
+  workspace.tasks=[{...task('old-x05','review',[unity.id]),taskId:'X05'}];
+  workspace.deliveries=[{id:'old-receipt',objectId:'o',versionIds:['a'],profileFingerprint:'p',converterVersion:'1',createdAt:'now',destination:'out',status:'imported',files:[{path:'a.fbx',sha256:'x',bytes:1,kind:'fbx'}],warnings:[],errors:[],playbackVerified:false}];
+  const before=structuredClone(workspace),j=deriveJourney(workspace,'o',draft,{stage:'unity',candidateVersionId:unity.id});
+  assert.notEqual(j.stages.find(s=>s.id==='unity')?.status,'complete');assert.equal(j.delivery,undefined);assert.equal(j.review,undefined);assert.equal(j.task,undefined);
+  assert.equal(j.primaryAction.intent,'prepare');assert.equal(j.primaryAction.target.taskId,'X04');assert.match(j.primaryAction.label,/내보내기/);
+  assert.deepEqual(workspace,before);
+  workspace.tasks.push({...task('active-x05','running'),taskId:'X05'});
+  assert.equal(deriveJourney(workspace,'o',draft,{stage:'unity'}).task?.id,'active-x05');
+});
+
+test('file-only completed output requires exact frozen input/settings and reviews files without adoption',()=>{
+  const {workspace,draft}=setup();draft.stageSettings.unity!.values.deliveryMode='files';
+  for(const v of workspace.versions)v.files=[{path:v.id+'.blend',kind:'blend',bytes:1,sha256:'a'.repeat(64)}];
+  const exported={...version('exported'),sourceVersionIds:['a'],provenance:{type:'local' as const,jobId:'export-task'},files:['blend','fbx','glb'].map(ext=>({path:'exported.'+ext,kind:ext,bytes:1,sha256:'b'.repeat(64)}))};workspace.versions.push(exported);
+  workspace.tasks=[{...task('export-task','review',[exported.id]),taskId:'X04',settings:{exportFormat:'both',scale:1,pivot:'keep'}}];
+  let j=deriveJourney(workspace,'o',draft,{stage:'unity'});
+  assert.equal(j.stages.find(s=>s.id==='unity')?.status,'complete');assert.equal(j.review?.version.id,exported.id);assert.equal(j.review?.adoptable,false);
+  assert.match(j.primaryAction.label,/내보낸 파일/);assert(!j.secondaryActions.some(a=>a.intent==='accept'));
+  draft.stageSettings.unity!.values.exportFormat='glb';j=deriveJourney(workspace,'o',draft,{stage:'unity'});assert.notEqual(j.stages.find(s=>s.id==='unity')?.status,'complete');
+  draft.stageSettings.unity!.values.exportFormat='both';workspace.objects[0].accepted['model:main']='b';j=deriveJourney(workspace,'o',draft,{stage:'unity'});assert.notEqual(j.stages.find(s=>s.id==='unity')?.status,'complete');
+  workspace.objects[0].accepted['model:main']=exported.id;j=deriveJourney(workspace,'o',draft,{stage:'unity'});assert.equal(j.stages.find(s=>s.id==='unity')?.status,'complete');
+});
+
+test('auto-rig both completion accepts only the exact parent-bound diagnostic preview',()=>{
+ const {workspace,draft}=setup();draft.stageSettings.unity!.values.deliveryMode='files';
+ const source={...version('rig'),role:'rig' as const,files:['blend','fbx','glb'].map(ext=>({path:'source/asset.'+ext,kind:ext,bytes:120,sha256:ext.repeat(64).slice(0,64)})),autoRig:{schemaVersion:1,runId:'run',contract:{},reportFile:{},exportFbx:{}} as any};
+ workspace.versions.push(source);workspace.objects[0].accepted['rig:main']=source.id;
+ const derived={...version('copy'),role:'rig' as const,sourceVersionIds:[source.id],provenance:{type:'local' as const,jobId:'export-rig'},autoRig:{...source.autoRig,derivedFromVersionId:source.id},files:[...source.files.filter(f=>!f.path.endsWith('.glb')).map(f=>({...f,path:f.path.replace('source/','copy/')})),{...source.files[2],path:'copy/diagnostic.glb',kind:'preview'}]};
+ workspace.versions.push(derived);workspace.tasks=[{...task('export-rig','review',[derived.id]),taskId:'X04',inputVersionIds:[source.id],settings:{exportFormat:'both',scale:1,pivot:'keep'}}];
+ let j=deriveJourney(workspace,'o',draft,{stage:'unity'});assert.equal(j.stages.find(s=>s.id==='unity')?.status,'complete');
+ derived.files[2].sha256='wrong';j=deriveJourney(workspace,'o',draft,{stage:'unity'});assert.notEqual(j.stages.find(s=>s.id==='unity')?.status,'complete');
+ derived.files[2].sha256=source.files[2].sha256;derived.files[2].path='copy/arbitrary.glb';j=deriveJourney(workspace,'o',draft,{stage:'unity'});assert.notEqual(j.stages.find(s=>s.id==='unity')?.status,'complete');
+});
 test('UV acceptance leads to texture preparation, never marks full surface complete',()=>{
   const {workspace,draft}=setup(); workspace.tasks=[{...task('1','review',['a']),taskId:'T01'}];
   const j=deriveJourney(workspace,'o',draft,{stage:'surface'});
@@ -163,6 +201,25 @@ test('assembly exact input helper uses matching accepted material and blocks sta
   assert.deepEqual(r.inputs.map(i=>i.versionId),['mat','body']); assert.equal(r.problems.length,0);
   workspace.versions[2].sourceVersionIds=['old']; r=getJourneyReadiness(workspace,'o',draft,{stage:'assembly',taskOverride:'M08'});
   assert.match(r.problems[0].reason,/다른 형상/); assert.equal(r.problems[0].target.partId,'head');
+});
+
+test('completed separately accepted part materials guide to assembly and changing one model preserves other parts',()=>{
+ const {workspace,draft}=setup();draft.attributes.composition='parts';draft.parts=[{id:'head',label:'Head',enabled:true,instruction:'',faceLimit:1000,count:1},{id:'body',label:'Body',enabled:true,instruction:'',faceLimit:1000,count:1}];
+ const head=version('head-uv','part-head'),body=version('body-uv','part-body');
+ const headMat={...version('head-material','part-head'),role:'material' as const,sourceVersionIds:[head.id]},bodyMat={...version('body-material','part-body'),role:'material' as const,sourceVersionIds:[body.id]};
+ const headAdjusted={...headMat,id:'head-adjusted',sourceVersionIds:[headMat.id]};
+ workspace.versions=[head,body,headMat,headAdjusted,bodyMat];workspace.objects[0].accepted={'model:part-head':head.id,'model:part-body':body.id,'material:part-head':headAdjusted.id,'material:part-body':bodyMat.id};
+ workspace.tasks=[{...task('texture-head','review',[headMat.id]),taskId:'T03'},{...task('texture-body','review',[bodyMat.id]),taskId:'T03'}];
+ const before=structuredClone(workspace);
+ assert.deepEqual(getJourneyReadiness(workspace,'o',draft,{stage:'assembly',taskOverride:'M08'}).inputs.map(i=>i.versionId),[headAdjusted.id,bodyMat.id]);
+ assert.deepEqual(nextAfterAccept(workspace,'o',draft,bodyMat),{stage:'assembly'});
+ const j=deriveJourney(workspace,'o',draft,{stage:'surface',partId:'body',candidateVersionId:bodyMat.id});
+ assert(j.parts.every(p=>p.status==='complete'));assert.equal(j.parts.find(p=>p.id==='head')?.textureVersionId,headMat.id);
+ assert.deepEqual(workspace,before);
+ const replacement=version('changed-head','part-head');workspace.versions.push(replacement);workspace.objects[0].accepted['model:part-head']=replacement.id;
+ const changed=getJourneyReadiness(workspace,'o',draft,{stage:'assembly',taskOverride:'M08'});assert(changed.problems.some(p=>/다른 형상/.test(p.reason)));assert.equal(changed.inputs.find(i=>i.version?.slot==='part-body')?.versionId,bodyMat.id);
+ assert.deepEqual(nextAfterAccept(workspace,'o',draft,bodyMat),{stage:'surface',partId:'head'});
+ const stale=deriveJourney(workspace,'o',draft,{stage:'surface',partId:'body'});assert.equal(stale.parts.find(p=>p.id==='head')?.status,'blocked');assert.equal(stale.parts.find(p=>p.id==='body')?.status,'complete');assert.equal(stale.parts.find(p=>p.id==='head')?.textureVersionId,undefined);
 });
 test('part draft does not hide whole split-generation, assembly or rig results',()=>{
   const {workspace,draft}=setup(); draft.attributes.composition='parts'; draft.attributes.compositionStrategy='whole-then-split'; draft.activePartId='head'; draft.parts=[{id:'head',label:'Head',enabled:true,instruction:'',count:1,faceLimit:5000}];

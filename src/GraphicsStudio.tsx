@@ -1490,8 +1490,11 @@ export function GraphicsStudio({
   const relevantPreview = shownVersion && (shownVersionId || (shownProducer ? stageForTask(shownProducer.taskId) === stage : stageRoles[stage][0] === shownVersion.role)) ? shownVersion.id : undefined;
   const journey = workspace && object ? deriveJourney(workspace, object.id, creation, { stage, partId: texturePart?.id, taskOverride, clipName: stage === 'animation' ? String(settings.clipName ?? 'Idle') : undefined, candidateVersionId: relevantPreview }) : undefined;
   const guideTask = journey?.task;
+  const unityOperationTaskId = guideTask && ['running', 'awaiting_approval', 'submission_unknown'].includes(guideTask.status) && ['X04', 'X05'].includes(guideTask.taskId) ? guideTask.taskId : taskId;
+  const fileExport = stage === 'unity' && unityOperationTaskId === 'X04';
+  const autoRigFileExport = fileExport && Boolean(journey?.inputReadiness.inputs.some(input => input.version?.role === 'rig' && input.version.autoRig));
   const waitingForUnity = guideTask?.taskId === 'X05' && workspace?.deliveries.some(delivery => delivery.id === guideTask.deliveryId && delivery.objectId === object?.id && delivery.status === 'queued');
-  const deliveryCurrent = stage === 'unity' && journey?.stages.find(item => item.id === 'unity')?.status === 'complete';
+  const deliveryCurrent = stage === 'unity' && !fileExport && journey?.stages.find(item => item.id === 'unity')?.status === 'complete';
   const currentDeliveryMessage = deliveryCurrent && journey?.delivery?.status === 'imported'
     ? [...objectTasks].reverse().find(task => task.taskId === 'X05' && task.status === 'review' && task.deliveryId === journey.delivery!.id && task.objectId === object?.id && task.objectId === journey.delivery!.objectId && JSON.stringify([...task.inputVersionIds].sort()) === JSON.stringify([...journey.delivery!.versionIds].sort()))?.message
     : undefined;
@@ -1502,8 +1505,8 @@ export function GraphicsStudio({
   const guideAction: JourneyAction | undefined = journey && !active && adoptableReview
     ? { intent: 'accept', label: `${reviewVersion?.role === 'design' ? '이 이미지' : reviewVersion?.role === 'animation' ? '이 동작' : shownAssembly ? '이 조립과 파트' : '이 결과'} 사용 · 다음 설정`, reason: shownAssembly ? '전체 조립과 같은 작업의 파트를 함께 사용합니다. 새 제작은 시작하지 않습니다.' : '선택한 결과를 다음 작업의 원본으로 저장합니다. 새 제작은 시작하지 않습니다.', target: { stage, versionId: reviewVersion!.id } }
     : journey?.primaryAction;
-  const guideTitles: Record<string, string> = { design: '어떤 모습으로 만들까요?', model: '3D 모델을 만들어요', surface: '표면과 색을 완성해요', assembly: '모양과 연결을 확인해요', rig: '움직일 뼈대를 준비해요', animation: '동작을 만들어요', unity: 'Unity로 가져와요' };
-  const guideState = pending ? '요청을 처리하고 있어요' : guideTask?.runtimeApproval && guideTask.status === 'running' ? '작업 중 확인이 필요해요' : guideTask?.status === 'awaiting_approval' ? '입력과 비용을 확인하세요' : guideTask?.status === 'running' ? guideTask.taskId === 'LOCAL_PLANAR_INSPECT' ? '모델을 검사하고 있어요' : guideTask.taskId === 'X05' ? waitingForUnity ? 'Unity 가져오기를 기다리고 있어요' : 'Unity 전달 파일을 준비하고 있어요' : '제작이 진행 중이에요' : guideTask?.status === 'submission_unknown' ? '기존 제출을 먼저 확인하세요' : adoptableReview ? '마음에 드는 결과를 사용하세요' : guideTitles[stage];
+  const guideTitles: Record<string, string> = { design: '어떤 모습으로 만들까요?', model: '3D 모델을 만들어요', surface: '표면과 색을 완성해요', assembly: '모양과 연결을 확인해요', rig: '움직일 뼈대를 준비해요', animation: '동작을 만들어요', unity: fileExport ? 'FBX · GLB 파일로 내보내요' : 'Unity로 가져와요' };
+  const guideState = pending ? '요청을 처리하고 있어요' : guideTask?.runtimeApproval && guideTask.status === 'running' ? '작업 중 확인이 필요해요' : guideTask?.status === 'awaiting_approval' ? '입력과 비용을 확인하세요' : guideTask?.status === 'running' ? guideTask.taskId === 'LOCAL_PLANAR_INSPECT' ? '모델을 검사하고 있어요' : guideTask.taskId === 'X05' ? waitingForUnity ? 'Unity 가져오기를 기다리고 있어요' : 'Unity 전달 파일을 준비하고 있어요' : guideTask.taskId === 'X04' ? '내보낼 파일을 준비하고 있어요' : '제작이 진행 중이에요' : guideTask?.status === 'submission_unknown' ? '기존 제출을 먼저 확인하세요' : adoptableReview ? '마음에 드는 결과를 사용하세요' : guideTitles[stage];
   const prepareDisabled = disabled || !!journey?.inputReadiness.problems.length || !sizeInputsValid || !!(selectionProblem || multiviewProblem || modelProblem) || active || activeTask.status === 'planned' || (stage === 'rig' && settings.rigType === 'none') || Boolean(object && ['sprite', 'ui', 'vfx'].includes(object.kind));
   function handleGuide(action: JourneyAction) {
     const version = versions.find(item => item.id === action.target.versionId);
@@ -2566,7 +2569,7 @@ export function GraphicsStudio({
                 <aside className="gs-guide" aria-label="현재 작업 안내" data-testid="graphics-guide">
                   {useAutoRig ? <div className="gs-guide-heading"><h2>{autoRigView.running ? '로컬 리깅 작업 진행 중' : autoRigView.candidate ? autoRigRun?.operation==='repair' ? '보정 결과를 확인하세요' : '움직임과 보정할 부위를 확인하세요' : '자동 리깅으로 움직임을 준비해요'}</h2><p>{autoRigView.candidate ? '중앙에서 검사용 동작을 재생하고, 마음에 들면 이 리그를 사용하세요.' : '전체 모델과 앞 방향을 확인하고 로컬 작업을 시작하세요.'}</p></div> : guideHeading}
                   <div className="gs-guide-scroll">
-                    {stage === 'unity' && <section className="gs-guide-inputs" aria-label="현재 Unity 프로젝트">
+                  {stage === 'unity' && !fileExport && <section className="gs-guide-inputs" aria-label="현재 Unity 프로젝트">
                       <strong>현재 Unity 프로젝트</strong>
                       <p data-testid="graphics-unity-target-path">{unityTargetPath || '아직 선택하지 않았습니다. 프로젝트를 선택해 주세요.'}</p>
                       <button type="button" data-testid="graphics-change-unity-target" disabled={unityTargetLocked} onClick={openUnityTarget}>프로젝트 변경</button>
@@ -2578,7 +2581,7 @@ export function GraphicsStudio({
                     {approvalCards}
                     {active || journey?.task?.status === 'failed' || journey?.task?.status === 'submission_unknown' ? currentJobs : <details className="gs-recent-status"><summary>최근 작업 상태와 복구</summary>{currentJobs}</details>}
                     {guideInputs}
-                    {stage === 'unity' && journey?.delivery && <section className="gs-guide-inputs" aria-label="Unity 전달 확인">
+                    {stage === 'unity' && !fileExport && journey?.delivery && <section className="gs-guide-inputs" aria-label="Unity 전달 확인">
                       <strong>{deliveryCurrent ? '현재 결과 가져오기 완료' : '이전 전달 기록 · 현재 원본과 다시 확인 필요'}</strong>
                       {currentDeliveryMessage && <p className="gs-fine" data-testid="graphics-unity-delivery-message">{currentDeliveryMessage}</p>}
                       <p>{journey.delivery.prefabPath ?? journey.delivery.destination}</p>
@@ -2603,6 +2606,8 @@ export function GraphicsStudio({
                     {settings.surfaceOperation !== 'uv' && <small>현재 선택은 텍스처·재질 작업입니다. UV를 새로 만들려면 아래 ‘UV 준비’를 선택해 먼저 실행하세요. 텍스처 실행이 UV 준비를 대신 실행하지 않습니다.</small>}
                   </section>}
                   <CreationOptions
+                    taskId={unityOperationTaskId}
+                    autoRigFileExport={autoRigFileExport}
                     kind={object.kind}
                     spec={creation}
                     stage={stage}
@@ -3139,9 +3144,9 @@ export function GraphicsStudio({
                               setting("exportFormat", event.target.value)
                             }
                           >
-                            <option value="both">FBX + GLB</option>
+                            <option value="both">{autoRigFileExport ? 'FBX + 변형 검사용 GLB' : 'FBX + GLB'}</option>
                             <option value="fbx">FBX</option>
-                            <option value="glb">GLB</option>
+                            <option value="glb" disabled={autoRigFileExport}>{autoRigFileExport ? 'GLB만 · 자동 리그는 지원하지 않음' : 'GLB'}</option>
                           </select>
                         </label>
                       </>
