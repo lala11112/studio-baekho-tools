@@ -675,6 +675,8 @@ export function GraphicsStudio({
     "all" | "recommended" | "selected"
   >("all");
   const [stage, setStage] = useState<CreationStage>("design");
+  const currentImportView = useRef('');
+  currentImportView.current = `${project.id}:${objectId}:${stage}`;
   const [creation, setCreation] = useState<CreationSpec>(() =>
     defaultCreation("prop"),
   );
@@ -999,7 +1001,7 @@ export function GraphicsStudio({
       setStage('assembly'); setTaskId('M06');
     } else {
       const producer = objectTasks.find(task => task.outputVersionIds.includes(version.id));
-      setStage(producer ? stageForTask(producer.taskId) : version.role === 'design' ? 'design' : version.role === 'rig' ? 'rig' : version.role === 'animation' || version.role === 'motion-reference' ? 'animation' : version.role === 'unity' ? 'unity' : 'model');
+      setStage(producer ? stageForTask(producer.taskId) : version.role === 'design' ? 'design' : version.role === 'material' ? 'surface' : version.role === 'rig' ? 'rig' : version.role === 'animation' || version.role === 'motion-reference' ? 'animation' : version.role === 'unity' ? 'unity' : 'model');
       setTaskId(undefined);
     }
     if (version.slot.startsWith('part-')) setCreation(current => current.parts.some(part => part.enabled && `part-${part.id}` === version.slot) ? { ...current, activePartId: version.slot.slice(5) } : current);
@@ -1361,6 +1363,8 @@ export function GraphicsStudio({
   }
   async function importSource() {
     if (!object || disabled) return;
+    const startedView = currentImportView.current;
+    const existingIds = new Set(workspace?.versions.map(version => version.id));
     setPending(true);
     setError("");
     setNotice("");
@@ -1370,7 +1374,7 @@ export function GraphicsStudio({
         objectId: object.id,
         patch: { creation },
       });
-      await onAction({
+      const result = await onAction({
         kind: "import",
         objectId: object.id,
         role: importRole,
@@ -1382,6 +1386,16 @@ export function GraphicsStudio({
             }
           : {}),
       });
+      const importedWorkspace = result as GraphicsWorkspace | undefined;
+      const imported = importedWorkspace?.projectId === project.id
+        ? importedWorkspace.versions.filter(version => !existingIds.has(version.id) && version.objectId === object.id && version.role === importRole && version.provenance.type === 'import')
+        : [];
+      // Only this explicit import may navigate. Cancelled pickers and results for
+      // an object the user has left never steal the current preview or focus.
+      if (imported.length && currentImportView.current === startedView) {
+        showVersion(imported[0]);
+        setNotice(`${imported.length}개 원본을 가져왔습니다. 결과를 확인하고 ‘이 결과 사용’을 눌러 주세요. 아직 사용할 결과로 확정하지 않았습니다.`);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -1463,6 +1477,7 @@ export function GraphicsStudio({
   const relevantPreview = shownVersion && (shownVersionId || (shownProducer ? stageForTask(shownProducer.taskId) === stage : stageRoles[stage][0] === shownVersion.role)) ? shownVersion.id : undefined;
   const journey = workspace && object ? deriveJourney(workspace, object.id, creation, { stage, partId: texturePart?.id, taskOverride, clipName: stage === 'animation' ? String(settings.clipName ?? 'Idle') : undefined, candidateVersionId: relevantPreview }) : undefined;
   const guideTask = journey?.task;
+  const waitingForUnity = guideTask?.taskId === 'X05' && workspace?.deliveries.some(delivery => delivery.id === guideTask.deliveryId && delivery.objectId === object?.id && delivery.status === 'queued');
   const deliveryCurrent = stage === 'unity' && journey?.stages.find(item => item.id === 'unity')?.status === 'complete';
   const currentDeliveryMessage = deliveryCurrent && journey?.delivery?.status === 'imported'
     ? [...objectTasks].reverse().find(task => task.taskId === 'X05' && task.status === 'review' && task.deliveryId === journey.delivery!.id && task.objectId === object?.id && task.objectId === journey.delivery!.objectId && JSON.stringify([...task.inputVersionIds].sort()) === JSON.stringify([...journey.delivery!.versionIds].sort()))?.message
@@ -1475,7 +1490,7 @@ export function GraphicsStudio({
     ? { intent: 'accept', label: `${reviewVersion?.role === 'design' ? '이 이미지' : reviewVersion?.role === 'animation' ? '이 동작' : shownAssembly ? '이 조립과 파트' : '이 결과'} 사용 · 다음 설정`, reason: shownAssembly ? '전체 조립과 같은 작업의 파트를 함께 사용합니다. 새 제작은 시작하지 않습니다.' : '선택한 결과를 다음 작업의 원본으로 저장합니다. 새 제작은 시작하지 않습니다.', target: { stage, versionId: reviewVersion!.id } }
     : journey?.primaryAction;
   const guideTitles: Record<string, string> = { design: '어떤 모습으로 만들까요?', model: '3D 모델을 만들어요', surface: '표면과 색을 완성해요', assembly: '모양과 연결을 확인해요', rig: '움직일 뼈대를 준비해요', animation: '동작을 만들어요', unity: 'Unity로 가져와요' };
-  const guideState = pending ? '요청을 처리하고 있어요' : guideTask?.runtimeApproval && guideTask.status === 'running' ? '작업 중 확인이 필요해요' : guideTask?.status === 'awaiting_approval' ? '입력과 비용을 확인하세요' : guideTask?.status === 'running' ? guideTask.taskId === 'LOCAL_PLANAR_INSPECT' ? '모델을 검사하고 있어요' : '제작이 진행 중이에요' : guideTask?.status === 'submission_unknown' ? '기존 제출을 먼저 확인하세요' : adoptableReview ? '마음에 드는 결과를 사용하세요' : guideTitles[stage];
+  const guideState = pending ? '요청을 처리하고 있어요' : guideTask?.runtimeApproval && guideTask.status === 'running' ? '작업 중 확인이 필요해요' : guideTask?.status === 'awaiting_approval' ? '입력과 비용을 확인하세요' : guideTask?.status === 'running' ? guideTask.taskId === 'LOCAL_PLANAR_INSPECT' ? '모델을 검사하고 있어요' : guideTask.taskId === 'X05' ? waitingForUnity ? 'Unity 가져오기를 기다리고 있어요' : 'Unity 전달 파일을 준비하고 있어요' : '제작이 진행 중이에요' : guideTask?.status === 'submission_unknown' ? '기존 제출을 먼저 확인하세요' : adoptableReview ? '마음에 드는 결과를 사용하세요' : guideTitles[stage];
   const prepareDisabled = disabled || !!journey?.inputReadiness.problems.length || !sizeInputsValid || !!(selectionProblem || multiviewProblem || modelProblem) || active || activeTask.status === 'planned' || (stage === 'rig' && settings.rigType === 'none') || Boolean(object && ['sprite', 'ui', 'vfx'].includes(object.kind));
   function handleGuide(action: JourneyAction) {
     const version = versions.find(item => item.id === action.target.versionId);

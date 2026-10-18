@@ -162,7 +162,16 @@ function assertRequestBinding(root:string, delivery:UnityDelivery, q:QueueReques
     if(!evidence||sha(file)!==evidence.sha256||JSON.stringify(normalizePhysicalSize(json(file).settings))!==JSON.stringify(normalizePhysicalSize(q.physicalSize)))throw Error("Unity 실제 크기 설정이 고정된 원본 치수 검사와 다릅니다.");
   }
 }
-export type PrepareUnityDeliveryArgs = { projectRoot: string; object: GraphicsObject; versions: AssetVersion[]; profile: UnityTargetProfile; blenderPath: string; resources: string; signal?: AbortSignal; clipSettings?:UnityClipSettings[]; rigContract?:UnityRigContract };
+export type PrepareUnityDeliveryArgs = { projectRoot: string; object: GraphicsObject; versions: AssetVersion[]; profile: UnityTargetProfile; blenderPath: string; resources: string; signal?: AbortSignal; clipSettings?:UnityClipSettings[]; rigContract?:UnityRigContract; approvedTaskId?: string; recoveryOnly?: boolean };
+const UNITY_CANCELLED = "사용자가 Unity 대기 요청을 취소했습니다. 이미 시작한 가져오기는 되돌리지 않으며 생성된 에셋은 보존합니다.";
+const attemptId = (contentId:string,taskId:string) => digest(JSON.stringify({contentId,approvedTaskId:taskId})).slice(0,32);
+function bridgeCancellationError(value:unknown):boolean {
+  if(typeof value!=="string"||value.length>8192)return false;
+  const lines=value.replace(/\r\n/g,"\n").trimEnd().split("\n");
+  // The unchanged C# bridge persists Exception.ToString(), including its stack.
+  // Match its exact exception first line, never a substring in another failure.
+  return (lines[0]==="Delivery cancelled before import"||lines[0]==="System.Exception: Delivery cancelled before import")&&lines.length<=33&&lines.slice(1).every(line=>/^\s+at \S.*$/.test(line));
+}
 /** ARP's native controllers are editable sources, not a game export skeleton. */
 export function autoRigUnityExport(version: AssetVersion, versions: AssetVersion[], settings: GraphicsObject['settings'], contract?: UnityRigContract): GraphicsFile | undefined {
   if(!version.autoRig&&contract?.exportPolicy!=='auto-rig-fbx')return undefined;
@@ -218,6 +227,7 @@ function pendingProfileMatches(root:string, delivery:UnityDelivery):boolean {
 /** Freezes and stages exact source bytes, then queues import only. Never enters Play Mode. */
 export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise<UnityDelivery> {
   a.signal?.throwIfAborted();
+  if(a.approvedTaskId!==undefined&&!/^[a-zA-Z0-9_-]{1,160}$/.test(a.approvedTaskId))throw Error("새 Unity 작업 승인 식별자가 잘못됐습니다.");
   const target = readUnityTarget(a.profile.projectPath), root = target.projectPath;
   if (target.fingerprint !== a.profile.fingerprint || a.profile.platform !== "pc") throw Error("Unity 대상 설정이 바뀌었습니다. 프로젝트를 다시 확인하세요.");
   if (target.pipeline === "unknown") throw Error("렌더 파이프라인을 확인한 뒤 Unity로 보낼 수 있습니다.");
@@ -267,14 +277,72 @@ export async function prepareUnityDelivery(a: PrepareUnityDeliveryArgs): Promise
   const deliveryFile = safePath(root,`Library/PartsmithGraphicsStaging/${id}/delivery.json`);
   const queue = safePath(root,`Library/PartsmithGraphicsInbox/${id}.json`);
   const resultPath = safePath(root,`Library/PartsmithGraphicsResults/${id}.json`);
-  if (fs.existsSync(deliveryFile)) {
-    const cached=json(deliveryFile) as UnityDelivery;
-    if(cached.id!==id||cached.objectId!==a.object.id||cached.profileFingerprint!==target.fingerprint||cached.converterVersion!==converterVersion||cached.destination!==dest||JSON.stringify(cached.versionIds)!==JSON.stringify(a.versions.map(v=>v.id)))throw Error("저장된 Unity 전달 기록이 현재 고정 입력·대상과 다릅니다.");
-    return inspectUnityDelivery(root,cached);
+  const latestFile=path.join(staging,"latest-attempt.json");
+  const cachedDelivery=():UnityDelivery|undefined=>{
+    let selected=id;
+    if(fs.existsSync(latestFile)){
+      const index=json(latestFile);
+      if(index.schemaVersion!==1||index.contentId!==id||typeof index.approvedTaskId!=="string"||!/^[a-zA-Z0-9_-]{1,160}$/.test(index.approvedTaskId)||index.id!==attemptId(id,index.approvedTaskId))throw Error("Unity 전달 시도 연결 기록이 다릅니다.");
+      selected=index.id;
+    }
+    const file=safePath(root,`Library/PartsmithGraphicsStaging/${selected}/delivery.json`);
+    if(!fs.existsSync(file)){if(selected!==id)throw Error("저장된 Unity 전달 시도가 없습니다.");return;}
+    const cached=json(file) as UnityDelivery;
+    if(cached.id!==selected||cached.objectId!==a.object.id||cached.profileFingerprint!==target.fingerprint||cached.converterVersion!==converterVersion||cached.destination!==dest||JSON.stringify(cached.versionIds)!==JSON.stringify(a.versions.map(v=>v.id))||selected!==id&&(cached.contentId!==id||!cached.approvedTaskId||attemptId(id,cached.approvedTaskId)!==selected))throw Error("저장된 Unity 전달 기록이 현재 고정 입력·대상과 다릅니다.");
+    return cached;
+  };
+  const cached=cachedDelivery();
+  if (cached) {
+    const inspected=inspectUnityDelivery(root,cached);
+    if(a.recoveryOnly||!a.approvedTaskId||cached.approvedTaskId===a.approvedTaskId)return inspected;
+    let ancestor=cached;const seen=new Set<string>();
+    while(ancestor.retryOf){
+      if(seen.has(ancestor.id)||seen.size>1000||!/^[a-f\d]{32}$/.test(ancestor.retryOf))throw Error("Unity 전달 시도 이력이 잘못됐습니다.");seen.add(ancestor.id);
+      const previousId=ancestor.retryOf;ancestor=json(safePath(root,`Library/PartsmithGraphicsStaging/${previousId}/delivery.json`));
+      if(ancestor.id!==previousId||ancestor.objectId!==a.object.id||ancestor.profileFingerprint!==target.fingerprint||ancestor.converterVersion!==converterVersion||ancestor.destination!==dest||JSON.stringify(ancestor.versionIds)!==JSON.stringify(cached.versionIds)||ancestor.id!==id&&(ancestor.contentId!==id||!ancestor.approvedTaskId||attemptId(id,ancestor.approvedTaskId)!==ancestor.id))throw Error("Unity 전달 시도 이력이 다른 입력을 가리킵니다.");
+      if(ancestor.approvedTaskId===a.approvedTaskId)return inspectUnityDelivery(root,ancestor);
+    }
+    if(inspected.status!=="failed")return inspected;
+    const retryable=(saved:UnityDelivery,current:UnityDelivery)=>{
+      const cancellation=safePath(root,`Library/PartsmithGraphicsStaging/${saved.id}/cancelled.json`),receipt=safePath(root,`Library/PartsmithGraphicsResults/${saved.id}.json`);
+      if(current.status!=="failed"||!fs.existsSync(cancellation)||json(cancellation).requestId!==saved.id||!Number.isFinite(Date.parse(json(cancellation).cancelledAt))||saved.errors.some(e=>e!==UNITY_CANCELLED)||current.errors.some(e=>e!==UNITY_CANCELLED&&!bridgeCancellationError(e)))return false;
+      if(fs.existsSync(receipt)){const r=json(receipt);if(r.status!=="failed"||!Array.isArray(r.errors)||r.errors.length!==1||!bridgeCancellationError(r.errors[0]))return false;}
+      return true;
+    };
+    // A user cancellation is the sole retryable terminal state. Failure text alone is not authority.
+    if(!retryable(cached,inspected))return inspected;
+    if(busy.has(root))throw Error("이 Unity 프로젝트의 다른 전달 작업을 처리 중입니다.");
+    busy.add(root);let retryLock:number|undefined;
+    const lockPath=safePath(root,"Library/PartsmithGraphicsPreparation.lock");
+    try{
+      try{retryLock=fs.openSync(lockPath,"wx");fs.writeFileSync(retryLock,JSON.stringify({pid:process.pid,id:cached.id}));}catch{throw Error("Unity 전달 잠금이 있습니다. 다른 작업이 끝났는지 확인하세요.");}
+      const latest=cachedDelivery();if(!latest||latest.id!==cached.id)return latest?inspectUnityDelivery(root,latest):inspected;
+      const current=inspectUnityDelivery(root,latest);if(!retryable(latest,current))return current;
+      const oldStage=safePath(root,`Library/PartsmithGraphicsStaging/${cached.id}`),request=json(path.join(oldStage,"request.json")) as QueueRequest;assertRequestBinding(root,cached,request);
+      if(JSON.stringify(request.sources)!==JSON.stringify(inputs.map(i=>({path:i.absolute,sha256:i.sha256}))))throw Error("취소된 Unity 요청의 원본 목록이 다릅니다.");
+      const inbox=safePath(root,"Library/PartsmithGraphicsInbox");if(files(inbox).some(f=>f.endsWith(".json")))throw Error("이미 대기 중인 Unity 전달이 있습니다. 먼저 기존 결과를 확인하세요.");
+      const bridge=safePath(root,"Assets/PartsmithGraphicsBridge/Editor/PartsmithGraphicsBridge.cs");if(!fs.existsSync(bridge)||sha(bridge)!==sha(bridgeSource))throw Error("Unity 브리지 변경을 보존했습니다. 취소 요청을 재전송하지 않습니다.");
+      const generated=safePath(root,dest+"/Generated"),manifest=safePath(root,dest+"/Generated/partsmith-manifest.json");
+      if(files(generated).length&&!fs.existsSync(manifest))throw Error("출처 기록 없는 Generated 폴더를 보존했습니다.");
+      if(fs.existsSync(manifest)){const prior=json(manifest);if(prior.objectId!==cached.objectId||prior.structure!==request.structure)throw Error("기존 Unity 출력 구조가 다릅니다.");for(const f of prior.files??[])if(sha(safePath(root,f.path))!==f.sha256)throw Error("외부에서 변경된 Generated 파일을 보존했습니다.");}
+      const nextId=attemptId(id,a.approvedTaskId),nextStage=safePath(root,`Library/PartsmithGraphicsStaging/${nextId}`);
+      // A crash after staging must never authorize a replay of the same approved task.
+      const already=path.join(nextStage,"delivery.json");if(fs.existsSync(already)){const prior=json(already);if(prior.id!==nextId||prior.contentId!==id||prior.approvedTaskId!==a.approvedTaskId||prior.retryOf!==cached.id)throw Error("이미 저장된 승인 시도가 다릅니다.");return inspectUnityDelivery(root,prior);}
+      if(fs.existsSync(nextStage)&&fs.readdirSync(nextStage).length)throw Error("완료 기록 없는 Unity 시도 파일을 보존했습니다. 자동으로 덮어쓰지 않습니다.");
+      fs.mkdirSync(nextStage,{recursive:true});if(fs.realpathSync(nextStage)!==nextStage)throw Error("연결된 Unity 시도 폴더를 사용하지 않습니다.");
+      const outputs=request.files.map(f=>{const old=safePath(root,slash(path.relative(root,f.source)));if(!contained(oldStage,fs.realpathSync(old))||sha(old)!==f.sha256||fs.statSync(old).size!==f.bytes)throw Error("취소된 전달의 변환 파일이 변경됐습니다.");const next=safePath(nextStage,slash(path.relative(oldStage,old)));fs.mkdirSync(path.dirname(next),{recursive:true});if(!fs.existsSync(next))fs.copyFileSync(old,next,fs.constants.COPYFILE_EXCL);if(sha(next)!==f.sha256||fs.statSync(next).size!==f.bytes)throw Error("복사한 Unity 전달 파일이 다릅니다.");return {...f,source:next};});
+      validateSources(a.projectRoot,a.object,a.versions);if(readUnityTarget(root).fingerprint!==target.fingerprint)throw Error("Unity 대상 설정이 변경됐습니다.");a.signal?.throwIfAborted();
+      const next:UnityDelivery={...cached,id:nextId,contentId:id,approvedTaskId:a.approvedTaskId,retryOf:cached.id,createdAt:new Date().toISOString(),status:"queued",errors:[],warnings:[...cached.warnings,"명시적으로 승인한 새 작업에서 검증된 동일 전달 파일을 재사용합니다."],playbackVerified:false};delete next.guid;delete next.prefabPath;delete next.userPrefabPath;delete next.rig;
+      const nextRequest={...request,requestId:nextId,resultPath:safePath(root,`Library/PartsmithGraphicsResults/${nextId}.json`),files:outputs};assertRequestBinding(root,next,nextRequest);
+      write(path.join(nextStage,"request.json"),nextRequest);write(already,next);
+      write(latestFile,{schemaVersion:1,contentId:id,id:nextId,approvedTaskId:a.approvedTaskId});
+      a.signal?.throwIfAborted();write(safePath(root,`Library/PartsmithGraphicsInbox/${nextId}.json`),nextRequest);return next;
+    }finally{if(retryLock!==undefined){fs.closeSync(retryLock);fs.unlinkSync(lockPath);}busy.delete(root);}
   }
+  if(a.recoveryOnly)throw Error("저장된 Unity 전달 기록이 없습니다. 복구에서 새 요청을 만들지 않습니다.");
   if (busy.has(root)) throw Error("이 Unity 프로젝트의 다른 전달 작업을 처리 중입니다.");
   busy.add(root);
-  const delivery: UnityDelivery = { id,objectId:a.object.id,versionIds:a.versions.map(v=>v.id),profileFingerprint:target.fingerprint,converterVersion,createdAt:new Date().toISOString(),destination:dest,status:"queued",files:[],warnings:["가져오기만 요청했습니다. Play Mode·외형·변형 품질은 검증하지 않았습니다."],errors:[],playbackVerified:false };
+  const delivery: UnityDelivery = { id,contentId:id,...(a.approvedTaskId?{approvedTaskId:a.approvedTaskId}:{}),objectId:a.object.id,versionIds:a.versions.map(v=>v.id),profileFingerprint:target.fingerprint,converterVersion,createdAt:new Date().toISOString(),destination:dest,status:"queued",files:[],warnings:["가져오기만 요청했습니다. Play Mode·외형·변형 품질은 검증하지 않았습니다."],errors:[],playbackVerified:false };
   for(const clip of clips.filter(v=>!clipSettings.some(setting=>setting.versionId===v.id)))delivery.warnings.push(`동작 ${clip.slot}은 저장된 반복·루트 모션·FPS 계약이 없어 기존 importer 동작을 유지합니다. 이름으로 반복 설정을 추정하지 않습니다.`);
   let lock: number | undefined;
   const lockPath = safePath(root,"Library/PartsmithGraphicsPreparation.lock");
@@ -423,7 +491,7 @@ export function cancelUnityDelivery(projectPath: string, delivery: UnityDelivery
   write(safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/cancelled.json`),{requestId:delivery.id,cancelledAt:new Date().toISOString()});
   if(fs.existsSync(queue))fs.unlinkSync(queue);
   if(fs.existsSync(report))return inspectUnityDelivery(root,delivery);
-  const cancelled:UnityDelivery={...delivery,status:"failed",errors:[...delivery.errors,"사용자가 Unity 대기 요청을 취소했습니다. 이미 시작한 가져오기는 되돌리지 않으며 생성된 에셋은 보존합니다."],playbackVerified:false};
+  const cancelled:UnityDelivery={...delivery,status:"failed",errors:[...delivery.errors,UNITY_CANCELLED],playbackVerified:false};
   write(staged,cancelled);return cancelled;
 }
 
@@ -447,6 +515,10 @@ export function inspectUnityDelivery(projectPath: string, delivery: UnityDeliver
     if(readUnityTarget(root).fingerprint!==delivery.profileFingerprint){result.status="conflict";result.errors.push("Unity 대상 프로필이 바뀌어 이전 검증을 재사용하지 않습니다.");return result;}
     const r=json(reportFile);
     if(r.requestId!==delivery.id || r.objectId!==delivery.objectId || r.profileFingerprint!==delivery.profileFingerprint || r.converterVersion!==delivery.converterVersion || !["imported","failed","conflict"].includes(r.status))throw Error("Unity 결과와 고정한 전달 요청이 다릅니다.");
+    // Keep cancellation history in its immutable marker; a late valid receipt may win.
+    // Only the exact host cancellation message is superseded, never real receipt failures.
+    const marker=safePath(root,`Library/PartsmithGraphicsStaging/${delivery.id}/cancelled.json`);
+    if(r.status==="imported"&&fs.existsSync(marker)&&json(marker).requestId===delivery.id)result.errors=result.errors.filter(e=>e!==UNITY_CANCELLED);
     result.status=r.status;result.warnings=[...new Set([...result.warnings,...(r.warnings??[])])];result.errors=[...new Set([...result.errors,...(r.errors??[])])];
     if(r.status==="imported") {
       if(request.rigContract?.rigType==='humanoid'){

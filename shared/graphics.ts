@@ -32,6 +32,8 @@ export type UnityTargetProfile = {
 export type UnityClipSettings = { versionId: string; name: string; loop: boolean; rootMotion: boolean; fps: number };
 export type UnityDelivery = {
   id: string; objectId: string; versionIds: string[]; profileFingerprint: string;
+  /** Content identity stays stable; a cancelled request may have an explicitly approved new attempt. */
+  contentId?: string; approvedTaskId?: string; retryOf?: string;
   converterVersion: string; createdAt: string; destination: string;
   status: "queued" | "imported" | "failed" | "conflict";
   files: GraphicsFile[]; guid?: string; prefabPath?: string; userPrefabPath?: string;

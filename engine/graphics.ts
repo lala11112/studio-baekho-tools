@@ -1129,7 +1129,8 @@ export class GraphicsEngine {
     const o = { ...this.object(w, t.objectId), ...t.objectSnapshot }, inputs = t.inputVersionIds.map(vid => w.versions.find(v => v.id === vid)!);
     if (t.taskId === "X05") {
       if (!t.targetProfile) throw Error("고정된 Unity 프로젝트 설정이 없습니다.");
-      const delivery = await this.unity({ projectRoot: this.store.directory(id), object: { ...o, settings: t.settings }, versions: inputs, clipSettings: t.unityClipSettings, rigContract: t.unityRigContract, profile: t.targetProfile, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal });
+      const saved=t.deliveryId?w.deliveries.find(d=>d.id===t.deliveryId):undefined;
+      const delivery = recoveryOnly&&saved?inspectUnityDelivery(t.targetProfile.projectPath,saved):await this.unity({ projectRoot: this.store.directory(id), object: { ...o, settings: t.settings }, versions: inputs, clipSettings: t.unityClipSettings, rigContract: t.unityRigContract, profile: t.targetProfile, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal, recoveryOnly, ...(!recoveryOnly?{approvedTaskId:t.id}:{}) });
       w = this.get(id); if (signal.aborted) return;
       const priorIndex = w.deliveries.findIndex(d => d.id === delivery.id);
       if (priorIndex < 0) w.deliveries.push(delivery); else w.deliveries[priorIndex] = delivery;

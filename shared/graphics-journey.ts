@@ -242,6 +242,10 @@ export function deriveJourney(workspace: GraphicsWorkspace, objectId: string, dr
     else if (selectedTask.status === 'awaiting_approval') primaryAction = action('approve', '입력과 비용 확인', '준비된 작업의 정확한 입력과 비용을 확인한 후 실행을 승인하세요.', extra);
     else primaryAction = selectedTask.taskId === 'LOCAL_PLANAR_INSPECT'
       ? action('review', '검사 진행 상황', '모델의 열린 부분을 로컬에서 검사합니다. 추가 서비스 비용·제작용 GPT 사용은 없습니다.', extra)
+      : selectedTask.taskId === 'X05'
+      ? workspace.deliveries.some(delivery => delivery.id === selectedTask.deliveryId && delivery.objectId === objectId && delivery.status === 'queued')
+        ? action('review', 'Unity 가져오기 대기', '전달 파일은 준비됐습니다. 연결된 Unity Editor가 요청을 처리하면 결과를 표시합니다. Play Mode는 실행하지 않습니다.', extra)
+        : action('review', 'Unity 전달 준비 상황', '선택한 원본을 검사하고 Unity 전달 파일을 준비합니다.', extra)
       : action('review', '진행 상황 보기', '현재 작업이 진행 중입니다.', extra);
     if (selectedTask.status !== 'submission_unknown') secondaryActions.push(action('stop', '작업 중단', '현재 작업의 중단을 요청합니다.', extra));
     const row = stages.find(s => s.id === stage)!;
