@@ -43,16 +43,18 @@ export class LocalPipeline {
     private store: Store,
     private resources: string,
   ) {}
-  /** Keep Tripo's native FBX intact; this GLB is only a viewport derivative. */
+  /** Keep native model bytes intact; this GLB is only a viewport derivative. */
   async previewModel(id: string, nativeRelative: string): Promise<string> {
     this.store.project(id);
     const source = this.store.file(id, nativeRelative);
-    if (path.extname(source).toLowerCase() !== ".fbx")
-      throw new Error("미리보기 변환은 FBX 결과만 지원합니다.");
+    if (!/\.(fbx|blend|obj|stl)$/i.test(source))
+      throw new Error("미리보기 변환은 FBX·BLEND·OBJ·STL 원본을 지원합니다.");
     if (!fs.existsSync(source) || !fs.statSync(source).isFile())
-      throw new Error("변환할 FBX 원본이 없습니다.");
+      throw new Error("미리보기로 변환할 모델 원본이 없습니다.");
+    const sourceSha256 = createHash("sha256").update(fs.readFileSync(source)).digest("hex");
     const digest = createHash("sha256")
       .update(path.relative(this.store.directory(id), source))
+      .update(sourceSha256)
       .digest("hex")
       .slice(0, 12);
     const name =
@@ -65,6 +67,10 @@ export class LocalPipeline {
     const output = this.store.file(id, `${folder}/model`);
     const validOutput = () => {
       if (!fs.existsSync(output + ".glb")) return false;
+      try {
+        const report = JSON.parse(fs.readFileSync(output + '.report.json', 'utf8'));
+        if (report.schemaVersion !== 1 || report.mode !== 'convert' || report.previewOnly !== true || report.nativeSourceSha256 !== sourceSha256) return false;
+      } catch { return false; }
       const fd = fs.openSync(output + ".glb", "r");
       try {
         const header = Buffer.alloc(12);
@@ -98,6 +104,7 @@ export class LocalPipeline {
       const log = await runProcess(this.store.settings.blenderPath, [
         "--background",
         "--factory-startup",
+        "--disable-autoexec",
         "--python",
         path.join(this.resources, "blender/pipeline.py"),
         "--",
@@ -106,7 +113,7 @@ export class LocalPipeline {
       this.store.write(id, `${folder}/blender.log`, log);
       if (!validOutput())
         throw new Error(
-          "FBX 미리보기 GLB를 검증하지 못했습니다. 원본은 보존됩니다.",
+          "모델 미리보기 GLB를 검증하지 못했습니다. 원본은 보존됩니다.",
         );
       return relative;
     })();

@@ -1,3 +1,4 @@
+import { isGraphicsProductionFile } from '../shared/graphics';
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -177,7 +178,7 @@ function verifyInputs(args: GraphicsNativeArgs, root: string): VerifiedInput[] {
   const files: VerifiedInput[] = [];
   for (const version of args.inputs) {
     if (!expected.delete(version.id)) throw Error("고정한 그래픽 입력 버전이 다릅니다.");
-    for (const file of version.files) {
+    for (const file of version.files.filter(isGraphicsProductionFile)) {
       const localPath = verifiedFile(root, file.path);
       if (fs.statSync(localPath).size !== file.bytes || fileHash(localPath) !== file.sha256)
         throw Error("그래픽 입력 원본의 크기 또는 해시가 변경됐습니다.");

@@ -4,6 +4,8 @@ import type { WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from './workben
 export type GraphicsKind = "character" | "weapon" | "prop" | "environment" | "sprite" | "ui" | "vfx";
 export type GraphicsRole = "design" | "model" | "material" | "rig" | "motion-reference" | "animation" | "unity";
 export type GraphicsFile = { path: string; sha256: string; bytes: number; kind: string };
+/** Viewport derivatives never substitute for a native production input. */
+export function isGraphicsProductionFile(file: { kind: string }) { return file.kind !== 'preview'; }
 export type AssetVersion = {
   id: string; objectId: string; role: GraphicsRole; slot: string; label: string;
   files: GraphicsFile[]; createdAt: string; sourceVersionIds: string[];
@@ -161,6 +163,8 @@ export type GraphicsAction =
   | { kind: "create-object"; name: string; objectKind: GraphicsKind; creation?: CreationSpec }
   | { kind: "update-object"; objectId: string; patch: Partial<Pick<GraphicsObject, "name" | "selectedTasks" | "instruction" | "settings" | "references" | "creation">> }
   | { kind: "import"; objectId: string; role: GraphicsRole; clipName?: string }
+  | { kind: 'prepare-import-preview'; objectId: string; versionId: string }
+  | { kind: 'set-unity-target'; projectPath: string }
   | { kind: "accept"; objectId: string; versionId: string }
   | { kind: 'restore-part-space'; versionId: string }
   | { kind: 'prepare-part-source'; versionId: string }

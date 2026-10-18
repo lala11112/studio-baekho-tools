@@ -1,5 +1,5 @@
 """Bounded, deterministic, offline planar boundary repair. No services or adoption."""
-import bpy, bmesh, json, pathlib, sys, math
+import bpy, bmesh, json, pathlib, sys, math, unicodedata, hashlib
 import numpy as np
 from mathutils import Vector
 from mathutils.kdtree import KDTree
@@ -31,19 +31,58 @@ def project(points):
             if j not in (i+1,) and (i,j)!=(0,len(flat)-1) and (proper_cross(flat[i],flat[(i+1)%len(flat)],flat[j],flat[(j+1)%len(flat)],eps*eps) or any(abs(cross(a,b,c))<=eps*eps and np.dot(np.asarray(c)-a,np.asarray(c)-b)<=eps*eps for a,b,c in [(flat[i],flat[(i+1)%len(flat)],flat[j]),(flat[i],flat[(i+1)%len(flat)],flat[(j+1)%len(flat)]),(flat[j],flat[(j+1)%len(flat)],flat[i]),(flat[j],flat[(j+1)%len(flat)],flat[(i+1)%len(flat)])])): raise ValueError('self-crossing or touching boundary')
     return flat,n,axes,eps
 
+def companion_name(value):
+    return unicodedata.normalize('NFC', str(value).replace('\\','/').rsplit('/',1)[-1]).casefold()
+
+def pack_registered_companions(q, source):
+    manifest=q.get('sourceCompanions',[]); resources=q.get('companionResources',[])
+    if manifest and q.get('sourceManifestVersion')!=1: raise ValueError('unsupported companion manifest')
+    if len(manifest)!=len(resources): raise ValueError('companion manifest mismatch')
+    allowed={}
+    for file,resource in zip(manifest,resources):
+        name=companion_name(file['path']); staged=pathlib.Path(resource['stagedPath']).resolve()
+        if not name or name in allowed or resource['file']!=file or staged.parent!=source.parent or companion_name(staged.name)!=name or not staged.is_file(): raise ValueError('ambiguous or invalid companion path')
+        data=staged.read_bytes()
+        if len(data)!=file['bytes'] or hashlib.sha256(data).hexdigest()!=file['sha256']: raise ValueError('companion bytes changed')
+        allowed[name]=(staged,file)
+    for image in bpy.data.images:
+        if image.source=='VIEWER': continue
+        if image.source!='FILE': raise ValueError('unsupported image source')
+        match=allowed.get(companion_name(image.filepath))
+        if image.packed_file:
+            if match and hashlib.sha256(bytes(image.packed_file.data)).hexdigest()!=match[1]['sha256']: raise ValueError('embedded image and registered companion disagree')
+            continue
+        if not match: raise ValueError('unlisted external image: '+image.name)
+        staged,file=match
+        image.filepath=str(staged); image.reload(); image.pack()
+        if not image.packed_file or hashlib.sha256(bytes(image.packed_file.data)).hexdigest()!=file['sha256']: raise ValueError('packed companion hash mismatch')
+
 def load(q):
     source=pathlib.Path(q['source']).resolve()
     if source.suffix.lower() not in ('.fbx','.blend') or file_hash(source)!=q['sourceSha256']: raise ValueError('source hash/type mismatch')
     if q.get('algorithmVersion')!='planar-v2': raise ValueError('unsupported algorithm version')
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    if source.suffix.lower()=='.blend': bpy.ops.wm.open_mainfile(filepath=str(source),load_ui=False)
-    else: bpy.ops.import_scene.fbx(filepath=str(source),use_image_search=False)
+    if source.suffix.lower()=='.blend': bpy.ops.wm.open_mainfile(filepath=str(source),load_ui=False,use_scripts=False)
+    else:
+        # FBX's importer normally tries its recorded external paths before
+        # consulting embedded data. Defer every external load until the exact
+        # registered manifest below has authorized its bytes.
+        from bpy_extras import image_utils
+        original_load=image_utils.load_image
+        def placeholder(filepath, **kwargs):
+            image=bpy.data.images.new(companion_name(filepath),width=1,height=1)
+            image.source='FILE'; image.filepath=str(filepath)
+            return image
+        image_utils.load_image=placeholder
+        try: bpy.ops.import_scene.fbx(filepath=str(source),use_image_search=False)
+        finally: image_utils.load_image=original_load
     objects=list(bpy.context.scene.objects)
     if not objects or len(objects)>64 or any(o.type!='MESH' or o.modifiers or o.constraints or o.parent or o.vertex_groups or o.data.shape_keys for o in objects): raise ValueError('static independent meshes only; rigs, skin, morphs and modifiers unsupported')
     if bpy.data.armatures or bpy.data.actions or bpy.data.libraries or any(getattr(o,'animation_data',None) for o in bpy.data.user_map()): raise ValueError('dynamic or linked dependencies unsupported')
     if sum(len(o.data.polygons) for o in objects)>250000: raise ValueError('inspection face limit exceeded')
     if len(bpy.data.scenes)!=1 or len(bpy.data.objects)!=len(objects): raise ValueError('extra scenes or off-scene objects unsupported')
-    material_snapshot() # Packed originals only.
+    pack_registered_companions(q, source)
+    material_snapshot() # Exact packed originals or explicitly registered companions only.
     return sorted(objects,key=lambda o:o.name)
 
 def boundaries(obj):
@@ -307,6 +346,7 @@ def run(q):
         internals[meshid]=(obj,bs)
     inspection=digest([q['sourceSha256'],records,'planar-v2'])
     report={k:q.get(k) for k in ('identity','sourceVersionId','sourceSha256','algorithmVersion','meshId','selectedBoundaryIds','keptBoundaryIds','materialPolicy')}
+    if q.get('sourceCompanions'): report.update(sourceCompanions=q['sourceCompanions'],sourceManifestVersion=1)
     report.update(schemaVersion=1,mode=q['mode'],passed=True,inspectionId=inspection,meshes=records,localOnly=True,modelTurns=0,paidSubmissions=0,visualQualityVerified=False)
     if q['mode']=='repair':
         if q.get('inspectionId')!=inspection: raise ValueError('inspection identity changed')

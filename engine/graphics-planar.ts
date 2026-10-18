@@ -1,3 +1,4 @@
+import { isGraphicsProductionFile } from '../shared/graphics';
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -19,6 +20,7 @@ import {
 export type PlanarArgs = {
   projectRoot: string;
   source: GraphicsFile;
+  sourceCompanions?: GraphicsFile[];
   sourceVersionId: string;
   resources: string;
   blenderPath: string;
@@ -33,6 +35,12 @@ export type PlanarArgs = {
 const hash = (value: Buffer | string) =>
   createHash("sha256").update(value).digest("hex");
 const active = new Set<string>();
+export function planarCompanions(files: GraphicsFile[]) {
+  const values = files.filter(f=>!['preview','report'].includes(f.kind) && /\.(png|jpe?g|webp|tga|tiff?|bmp|exr|hdr)$/i.test(f.path)).map(f=>({...f}));
+  const names=new Set<string>();
+  for(const f of values){const name=path.basename(f.path.replaceAll('\\','/')).normalize('NFC').toLowerCase();if(!name||names.has(name))throw Error('동반 이미지 이름이 중복됩니다.');names.add(name);}
+  return values;
+}
 const requiredChecks = [
   "staticOnly",
   "appendOnly",
@@ -105,6 +113,8 @@ export function validatePlanarReport(
     report.paidSubmissions !== 0
   )
     throw Error("로컬 검사 원본·실행 기록이 일치하지 않습니다.");
+  if(JSON.stringify(report.sourceCompanions??[])!==JSON.stringify(args.sourceCompanions??[]))throw Error('동반 이미지 검사 기록이 일치하지 않습니다.');
+  if((args.sourceCompanions?.length??0)>0 && report.sourceManifestVersion!==1)throw Error('동반 이미지 검사 버전이 다릅니다.');
   if (args.mode === "inspect") {
     if (
       typeof report.inspectionId !== "string" ||
@@ -266,8 +276,8 @@ export function validateSavedPlanarCandidate(
   )
     throw Error("평면 복구 후보의 정확한 원본 연결이 다릅니다.");
   const input =
-    source.files.find((f) => /\.blend$/i.test(f.path)) ??
-    source.files.find((f) => /\.fbx$/i.test(f.path));
+    source.files.find((f) => isGraphicsProductionFile(f) && /\.blend$/i.test(f.path)) ??
+    source.files.find((f) => isGraphicsProductionFile(f) && /\.fbx$/i.test(f.path));
   if (!input || input.sha256 !== p.sourceSha256)
     throw Error("평면 복구 원본의 해시가 다릅니다.");
   for (const file of [...source.files, ...candidate.files]) verify(root, file);
@@ -334,6 +344,7 @@ export function validateSavedPlanarCandidate(
     JSON.stringify({
       source: source.id,
       sha: input.sha256,
+      ...(inspection.sourceCompanions?.length ? {sourceCompanions:inspection.sourceCompanions,sourceManifestVersion:1} : {}),
       selection,
       inspectionReportSha256: inspection.reportFile.sha256,
       inspectionIdentity: inspection.identity,
@@ -399,6 +410,8 @@ export function validateSavedPlanarCandidate(
     )
   )
     throw Error("평면 복구 후보의 원본·검사·선택 기록이 다릅니다.");
+  if(JSON.stringify(report.sourceCompanions??[])!==JSON.stringify(inspection.sourceCompanions??[]))throw Error('저장된 동반 이미지 기록이 다릅니다.');
+  if(inspection.sourceCompanions?.length && JSON.stringify(planarCompanions(source.files))!==JSON.stringify(inspection.sourceCompanions))throw Error('원본 동반 이미지가 변경됐습니다.');
 }
 type Run = (
   binary: string,
@@ -436,6 +449,8 @@ export function createGraphicsPlanarRunner(deps: { runBlender?: Run } = {}) {
     const root = fs.realpathSync(args.projectRoot),
       resources = fs.realpathSync(args.resources),
       source = verify(root, args.source);
+    if(JSON.stringify(planarCompanions(args.sourceCompanions??[]))!==JSON.stringify(args.sourceCompanions??[]))throw Error('등록된 이미지 동반 파일만 허용됩니다.');
+    if(args.mode==='repair' && (args.sourceCompanions?.length??0)>0 && (args.inspection?.sourceManifestVersion!==1 || JSON.stringify(args.inspection?.sourceCompanions??[])!==JSON.stringify(args.sourceCompanions)))throw Error('동반 이미지의 명시적 재검사가 필요합니다.');
     if (args.mode === "repair") {
       if (
         !args.selection ||
@@ -476,6 +491,7 @@ export function createGraphicsPlanarRunner(deps: { runBlender?: Run } = {}) {
         algorithmVersion: "planar-v2",
         sourceVersionId: args.sourceVersionId,
         sourceSha256: args.source.sha256,
+        ...((args.sourceCompanions?.length??0)>0 ? {sourceCompanions:args.sourceCompanions,sourceManifestVersion:1} : {}),
         mode: args.mode,
         inspectionAttempt:
           args.mode === "inspect" ? (args.inspectionAttempt ?? null) : null,
@@ -493,6 +509,7 @@ export function createGraphicsPlanarRunner(deps: { runBlender?: Run } = {}) {
     const check = () => {
       args.signal.throwIfAborted();
       verify(root, args.source);
+      for(const f of args.sourceCompanions??[])verify(root,f);
       if (hash(fs.readFileSync(binary)) !== binarySha256)
         throw Error("Blender 실행 파일이 변경됐습니다.");
       for (const s of scripts)
@@ -569,6 +586,9 @@ export function createGraphicsPlanarRunner(deps: { runBlender?: Run } = {}) {
       fs.mkdirSync(output);
       const localSource = path.join(staging, "source" + path.extname(source));
       fs.copyFileSync(source, localSource);
+      const companions=planarCompanions(args.sourceCompanions??[]);
+      if(companions.length!==(args.sourceCompanions?.length??0))throw Error('등록된 이미지 동반 파일만 허용됩니다.');
+      const companionResources=companions.map(file=>{const destination=path.join(staging!,path.basename(file.path.replaceAll('\\','/')));fs.copyFileSync(verify(root,file),destination,fs.constants.COPYFILE_EXCL);return {file,stagedPath:destination};});
       for (const s of scripts)
         fs.copyFileSync(s.file, path.join(tools, s.name));
       const request = {
@@ -579,6 +599,7 @@ export function createGraphicsPlanarRunner(deps: { runBlender?: Run } = {}) {
         report: path.join(output, "report.json"),
         sourceVersionId: args.sourceVersionId,
         sourceSha256: args.source.sha256,
+        ...(companions.length ? {sourceCompanions:companions,sourceManifestVersion:1,companionResources} : {}),
         identity,
         algorithmVersion: "planar-v2",
         ...args.selection,
@@ -623,6 +644,7 @@ export function createGraphicsPlanarRunner(deps: { runBlender?: Run } = {}) {
         args.signal,
       );
       check();
+      for(const resource of companionResources)if(hash(fs.readFileSync(resource.stagedPath))!==resource.file.sha256||fs.statSync(resource.stagedPath).size!==resource.file.bytes)throw Error('실행 중 동반 이미지가 변경됐습니다.');
       if (
         hash(fs.readFileSync(localSource)) !== args.source.sha256 ||
         scripts.some(

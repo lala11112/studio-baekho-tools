@@ -1,3 +1,4 @@
+import { isGraphicsProductionFile } from '../shared/graphics';
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -128,7 +129,7 @@ function selectInputs(args: GraphicsNativeArgs, root: string) {
   if (ids.size !== args.task.inputVersionIds.length || ids.size !== args.inputs.length) throw Error("고정한 Astra 입력 버전 목록이 다릅니다.");
   for (const version of args.inputs) {
     if (!ids.delete(version.id) || !version.files.length) throw Error("고정한 Astra 입력 버전이 없습니다.");
-    for (const file of version.files) files.push({ ...file, version, localPath: fileWithin(root, file.path) });
+    for (const file of version.files.filter(isGraphicsProductionFile)) files.push({ ...file, version, localPath: fileWithin(root, file.path) });
   }
   unchanged(files);
   const operation = args.task.taskId, animation = operation.startsWith("N"), clipName = String(args.task.settings.clipName ?? "");

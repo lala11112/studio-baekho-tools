@@ -155,6 +155,13 @@ async function dispatch(c: Command): Promise<unknown> {
     case "graphics.topology":
       return nativeTopology.inspect(c.id, c.versionId);
     case "graphics.action": {
+      if (c.action.kind === 'prepare-import-preview') {
+        const action = c.action;
+        const version = graphics.get(c.id).versions.find(version => version.id === action.versionId && version.objectId === action.objectId && version.provenance.type === 'import');
+        if (!version) throw Error('미리보기를 준비할 가져온 원본을 선택하세요.');
+        if (!version.files.some(file => /\.(fbx|blend|obj|stl|glb)$/i.test(file.path))) throw Error('로컬 모델 미리보기를 지원하는 원본 형식이 아닙니다.');
+        return graphics.prepareImportedPreviews(c.id, [version.id], (projectId, source) => local.previewModel(projectId, source), true);
+      }
       if (c.action.kind === 'inspect-external-rig') {
         const selected = await dialog.showOpenDialog(win, {
           title: 'AccuRIG에서 내보낸 캐릭터 전용 FBX 선택',
@@ -173,7 +180,9 @@ async function dispatch(c: Command): Promise<unknown> {
         });
         if (result.canceled) return graphics.get(c.id);
         if (motion) return graphics.importMotionFile(c.id, c.action.objectId, result.filePaths[0], c.action.clipName ?? '');
-        return graphics.importFiles(c.id, c.action.objectId, c.action.role, result.filePaths, c.action.clipName);
+        const previous = new Set(graphics.get(c.id).versions.map(version => version.id));
+        const imported = graphics.importFiles(c.id, c.action.objectId, c.action.role, result.filePaths, c.action.clipName);
+        return graphics.prepareImportedPreviews(c.id, imported.versions.filter(version => !previous.has(version.id)).map(version => version.id), (projectId, source) => local.previewModel(projectId, source));
       }
       return graphics.action(c.id, c.action);
     }

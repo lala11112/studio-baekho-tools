@@ -15,9 +15,9 @@ test('guided static workflow reviews exact input, persists draft, and keeps cost
   const entry=`import React from 'react';import{createRoot}from'react-dom/client';import{GraphicsStudio}from${JSON.stringify(path.resolve('src/GraphicsStudio.tsx'))};import${JSON.stringify(path.resolve('src/style.css'))};
     window.actions=[];window.desktopCommands=[];window.fixture=${JSON.stringify(initial)};window.failAction='';window.desktop={assetUrl:()=>'',call:async command=>{window.desktopCommands.push(command);if(command.type==='unity.open')return 'Unity 프로젝트가 이미 열려 있습니다.';throw Error('Unexpected desktop call')}};
     const project={schemaVersion:1,id:'p',name:'Guided fixture',style:'',height:1,unityPath:'',unityFolder:'',createdAt:'',updatedAt:'',revision:0,assets:[],parts:[],jobs:[],assemblies:[],builds:[],demo:false};
-    const root=createRoot(document.getElementById('root'));window.renderFixture=()=>root.render(<GraphicsStudio project={project} workspace={structuredClone(window.fixture)} busy={false} onAction={async action=>{window.actions.push(action);if(window.failAction===action.kind)throw Error('Fixture recovery unavailable');if(action.kind==='accept'){window.fixture.objects[0].accepted['design:main']=action.versionId;window.renderFixture();}if(action.kind==='update-object'){Object.assign(window.fixture.objects[0],action.patch);}return window.fixture;}}/>);window.renderFixture();`;
+    const root=createRoot(document.getElementById('root'));window.renderFixture=()=>root.render(<><header className="topbar" style={{minHeight:80}}>Partsmith · isolated app shell</header><GraphicsStudio project={project} workspace={structuredClone(window.fixture)} busy={false} onAction={async action=>{window.actions.push(action);if(window.failAction===action.kind)throw Error('Fixture recovery unavailable');if(action.kind==='accept'){window.fixture.objects[0].accepted['design:main']=action.versionId;window.renderFixture();}if(action.kind==='update-object'){Object.assign(window.fixture.objects[0],action.patch);}return window.fixture;}}/></>);window.renderFixture();`;
   await build({stdin:{contents:entry,loader:'tsx',resolveDir:process.cwd()},bundle:true,format:'iife',outfile:path.join(root,'ui.js'),jsx:'automatic',logLevel:'silent'});
-  fs.writeFileSync(path.join(root,'index.html'),'<html lang="ko"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src \'self\'; script-src \'self\'; style-src \'self\' \'unsafe-inline\'; connect-src \'none\'"><link rel="stylesheet" href="ui.css"></head><body style="margin:0"><div id="root"></div><script src="ui.js"></script></body></html>');
+  fs.writeFileSync(path.join(root,'index.html'),'<html lang="ko"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src \'self\'; script-src \'self\'; style-src \'self\' \'unsafe-inline\'; connect-src \'none\'"><link rel="stylesheet" href="ui.css"></head><body style="margin:0"><div id="root" class="app-body" style="height:100vh"></div><script src="ui.js"></script></body></html>');
   fs.writeFileSync(path.join(root,'main.cjs'),`const{app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(root,'profile'))});app.whenReady().then(()=>{const w=new BrowserWindow({show:false,width:1440,height:1000,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});w.loadFile(${JSON.stringify(path.join(root,'index.html'))});});`);
   const app=await electron.launch({executablePath:binary as unknown as string,args:[path.join(root,'main.cjs')]});
   try {
@@ -31,6 +31,9 @@ test('guided static workflow reviews exact input, persists draft, and keeps cost
 
     await page.locator('.gs-version-history > summary').click();
     await page.getByTestId('graphics-version-design-new').click();
+    await page.waitForFunction(()=>document.querySelector('.gs-main')?.scrollTop===0);
+    const navigationLayout=await guide.evaluate(element=>{const main=document.querySelector('.gs-main')!.getBoundingClientRect(),heading=element.querySelector('.gs-guide-heading')!.getBoundingClientRect(),result=document.querySelector('.gs-result')!.getBoundingClientRect();return{mainTop:main.top,headingTop:heading.top,resultTop:result.top};});
+    assert.ok(navigationLayout.headingTop>=navigationLayout.mainTop&&navigationLayout.resultTop>=navigationLayout.mainTop,JSON.stringify(navigationLayout));
     assert.match(await primary.innerText(),/이 이미지 사용 · 다음 설정/);
     assert.equal(await page.evaluate(()=>(window as any).fixture.objects[0].accepted['design:main']),'design-old');
     assert.equal(await page.evaluate(()=>(window as any).actions.length),0);
@@ -90,6 +93,20 @@ test('guided static workflow reviews exact input, persists draft, and keeps cost
     await page.getByRole('button',{name:'Unity에서 확인',exact:true}).waitFor();
     assert.equal(await page.getByRole('button',{name:'Unity 전달 다시 준비',exact:true}).isVisible(),true,'Completed delivery must keep an explicit redelivery preparation action');
     assert.match(await guide.innerText(),/현재 결과 가져오기 완료/);
+    const layouts=[];
+    for(const width of [800,960,1280,1920]) {
+      await page.setViewportSize({width,height:900});
+      const layout=await primary.evaluate(element=>{const r=element.getBoundingClientRect();return {width:innerWidth,height:innerHeight,scrollWidth:document.documentElement.scrollWidth,primary:{left:r.left,top:r.top,right:r.right,bottom:r.bottom}};});
+      assert.ok(layout.scrollWidth<=layout.width,JSON.stringify(layout));
+      assert.ok(layout.primary.left>=0&&layout.primary.right<=layout.width+1&&layout.primary.top>=0&&layout.primary.bottom<=layout.height+1,JSON.stringify(layout));
+      layouts.push(layout);
+      if(process.env.PARTSMITH_QA_UI_DIR) {
+        fs.mkdirSync(process.env.PARTSMITH_QA_UI_DIR,{recursive:true});
+        const png=await app.evaluate(async({BrowserWindow})=>(await BrowserWindow.getAllWindows()[0].webContents.capturePage()).toPNG().toString('base64'));
+        fs.writeFileSync(path.join(process.env.PARTSMITH_QA_UI_DIR,`guided-delivery-${width}.png`),Buffer.from(png,'base64'));
+      }
+    }
+    if(process.env.PARTSMITH_QA_UI_DIR) fs.writeFileSync(path.join(process.env.PARTSMITH_QA_UI_DIR,'guided-layouts.json'),JSON.stringify(layouts,null,2));
     await page.getByRole('button',{name:'Unity에서 확인',exact:true}).click();
     await page.waitForFunction(()=>(window as any).desktopCommands.length===1);
     assert.deepEqual(await page.evaluate(()=>(window as any).desktopCommands),[{type:'unity.open',id:'p'}]);

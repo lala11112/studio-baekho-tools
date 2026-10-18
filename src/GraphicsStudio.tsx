@@ -462,6 +462,8 @@ function VersionPreview({
       <p>
         {mediaError
           ? "미리보기를 불러오지 못했습니다. 저장된 원본은 유지됩니다."
+          : version.provenance.type === 'import' && version.files.some(file => /\.(fbx|blend|obj|stl)$/i.test(file.path))
+          ? "가져온 원본을 화면에서 확인하려면 아래에서 로컬 미리보기를 준비하세요."
           : "이 형식은 화면 미리보기를 지원하지 않습니다."}
       </p>
       <span>
@@ -663,6 +665,10 @@ export function GraphicsStudio({
   const newObjectTrigger = useRef<HTMLElement | null>(null);
   const newObjectNameFocus = useRef(false);
   const createSubmitting = useRef(false);
+  const unityTargetDialog = useRef<HTMLDialogElement>(null);
+  const [unityTargetOpen, setUnityTargetOpen] = useState(false);
+  const [unityTargetDraft, setUnityTargetDraft] = useState('');
+  const [unityTargetError, setUnityTargetError] = useState('');
   const previousObjectIds = useRef<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [catalogTab, setCatalogTab] = useState<
@@ -904,6 +910,27 @@ export function GraphicsStudio({
       task.status === "submission_unknown" ||
       task.status === "awaiting_approval",
   );
+  const unityTargetPath = workspace?.target?.projectPath || project.unityPath || '';
+  const unityTargetLocked = disabled || !!workspace?.tasks.some(task => ['running','awaiting_approval','submission_unknown'].includes(task.status)) || !!workspace?.deliveries.some(delivery => delivery.status === 'queued');
+  useEffect(() => {
+    if (unityTargetOpen) unityTargetDialog.current?.showModal();
+    else unityTargetDialog.current?.close();
+  }, [unityTargetOpen]);
+  function openUnityTarget() {
+    if (unityTargetLocked) return;
+    setUnityTargetDraft(unityTargetPath); setUnityTargetError(''); setUnityTargetOpen(true);
+  }
+  async function saveUnityTarget(event: FormEvent) {
+    event.preventDefault();
+    if (unityTargetLocked || !unityTargetDraft.trim()) return;
+    setPending(true); setUnityTargetError('');
+    try {
+      await onAction({kind:'set-unity-target',projectPath:unityTargetDraft.trim()});
+      setUnityTargetOpen(false);
+      setNotice('현재 프로젝트의 Unity 전달 대상을 변경했습니다. 생성이나 Unity 실행은 시작하지 않았습니다.');
+    } catch (cause) { setUnityTargetError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setPending(false); }
+  }
   const latestTaskByOperation = new Map<string, GraphicsTask>();
   const latestResultByOperation = new Map<string, GraphicsTask>();
   for (const task of [...objectTasks].sort((a, b) =>
@@ -951,11 +978,22 @@ export function GraphicsStudio({
     const contactResult = task.settings.contactPhase ? contactVersionForTask(task) : undefined;
     const result = contactResult ?? [...results].reverse().find(version => version.surfaceRepair || version.partSpace || version.partSource) ?? results[0];
     if (result) showVersion(result);
-    document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    revealResult();
+  }
+
+  function revealResult() {
+    requestAnimationFrame(() => {
+      // Scroll the workspace itself; scrollIntoView can also move hidden shell
+      // ancestors and leave the preview and sticky guide beneath the stage bar.
+      for (const selector of ['.gs-main', '.gs-workspace', '.graphics-studio', '.app-body']) {
+        document.querySelector<HTMLElement>(selector)?.scrollTo({ top: 0, behavior: 'instant' });
+      }
+    });
   }
 
   function showVersion(version: AssetVersion) {
     setShownVersionId(version.id);
+    revealResult();
     setHeadComparisonOpen(false);
     if (version.contact || objectTasks.some(task => task.taskId === 'M06' && task.settings.contactPhase && task.outputVersionIds.includes(version.id))) {
       setStage('assembly'); setTaskId('M06');
@@ -1049,8 +1087,9 @@ export function GraphicsStudio({
     setDraftSaved(saveGraphicsView(localStorage, project.id, object.id, { schemaVersion: 1, stage, creation, shownVersionId, taskOverride, movementExpanded }));
   }, [project.id, object?.id, creation, stage, shownVersionId, taskOverride, movementExpanded]);
   useEffect(() => {
-    if (!entryIntent || consumedEntry.current === entryIntent.id || !workspace) return;
+    if (!entryIntent || consumedEntry.current === entryIntent.id) return;
     if (entryIntent.kind === 'resume') {
+      if (!workspace) return;
       const attention = [...workspace.tasks].reverse().find(task => ['awaiting_approval','running','submission_unknown'].includes(task.status))
         ?? [...workspace.tasks].reverse().find(task => task.status === 'failed' || task.status === 'review' && task.outputVersionIds.some(id => !Object.values(workspace.objects.find(row => row.id === task.objectId)?.accepted ?? {}).includes(id)));
       if (attention && attention.objectId !== object?.id && workspace.objects.some(row => row.id === attention.objectId)) { setObjectId(attention.objectId); return; }
@@ -1208,6 +1247,7 @@ export function GraphicsStudio({
     setTaskId(undefined);
   }
   function changeStage(next: CreationStage) {
+    revealResult();
     setStage(next);
     setTaskId(undefined);
     setShownVersionId('');
@@ -1475,7 +1515,7 @@ export function GraphicsStudio({
   const exactInputs = journey?.inputReadiness.inputs ?? [];
   const guideInputs = <div className="gs-guide-inputs" aria-label="실제 사용할 원본">
     <strong>{waiting.length ? '준비된 요청의 원본은 위 비용 카드에 고정돼 있습니다' : active ? '진행 중인 요청의 고정 원본' : '실제 사용할 원본'}</strong>
-    {!waiting.length && (exactInputs.length ? exactInputs.map(input => <button key={`${input.key}:${input.versionId}`} onClick={() => { if (input.version) { setShownVersionId(input.version.id); document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' }); } }}><Check size={13} /><span>{input.version?.label ?? '원본 확인 필요'}<small>{roles[input.version?.role ?? 'model']} · 현재 사용 중</small></span></button>) : <p>{stage === 'design' ? '새 디자인을 준비합니다. 참고 자료는 아래에서 연결할 수 있습니다.' : '이 단계에 사용할 결과를 먼저 선택해 주세요.'}</p>)}
+    {!waiting.length && (exactInputs.length ? exactInputs.map(input => <button key={`${input.key}:${input.versionId}`} onClick={() => { if (input.version) { setShownVersionId(input.version.id); revealResult(); } }}><Check size={13} /><span>{input.version?.label ?? '원본 확인 필요'}<small>{roles[input.version?.role ?? 'model']} · 현재 사용 중</small></span></button>) : <p>{stage === 'design' ? '새 디자인을 준비합니다. 참고 자료는 아래에서 연결할 수 있습니다.' : '이 단계에 사용할 결과를 먼저 선택해 주세요.'}</p>)}
     {journey && journey.parts.length > 0 && <details><summary>파트별 준비 상태 · {journey.parts.length}개</summary>{journey.parts.map(part => <button key={part.id} aria-pressed={creation.activePartId === part.id} onClick={() => { setCreation(current => ({ ...current, activePartId: part.id })); setShownVersionId(''); }}><span>{part.label}<small>{part.reason}</small></span></button>)}</details>}
   </div>;
   async function openUnity() {
@@ -1539,7 +1579,7 @@ export function GraphicsStudio({
     onRecover={async () => { if (autoRigRun) await run({ kind: 'recover-auto-rig', objectId: object.id, runId: autoRigRun.id }); }}
     onInspect={async () => { if (autoRigCandidate) await run({ kind: 'inspect-auto-rig', objectId: object.id, versionId: autoRigCandidate.id }); }}
     onCorrect={async repair => { if (autoRigCandidate && autoRigInspectionRun && autoRigInspectedPreview && rigRegionReady && rigRegion?.versionId===autoRigCandidate.id && rigRegion.mesh===repair.mesh && rigRegion.islandId===repair.islandId) await run({ kind: 'repair-auto-rig', objectId: object.id, versionId: autoRigCandidate.id, inspectionRunId: autoRigInspectionRun.id, repairs: [repair] }); }}
-    onShow={version => { setShownVersionId(version.id); document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' }); }}
+    onShow={version => { setShownVersionId(version.id); revealResult(); }}
     onAdopt={async () => { if (autoRigCandidate && await run({ kind: 'accept', objectId: object.id, versionId: autoRigCandidate.id }, '이 리그를 사용할 원본으로 저장했습니다.')) changeStage('unity'); }}
     onUnity={() => changeStage('unity')}
     onRegion={island => { setRigRegionReady(false); if(island?.vertexIndices && autoRigCandidate) { setShownVersionId(autoRigCandidate.id);setRigRegion({mesh:island.mesh,islandId:island.islandId,vertexIndices:island.vertexIndices,versionId:autoRigCandidate.id}); } else setRigRegion(undefined); }} />;
@@ -2242,6 +2282,14 @@ export function GraphicsStudio({
                       ? <HeadComparison projectId={project.id} baseline={headBaseline} candidate={headCandidate} choices={headVersions} acceptedId={acceptedHeadId} onBaseline={setHeadBaselineId} onClose={() => setHeadComparisonOpen(false)} />
                       : <VersionPreview project={project} version={shownVersion} physicalSize={shownVersion?.slot.startsWith("part-") ? undefined : creation.physicalSize} onBounds={setModelBounds} onMeshSelect={setMeshSelection} nativePolygonCount={nativeMeasurement?.versionId === shownVersion?.id ? nativeMeasurement?.faces : undefined} previewFile={stage==='rig' && shownVersion?.id===autoRigCandidate?.id ? autoRigInspectedPreview : undefined} rigRegion={stage==='rig' && rigRegion?.versionId===shownVersion?.id ? rigRegion : undefined} onRigRegionStatus={status=>setRigRegionReady(status.ready)} />}
                   </div>}
+                  {shownVersion?.provenance.type === 'import' && shownVersion.files.filter(file => /\.(fbx|blend|obj|stl)$/i.test(file.path)).length === 1 && !shownVersion.files.some(file => /\.glb$/i.test(file.path)) && <section className="gs-result-notes" aria-label="가져온 모델 미리보기">
+                    <strong>가져온 모델을 화면에서 확인하세요</strong>
+                    <p>Blender로 미리보기 사본을 준비합니다. 원본 파일과 현재 사용하는 결과는 그대로 유지합니다.</p>
+                    <button type="button" className="gs-primary" data-testid="graphics-prepare-import-preview" disabled={disabled || active} onClick={() => void run({ kind: 'prepare-import-preview', objectId: object.id, versionId: shownVersion.id }, '미리보기 준비가 끝났습니다. 원본과 채택 상태는 유지됩니다.')}>
+                      {pending ? <><LoaderCircle size={15} className="gs-spin" /> 미리보기 준비 중…</> : '미리보기 준비 · 무료'}
+                    </button>
+                    <small>추가 서비스 비용 없음 · 제작용 GPT 사용 없음</small>
+                  </section>}
                   {shownVersion && !shownContact && !contactPartProducer && ['model', 'material'].includes(shownVersion.role) && <div className="gs-preview-actions" data-testid="graphics-preview-actions">
                     <strong>{shownVersion.label}</strong>
                     <div>
@@ -2484,6 +2532,12 @@ export function GraphicsStudio({
                 <aside className="gs-guide" aria-label="현재 작업 안내" data-testid="graphics-guide">
                   {useAutoRig ? <div className="gs-guide-heading"><h2>{autoRigView.running ? '로컬 리깅 작업 진행 중' : autoRigView.candidate ? autoRigRun?.operation==='repair' ? '보정 결과를 확인하세요' : '움직임과 보정할 부위를 확인하세요' : '자동 리깅으로 움직임을 준비해요'}</h2><p>{autoRigView.candidate ? '중앙에서 검사용 동작을 재생하고, 마음에 들면 이 리그를 사용하세요.' : '전체 모델과 앞 방향을 확인하고 로컬 작업을 시작하세요.'}</p></div> : guideHeading}
                   <div className="gs-guide-scroll">
+                    {stage === 'unity' && <section className="gs-guide-inputs" aria-label="현재 Unity 프로젝트">
+                      <strong>현재 Unity 프로젝트</strong>
+                      <p data-testid="graphics-unity-target-path">{unityTargetPath || '아직 선택하지 않았습니다. 프로젝트를 선택해 주세요.'}</p>
+                      <button type="button" data-testid="graphics-change-unity-target" disabled={unityTargetLocked} onClick={openUnityTarget}>프로젝트 변경</button>
+                      <small>{unityTargetLocked ? '진행 중이거나 승인·확인을 기다리는 작업과 전달을 완료하거나 취소한 뒤 변경하세요.' : '이 제작 프로젝트의 전달 대상입니다. 앱 기본 경로를 바꿔도 이 대상은 바뀌지 않습니다.'}</small>
+                    </section>}
                     {error && <div role="alert" className="gs-alert gs-alert-error"><strong>요청을 완료하지 못했습니다.</strong><p>{error}</p><span>기존 원본과 사용하는 결과는 유지됩니다.</span></div>}
                     {stage === 'rig' && <div className="gs-file-actions" aria-label="리깅 방법"><button type="button" aria-pressed={!legacyRig} onClick={() => setLegacyRig(false)}>자동 리깅 · 권장</button><button type="button" aria-pressed={legacyRig} onClick={() => setLegacyRig(true)}>기타 도구 · Blender + Astra</button></div>}
                     {useAutoRig ? autoRigPanel : <>
@@ -2507,7 +2561,7 @@ export function GraphicsStudio({
                       <p>UV 결과를 확인하고 ‘이 모델 채택’을 눌러야 다음 텍스처 요청에 그 UV가 사용됩니다.</p>
                       {pendingSurfaceUvs.map(version => <div className="gs-file-actions" key={version.id}>
                         <span>{version.label}</span>
-                        <button type="button" data-testid={`graphics-view-pending-uv-${version.id}`} onClick={() => { showVersion(version); document.querySelector('.gs-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' }); }}>이 UV 결과 보기</button>
+                        <button type="button" data-testid={`graphics-view-pending-uv-${version.id}`} onClick={() => showVersion(version)}>이 UV 결과 보기</button>
                       </div>)}
                     </div>}
                     <p>새 면을 추가했거나 UV가 없는 모델은 <b>UV 생성 → 결과 채택 → 텍스처 생성</b> 순서로 진행하세요.</p>
@@ -3312,6 +3366,7 @@ export function GraphicsStudio({
                   프로젝트 검사
                 </button>
               </div>
+              <p className="gs-fine">현재 제작 프로젝트의 전달 대상: {unityTargetPath || '선택 전'}. Unity 전달 단계의 ‘프로젝트 변경’에서 저장하세요. 연결 설정의 기본 경로는 현재 프로젝트 대상을 바꾸지 않습니다.</p>
               {workspace?.target ? (
                 <>
                   <strong>{workspace.target.projectPath}</strong>
@@ -3840,6 +3895,17 @@ export function GraphicsStudio({
           </form>
         </dialog>
       )}
+      <dialog ref={unityTargetDialog} className="gs-unity-target-dialog" aria-label="Unity 프로젝트 변경" onCancel={event=>{event.preventDefault();if(!pending)setUnityTargetOpen(false);}}>
+        <form onSubmit={event=>void saveUnityTarget(event)}>
+          <header><h2>Unity 프로젝트 변경</h2><button type="button" aria-label="Unity 프로젝트 변경 닫기" disabled={pending} onClick={()=>setUnityTargetOpen(false)}><X size={18}/></button></header>
+          <p>Assets, Packages, ProjectSettings가 있는 Unity 프로젝트 폴더를 입력하세요. 저장하면 폴더 정보를 검사하고 이 제작 프로젝트의 전달 대상으로 설정합니다.</p>
+          <label htmlFor="gs-unity-target-path">새 Unity 프로젝트 경로</label>
+          <input id="gs-unity-target-path" autoFocus value={unityTargetDraft} disabled={unityTargetLocked} onChange={event=>setUnityTargetDraft(event.target.value)} />
+          <small>저장 전까지 현재 대상은 유지됩니다. 파일 전달·생성·Play는 시작하지 않습니다.</small>
+          {unityTargetError && <p role="alert" className="gs-error">{unityTargetError}</p>}
+          <footer><button type="button" disabled={pending} onClick={()=>setUnityTargetOpen(false)}>취소</button><button type="submit" className="gs-primary" disabled={unityTargetLocked || !unityTargetDraft.trim()}>{pending ? '대상 확인 중…' : '검사하고 저장'}</button></footer>
+        </form>
+      </dialog>
       {focusedImage && (
         <dialog
           ref={imageDialog}

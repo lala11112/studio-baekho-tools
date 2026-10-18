@@ -66,12 +66,19 @@ def import_model(file):
     before=set(bpy.data.objects)
     # Viewport-only bone shape helpers must not become exported character meshes.
     extension=os.path.splitext(file)[1].lower()
-    if extension=='.fbx':
+    if extension=='.blend':
+        bpy.ops.wm.open_mainfile(filepath=file,load_ui=False,use_scripts=False)
+        return list(bpy.context.scene.objects)
+    if extension=='.obj':
+        bpy.ops.wm.obj_import(filepath=file)
+    elif extension=='.stl':
+        bpy.ops.wm.stl_import(filepath=file)
+    elif extension=='.fbx':
         bpy.ops.import_scene.fbx(filepath=file,use_image_search=False)
     elif extension in ('.glb','.gltf'):
         bpy.ops.import_scene.gltf(filepath=file,disable_bone_shape=True)
     else:
-        raise ValueError('Supported import formats are GLB, glTF and FBX')
+        raise ValueError('Supported import formats are BLEND, OBJ, STL, GLB, glTF and FBX')
     objects=[o for o in bpy.data.objects if o not in before]
     # glTF import stashes non-active clips in muted NLA tracks. FBX's NLA
     # exporter omits those tracks unless enabled, silently dropping animations.

@@ -1,3 +1,4 @@
+import { isGraphicsProductionFile } from '../shared/graphics';
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -44,7 +45,7 @@ export function prepareGraphicsMotionSource(args: Args) {
     args.inputs.length !== args.task.inputVersionIds.length || args.inputs.some(input => !args.task.inputVersionIds.includes(input.id))) throw Error("고정된 측면 입력 목록이 다릅니다.");
   const root = fs.realpathSync(args.projectRoot);
   for (const input of args.inputs) for (const file of input.files) verified(root, file);
-  const source = ["blend", "glb", "fbx"].map(ext => version.files.find(file => file.path.toLowerCase().endsWith("." + ext))).find(Boolean);
+  const source = ["blend", "glb", "fbx"].map(ext => version.files.find(file => isGraphicsProductionFile(file) && file.path.toLowerCase().endsWith("." + ext))).find(Boolean);
   if (!source) throw Error("측면 렌더에는 BLEND·GLB·FBX 원본이 필요합니다.");
   const axis = String(args.task.settings.motionSourceAxis ?? "X");
   if (!["X", "Y"].includes(axis)) throw Error("측면 촬영 축은 X 또는 Y입니다.");
@@ -98,7 +99,7 @@ export function createGraphicsMotionSourceExecutor(dependencies: { runBlender?: 
       // Short private paths avoid Blender's native Windows path limit and isolate FBX embedded texture extraction.
       staging = fs.mkdtempSync(path.join(os.tmpdir(), "ps-gms-"));
       const input = path.join(staging, "input"), out = path.join(staging, "output"); fs.mkdirSync(input); fs.mkdirSync(out);
-      const files = version.files.map((file, index) => {
+      const files = version.files.filter(isGraphicsProductionFile).map((file, index) => {
         const target = path.join(input, `${index}-${path.basename(file.path)}`);
         fs.copyFileSync(verified(root, file), target, fs.constants.COPYFILE_EXCL);
         return { ...file, original: path.resolve(root, file.path), local: target };

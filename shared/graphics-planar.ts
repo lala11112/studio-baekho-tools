@@ -28,6 +28,8 @@ export type PlanarInspection = {
   identity: string;
   sourceVersionId: string;
   sourceSha256: string;
+  sourceCompanions?: GraphicsFile[];
+  sourceManifestVersion?: 1;
   algorithmVersion: PlanarAlgorithmVersion;
   meshes: { meshId: string; name: string; boundaries: PlanarBoundary[] }[];
   warnings?: string[];

@@ -1,4 +1,12 @@
 /* Guided workspace: one preview and one persistent action rail. */
+.gs-unity-target-dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 20px; border: 1px solid #718779; border-radius: 12px; background: #1b2722; color: #e7eee8; overflow: auto; }
+.gs-unity-target-dialog::backdrop { background: #0009; }
+.gs-unity-target-dialog header, .gs-unity-target-dialog footer { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.gs-unity-target-dialog h2 { margin:0; }
+.gs-unity-target-dialog input { width:100%; box-sizing:border-box; margin:8px 0; }
+.gs-unity-target-dialog small { display:block; }
+.gs-unity-target-dialog footer { justify-content:flex-end; margin-top:20px; }
+.graphics-studio [data-testid="graphics-unity-target-path"] { overflow-wrap:anywhere; }
 .graphics-studio { --gs-muted: #b8c5bd; --gs-border: #52635b; font-size: 14px; }
 .graphics-studio :is(button,input,select,textarea) { font-size: 14px; }
 .graphics-studio button { min-height: 36px; white-space: normal; }

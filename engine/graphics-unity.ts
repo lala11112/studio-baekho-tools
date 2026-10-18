@@ -1,3 +1,4 @@
+import { isGraphicsProductionFile } from '../shared/graphics';
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -181,7 +182,7 @@ function validateSources(projectRoot: string, object: GraphicsObject, versions: 
   if (!versions.length || new Set(versions.map(v=>v.id)).size !== versions.length) throw Error("Unity에 보낼 정확한 버전이 필요합니다.");
   return versions.flatMap(v => {
     if (v.objectId !== object.id) throw Error("다른 오브젝트의 버전을 Unity 원본으로 사용할 수 없습니다.");
-    return v.files.map(f => {
+    return v.files.filter(isGraphicsProductionFile).map(f => {
       const absolute = safePath(root, f.path);
       if (!fs.statSync(absolute).isFile() || !/^[a-f\d]{64}$/.test(f.sha256) || fs.statSync(absolute).size !== f.bytes || sha(absolute) !== f.sha256) throw Error("Unity 원본의 해시·크기·경로가 변경됐습니다: " + f.path);
       return { ...f, absolute, versionId: v.id };
