@@ -5,6 +5,7 @@ import type {
   GraphicsWorkspace,
 } from "../shared/graphics";
 import type { PlanarMaterialPolicy } from "../shared/graphics-planar";
+import { hasPersistedNativeMeterUnits } from "../shared/graphics-size-provenance";
 import type { Project } from "../shared/types";
 import { Viewport } from "./Viewport";
 import { PlanarComparison } from "./PlanarComparison";
@@ -570,6 +571,7 @@ export function GraphicsPlanarReview({
                       <Viewport
                         project={preview}
                         previewId="planar-preview"
+                        unitsKnown={hasPersistedNativeMeterUnits(source, workspace.tasks)}
                         boundaryOverlays={overlays}
                         focusedBoundaryId={focus}
                       />

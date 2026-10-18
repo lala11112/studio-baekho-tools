@@ -240,7 +240,9 @@ export function deriveJourney(workspace: GraphicsWorkspace, objectId: string, dr
     if (selectedTask.status === 'submission_unknown') primaryAction = action('review', '제출 상태 확인', '제출 여부가 불확실합니다. 같은 작업을 다시 실행하지 마세요.', extra);
     else if (selectedTask.runtimeApproval) primaryAction = action('approve', '실행 중 요청 확인', '작업 도구의 권한·질문에 답변이 필요합니다.', extra);
     else if (selectedTask.status === 'awaiting_approval') primaryAction = action('approve', '입력과 비용 확인', '준비된 작업의 정확한 입력과 비용을 확인한 후 실행을 승인하세요.', extra);
-    else primaryAction = action('review', '진행 상황 보기', '현재 작업이 진행 중입니다.', extra);
+    else primaryAction = selectedTask.taskId === 'LOCAL_PLANAR_INSPECT'
+      ? action('review', '검사 진행 상황', '모델의 열린 부분을 로컬에서 검사합니다. 추가 서비스 비용·제작용 GPT 사용은 없습니다.', extra)
+      : action('review', '진행 상황 보기', '현재 작업이 진행 중입니다.', extra);
     if (selectedTask.status !== 'submission_unknown') secondaryActions.push(action('stop', '작업 중단', '현재 작업의 중단을 요청합니다.', extra));
     const row = stages.find(s => s.id === stage)!;
     row.status = selectedTask.status === 'submission_unknown' ? 'blocked' : selectedTask.runtimeApproval || selectedTask.status === 'awaiting_approval' ? 'approval' : 'running'; row.reason = primaryAction.reason;

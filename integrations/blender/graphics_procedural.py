@@ -1,9 +1,12 @@
 """Finite offline presets and explicit UV/material edits. Never writes a source file."""
-import bpy, json, pathlib, sys, math, hashlib, re
+import bpy, json, pathlib, sys, math, hashlib, re, unicodedata
 from mathutils import Vector
 from mathutils.kdtree import KDTree
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from graphics_glb import export_packed_glb
+
+def image_name(value):
+    return unicodedata.normalize('NFC', str(value).replace('\\','/').rsplit('/',1)[-1]).casefold()
 
 q = json.loads(pathlib.Path(sys.argv[sys.argv.index('--') + 1]).read_text(encoding='utf8'))
 s = q['settings']; operation = q['taskId']; out = pathlib.Path(q['output']).resolve()
@@ -141,8 +144,9 @@ for index, image in enumerate(bpy.data.images):
     if image.source not in {'FILE','GENERATED'}: raise RuntimeError('Image sequence/movie textures are not supported')
     if image.packed_file: raw = bytes(image.packed_file.data)
     else:
-        basename = pathlib.Path(image.filepath.replace('\\','/')).name
-        matches = [item for item in q['files'] if pathlib.Path(item['original']).name == basename]
+        basename = image_name(image.filepath)
+        matches = [item for item in q['files'] if image_name(item['original']) == basename]
+        if len(matches) > 1: raise RuntimeError('Ambiguous registered texture filename: '+image.name)
         local = pathlib.Path(bpy.path.abspath(image.filepath)).resolve()
         if len(matches) == 1: raw = pathlib.Path(matches[0]['local']).read_bytes()
         elif local.is_file() and local.is_relative_to(input_root): raw = local.read_bytes()

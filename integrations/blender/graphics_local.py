@@ -9,6 +9,7 @@ from mathutils import Matrix, Vector
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from graphics_glb import export_packed_glb
 from graphics_size import apply_physical_size
+from graphics_source_images import import_fbx_deferred, pack_registered_companions
 
 spec_path = pathlib.Path(sys.argv[sys.argv.index('--') + 1]).resolve()
 q = json.loads(spec_path.read_text(encoding='utf8'))
@@ -16,6 +17,8 @@ source = pathlib.Path(q['source']).resolve()
 out = pathlib.Path(q['output']).resolve()
 out.mkdir(parents=True, exist_ok=True)
 original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+if q.get('sourceSha256') and original_hash != q['sourceSha256']:
+    raise RuntimeError('Frozen source hash changed')
 operation = q['operation']
 scale = float(q['scale'])
 pivot = q['pivot']
@@ -32,9 +35,10 @@ elif source.suffix.lower() == '.glb':
     bpy.ops.import_scene.gltf(filepath=str(source))
 elif source.suffix.lower() == '.fbx':
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.import_scene.fbx(filepath=str(source), use_image_search=False)
+    import_fbx_deferred(source)
 else:
     raise RuntimeError('Expected Blender, GLB or FBX source')
+source_images = pack_registered_companions(q, source)
 meshes = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH']
 if not meshes:
     raise RuntimeError('No mesh in the selected source')
@@ -118,6 +122,10 @@ report = {'schemaVersion': 1, 'identity': q['identity'], 'operation': operation,
     'geometryAuthored': False, 'motionAuthored': False, 'unityPlaybackVerified': False,
     'warnings': warnings, 'glbImages': glb_images}
 report['physicalSize'] = physical_size
+if q.get('sourceManifestVersion') == 1:
+    report['sourceManifestVersion'] = 1
+    report['sourceCompanions'] = q.get('sourceCompanions', [])
+report['sourceImages'] = source_images
 temporary = out / 'report.json.tmp'
 temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf8')
 temporary.replace(out / 'report.json')

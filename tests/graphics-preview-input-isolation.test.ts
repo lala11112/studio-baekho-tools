@@ -27,7 +27,10 @@ test('size and export operations keep original FBX despite a preview GLB listed 
     const f=fixture(child,extension);f.args.task.taskId=taskId;let selected='';
     const execute=createGraphicsNativeExecutor({runBlender:async(_binary,argv)=>{selected=JSON.parse(fs.readFileSync(argv.at(-1)!,'utf8')).source;throw Error('captured source only');}});
     await assert.rejects(execute(f.args),/captured source only/);
-    assert.equal(selected,path.join(f.root,f.original.path));
+    assert.notEqual(selected,path.join(f.root,f.original.path));
+    assert.equal(path.basename(selected),path.basename(f.original.path));
+    assert.equal(createHash('sha256').update(fs.readFileSync(selected)).digest('hex'),f.original.sha256);
+    assert.match(selected,/work[\\/]input[\\/]/);
   });
 });
 

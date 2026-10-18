@@ -57,6 +57,35 @@ def pack_registered_companions(q, source):
         image.filepath=str(staged); image.reload(); image.pack()
         if not image.packed_file or hashlib.sha256(bytes(image.packed_file.data)).hexdigest()!=file['sha256']: raise ValueError('packed companion hash mismatch')
 
+SIZE_ROOT_MARKER = 'partsmith_physical_size_root'
+
+def static_scene_meshes(objects):
+    meshes=[o for o in objects if o.type=='MESH']; roots=[o for o in objects if o.type!='MESH']
+    root=None
+    if roots:
+        if len(roots)!=1: raise ValueError('only one static A05 physical-size root is supported')
+        root=roots[0]
+        if root.type!='EMPTY' or root.get(SIZE_ROOT_MARKER) is not True or root.parent is not None:
+            raise ValueError('only the marked static A05 physical-size root is supported')
+        m=root.matrix_world
+        if any(not math.isfinite(v) for row in m for v in row) or any(m[i][i]<=0 for i in range(3)) or any(abs(m[i][j])>1e-8 for i in range(3) for j in range(3) if i!=j) or max(m[i][i] for i in range(3))-min(m[i][i] for i in range(3))>max(m[i][i] for i in range(3))*1e-7:
+            raise ValueError('A05 physical-size root requires positive uniform scale and translation only')
+        if root.constraints or root.modifiers or root.library or root.instance_type!='NONE':
+            raise ValueError('dynamic, linked or instanced A05 physical-size root unsupported')
+    if not meshes or any(o.parent!=root or o.modifiers or o.constraints or o.vertex_groups or o.data.shape_keys or o.library or o.data.library or o.instance_type!='NONE' for o in meshes):
+        raise ValueError('static independent meshes or direct children of one A05 physical-size root only; rigs, skin, morphs and modifiers unsupported')
+    return meshes
+
+def hierarchy_snapshot(objects):
+    def plain(v):
+        if hasattr(v,'to_dict'):return {k:plain(x) for k,x in v.to_dict().items()}
+        if hasattr(v,'to_list'):return [plain(x) for x in v.to_list()]
+        if isinstance(v,dict):return {k:plain(x) for k,x in v.items()}
+        if isinstance(v,(tuple,list)):return [plain(x) for x in v]
+        if isinstance(v,bpy.types.ID):return [v.bl_rna.identifier,v.name]
+        return v
+    return {o.name:{'parent':o.parent.name if o.parent else None,'parentType':o.parent_type,'location':list(o.location),'scale':list(o.scale),'rotationMode':o.rotation_mode,'rotationEuler':list(o.rotation_euler),'rotationQuaternion':list(o.rotation_quaternion),'rotationAxisAngle':list(o.rotation_axis_angle),'deltaLocation':list(o.delta_location),'deltaScale':list(o.delta_scale),'deltaEuler':list(o.delta_rotation_euler),'deltaQuaternion':list(o.delta_rotation_quaternion),'parentInverse':[list(row) for row in o.matrix_parent_inverse],'matrix':[list(row) for row in o.matrix_world],'props':plain(dict(o.items()))} for o in objects}
+
 def load(q):
     source=pathlib.Path(q['source']).resolve()
     if source.suffix.lower() not in ('.fbx','.blend') or file_hash(source)!=q['sourceSha256']: raise ValueError('source hash/type mismatch')
@@ -77,13 +106,14 @@ def load(q):
         try: bpy.ops.import_scene.fbx(filepath=str(source),use_image_search=False)
         finally: image_utils.load_image=original_load
     objects=list(bpy.context.scene.objects)
-    if not objects or len(objects)>64 or any(o.type!='MESH' or o.modifiers or o.constraints or o.parent or o.vertex_groups or o.data.shape_keys for o in objects): raise ValueError('static independent meshes only; rigs, skin, morphs and modifiers unsupported')
+    if not objects or len(objects)>64: raise ValueError('static mesh scene limit exceeded')
+    meshes=static_scene_meshes(objects)
     if bpy.data.armatures or bpy.data.actions or bpy.data.libraries or any(getattr(o,'animation_data',None) for o in bpy.data.user_map()): raise ValueError('dynamic or linked dependencies unsupported')
-    if sum(len(o.data.polygons) for o in objects)>250000: raise ValueError('inspection face limit exceeded')
+    if sum(len(o.data.polygons) for o in meshes)>250000: raise ValueError('inspection face limit exceeded')
     if len(bpy.data.scenes)!=1 or len(bpy.data.objects)!=len(objects): raise ValueError('extra scenes or off-scene objects unsupported')
     pack_registered_companions(q, source)
     material_snapshot() # Exact packed originals or explicitly registered companions only.
-    return sorted(objects,key=lambda o:o.name)
+    return sorted(meshes,key=lambda o:o.name)
 
 def boundaries(obj):
     mesh=obj.data;incidence={};directed={}
@@ -318,6 +348,8 @@ def attributes(mesh):
 
 def run(q):
     objects=load(q); before={o.name:mesh_snapshot(o) for o in objects}; materials=material_snapshot()
+    source_objects=list(bpy.context.scene.objects); hierarchy=hierarchy_snapshot(source_objects)
+    size_root=next((o for o in source_objects if o.type=='EMPTY'),None)
     textured=bool(materials['textures']); records=[]; internals={};old_attributes={o.name:attributes(o.data) for o in objects};old_edge_keys={o.name:[tuple(sorted(e.vertices)) for e in o.data.edges] for o in objects}
     for obj in objects:
         meshid=str(obj.get('partsmith_id') or obj.name)
@@ -455,18 +487,27 @@ def run(q):
             if other!=obj and (not other.data.uv_layers.active or any(abs(area([list(other.data.uv_layers.active.data[i].uv) for i in f.loop_indices]))<1e-12 for f in other.data.polygons)): raise ValueError('unselected mesh lacks valid export UV; prepare it separately')
         output=pathlib.Path(q['output']).resolve();output.mkdir(parents=True,exist_ok=True)
         if any(output.iterdir()): raise ValueError('output must be empty')
+        if hierarchy_snapshot(source_objects)!=hierarchy: raise ValueError('original object hierarchy, transforms or properties changed')
         bpy.ops.wm.save_as_mainfile(filepath=str(output/'asset.blend'),compress=False)
         # Export copies carry only their active UV, preserving editable original layers.
         bpy.ops.object.select_all(action='DESELECT');copies=[];original_names=[]
+        export_root=None;root_name=None
+        if size_root:
+            root_name=size_root.name;size_root.name=root_name+'__planar_source'
+            export_root=size_root.copy();export_root.name=root_name;bpy.context.collection.objects.link(export_root);export_root.select_set(True)
         for original_obj in objects:
             objectname,meshname=original_obj.name,original_obj.data.name;original_names.append((original_obj,objectname,meshname))
             original_obj.name=objectname+'__planar_source';original_obj.data.name=meshname+'__planar_source'
             copy=original_obj.copy();copy.data=original_obj.data.copy();copy.name=objectname;copy.data.name=meshname;bpy.context.collection.objects.link(copy);copies.append(copy);copy.select_set(True)
+            if export_root:
+                # Preserve exact local channels and parent inverse on the private export hierarchy.
+                copy.parent=export_root
             active=copy.data.uv_layers.active.name if copy.data.uv_layers.active else None
             for layername in [layer.name for layer in copy.data.uv_layers]:
                 if layername!=active: copy.data.uv_layers.remove(copy.data.uv_layers[layername])
             if copy.data.uv_layers: copy.data.uv_layers[0].active_render=True
         bpy.context.view_layer.objects.active=copies[0]
+        bpy.context.view_layer.update()
         export_triangles=[]
         for export_obj in copies:
             export_obj.data.calc_loop_triangles();uv=export_obj.data.uv_layers.active
@@ -474,17 +515,24 @@ def run(q):
                 export_triangles.append({'world':[list(export_obj.matrix_world@export_obj.data.vertices[i].co) for i in tri.vertices],'uv':[list(uv.data[i].uv) for i in tri.loops],'material':export_obj.data.materials[tri.material_index].name if tri.material_index<len(export_obj.data.materials) and export_obj.data.materials[tri.material_index] else None})
         expected=[mesh_snapshot(o) for o in copies]
         expected_triangles=sum(sum(len(f)-2 for f in snap['polygons']) for snap in expected)
-        bpy.ops.export_scene.fbx(filepath=str(output/'asset.fbx'),use_selection=True,object_types={'MESH'},use_mesh_modifiers=False,use_triangles=False,use_custom_props=True,bake_anim=False,path_mode='COPY',embed_textures=True)
+        bpy.ops.export_scene.fbx(filepath=str(output/'asset.fbx'),use_selection=True,object_types={'MESH','EMPTY'} if export_root else {'MESH'},use_mesh_modifiers=False,use_triangles=False,use_custom_props=True,bake_anim=False,path_mode='COPY',embed_textures=True)
         glb_images=export_packed_glb(output/'asset.glb',use_selection=True,use_active_scene=True,export_animations=False,export_extras=True)
         for copy in copies:
             mesh=copy.data;bpy.data.objects.remove(copy,do_unlink=True);bpy.data.meshes.remove(mesh)
+        if export_root:bpy.data.objects.remove(export_root,do_unlink=True);size_root.name=root_name
         for original_obj,objectname,meshname in original_names: original_obj.name=objectname;original_obj.data.name=meshname
+        if hierarchy_snapshot(source_objects)!=hierarchy: raise ValueError('export changed original hierarchy, transforms or properties')
         # Actual independent exporter reloads, ensuring all exported polygons have UV area.
         for suffix in ('fbx','glb'):
             bpy.ops.wm.read_factory_settings(use_empty=True)
             if suffix=='fbx': bpy.ops.import_scene.fbx(filepath=str(output/'asset.fbx'),use_image_search=False)
             else: bpy.ops.import_scene.gltf(filepath=str(output/'asset.glb'))
             imported=[o for o in bpy.context.scene.objects if o.type=='MESH']
+            if root_name is not None:
+                imported_roots=[o for o in bpy.context.scene.objects if o.type=='EMPTY' and o.get(SIZE_ROOT_MARKER)]
+                if len(imported_roots)!=1 or imported_roots[0].name!=root_name or imported_roots[0].parent or any(o.parent!=imported_roots[0] for o in imported): raise ValueError('export lost A05 root hierarchy or marker')
+                root_matrix=hierarchy[root_name]['matrix']
+                if max(abs(imported_roots[0].matrix_world[i][j]-root_matrix[i][j]) for i in range(4) for j in range(4))>max(extent*2e-6,1e-7): raise ValueError('export changed A05 root origin or transform')
             if len(imported)!=len(expected) or not imported: raise ValueError('export mesh count changed')
             unmatched=list(expected)
             for imported_obj in imported:

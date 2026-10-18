@@ -426,25 +426,50 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
       if (sources.length !== 1) throw Error("로컬 변환에는 단일 3D 모델 버전을 선택하세요.");
       const source = modelFiles.find(file => /\.blend$/i.test(file.localPath)) ?? modelFiles.find(file => /\.glb$/i.test(file.localPath)) ?? modelFiles[0];
       if (!source) throw Error("Blender/GLB/FBX 원본이 필요합니다.");
+      const companions = inputs.filter(file => file.versionId === source.versionId && file.kind === "image").map(({ path, kind, bytes, sha256 }) => ({ path, kind, bytes, sha256 }));
       const scale = task.taskId === "A05" ? Number(task.settings.scale ?? 1) : 1;
       const pivot = task.taskId === "A05" ? String(task.settings.pivot ?? "keep") : "keep";
       const format = task.taskId === "X04" ? String(task.settings.exportFormat ?? "both") : "both";
       const physicalSize = task.settings.physicalSize === undefined ? undefined : normalizePhysicalSize(task.settings.physicalSize);
       if (!Number.isFinite(scale) || scale <= 0 || scale > 1e6 || !["keep", "center", "bottom"].includes(pivot) || !["fbx", "glb", "both"].includes(format)) throw Error("크기·피벗·내보내기 설정을 확인하세요.");
       const reportPath = path.join(output, "report.json"), specPath = path.join(work, "local-request.json");
+      const savedReport = fs.existsSync(reportPath);
       // Recovery only validates saved output. A fresh local conversion requires an explicit run.
-      if (!fs.existsSync(reportPath)) {
+      if (!savedReport) {
         if (args.recoveryOnly) throw Error("저장된 완전한 로컬 변환 결과가 없습니다. 복구에서 Blender를 새로 실행하지 않습니다.");
         if (!args.blenderPath || !fs.existsSync(args.blenderPath)) throw Error("설정된 Blender 실행 파일을 확인하세요.");
         const script = path.join(args.resources, "blender", "graphics_local.py");
         if (!fs.existsSync(script)) throw Error("로컬 그래픽 변환 스크립트가 없습니다.");
-        write(specPath, { schemaVersion: 1, identity, source: source.localPath, output, operation: task.taskId, scale, pivot, format, physicalSize });
+        const input = path.join(work, "input");
+        if (fs.realpathSync(work) !== work || fs.existsSync(input) && fs.realpathSync(input) !== input) throw Error("격리 입력 폴더의 경로 연결은 허용되지 않습니다.");
+        ownedDirectory(root, input);
+        const names = new Set<string>();
+        const stage = (file: Pick<VerifiedInput, "path" | "bytes" | "sha256">) => {
+          const name = path.basename(file.path.replaceAll("\\", "/")), key = name.normalize("NFC").toLowerCase();
+          if (!name || names.has(key)) throw Error("동반 이미지와 원본의 파일 이름이 중복됩니다.");
+          names.add(key);
+          const destination = path.join(input, name);
+          if (fs.existsSync(destination) && fs.lstatSync(destination).isSymbolicLink()) throw Error("격리 입력 파일의 경로 연결은 허용되지 않습니다.");
+          if (!fs.existsSync(destination)) fs.copyFileSync(verifiedFile(root, file.path), destination, fs.constants.COPYFILE_EXCL);
+          const checked = verifiedFile(root, destination);
+          if (fs.statSync(checked).size !== file.bytes || fileHash(checked) !== file.sha256) throw Error("격리한 로컬 입력의 크기 또는 해시가 다릅니다.");
+          return checked;
+        };
+        const stagedSource = stage(source);
+        const companionResources = companions.map(file => {
+          if (!/\.(png|jpe?g|webp)$/i.test(file.path)) throw Error("등록된 PNG/JPEG/WebP 동반 이미지만 허용됩니다.");
+          return { file, stagedPath: stage(file) };
+        });
+        write(specPath, { schemaVersion: 1, identity, source: stagedSource, sourceSha256: source.sha256, sourceManifestVersion: 1, sourceCompanions: companions, companionResources, output, operation: task.taskId, scale, pivot, format, physicalSize });
         args.onProgress(task.taskId === "A05" ? "Blender에서 원본을 보존하며 크기·피벗을 새 버전에 적용합니다." : "Blender에서 새 FBX/GLB 내보내기 파일을 만듭니다.");
         await (dependencies.runBlender ?? runBlender)(args.blenderPath, ["--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1", "--python", script, "--", specPath], args.signal);
       }
       args.signal.throwIfAborted();
       const report = read(reportPath);
       if (report.identity !== identity || report.operation !== task.taskId || report.originalPreserved !== true || report.sourceSha256 !== source.sha256 || !Array.isArray(report.files) || !report.files.length) throw Error("로컬 그래픽 변환 결과 검증에 실패했습니다.");
+      // Legacy completed reports predate image manifests. Their exact identity/source/output
+      // validation remains readable, without asserting newly verified companion provenance.
+      if ((!savedReport && companions.length || report.sourceManifestVersion !== undefined) && (report.sourceManifestVersion !== 1 || JSON.stringify(report.sourceCompanions) !== JSON.stringify(companions))) throw Error("로컬 변환의 등록된 동반 이미지 목록이 다릅니다.");
       if (physicalSize && (report.physicalSize?.sourceSha256 !== source.sha256 || JSON.stringify(normalizePhysicalSize(report.physicalSize?.settings)) !== JSON.stringify(physicalSize))) throw Error("실제 크기 검사와 고정한 원본·설정이 다릅니다.");
       const expected = ["asset.blend", ...(format !== "fbx" ? ["asset.glb"] : []), ...(format !== "glb" ? ["asset.fbx"] : [])];
       if (!expected.every(file => report.files.includes(file))) throw Error("요청한 그래픽 내보내기 파일이 없습니다.");
