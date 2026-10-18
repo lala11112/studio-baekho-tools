@@ -18,7 +18,7 @@ test('explicit import opens its exact unadopted result; cancel and another objec
     if(action.kind==='update-object')Object.assign(window.fixture.objects.find(o=>o.id===action.objectId),action.patch);
     if(action.kind==='import'){
       if(window.importMode==='deferred')await new Promise(resolve=>window.resolveImport=resolve);
-      if(window.importMode!=='cancel')for(let i=0;i<(action.role==='design'?2:1);i++)window.fixture.versions.push({id:'import-'+(++window.counter),objectId:action.objectId,role:action.role,slot:'main',label:'Imported '+action.role+' '+window.counter,files:[],createdAt:'2026-10-18',sourceVersionIds:[],provenance:{type:'import'},warnings:[]});
+      if(window.importMode!=='cancel')for(let i=0;i<(action.role==='design'||window.importMode==='bulk-models'?2:1);i++)window.fixture.versions.push({id:'import-'+(++window.counter),objectId:action.objectId,role:action.role,slot:'main',label:'Imported '+action.role+' '+window.counter,files:[],createdAt:'2026-10-18',sourceVersionIds:[],provenance:{type:'import'},warnings:[]});
     }
     window.renderFixture();return structuredClone(window.fixture);
   }}/>);window.renderFixture();`;
@@ -56,6 +56,36 @@ test('explicit import opens its exact unadopted result; cancel and another objec
     assert.equal(await page.getByTestId('graphics-object-second').getAttribute('aria-pressed'),'true');
     assert.match(await stages.locator('[aria-current="step"]').innerText(),/이미지/);
     assert.deepEqual(await page.evaluate(()=>(window as any).fixture.objects.map((o:any)=>o.accepted)),[{},{}]);
+    assert.equal(await page.evaluate(()=>(window as any).actions.some((a:any)=>['accept','prepare','approve','recover'].includes(a.kind))),false);
+    // A preserved old import may contain unrelated FBX and GLB originals.
+    // Do not preview either arbitrarily or let its old adoption authorize work.
+    await page.evaluate(()=>{
+      const w=(window as any).fixture;
+      w.versions.push({id:'ambiguous',objectId:'second',role:'model',slot:'main',label:'Old combined import',files:['first.fbx','second.glb'].map(path=>({path,kind:'model',bytes:1,sha256:'0'.repeat(64)})),createdAt:'2026-10-18',sourceVersionIds:[],provenance:{type:'import'},warnings:[]});
+      w.objects[1].accepted={'model:main':'ambiguous'};(window as any).actions=[];(window as any).renderFixture();
+    });
+    const history=page.locator('.gs-version-history');
+    if(await history.getAttribute('open')===null)await history.locator('summary').click();
+    await page.getByTestId('graphics-version-ambiguous').click();
+    await page.getByTestId('graphics-import-source-warning').waitFor();
+    await page.getByTestId('graphics-ambiguous-import-preview').waitFor();
+    assert.equal(await page.getByTestId('graphics-guide-primary').innerText(),'사용할 모델 다시 가져오기');
+    assert.equal(await page.getByTestId('graphics-accept-preview').isDisabled(),true);
+    await page.getByTestId('graphics-guide-primary').click();
+    assert.equal(await page.getByLabel('가져올 자료의 역할').inputValue(),'model');
+    assert.notEqual(await page.locator('.gs-import-details').getAttribute('open'),null);
+    assert.deepEqual(await page.evaluate(()=>(window as any).fixture.objects[1].accepted),{'model:main':'ambiguous'});
+    assert.deepEqual(await page.evaluate(()=>(window as any).actions),[]);
+    await page.evaluate(()=>{(window as any).importMode='bulk-models';});
+    await openImport('model');
+    const importedChoices=page.getByTestId('graphics-import-candidates');
+    await importedChoices.waitFor();
+    assert.equal(await importedChoices.getByRole('button').count(),2);
+    assert.equal(await importedChoices.getByRole('button').first().getAttribute('aria-pressed'),'true');
+    await importedChoices.getByRole('button').nth(1).click();
+    assert.equal(await importedChoices.getByRole('button').nth(1).getAttribute('aria-pressed'),'true');
+    await selected('import-7');
+    assert.deepEqual(await page.evaluate(()=>(window as any).fixture.objects[1].accepted),{'model:main':'ambiguous'});
     assert.equal(await page.evaluate(()=>(window as any).actions.some((a:any)=>['accept','prepare','approve','recover'].includes(a.kind))),false);
     assert.deepEqual(errors,[]);
   }finally{await app.close();}

@@ -27,7 +27,7 @@ import type {
   GraphicsWorkspace,
   GraphicsFile,
 } from "../shared/graphics";
-import { graphicsLegacyUnlinkProblem, requiresPartSourcePreparation, requiresPartSpaceRestoration, surfaceRepairSources } from "../shared/graphics";
+import { graphicsLegacyUnlinkProblem, importedModelSourceProblem, requiresPartSourcePreparation, requiresPartSpaceRestoration, surfaceRepairSources } from "../shared/graphics";
 import {
   filterGraphicsTasks,
   findGraphicsTask,
@@ -365,6 +365,8 @@ function VersionPreview({
         </p>
       </div>
     );
+  const sourceProblem = importedModelSourceProblem(version);
+  if (sourceProblem) return <div className="gs-preview-empty" data-testid="graphics-ambiguous-import-preview"><Box size={40} strokeWidth={1} /><h3>사용할 원본을 먼저 구분해 주세요</h3><p>{sourceProblem}</p></div>;
   const glb = previewFile ?? version.files.find((file) => /\.glb$/i.test(file.path));
   const motionSources =
     version.role === "design" && version.slot === "motion-source"
@@ -683,6 +685,8 @@ export function GraphicsStudio({
   const [taskOverride, setTaskId] = useState<string>();
   const taskId = taskOverride ?? creationTaskId(creation, stage);
   const [shownVersionId, setShownVersionId] = useState("");
+  const [importedChoiceIds, setImportedChoiceIds] = useState<string[]>([]);
+  useEffect(() => setImportedChoiceIds([]), [project.id, objectId]);
   const [headComparisonOpen, setHeadComparisonOpen] = useState(false);
   const [headBaselineId, setHeadBaselineId] = useState('');
   const [focusedImage, setFocusedImage] = useState<{
@@ -781,6 +785,7 @@ export function GraphicsStudio({
     stageVersions.at(-1);
   const needsPartSpaceRestoration = Boolean(workspace && shownVersion && requiresPartSpaceRestoration(workspace, shownVersion));
   const needsPartSourcePreparation = Boolean(workspace && shownVersion && requiresPartSourcePreparation(workspace, shownVersion));
+  const shownImportProblem = shownVersion && importedModelSourceProblem(shownVersion);
   const needsPartPreparation = needsPartSpaceRestoration || needsPartSourcePreparation;
   const shownContact = shownVersion?.contact;
   const contactReviewActive = Boolean(shownContact && stage === 'assembly');
@@ -1008,6 +1013,8 @@ export function GraphicsStudio({
   }
 
   async function adoptVersion(version: AssetVersion) {
+    const problem = importedModelSourceProblem(version);
+    if (problem) { setError(problem); return; }
     if (version.contact?.phase === 'analyze' || version.contact?.status === 'blocked') return;
     if (version.slot.startsWith('part-') && objectTasks.some(task => task.taskId === 'M06' && ['repair', 'reconstruct'].includes(String(task.settings.contactPhase)) && task.outputVersionIds.includes(version.id))) return;
     if (version.slot === 'part-head' && acceptedHeadId && acceptedHeadId !== version.id) setHeadBaselineId(acceptedHeadId);
@@ -1393,6 +1400,7 @@ export function GraphicsStudio({
       // Only this explicit import may navigate. Cancelled pickers and results for
       // an object the user has left never steal the current preview or focus.
       if (imported.length && currentImportView.current === startedView) {
+        setImportedChoiceIds(imported.filter(version => ['model', 'material', 'rig'].includes(version.role)).map(version => version.id));
         showVersion(imported[0]);
         setNotice(`${imported.length}개 원본을 가져왔습니다. 결과를 확인하고 ‘이 결과 사용’을 눌러 주세요. 아직 사용할 결과로 확정하지 않았습니다.`);
       }
@@ -1463,6 +1471,11 @@ export function GraphicsStudio({
     const panel = document.querySelector<HTMLDetailsElement>('.gs-import-details');
     if (panel) { panel.open = true; panel.scrollIntoView({ block: 'center' }); panel.querySelector<HTMLElement>('select,button')?.focus(); }
   }
+  function openSingleSourceImport() {
+    setImportRole(shownVersion?.role === 'material' || shownVersion?.role === 'rig' ? shownVersion.role : 'model');
+    setNotice('사용할 3D 원본 하나와 필요한 동반 이미지를 가져오세요. 기존 파일과 사용 기록은 유지됩니다.');
+    openImportPanel();
+  }
   function settingForStage(targetStage: CreationStage, key: string, value: string | number | boolean) {
     setCreation(current => ({ ...current, stageSettings: { ...current.stageSettings, [targetStage]: { instruction: current.stageSettings[targetStage]?.instruction ?? '', values: { ...current.stageSettings[targetStage]?.values, [key]: value } } } }));
   }
@@ -1484,7 +1497,7 @@ export function GraphicsStudio({
     : undefined;
   const reviewVersion = journey?.review?.version;
   const reviewIsShown = Boolean(reviewVersion && shownVersion?.id === reviewVersion.id);
-  const adoptableReview = Boolean(journey?.review?.adoptable && !journey.review.accepted && reviewIsShown && !contactPartProducer);
+  const adoptableReview = Boolean(journey?.review?.adoptable && !journey.review.accepted && reviewIsShown && !contactPartProducer && !shownImportProblem);
   const readyProblem = activeTask.status === 'planned' ? activeTask.reason || '아직 개발 중인 작업입니다.' : selectionProblem || multiviewProblem || modelProblem || (!sizeInputsValid ? '실제 크기 입력을 확인하세요.' : '');
   const guideAction: JourneyAction | undefined = journey && !active && adoptableReview
     ? { intent: 'accept', label: `${reviewVersion?.role === 'design' ? '이 이미지' : reviewVersion?.role === 'animation' ? '이 동작' : shownAssembly ? '이 조립과 파트' : '이 결과'} 사용 · 다음 설정`, reason: shownAssembly ? '전체 조립과 같은 작업의 파트를 함께 사용합니다. 새 제작은 시작하지 않습니다.' : '선택한 결과를 다음 작업의 원본으로 저장합니다. 새 제작은 시작하지 않습니다.', target: { stage, versionId: reviewVersion!.id } }
@@ -1524,8 +1537,8 @@ export function GraphicsStudio({
     : guideAction?.intent === 'prepare' ? prepareLabel : guideAction?.label ?? '현재 설정을 확인하세요';
   const guideHeading = <div className="gs-guide-heading" tabIndex={-1}>
     <div className="gs-guide-kicker"><span>지금 할 일</span><button type="button" aria-expanded={helpOpen} onClick={() => setHelpOpen(value => !value)}>도움말</button></div>
-    <h2>{deliveryCurrent && !active ? 'Unity 가져오기를 확인했어요' : guideState}</h2>
-    <p>{(active || adoptableReview ? guideAction?.reason : readyProblem || guideAction?.reason) || '주요 조건을 선택하고 입력과 비용을 확인하세요.'}</p>
+    <h2>{shownImportProblem && !active ? '사용할 원본을 하나씩 구분해 주세요' : deliveryCurrent && !active ? 'Unity 가져오기를 확인했어요' : guideState}</h2>
+    <p>{(!active && shownImportProblem) || (active || adoptableReview ? guideAction?.reason : readyProblem || guideAction?.reason) || '주요 조건을 선택하고 입력과 비용을 확인하세요.'}</p>
     {guideTask?.status === 'running' && <p role="status"><LoaderCircle size={14} className="gs-spin" /> {Math.max(0, Math.floor((clock - new Date(guideTask.createdAt).getTime()) / 60000))}분 전 요청 · 마지막 갱신 {stamp(guideTask.updatedAt)}</p>}
     <small role="status">{draftSaved ? '설정 초안 자동 저장 · 생성은 실행 버튼에서 시작' : '이 기기에 초안을 저장하지 못했습니다. 설정 저장을 이용하세요.'}</small>
     {helpOpen && <div className="gs-inline-help"><strong>이 화면은 이렇게 사용하세요</strong><ol><li>왼쪽 결과는 클릭해서 비교합니다.</li><li>마음에 들면 ‘이 결과 사용’을 누릅니다.</li><li>오른쪽 설정과 비용을 확인하고 실행합니다.</li></ol><p>UV는 모델 표면에 무늬를 배치하는 좌표입니다. 리깅은 움직임을 위한 뼈대입니다. 정적 소품은 움직임 단계를 건너뛸 수 있습니다.</p><button onClick={() => onOpenSettings?.(activeTask.executor === 'tripo' ? 'tripo' : undefined)}>필요한 연결 설정</button></div>}
@@ -1543,7 +1556,7 @@ export function GraphicsStudio({
     finally { setPending(false); }
   }
   const guideFooter = <footer className="gs-guide-footer">
-    {deliveryCurrent && !active ? <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled} onClick={() => void openUnity()}>Unity에서 확인</button> : guideAction && <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled || guideAction.intent === 'prepare' && prepareDisabled || guideTask?.status === 'awaiting_approval' && graphicsApprovalState(guideTask, clock) === 'blocked'} onClick={() => handleGuide(guideAction)}>{pending ? <><LoaderCircle size={15} className="gs-spin" /> 요청 처리 중…</> : actionLabel}</button>}
+    {shownImportProblem && !active ? <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled} onClick={openSingleSourceImport}>사용할 모델 다시 가져오기</button> : deliveryCurrent && !active ? <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled} onClick={() => void openUnity()}>Unity에서 확인</button> : guideAction && <button type="button" className="gs-primary" data-testid="graphics-guide-primary" disabled={disabled || guideAction.intent === 'prepare' && prepareDisabled || guideTask?.status === 'awaiting_approval' && graphicsApprovalState(guideTask, clock) === 'blocked'} onClick={() => handleGuide(guideAction)}>{pending ? <><LoaderCircle size={15} className="gs-spin" /> 요청 처리 중…</> : actionLabel}</button>}
     <div className="gs-guide-secondary">
       {(guideAction?.intent !== 'prepare' || deliveryCurrent) && !active && !shownContact && !contactPartProducer && <button data-testid="graphics-prepare" disabled={prepareDisabled} onClick={() => void prepare()}>{deliveryCurrent ? 'Unity 전달 다시 준비' : `새 ${stage === 'design' ? '이미지' : stage === 'model' ? '모델' : '작업'} 준비`}</button>}
       {journey?.secondaryActions.filter(action => action.intent === 'navigate').map(action => <button key={action.label} onClick={() => handleGuide(action)}>{action.label}</button>)}
@@ -2272,12 +2285,14 @@ export function GraphicsStudio({
                       </div>
                     </section>
                   )}
+                  {versions.filter(version => importedChoiceIds.includes(version.id)).length > 1 && <section className="gs-preview-actions" aria-label="이번에 가져온 모델 후보" data-testid="graphics-import-candidates"><strong>가져온 모델을 하나씩 확인하세요</strong><div>{versions.filter(version => importedChoiceIds.includes(version.id)).map((version, index) => <button key={version.id} type="button" aria-pressed={shownVersion?.id === version.id} onClick={() => showVersion(version)}>{index + 1}. {version.label}{shownVersion?.id === version.id ? ' · 미리보기 중' : ''}</button>)}</div><small>각 파일은 별도 후보입니다. 미리본 뒤 ‘이 결과 사용’으로 하나를 선택하세요.</small></section>}
                   {shownVersion && <div className="gs-preview-caption" data-testid="graphics-preview-context">
                     <div><strong>{acceptedVersion(object, shownVersion) ? '현재 사용하는 결과' : '미리보는 후보 · 아직 사용하지 않음'}</strong><small>{shownVersion.label}</small></div>
-                    <button type="button" aria-expanded={editOpen} disabled={disabled || active} onClick={() => setEditOpen(value => !value)}>수정하기</button>
+                    <button type="button" aria-expanded={editOpen} disabled={disabled || active || !!shownImportProblem} onClick={() => setEditOpen(value => !value)}>수정하기</button>
                     <small>미리보기 선택은 다음 작업의 원본을 바꾸지 않습니다.</small>
                   </div>}
-                  {editOpen && shownVersion && <div className="gs-edit-menu" aria-label="결과 수정 방법">
+                  {shownImportProblem && <section className="gs-result-notes" role="status" data-testid="graphics-import-source-warning"><strong>여러 모델이 하나의 결과에 들어 있습니다</strong><p>{shownImportProblem}</p><p>기존 파일과 사용 기록은 보존했습니다. 다시 가져온 후보에서 사용할 모델을 골라 주세요.</p><button type="button" disabled={disabled || active} onClick={openSingleSourceImport}>사용할 모델 다시 가져오기</button></section>}
+                  {editOpen && shownVersion && !shownImportProblem && <div className="gs-edit-menu" aria-label="결과 수정 방법">
                     <p><b>수정 원본:</b> {shownVersion.label} · 수정본은 별도로 저장됩니다.</p>
                     {shownVersion.role === 'design' && <button disabled={!acceptedVersion(object, shownVersion)} onClick={() => { changeStage('design'); settingForStage('design', 'designMode', 'revision'); setNotice('현재 사용하는 이미지를 수정합니다. 바꿀 부분과 유지할 부분을 추가 지시에 적어 주세요.'); }}>이미지 수정</button>}
                     {['model', 'material'].includes(shownVersion.role) && <>
@@ -2297,7 +2312,7 @@ export function GraphicsStudio({
                     onRecoverProcedure={() => { if (shownContactTask) void run({ kind: 'recover-contact-procedure', taskId: shownContactTask.id }, '저장된 보정 절차의 로컬 호환 복구를 요청했습니다. 추가 GPT 호출 없이 같은 작업의 결과를 확인합니다.'); }}
                     onKeepSource={() => { const source = versions.find(version => version.id === shownContact.sourceVersionId); if (source) showVersion(source); setNotice('기존 조립 결과로 돌아왔습니다. 채택 상태와 파일은 변경하지 않았습니다.'); }}
                     onAccept={() => adoptVersion(shownVersion)} onImage={(path, label) => setFocusedImage({ path, label })} /> : <div className={`gs-preview${headComparisonOpen && headCandidate && headBaseline ? ' gs-preview-comparison' : ''}`} data-testid="graphics-preview">
-                    {headComparisonOpen && headCandidate && headBaseline
+                    {headComparisonOpen && headCandidate && headBaseline && !shownImportProblem
                       ? <HeadComparison projectId={project.id} baseline={headBaseline} candidate={headCandidate} choices={headVersions} acceptedId={acceptedHeadId} onBaseline={setHeadBaselineId} onClose={() => setHeadComparisonOpen(false)} />
                       : <VersionPreview project={project} version={shownVersion} physicalSize={shownVersion?.slot.startsWith("part-") ? undefined : creation.physicalSize} onBounds={setModelBounds} onMeshSelect={setMeshSelection} nativePolygonCount={nativeMeasurement?.versionId === shownVersion?.id ? nativeMeasurement?.faces : undefined} previewFile={stage==='rig' && shownVersion?.id===autoRigCandidate?.id ? autoRigInspectedPreview : undefined} rigRegion={stage==='rig' && rigRegion?.versionId===shownVersion?.id ? rigRegion : undefined} onRigRegionStatus={status=>setRigRegionReady(status.ready)} />}
                   </div>}
@@ -2312,7 +2327,7 @@ export function GraphicsStudio({
                   {shownVersion && !shownContact && !contactPartProducer && ['model', 'material'].includes(shownVersion.role) && <div className="gs-preview-actions" data-testid="graphics-preview-actions">
                     <strong>{shownVersion.label}</strong>
                     <div>
-                      <button className="gs-adopt-secondary" data-testid="graphics-accept-preview" disabled={disabled || needsPartPreparation || shownAcceptanceComplete} onClick={() => adoptVersion(shownVersion)}>
+                      <button className="gs-adopt-secondary" data-testid="graphics-accept-preview" disabled={disabled || needsPartPreparation || shownAcceptanceComplete || !!shownImportProblem} onClick={() => adoptVersion(shownVersion)}>
                         {shownAcceptanceComplete ? shownAssembly ? '현재 채택한 조립·파트' : '현재 채택한 모델' : needsPartSpaceRestoration ? '크기·위치 복원 후 채택' : needsPartSourcePreparation ? '작업 원본 준비 후 채택' : shownAssembly ? '이 조립과 파트 채택' : '이 모델 채택'}
                       </button>
                       {headCandidate && headBaseline && !headComparisonOpen && <button data-testid="graphics-compare-heads" onClick={() => { setHeadBaselineId(headBaseline.id); setHeadComparisonOpen(true); setMeshSelection(null); }}>
@@ -2416,7 +2431,7 @@ export function GraphicsStudio({
                       </div>}
                       {shownVersion.partSpace && <p className="gs-fine" data-testid="graphics-part-space-restored">원래 파트의 크기·위치 복원 결과입니다. 외부 원본은 별도 버전으로 보관됩니다.</p>}
                       {shownVersion.partSource && <p className="gs-fine" data-testid="graphics-part-source-prepared">로컬 파트 작업 사본입니다. 외부 원본은 별도 버전으로 보관되며, 외형 검토와 채택은 직접 진행하세요.</p>}
-                      {!shownContact && !contactPartProducer && ['model', 'material'].includes(shownVersion.role) && <div className="gs-result-notes" aria-label="결과 추가 보정">
+                      {!shownContact && !contactPartProducer && !shownImportProblem && ['model', 'material'].includes(shownVersion.role) && <div className="gs-result-notes" aria-label="결과 추가 보정">
                         <button disabled={disabled || active || needsPartPreparation} onClick={() => chooseRevisionSource(shownVersion)}>이 결과 더 보정</button>
                         <small>현재 보는 결과의 형태를 이어서 수정합니다. 채택 전 후보도 지정할 수 있으며, 원본과 채택 상태는 유지됩니다.</small>
                       </div>}
@@ -2509,7 +2524,7 @@ export function GraphicsStudio({
                         data-testid="graphics-accept-version"
                         aria-label={shownAssembly ? '상세 결과에서 조립과 파트 함께 채택' : undefined}
                         disabled={
-                          disabled || needsPartPreparation || shownAcceptanceComplete
+                          disabled || needsPartPreparation || shownAcceptanceComplete || !!shownImportProblem
                         }
                         onClick={() => adoptVersion(shownVersion)}
                       >
@@ -2690,6 +2705,7 @@ export function GraphicsStudio({
                         <FolderInput size={14} /> 파일 가져오기
                       </button>
                     </div>
+                    {['model', 'material', 'rig', 'unity'].includes(importRole) && <p className="gs-fine" data-testid="graphics-import-model-help">3D 파일은 하나씩 별도 후보로 가져옵니다. 모델과 함께 쓸 이미지·MTL 파일은 같은 폴더에서 선택하세요. 여러 모델을 자동으로 조립하거나 사용하지 않습니다.</p>}
                     {["animation", "motion-reference"].includes(importRole) && (
                       <label>
                         {importRole === "animation"

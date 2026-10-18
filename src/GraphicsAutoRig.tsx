@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { AssetVersion, GraphicsObject } from '../shared/graphics';
+import { importedModelSourceProblem, type AssetVersion, type GraphicsObject } from '../shared/graphics';
 import type { AutoRigIsland, AutoRigRepair } from '../shared/graphics-auto-rig';
 import './graphics-auto-rig.css';
 
@@ -44,7 +44,8 @@ export function GraphicsAutoRig(props: Props) {
   useEffect(()=>{setMeshId('');setBone('');setRepairKind('normalize');props.onRegion?.(undefined);},[view.candidate?.id,view.inspectionId]);
   const selectedIsland = view.islands.find(island => JSON.stringify([island.mesh, island.islandId]) === meshId);
   const source = sources.find(version => version.id === sourceId);
-  const sourcePreviewAvailable = !!source?.files.some(file=>/\.glb$/i.test(file.path));
+  const sourceProblem = source && importedModelSourceProblem(source);
+  const sourcePreviewAvailable = !sourceProblem && !!source?.files.some(file=>/\.glb$/i.test(file.path));
   const sourcePreviewCurrent = !!source && props.previewVersionId === source.id;
   const locked = disabled || view.running;
   const runEnabled = !locked && view.ready && !!source && sourcePreviewAvailable && sourcePreviewCurrent && !!frontAxis;
@@ -68,7 +69,8 @@ export function GraphicsAutoRig(props: Props) {
         {source && <><small data-testid="auto-rig-source-id">{source.id}</small><code>{source.files.find(file => /\.(blend|fbx|glb)$/i.test(file.path))?.sha256}</code></>}
         {source && sourcePreviewAvailable && <button type="button" onClick={()=>props.onShow(source)}>실행 원본 3D 보기</button>}
         {source && sourcePreviewAvailable && !sourcePreviewCurrent && <p role="status" data-testid="auto-rig-preview-mismatch">현재 미리보기와 실행 원본이 다릅니다. ‘실행 원본 3D 보기’로 원본을 확인한 뒤 리깅하세요.</p>}
-        {!sourcePreviewAvailable && source && <p role="alert">이 원본에는 3D 미리보기가 없습니다. 같은 원본의 GLB 미리보기를 먼저 준비해야 앞 방향을 확인하고 실행할 수 있습니다.</p>}
+        {sourceProblem && <p role="alert" data-testid="auto-rig-import-source-warning">{sourceProblem}</p>}
+        {!sourcePreviewAvailable && source && !sourceProblem && <p role="alert">이 원본에는 3D 미리보기가 없습니다. 같은 원본의 GLB 미리보기를 먼저 준비해야 앞 방향을 확인하고 실행할 수 있습니다.</p>}
         <label>모델이 바라보는 앞 방향<select aria-label="모델 앞 방향" value={frontAxis} disabled={locked || submitting || !sourcePreviewAvailable} onChange={event => setFrontAxis(event.target.value as AutoRigDraft['frontAxis'])}><option value="">미리보기 축을 보고 선택하세요</option>{(['+X', '-X', '+Y', '-Y'] as const).map(axis => <option key={axis} value={axis}>{axis}</option>)}</select></label>
         <label className="gs-auto-rig-check"><input type="checkbox" checked={fingers} disabled={locked || submitting} onChange={event => setFingers(event.target.checked)} />손가락도 자동 감지</label>
         <small>채택한 사람 형태의 전체 모델을 사용하세요. 결과의 어깨·팔·손가락·양쪽 무릎 움직임을 직접 확인합니다.</small>

@@ -1,5 +1,5 @@
 import type { AssetVersion, GraphicsTask, GraphicsWorkspace } from './graphics';
-import { requiresPartSourcePreparation, requiresPartSpaceRestoration } from './graphics';
+import { importedModelSourceProblem, requiresPartSourcePreparation, requiresPartSpaceRestoration } from './graphics';
 import { creationPartForTask, creationStages, creationTaskId, creationSelectionProblem, isBiologicalSubject, stageForTask, type CreationSpec, type CreationStage } from './graphics-creation';
 import { getGraphicsCompatibility } from './graphics-lineage';
 import { graphicsAstraTasks } from './graphics-catalog';
@@ -28,7 +28,7 @@ export function getJourneyReadiness(workspace: GraphicsWorkspace, objectId: stri
     const task=workspace.tasks.find(t=>t.objectId===objectId&&t.id===focus.taskId&&t.taskId===taskId);
     const sourceId=task?.inputVersionIds[0]??task?.planarSelection?.versionId;
     const source=workspace.versions.find(v=>v.objectId===objectId&&v.id===sourceId);
-    return {inputs:source?[{key:`model:${source.slot}`,versionId:source.id,version:source}]:[],problems:source?[]:[{reason:'고정된 모델의 경계 검사 화면에서 진행하세요.',target:{stage:'model'}}]};
+    return {inputs:source?[{key:`model:${source.slot}`,versionId:source.id,version:source}]:[],problems:source?(importedModelSourceProblem(source)?[{reason:importedModelSourceProblem(source)!,target:{stage:'model'}}]:[]):[{reason:'고정된 모델의 경계 검사 화면에서 진행하세요.',target:{stage:'model'}}]};
   }
   const part=creationPartForTask({...draft,activePartId:focus.partId ?? draft.activePartId},taskId);
   const slot=part ? `part-${part.id}` : 'main';
@@ -117,6 +117,7 @@ export function getJourneyReadiness(workspace: GraphicsWorkspace, objectId: stri
       if(version && (['I05','I07','M15'].includes(taskId) || version.role!=='motion-reference')) inputs.push({key:`reference:${version.id}`,versionId:version.id,version});
     }
   }
+  for(const input of inputs){const problem=input.version && importedModelSourceProblem(input.version);if(problem && !problems.some(p=>p.reason===problem))problems.push({reason:problem,target:target(focus.stage)});}
   return {inputs:[...new Map(inputs.map(input=>[input.versionId,input])).values()],problems};
 }
 
@@ -226,7 +227,7 @@ export function deriveJourney(workspace: GraphicsWorkspace, objectId: string, dr
     const isAccepted = acceptedInputs.some(item => item.versionId === candidate.id);
     const needsRestore = requiresPartSpaceRestoration(workspace, candidate) || requiresPartSourcePreparation(workspace, candidate);
     const adoptable = !candidate.contact || candidate.contact.status === 'repaired';
-    review = { version: candidate, accepted: isAccepted, adoptable: adoptable && !needsRestore, reason: needsRestore ? '원본 좌표·편집용 파일 복원이 먼저 필요합니다.' : !adoptable ? '접합 진단은 채택할 모델이 아닙니다.' : isAccepted ? '현재 채택한 결과입니다.' : '결과를 확인한 후 채택하세요.' };
+    review = { version: candidate, accepted: isAccepted, adoptable: adoptable && !needsRestore && !importedModelSourceProblem(candidate), reason: importedModelSourceProblem(candidate) ?? (needsRestore ? '원본 좌표·편집용 파일 복원이 먼저 필요합니다.' : !adoptable ? '접합 진단은 채택할 모델이 아닙니다.' : isAccepted ? '현재 채택한 결과입니다.' : '결과를 확인한 후 채택하세요.') };
     primaryAction = isAccepted ? action('navigate', '다음 단계 보기', review.reason, nextAfterAccept(workspace,objectId,draft,candidate)) :
       needsRestore ? action('recover', '원본 기준으로 복원', review.reason, { versionId: candidate.id }) :
       action('review', '결과 확인', review.reason, { versionId: candidate.id });
@@ -259,7 +260,7 @@ export function deriveJourney(workspace: GraphicsWorkspace, objectId: string, dr
   const readinessProblems = readiness.problems;
   const nextPart = parts.find(p => !p.modelVersionId || !p.surfaceVersionId);
   const suggestedNext: JourneyTarget = candidate ? nextAfterAccept(workspace,objectId,draft,candidate) : nextPart ? { stage: nextPart.modelVersionId ? 'surface' : 'model', partId: nextPart.id } : model ? nextAfterAccept(workspace,objectId,draft,model) : {stage:accepted('design:main')?'model':'design'};
-  if (!active && model && !enabled('rig') && !compatibilityIssues.length && focus.stage !== 'unity') secondaryActions.push(action('navigate','Unity 전달 준비','채택한 모델을 그대로 전달할 수 있습니다.',{stage:'unity',partId:undefined,versionId:undefined}));
+  if (!active && model && !importedModelSourceProblem(model) && !enabled('rig') && !compatibilityIssues.length && focus.stage !== 'unity') secondaryActions.push(action('navigate','Unity 전달 준비','채택한 모델을 그대로 전달할 수 있습니다.',{stage:'unity',partId:undefined,versionId:undefined}));
   const inputReadiness:JourneyReadiness=active ? {inputs:active.inputVersionIds.map(versionId=>{
     const version=workspace.versions.find(v=>v.id===versionId);
     return {key:version?`${version.role}:${version.slot}`:`task-input:${versionId}`,versionId,version};

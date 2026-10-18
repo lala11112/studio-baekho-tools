@@ -19,7 +19,7 @@ test('native format readiness distinguishes unsupported originals from missing o
     for (const ext of ['blend', 'fbx', 'glb']) assert.equal(graphicsInputSupportProblem(task, [version(ext)]), undefined);
     const v = version('stl'); v.files.push(...version('glb', 'preview').files);
     assert.match(graphicsInputSupportProblem(task, [v])!, /STL 원본은/);
-    v.files.push(...version('fbx').files); assert.equal(graphicsInputSupportProblem(task, [v]), undefined);
+    v.files.push(...version('fbx').files); v.provenance = { type: 'local' }; assert.equal(graphicsInputSupportProblem(task, [v]), undefined);
   }
   assert.match(graphicsInputSupportProblem('T02', [version('glb', 'preview')])!, /모델 원본 파일이 없습니다/);
   assert.match(graphicsInputSupportProblem('T02', [])!, /모델 원본이 없습니다/);

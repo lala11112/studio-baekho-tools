@@ -9,10 +9,11 @@ test('automatic rig UI requires explicit orientation, keeps recovery local, and 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'graphics-auto-rig-ui-'));
   const entry = `import React from 'react';import{createRoot}from'react-dom/client';import{GraphicsAutoRig}from${JSON.stringify(path.resolve('src/GraphicsAutoRig.tsx'))};
     window.actions=[];window.previewVersionId='whole';window.view={ready:false,checked:false,readiness:[],running:false,recoverable:false,adopted:false,videos:[],checks:[],bones:[],islands:[],correctionAvailable:false};
-    const version={id:'whole',objectId:'human',role:'model',slot:'main',label:'채택 전체 사람',files:[{path:'source.blend',sha256:'exact-source'},{path:'source.glb',sha256:'preview-exact'}]};
+    const version={id:'whole',objectId:'human',role:'model',slot:'main',label:'채택 전체 사람',provenance:{type:'import'},files:[{path:'source.blend',sha256:'exact-source',kind:'model'},{path:'source.glb',sha256:'preview-exact',kind:'preview'}]};
     const object={id:'human',accepted:{'model:main':'whole'}};const root=createRoot(document.getElementById('root'));
     const action=async(kind,value)=>{window.actions.push({kind,...(value===undefined?{}:{value})});};
     window.addMaterialSource=()=>{object.accepted['material:main']='material';window.extraSources=[{...version,id:'material',role:'material',label:'새 재질 모델'}];window.render();};
+    window.makeSelectedAmbiguous=()=>{window.extraSources[0].files=window.extraSources[0].files.map(file=>({...file,kind:'model'}));window.render();};
     window.render=()=>root.render(<GraphicsAutoRig object={object} versions={[version,...(window.extraSources??[]),{...version,id:'unaccepted',label:'다른 후보'},{...version,id:'part',slot:'part-head'}]} view={window.view} previewVersionId={window.previewVersionId} disabled={false}
       onCheck={async()=>{await action('check');window.view={...window.view,ready:true,checked:true,readiness:['설치 확인 완료']};window.render();}}
       onRun={async draft=>{await action('start',draft);window.view={...window.view,running:true,state:'진행 중',sourceSha256:'exact-source',progress:'뼈 감지'};window.render();await new Promise(resolve=>window.finishRun=resolve);}}
@@ -76,6 +77,12 @@ test('automatic rig UI requires explicit orientation, keeps recovery local, and 
     assert.equal(await page.evaluate(()=>(window as any).view.candidate.id),'rig','Previous candidate remains saved');
     await page.getByRole('button',{name:'작업 중단',exact:true}).click();
     assert.equal(await page.getByRole('button',{name:'Unity 내보내기 설정',exact:true}).isVisible(),true,'Existing adoption remains available');
+    const actionCount=await page.evaluate(()=>(window as any).actions.length);
+    await page.evaluate(()=>(window as any).makeSelectedAmbiguous());
+    await page.getByTestId('auto-rig-import-source-warning').waitFor();
+    assert.equal(await page.getByTestId('auto-rig-run-new').isDisabled(),true);
+    assert.equal(await page.getByLabel('모델 앞 방향').isDisabled(),true);
+    assert.equal(await page.evaluate(()=>(window as any).actions.length),actionCount);
   } finally { await app.close(); }
 });
 
@@ -86,7 +93,7 @@ test('studio makes automatic rigging primary and adoption opens Unity settings w
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'graphics-auto-rig-studio-'));
   const creation = defaultCreation('character');
   const object = { id: 'human', name: '사람', kind: 'character', createdAt: '', selectedTasks: [], instruction: '', settings: {}, references: [], accepted: { 'model:main': 'whole' }, creation };
-  const version = { id: 'whole', objectId: 'human', role: 'model', slot: 'main', label: '전체 사람', createdAt: '', files: [{ path: 'source.blend', sha256: 'source-exact', kind: 'model', bytes: 100 }, { path: 'source.glb',sha256:'preview-exact',kind:'model',bytes:100 }], sourceVersionIds: [], provenance: { type: 'import' }, warnings: [] };
+  const version = { id: 'whole', objectId: 'human', role: 'model', slot: 'main', label: '전체 사람', createdAt: '', files: [{ path: 'source.blend', sha256: 'source-exact', kind: 'model', bytes: 100 }, { path: 'source.glb',sha256:'preview-exact',kind:'preview',bytes:100 }], sourceVersionIds: [], provenance: { type: 'import' }, warnings: [] };
   const workspace = { schemaVersion: 1, id: 'ws', projectId: 'p', revision: 0, objects: [object], versions: [version], tasks: [], deliveries: [], autoRigRuns: [] };
   const entry = `import React from 'react';import{createRoot}from'react-dom/client';import{GraphicsStudio}from${JSON.stringify(path.resolve('src/GraphicsStudio.tsx'))};import${JSON.stringify(path.resolve('src/style.css'))};
     window.actions=[];window.fixture=${JSON.stringify(workspace)};window.desktop={assetUrl:()=>'',call:async()=>{throw Error('Unexpected desktop action')}};

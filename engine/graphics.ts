@@ -1,4 +1,4 @@
-import { isGraphicsProductionFile } from '../shared/graphics';
+import { importedModelSourceProblem, isGraphicsProductionFile } from '../shared/graphics';
 import { runGraphicsExternalRig } from './graphics-external-rig';
 import { runGraphicsAutoRig, inspectSavedGraphicsAutoRig, probeGraphicsAutoRig } from './graphics-auto-rig';
 import { autoRigOrientation, validateAutoRigRepairs, type AutoRigAction, type AutoRigRun, type AutoRigInspection } from '../shared/graphics-auto-rig';
@@ -225,6 +225,9 @@ export class GraphicsEngine {
     const slot = o.settings.partId && ['design', 'model', 'material'].includes(role) ? `part-${o.settings.partId}` : 'main';
     return w.versions.find(v => v.id === o.accepted[`${role}:${slot}`] && v.objectId === o.id && v.role === role && v.slot === slot);
   }
+  private assertImportedSource(version: AssetVersion) {
+    const problem=importedModelSourceProblem(version);if(problem)throw Error(problem);
+  }
   private inputs(w: GraphicsWorkspace, o: GraphicsObject, taskId: string): AssetVersion[] {
     const refs = [...new Set(o.references.map(r => r.versionId))].map(id => w.versions.find(v => v.id === id)).filter((v): v is AssetVersion => !!v);
     const design = this.selected(w, o, "design");
@@ -353,7 +356,7 @@ export class GraphicsEngine {
       }
     }
     values = [...new Map(values.map(v => [v.id, v])).values()];
-    for (const v of values) for (const f of v.files) this.verified(w.projectId, f);
+    for (const v of values) { this.assertImportedSource(v); for (const f of v.files) this.verified(w.projectId, f); }
     return values;
   }
   importFiles(id: string, objectId: string, role: GraphicsRole, sources: string[], clipName?: string) {
@@ -368,25 +371,36 @@ export class GraphicsEngine {
     }
     const allowed = /\.(png|jpe?g|webp|fbx|glb|blend|obj|mtl|stl|mp4|webm)$/i;
     for (const source of sources) if (!allowed.test(source) || !fs.statSync(source).isFile()) throw Error("지원되는 원본 파일을 선택하세요.");
-    const groups = role === "design" ? sources.map(source => [source]) : [sources];
+    if(new Set(sources.map(source=>fs.realpathSync(source))).size!==sources.length)throw Error('같은 원본 파일을 중복 선택할 수 없습니다.');
+    const main=sources.filter(source=>model.test(source)),sidecars=sources.filter(source=>!model.test(source));
+    if(role!=='design'&&main.length&&sidecars.length){
+      if(sidecars.some(source=>!image.test(source)&&!/\.mtl$/i.test(source)))throw Error('3D 원본의 동반 파일은 이미지 또는 OBJ 재질 MTL만 지원합니다.');
+      const folder=fs.realpathSync(path.dirname(main[0]));
+      if(sources.some(source=>fs.realpathSync(path.dirname(source))!==folder))throw Error('동반 파일은 같은 폴더에서 선택하세요.');
+    }
+    const groups = role === "design" ? sources.map(source => [source]) : main.length ? main.map(source=>[source,...sidecars]) : [sources];
+    // Validate every group and read every source before creating any original/version.
+    for(const group of groups){const names=new Set<string>();for(const source of group){const name=path.basename(source).normalize('NFC').toUpperCase().toLowerCase();if(names.has(name))throw Error('동반 파일 이름이 중복됩니다.');names.add(name);}}
+    const bytes=new Map(sources.map(source=>[source,fs.readFileSync(source)]));
+    const additions:AssetVersion[]=[];
     for (const group of groups) {
       const versionId = uid(), prefix = `graphics/originals/${versionId}`;
-      const common = path.dirname(group[0]);
-      const names = new Set<string>();
+      const directory=this.store.file(id,prefix),root=fs.realpathSync(this.store.directory(id));let ancestor=path.dirname(directory);while(!fs.existsSync(ancestor))ancestor=path.dirname(ancestor);
+      const actual=fs.realpathSync(ancestor);if(actual!==root&&!actual.startsWith(root+path.sep))throw Error('가져오기 저장 경로가 프로젝트 밖입니다.');
+      fs.mkdirSync(path.dirname(directory),{recursive:true});fs.mkdirSync(directory);
       const files = group.map(source => {
         // Keep companion names; reject collisions rather than silently renaming texture links.
         const name = path.basename(source);
-        if (names.has(name.toLowerCase())) throw Error("동반 파일 이름이 중복됩니다."); names.add(name.toLowerCase());
-        if (group.length > 1 && path.dirname(source) !== common) throw Error("동반 파일은 같은 폴더에서 선택하세요.");
         const rel = `${prefix}/${name}`;
-        this.store.write(id, rel, fs.readFileSync(source));
+        fs.writeFileSync(this.store.file(id,rel),bytes.get(source)!,{flag:'wx'});
         return this.file(id, rel, role === "animation" ? "blend" : image.test(name) ? "image" : model.test(name) ? "model" : /\.(mp4|webm)$/i.test(name) ? "video" : "companion");
       });
       const part = o.creation?.attributes.composition === 'parts' && o.creation.activePartId && (role === 'model' && creationCompositionStrategy(o.creation) === 'independent-parts' || role === 'design' && o.creation.stageSettings.design?.values.designMode === 'parts') ? o.creation.activePartId : undefined;
-      w.versions.push({ id: versionId, objectId: o.id, role, slot: role === "animation" ? clipName! : part ? `part-${part}` : "main", label: path.basename(group[0]), files,
+      additions.push({ id: versionId, objectId: o.id, role, slot: role === "animation" ? clipName! : part ? `part-${part}` : "main", label: path.basename(group[0]), files,
         createdAt: now(), sourceVersionIds: [], provenance: { type: "import" }, warnings: [],
         preview: files.find(f => image.test(f.path))?.path });
     }
+    w.versions.push(...additions);
     return this.save(w);
   }
   /** Optional local viewport derivative. Import is durable even if Blender cannot preview it. */
@@ -397,6 +411,7 @@ export class GraphicsEngine {
     try {
     for (const versionId of versionIds) {
       const version = this.get(id).versions.find(v => v.id === versionId && v.provenance.type === 'import');
+      if(version)this.assertImportedSource(version);
       if (!version || version.files.some(f => /\.glb$/i.test(f.path))) continue;
       const source = version.files.find(f => /\.(fbx|blend|obj|stl)$/i.test(f.path));
       if (!source) continue;
@@ -456,6 +471,7 @@ export class GraphicsEngine {
       if(this.isActive(id)||this.engine.isProjectActive(id))throw Error('현재 작업을 먼저 완료하세요.');
       const v=w.versions.find(v=>v.id===action.versionId&&v.objectId===object.id&&v.role==='model'&&v.slot==='main');
       if(!v||object.accepted['model:main']!==v.id||object.kind!=='character'||object.creation?.subject!=='human')throw Error('채택한 사람 전체 모델이 필요합니다.');
+      this.assertImportedSource(v);
       if(w.externalRigHandoffs?.some(v=>v.objectId===object.id&&!['failed','blocked','cancelled'].includes(v.state)&&!v.candidateVersionId))throw Error('기존 외부 리그 전달을 먼저 확인하세요.');
       for(const f of v.files)this.verified(id,f);
       const source=v.files.find(f=>isGraphicsProductionFile(f)&&/\.blend$/i.test(f.path))??v.files.find(f=>isGraphicsProductionFile(f)&&/\.fbx$/i.test(f.path)); if(!source)throw Error('원본 BLEND 또는 FBX가 필요합니다.');
@@ -464,6 +480,7 @@ export class GraphicsEngine {
     } else {
       h=w.externalRigHandoffs?.find(v=>v.id===action.handoffId&&v.objectId===object.id)!;if(!h)throw Error('전달 기록이 없습니다.');
       if(action.kind==='cancel-external-rig'){this.active.get(h.id)?.controller.abort();h.state='cancelled';h.updatedAt=now();return this.save(w);}
+      if(action.kind!=='recover-external-rig'){const source=w.versions.find(v=>v.id===h.sourceVersionId);if(!source)throw Error('전달 원본 버전이 없습니다.');this.assertImportedSource(source);}
       if(h.state==='cancelled'||h.candidateVersionId)throw Error('취소되거나 완료한 전달은 반복하지 않습니다.');
       if(this.isActive(id)||this.engine.isProjectActive(id))throw Error('현재 작업을 먼저 완료하세요.');this.verified(id,h.source);
       if(action.kind==='inspect-external-rig') {
@@ -552,6 +569,7 @@ export class GraphicsEngine {
       if(!('versionId' in action))throw Error('지원하지 않는 자동 리그 명령입니다.');
       const version=w.versions.find(v=>v.id===action.versionId&&v.objectId===object.id&&v.slot==='main');
       if(!version||object.kind!=='character'||object.creation?.subject!=='human')throw Error('사람 형태의 전체 모델 또는 리그가 필요합니다.');
+      this.assertImportedSource(version);
       if(action.kind==='start-auto-rig'&&(!['model','material'].includes(version.role)||object.accepted[`${version.role}:main`]!==version.id||!['neg-y','pos-y','pos-x','neg-x'].includes(action.frontAxis)||typeof action.fingers!=='boolean'))throw Error('채택한 전체 모델과 앞 방향·손가락 설정을 확인하세요.');
       if(action.kind!=='start-auto-rig'&&version.role!=='rig')throw Error('검사·보정할 리그 결과를 선택하세요.');
       for(const file of version.files)this.verified(id,file);
@@ -638,6 +656,7 @@ export class GraphicsEngine {
       case "accept": {
         const o = this.object(w, action.objectId), v = w.versions.find(v => v.id === action.versionId && v.objectId === o.id);
         if (!v) throw Error("이 대상의 결과가 아닙니다.");
+        this.assertImportedSource(v);
         if (v.contact && (!['repair', 'reconstruct'].includes(v.contact.phase) || v.contact.status !== 'repaired') || v.slot === 'contact-review')
           throw Error('접합 영역 분석은 채택할 모델이 아닙니다. 확인된 영역의 보정 결과를 비교하세요.');
         if (v.slot.startsWith('part-') && w.tasks.some(task => task.id === v.provenance.jobId && task.taskId === 'M06' && ['repair', 'reconstruct'].includes(String(task.settings.contactPhase))))
@@ -1009,7 +1028,7 @@ export class GraphicsEngine {
     if (!t || t.status !== "awaiting_approval") throw Error("승인 대기 중인 요청이 아닙니다.");
     if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error("다른 제작이 진행 중입니다. 완료 후 실행하세요.");
     const o = { ...this.object(w, t.objectId), ...t.objectSnapshot }, inputs = t.inputVersionIds.map(vid => w.versions.find(v => v.id === vid)!);
-    for (const v of inputs) { if (!v) throw Error("고정 입력 버전이 없습니다."); for (const f of v.files) this.verified(id, f); }
+    for (const v of inputs) { if (!v) throw Error("고정 입력 버전이 없습니다."); this.assertImportedSource(v); for (const f of v.files) this.verified(id, f); }
     if (t.taskId === "X05") {
       if (!t.objectSnapshot?.accepted) throw Error("이전 Unity 요청에 채택 버전의 고정 기록이 없습니다. 기존 요청을 취소하고 전달을 다시 준비하세요.");
       const issues = getGraphicsCompatibility(o, w.versions);
@@ -1127,6 +1146,7 @@ export class GraphicsEngine {
   private async execute(id: string, taskId: string, signal: AbortSignal, recoveryOnly = false) {
     let w = this.get(id); const t = w.tasks.find(t => t.id === taskId)!;
     const o = { ...this.object(w, t.objectId), ...t.objectSnapshot }, inputs = t.inputVersionIds.map(vid => w.versions.find(v => v.id === vid)!);
+    if(!recoveryOnly)for(const version of inputs)this.assertImportedSource(version);
     if (t.taskId === "X05") {
       if (!t.targetProfile) throw Error("고정된 Unity 프로젝트 설정이 없습니다.");
       const saved=t.deliveryId?w.deliveries.find(d=>d.id===t.deliveryId):undefined;
@@ -1330,6 +1350,7 @@ export class GraphicsEngine {
     if (existing) { for (const file of existing.files) this.verified(id, file); return w; }
     const source = w.versions.find(version => version.id === task.inputVersionIds[0]);
     if (!source || source.objectId !== provider.objectId || source.slot !== provider.slot || !provider.provenance.jobId) throw Error('API 파트의 고정 입력 연결이 없습니다.');
+    this.assertImportedSource(source); this.assertImportedSource(provider);
     const sourceFile = source.files.find(file => isGraphicsProductionFile(file) && /\.fbx$/i.test(file.path));
     const providerFile = provider.files.find(file => isGraphicsProductionFile(file) && /\.fbx$/i.test(file.path));
     if (!sourceFile || !providerFile) throw Error('크기·위치 복원에는 입력과 결과의 원본 FBX가 필요합니다.');
@@ -1375,6 +1396,7 @@ export class GraphicsEngine {
     if(recovery&&recovery.settings.algorithmVersion!==CURRENT_PLANAR_ALGORITHM)throw Error('이전 평면 작업은 새 알고리즘으로 재실행하지 않습니다. 이미 저장된 완료 후보는 유지됩니다. 새 복구는 명시적으로 다시 검사하세요.');
     const w=this.get(id),source=w.versions.find(v=>v.id===versionId);
     if(!source || source.role!=='model')throw Error('검사할 정적 모델을 선택하세요.');
+    if(!recovery)this.assertImportedSource(source);
     const file=source.files.find(f=>isGraphicsProductionFile(f)&&/\.blend$/i.test(f.path))??source.files.find(f=>isGraphicsProductionFile(f)&&/\.fbx$/i.test(f.path));
     if(!file)throw Error('검사에는 BLEND 또는 FBX 원본이 필요합니다.');
     for(const f of source.files)this.verified(id,f);
@@ -1410,6 +1432,7 @@ export class GraphicsEngine {
     if (existing) { for (const file of existing.files) this.verified(id, file); return w; }
     const { repair, original } = lineage;
     const versions = [provider, repair, original];
+    for(const version of versions)this.assertImportedSource(version);
     const files = versions.map(version => version.files.find(file => isGraphicsProductionFile(file) && /\.fbx$/i.test(file.path)));
     if (files.some(file => !file)) throw Error('기존 재질 복구에는 텍스처·보완·보완 전 원본의 FBX가 필요합니다.');
     for (const version of versions) for (const file of version.files) this.verified(id, file);

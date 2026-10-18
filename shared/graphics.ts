@@ -23,6 +23,14 @@ export type AssetVersion = {
   /** Analysis is review-only; repaired main and placed parts are adopted atomically. */
   contact?: import('./graphics-contact').GraphicsContactReview;
 };
+/** Imported formats are independent originals, never presumed equivalent exports. */
+export function importedModelSourceFiles(version: AssetVersion): GraphicsFile[] {
+  return version.files.filter(file => isGraphicsProductionFile(file) && /\.(blend|fbx|glb|obj|stl)$/i.test(file.path));
+}
+export function importedModelSourceProblem(version: AssetVersion): string | undefined {
+  if (version.provenance.type === 'import' && importedModelSourceFiles(version).length > 1)
+    return '여러 3D 원본이 한 가져오기 버전에 묶여 있습니다. 사용할 3D 원본 하나와 필요한 동반 이미지만 다시 가져오세요.';
+}
 export type UnityTargetProfile = {
   id: string; projectPath: string; unityVersion: string;
   pipeline: "urp" | "hdrp" | "builtin" | "unknown"; platform: "pc";

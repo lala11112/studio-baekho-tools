@@ -110,6 +110,7 @@ if q['format'] in ('fbx', 'both'):
     bpy.ops.export_scene.fbx(filepath=str(out / 'asset.fbx'), use_selection=True,
         object_types={'ARMATURE', 'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y',
         apply_unit_scale=True, apply_scale_options='FBX_SCALE_UNITS', add_leaf_bones=False,
+        use_custom_props=True,
         bake_anim=True, bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False,
         bake_anim_simplify_factor=0.0, path_mode='COPY', embed_textures=True)
     files.append('asset.fbx')

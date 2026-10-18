@@ -58,6 +58,10 @@ def pack_registered_companions(q, source):
         if not image.packed_file or hashlib.sha256(bytes(image.packed_file.data)).hexdigest()!=file['sha256']: raise ValueError('packed companion hash mismatch')
 
 SIZE_ROOT_MARKER = 'partsmith_physical_size_root'
+# FBX axis conversion returns FP32 object matrices. Allow four relative FP32
+# epsilons in the marked root's linear block (observed axis cancellation ~1.63e-7).
+# This validates serialized values only: never normalize or rewrite source TRS.
+SIZE_ROOT_LINEAR_REL_TOLERANCE = 4 * 2 ** -23
 
 def static_scene_meshes(objects):
     meshes=[o for o in objects if o.type=='MESH']; roots=[o for o in objects if o.type!='MESH']
@@ -65,10 +69,16 @@ def static_scene_meshes(objects):
     if roots:
         if len(roots)!=1: raise ValueError('only one static A05 physical-size root is supported')
         root=roots[0]
-        if root.type!='EMPTY' or root.get(SIZE_ROOT_MARKER) is not True or root.parent is not None:
+        marker=root.get(SIZE_ROOT_MARKER)
+        # FBX serializes True as int 1, also retained in subsequent editable BLENDs.
+        # Decode that exact representation without rewriting the stored property.
+        marked=marker is True or (type(marker) is int and marker==1)
+        if root.type!='EMPTY' or not marked or root.parent is not None:
             raise ValueError('only the marked static A05 physical-size root is supported')
         m=root.matrix_world
-        if any(not math.isfinite(v) for row in m for v in row) or any(m[i][i]<=0 for i in range(3)) or any(abs(m[i][j])>1e-8 for i in range(3) for j in range(3) if i!=j) or max(m[i][i] for i in range(3))-min(m[i][i] for i in range(3))>max(m[i][i] for i in range(3))*1e-7:
+        linear_scale=max(m[i][i] for i in range(3))
+        tolerance=linear_scale*SIZE_ROOT_LINEAR_REL_TOLERANCE
+        if any(not math.isfinite(v) for row in m for v in row) or any(m[i][i]<=0 for i in range(3)) or any(abs(m[i][j])>tolerance for i in range(3) for j in range(3) if i!=j) or max(m[i][i] for i in range(3))-min(m[i][i] for i in range(3))>tolerance:
             raise ValueError('A05 physical-size root requires positive uniform scale and translation only')
         if root.constraints or root.modifiers or root.library or root.instance_type!='NONE':
             raise ValueError('dynamic, linked or instanced A05 physical-size root unsupported')

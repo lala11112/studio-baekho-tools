@@ -1,7 +1,8 @@
-import { isGraphicsProductionFile, type AssetVersion, type GraphicsKind } from './graphics';
+import { importedModelSourceProblem, isGraphicsProductionFile, type AssetVersion, type GraphicsKind } from './graphics';
 
 /** Format readiness only. File hashes, UV quality and combined-rig contracts remain engine-owned. */
 export function graphicsInputSupportProblem(taskId: string, versions: AssetVersion[], kind?: GraphicsKind): string | undefined {
+  const ambiguous=versions.map(importedModelSourceProblem).find(Boolean);if(ambiguous)return ambiguous;
   if (!['T02', 'T05', 'A05', 'X04', 'X05'].includes(taskId)) return undefined;
   if (taskId === 'X05' && (kind === 'sprite' || kind === 'ui')) return undefined;
   const relevant = versions.filter(version => ['model', 'material', 'rig', 'animation'].includes(version.role));
