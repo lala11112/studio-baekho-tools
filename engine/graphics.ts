@@ -25,6 +25,7 @@ import { validatePlanarSelection, type PlanarSelection, type PlanarInspection, C
 import { compileCreation, validateCreation, creationCompositionStrategy } from "../shared/graphics-creation";
 import { freezeUnityRigContract } from '../shared/graphics-rig';
 import { DEFAULT_MODEL_FACE_LIMIT, requireModelGeometry } from '../shared/graphics-model-geometry';
+import { graphicsInputSupportProblem } from '../shared/graphics-input-support';
 import { executeGraphicsProcedural, proceduralProblem } from "./graphics-procedural";
 import { executeGraphicsNative } from "./graphics-native";
 import { executeGraphicsAstra } from "./graphics-astra";
@@ -909,6 +910,8 @@ export class GraphicsEngine {
     if (graphicsProceduralTasks.has(taskId)) { const problem = proceduralProblem({ ...o.settings, count: 1 }, taskId); if (problem) throw Error(problem); }
     if (w.tasks.some(t => t.objectId === o.id && ["awaiting_approval", "running", "submission_unknown"].includes(t.status))) throw Error("이 대상의 기존 작업을 확인하거나 취소한 뒤 새 작업을 준비하세요.");
     const inputs = this.inputs(w, o, taskId);
+    const inputSupportProblem = graphicsInputSupportProblem(taskId, inputs, o.kind);
+    if (inputSupportProblem) throw Error(inputSupportProblem);
     if (inputs.some(version => requiresPartSpaceRestoration(w, version))) throw Error('API 파트 결과의 원래 크기·위치 복원을 먼저 완료하세요. 원본은 유지됩니다.');
     if (inputs.some(version => requiresPartSourcePreparation(w, version))) throw Error('API 파트 원본의 로컬 작업 사본 준비를 먼저 완료하세요. 원본은 유지됩니다.');
     if (['M06', 'M09'].includes(taskId) && o.settings.meshSelectionVersionId !== undefined && inputs[0]?.id !== o.settings.meshSelectionVersionId)

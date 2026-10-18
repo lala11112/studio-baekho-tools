@@ -150,6 +150,7 @@ test('catalog task override uses its real inputs and avoids unrelated draft rout
 });
 test('Unity input helper chooses rig and includes exact animation and separate material',()=>{
   const {workspace,draft}=setup(); workspace.versions.push({...version('rig'),role:'rig',sourceVersionIds:['a']},{...version('clip','Idle'),role:'animation',sourceVersionIds:['rig']},{...version('mat'),role:'material',sourceVersionIds:['a']});
+  for (const v of workspace.versions) v.files = [{path:`${v.id}.blend`,kind:'blend',bytes:1,sha256:'f'.repeat(64)}];
   workspace.objects[0].accepted={'model:main':'a','rig:main':'rig','animation:Idle':'clip','material:main':'mat'};
   const r=getJourneyReadiness(workspace,'o',draft,{stage:'unity',taskOverride:'X05'});
   assert.deepEqual(r.inputs.map(i=>i.versionId),['rig','clip','mat']); assert.equal(r.problems.length,0);

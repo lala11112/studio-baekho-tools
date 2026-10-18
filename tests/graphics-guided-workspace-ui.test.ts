@@ -93,6 +93,14 @@ test('guided static workflow reviews exact input, persists draft, and keeps cost
     await page.getByRole('button',{name:'Unity에서 확인',exact:true}).waitFor();
     assert.equal(await page.getByRole('button',{name:'Unity 전달 다시 준비',exact:true}).isVisible(),true,'Completed delivery must keep an explicit redelivery preparation action');
     assert.match(await guide.innerText(),/현재 결과 가져오기 완료/);
+    const deliveryMessage=page.getByTestId('graphics-unity-delivery-message');
+    assert.equal(await deliveryMessage.count(),0,'A receipt alone does not invent a completed task message');
+    await page.evaluate(()=>{const w=window as any;w.fixture.tasks=[{id:'first-delivery',objectId:'crate',taskId:'X05',status:'review',deliveryId:'delivery',inputVersionIds:['imported-model'],outputVersionIds:[],settings:{},createdAt:'',updatedAt:'',message:'Unity 가져오기 완료 · 첫 전달'}];w.renderFixture();});
+    await deliveryMessage.filter({hasText:'첫 전달'}).waitFor();
+    assert.equal(await deliveryMessage.locator('xpath=ancestor::details[not(@open)]').count(),0,'Exact delivery status is outside collapsed task history');
+    await page.evaluate(()=>{const w=window as any,base=w.fixture.tasks[0];w.fixture.tasks.push({...base,id:'reused',message:'동일한 Unity 전달본을 재사용했습니다. 새 생성·재생은 없습니다.'},{...base,id:'wrong-object',objectId:'another',message:'다른 오브젝트의 잘못된 안내'},{...base,id:'wrong-input',inputVersionIds:['old-model'],message:'이전 입력의 잘못된 안내'},{...base,id:'wrong-delivery',deliveryId:'old-delivery',message:'이전 전달의 잘못된 안내'});w.renderFixture();});
+    await deliveryMessage.filter({hasText:'동일한 Unity 전달본'}).waitFor();
+    assert.doesNotMatch(await deliveryMessage.innerText(),/잘못된 안내/);
     const layouts=[];
     for(const width of [800,960,1280,1920]) {
       await page.setViewportSize({width,height:900});

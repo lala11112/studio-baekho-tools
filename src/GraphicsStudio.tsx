@@ -1464,6 +1464,9 @@ export function GraphicsStudio({
   const journey = workspace && object ? deriveJourney(workspace, object.id, creation, { stage, partId: texturePart?.id, taskOverride, clipName: stage === 'animation' ? String(settings.clipName ?? 'Idle') : undefined, candidateVersionId: relevantPreview }) : undefined;
   const guideTask = journey?.task;
   const deliveryCurrent = stage === 'unity' && journey?.stages.find(item => item.id === 'unity')?.status === 'complete';
+  const currentDeliveryMessage = deliveryCurrent && journey?.delivery?.status === 'imported'
+    ? [...objectTasks].reverse().find(task => task.taskId === 'X05' && task.status === 'review' && task.deliveryId === journey.delivery!.id && task.objectId === object?.id && task.objectId === journey.delivery!.objectId && JSON.stringify([...task.inputVersionIds].sort()) === JSON.stringify([...journey.delivery!.versionIds].sort()))?.message
+    : undefined;
   const reviewVersion = journey?.review?.version;
   const reviewIsShown = Boolean(reviewVersion && shownVersion?.id === reviewVersion.id);
   const adoptableReview = Boolean(journey?.review?.adoptable && !journey.review.accepted && reviewIsShown && !contactPartProducer);
@@ -2546,6 +2549,7 @@ export function GraphicsStudio({
                     {guideInputs}
                     {stage === 'unity' && journey?.delivery && <section className="gs-guide-inputs" aria-label="Unity 전달 확인">
                       <strong>{deliveryCurrent ? '현재 결과 가져오기 완료' : '이전 전달 기록 · 현재 원본과 다시 확인 필요'}</strong>
+                      {currentDeliveryMessage && <p className="gs-fine" data-testid="graphics-unity-delivery-message">{currentDeliveryMessage}</p>}
                       <p>{journey.delivery.prefabPath ?? journey.delivery.destination}</p>
                       <p>{journey.delivery.playbackVerified ? '재생 검사 기록 있음' : 'Play Mode 재생 검사는 별도입니다.'}</p>
                       <small>{journey.delivery.status === 'imported' ? 'Unity에서 확인된 가져오기 기록' : '파일 준비와 Unity 가져오기 완료는 다릅니다.'}</small>

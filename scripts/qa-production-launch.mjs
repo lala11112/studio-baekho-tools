@@ -36,5 +36,5 @@ try{
  }
  report.passed=true;
 }catch(error){report.failure=String(error);throw error;}
-finally{fs.writeFileSync('artifacts/runtime/qa-20261018-production-launch.json',JSON.stringify(report,null,2));await app.close();}
+finally{fs.writeFileSync(process.env.PARTSMITH_QA_LAUNCH_REPORT ?? 'artifacts/runtime/qa-20261018-production-launch.json',JSON.stringify(report,null,2));await app.close();}
 console.log(JSON.stringify(report));

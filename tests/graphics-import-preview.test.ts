@@ -79,17 +79,17 @@ test('source mutation during preview cannot register output and concurrent reque
   assert.equal(f.graphics.isActive(f.project.id), false);
 });
 
-test('real FBX and BLEND imports get local GLB previews and native counts without altering original files', { timeout: 180000 }, async t => {
+test('real FBX, BLEND, OBJ and STL imports get local GLB previews and native counts without altering original files', { timeout: 180000 }, async t => {
   const blender = process.env.BLENDER_PATH ?? 'C:/Program Files/Blender Foundation/Blender 5.0/blender.exe';
   if (!fs.existsSync(blender)) return t.skip('Blender unavailable');
   const f = await fixture(t);
   const script = path.join(f.root, 'fixture.py');
-  fs.writeFileSync(script, `import bpy,sys,os\nbpy.ops.wm.read_factory_settings(use_empty=True)\nbpy.ops.mesh.primitive_cube_add()\nobj=bpy.context.object\nobj.name='PreservedCube'\nobj['original_marker']='keep'\nbpy.ops.wm.save_as_mainfile(filepath=${JSON.stringify(path.join(f.root, 'cube.blend'))})\nbpy.ops.export_scene.fbx(filepath=${JSON.stringify(path.join(f.root, 'cube.fbx'))},use_selection=True,add_leaf_bones=False)\n`);
+  fs.writeFileSync(script, `import bpy,sys,os\nbpy.ops.wm.read_factory_settings(use_empty=True)\nbpy.ops.mesh.primitive_cube_add()\nobj=bpy.context.object\nobj.name='PreservedCube'\nobj['original_marker']='keep'\nbpy.ops.wm.save_as_mainfile(filepath=${JSON.stringify(path.join(f.root, 'cube.blend'))})\nbpy.ops.export_scene.fbx(filepath=${JSON.stringify(path.join(f.root, 'cube.fbx'))},use_selection=True,add_leaf_bones=False)\nbpy.ops.wm.obj_export(filepath=${JSON.stringify(path.join(f.root, 'cube.obj'))},export_selected_objects=True)\nbpy.ops.wm.stl_export(filepath=${JSON.stringify(path.join(f.root, 'cube.stl'))},export_selected_objects=True)\n`);
   const made = spawnSync(blender, ['--background', '--factory-startup', '--disable-autoexec', '--python', script], { windowsHide: true, encoding: 'utf8', timeout: 60000 });
   assert.equal(made.status, 0, made.stdout + made.stderr);
   f.store.settings.blenderPath = blender;
   const local = new LocalPipeline(f.store, path.resolve('integrations'));
-  for (const extension of ['fbx', 'blend']) {
+  for (const extension of ['fbx', 'blend', 'obj', 'stl']) {
     const source = path.join(f.root, `cube.${extension}`), sha = hash(source);
     const imported = f.graphics.importFiles(f.project.id, f.objectId, 'model', [source]);
     const version = imported.versions.at(-1)!, originals = structuredClone(version.files);
@@ -101,7 +101,7 @@ test('real FBX and BLEND imports get local GLB previews and native counts withou
     assert.ok(preview); assert.ok(preview.bytes > 100);
     assert.equal(hash(f.store.file(f.project.id, preview.path)), preview.sha256);
     const report = JSON.parse(fs.readFileSync(f.store.file(f.project.id, current.files.find(file => file.kind === 'report')!.path), 'utf8'));
-    assert.equal(report.nativeSourceSha256, sha); assert.equal(report.faces, 6); assert.equal(report.triangles, 12);
+    assert.equal(report.nativeSourceSha256, sha); assert.equal(report.faces, extension === 'stl' ? 12 : 6); assert.equal(report.triangles, 12);
     assert.equal(hash(source), sha); assert.equal(hash(f.store.file(f.project.id, originals[0].path)), sha);
     assert.deepEqual(result.objects[0].accepted, {}); assert.equal(result.tasks.length, 0);
   }

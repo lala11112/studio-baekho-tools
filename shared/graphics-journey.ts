@@ -3,6 +3,7 @@ import { requiresPartSourcePreparation, requiresPartSpaceRestoration } from './g
 import { creationPartForTask, creationStages, creationTaskId, creationSelectionProblem, isBiologicalSubject, stageForTask, type CreationSpec, type CreationStage } from './graphics-creation';
 import { getGraphicsCompatibility } from './graphics-lineage';
 import { graphicsAstraTasks } from './graphics-catalog';
+import { graphicsInputSupportProblem } from './graphics-input-support';
 
 export type JourneyFocus = { stage: CreationStage; partId?: string; clipName?: string; candidateVersionId?: string; taskId?: string; taskOverride?: string };
 export type JourneyTarget = JourneyAction['target'];
@@ -107,6 +108,8 @@ export function getJourneyReadiness(workspace: GraphicsWorkspace, objectId: stri
     }
     if(taskId==='N02') explicitInput(draft.stageSettings.animation?.values.motionSourceVersionId,'animation','동작 영상에 사용할 원본 이미지를 선택하세요.',true);
   }
+  const formatProblem = inputs.length ? graphicsInputSupportProblem(taskId, inputs.flatMap(input => input.version ? [input.version] : []), object?.kind) : undefined;
+  if (formatProblem) problems.push({ reason: formatProblem, target: target(focus.stage) });
   if(['animation','unity'].includes(focus.stage) && object) for(const reason of getGraphicsCompatibility(object,workspace.versions)) problems.push({reason,target:target(focus.stage)});
   if(['I05','I07','M15'].includes(taskId) || graphicsAstraTasks.has(taskId) && !['M08','M15'].includes(taskId)) {
     for(const ref of object?.references ?? []) {
