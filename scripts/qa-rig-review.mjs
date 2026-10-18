@@ -2,7 +2,7 @@
 import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import{createHash}from'node:crypto';
 import{_electron as electron}from'playwright';import binary from'electron';
 const read=f=>JSON.parse(fs.readFileSync(f,'utf8').replace(/^\uFEFF/,'')),sha=f=>createHash('sha256').update(fs.readFileSync(f)).digest('hex');
-const fixture=read('artifacts/runtime/graphics-auto-rig-start-live.json'),out=path.resolve('artifacts/runtime/qa-20261018-rig');fs.mkdirSync(out,{recursive:true});
+const fixture=read('artifacts/runtime/graphics-auto-rig-start-live.json'),out=path.resolve(process.env.PARTSMITH_QA_RIG_OUTPUT ?? 'artifacts/runtime/qa-20261018-rig');fs.mkdirSync(out,{recursive:true});
 const workspaceFile=path.join(fixture.projectRoot,'graphics/workspace.json'),before=read(workspaceFile),beforeSha=sha(workspaceFile);
 const candidate=before.versions.find(v=>v.id===fixture.run.candidateVersionId);assert(candidate?.id.startsWith('b005b7d1'));
 for(const f of candidate.files)assert.equal(sha(path.join(fixture.projectRoot,f.path)),f.sha256);

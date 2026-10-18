@@ -431,13 +431,14 @@ export function createGraphicsNativeExecutor(dependencies: Dependencies = {}) {
       const format = task.taskId === "X04" ? String(task.settings.exportFormat ?? "both") : "both";
       const physicalSize = task.settings.physicalSize === undefined ? undefined : normalizePhysicalSize(task.settings.physicalSize);
       if (!Number.isFinite(scale) || scale <= 0 || scale > 1e6 || !["keep", "center", "bottom"].includes(pivot) || !["fbx", "glb", "both"].includes(format)) throw Error("크기·피벗·내보내기 설정을 확인하세요.");
-      if (!args.blenderPath || !fs.existsSync(args.blenderPath)) throw Error("설정된 Blender 실행 파일을 확인하세요.");
-      const script = path.join(args.resources, "blender", "graphics_local.py");
-      if (!fs.existsSync(script)) throw Error("로컬 그래픽 변환 스크립트가 없습니다.");
       const reportPath = path.join(output, "report.json"), specPath = path.join(work, "local-request.json");
-      write(specPath, { schemaVersion: 1, identity, source: source.localPath, output, operation: task.taskId, scale, pivot, format, physicalSize });
-      // Local work may be repeated after failure, but never silently overwrite a completed output.
+      // Recovery only validates saved output. A fresh local conversion requires an explicit run.
       if (!fs.existsSync(reportPath)) {
+        if (args.recoveryOnly) throw Error("저장된 완전한 로컬 변환 결과가 없습니다. 복구에서 Blender를 새로 실행하지 않습니다.");
+        if (!args.blenderPath || !fs.existsSync(args.blenderPath)) throw Error("설정된 Blender 실행 파일을 확인하세요.");
+        const script = path.join(args.resources, "blender", "graphics_local.py");
+        if (!fs.existsSync(script)) throw Error("로컬 그래픽 변환 스크립트가 없습니다.");
+        write(specPath, { schemaVersion: 1, identity, source: source.localPath, output, operation: task.taskId, scale, pivot, format, physicalSize });
         args.onProgress(task.taskId === "A05" ? "Blender에서 원본을 보존하며 크기·피벗을 새 버전에 적용합니다." : "Blender에서 새 FBX/GLB 내보내기 파일을 만듭니다.");
         await (dependencies.runBlender ?? runBlender)(args.blenderPath, ["--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1", "--python", script, "--", specPath], args.signal);
       }

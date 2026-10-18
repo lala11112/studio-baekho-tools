@@ -28,6 +28,7 @@ type Props = {
   onCorrect: (selection: AutoRigRepair) => Promise<void>;
   onRegion?: (selection: AutoRigIsland | undefined) => void;
   footerHost?: HTMLElement | null;
+  previewVersionId?: string;
 };
 
 /** Every mutation is an explicit callback. Rendering and selecting never starts work. */
@@ -44,8 +45,9 @@ export function GraphicsAutoRig(props: Props) {
   const selectedIsland = view.islands.find(island => JSON.stringify([island.mesh, island.islandId]) === meshId);
   const source = sources.find(version => version.id === sourceId);
   const sourcePreviewAvailable = !!source?.files.some(file=>/\.glb$/i.test(file.path));
+  const sourcePreviewCurrent = !!source && props.previewVersionId === source.id;
   const locked = disabled || view.running;
-  const runEnabled = !locked && view.ready && !!source && sourcePreviewAvailable && !!frontAxis;
+  const runEnabled = !locked && view.ready && !!source && sourcePreviewAvailable && sourcePreviewCurrent && !!frontAxis;
   const [submitting, setSubmitting] = useState(false);
   const invoke = async (callback: () => Promise<void>) => { if (submitting) return; setSubmitting(true); try { await callback(); } finally { setSubmitting(false); } };
   const primary = view.running ? <div className="gs-auto-rig-running"><strong role="status">{view.progress || '로컬 작업 진행 중'}</strong><button type="button" onClick={() => void props.onCancel()}>작업 중단</button></div> : view.candidate ? view.adopted ? <button type="button" className="gs-primary" disabled={locked} onClick={props.onUnity}>Unity 내보내기 설정</button> : <button type="button" className="gs-primary" data-testid="auto-rig-adopt" disabled={disabled || submitting || view.running} onClick={() => void invoke(props.onAdopt)}>이 리그 사용</button> : <button form="graphics-auto-rig-form" type="submit" className="gs-primary" data-testid="auto-rig-run" disabled={!runEnabled || submitting}>{submitting ? '요청 처리 중' : '이 모델 자동 리깅'}</button>;
@@ -61,10 +63,11 @@ export function GraphicsAutoRig(props: Props) {
     </section>
     <form id="graphics-auto-rig-form" onSubmit={event => { event.preventDefault(); if (runEnabled && frontAxis) void invoke(() => props.onRun({ versionId: source!.id, frontAxis, fingers })); }}>
       <section className="gs-auto-rig-input" aria-label="자동 리깅 원본">
-        <label>실행할 전체 모델<select aria-label="자동 리깅 원본" value={sourceId} disabled={locked || submitting} onChange={event => { setSourceId(event.target.value);setFrontAxis(''); }}><option value="">전체 모델 선택</option>{sources.map(version => <option key={version.id} value={version.id}>{version.label} · {version.role === 'material' ? '채택 재질 모델' : '채택 모델'}</option>)}</select></label>
+        <label>실행할 전체 모델<select aria-label="자동 리깅 원본" value={sourceId} disabled={locked || submitting} onChange={event => { const selected=sources.find(version=>version.id===event.target.value);setSourceId(event.target.value);setFrontAxis('');if(selected)props.onShow(selected); }}><option value="">전체 모델 선택</option>{sources.map(version => <option key={version.id} value={version.id}>{version.label} · {version.role === 'material' ? '채택 재질 모델' : '채택 모델'}</option>)}</select></label>
         {sources.length > 1 && <small>채택 모델과 재질 모델이 있습니다. 색·텍스처를 포함할 정확한 원본을 선택하세요.</small>}
         {source && <><small data-testid="auto-rig-source-id">{source.id}</small><code>{source.files.find(file => /\.(blend|fbx|glb)$/i.test(file.path))?.sha256}</code></>}
         {source && sourcePreviewAvailable && <button type="button" onClick={()=>props.onShow(source)}>실행 원본 3D 보기</button>}
+        {source && sourcePreviewAvailable && !sourcePreviewCurrent && <p role="status" data-testid="auto-rig-preview-mismatch">현재 미리보기와 실행 원본이 다릅니다. ‘실행 원본 3D 보기’로 원본을 확인한 뒤 리깅하세요.</p>}
         {!sourcePreviewAvailable && source && <p role="alert">이 원본에는 3D 미리보기가 없습니다. 같은 원본의 GLB 미리보기를 먼저 준비해야 앞 방향을 확인하고 실행할 수 있습니다.</p>}
         <label>모델이 바라보는 앞 방향<select aria-label="모델 앞 방향" value={frontAxis} disabled={locked || submitting || !sourcePreviewAvailable} onChange={event => setFrontAxis(event.target.value as AutoRigDraft['frontAxis'])}><option value="">미리보기 축을 보고 선택하세요</option>{(['+X', '-X', '+Y', '-Y'] as const).map(axis => <option key={axis} value={axis}>{axis}</option>)}</select></label>
         <label className="gs-auto-rig-check"><input type="checkbox" checked={fingers} disabled={locked || submitting} onChange={event => setFingers(event.target.checked)} />손가락도 자동 감지</label>

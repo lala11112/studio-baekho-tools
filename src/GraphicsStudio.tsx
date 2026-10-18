@@ -1575,9 +1575,10 @@ export function GraphicsStudio({
     if(stage==='rig' && (newResult || !shownVersionId) && autoRigLatestResultRun?.objectId===objectId && autoRigLatestResultRun.candidateVersionId) setShownVersionId(autoRigLatestResultRun.candidateVersionId);
   },[objectId,stage,autoRigLatestResultRun?.id]);
   const autoRigPanel = object && <GraphicsAutoRig key={object.id} object={object} versions={versions} view={autoRigView} disabled={disabled || active}
+    previewVersionId={shownVersion?.id}
     footerHost={autoRigFooterHost}
     onCheck={async () => { await run({ kind: 'probe-auto-rig' }); }}
-    onRun={async draft => { const front = { '+X': 'pos-x', '-X': 'neg-x', '+Y': 'pos-y', '-Y': 'neg-y' } as const; await run({ kind: 'start-auto-rig', objectId: object.id, versionId: draft.versionId, frontAxis: front[draft.frontAxis], fingers: draft.fingers }); }}
+    onRun={async draft => { if(shownVersion?.id!==draft.versionId){setNotice('실행 원본 3D 보기로 선택한 원본을 확인한 뒤 리깅하세요.');return;}const front = { '+X': 'pos-x', '-X': 'neg-x', '+Y': 'pos-y', '-Y': 'neg-y' } as const; await run({ kind: 'start-auto-rig', objectId: object.id, versionId: draft.versionId, frontAxis: front[draft.frontAxis], fingers: draft.fingers }); }}
     onCancel={async () => { const running = autoRigRuns.find(item => item.state === 'running'); if (running) { try { await onAction({ kind: 'cancel-auto-rig', objectId: object.id, runId: running.id }); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } } }}
     onRecover={async () => { if (autoRigRun) await run({ kind: 'recover-auto-rig', objectId: object.id, runId: autoRigRun.id }); }}
     onInspect={async () => { if (autoRigCandidate) await run({ kind: 'inspect-auto-rig', objectId: object.id, versionId: autoRigCandidate.id }); }}

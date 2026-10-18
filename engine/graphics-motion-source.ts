@@ -84,6 +84,7 @@ export function createGraphicsMotionSourceExecutor(dependencies: { runBlender?: 
     active.add(key);
     let staging: string | undefined;
     try {
+      if (args.recoveryOnly && !fs.existsSync(checkpoint)) throw Error("완료 기록 없는 측면 렌더는 복구에서 새로 실행하지 않습니다. 기존 원본과 출력을 보존합니다.");
       directory(root, output);
       if (fs.existsSync(checkpoint)) {
         const saved = JSON.parse(fs.readFileSync(checkpoint, "utf8"));
@@ -92,6 +93,7 @@ export function createGraphicsMotionSourceExecutor(dependencies: { runBlender?: 
         if (JSON.stringify(saved.result.files) !== JSON.stringify(saved.files.map(({ path, kind }: GraphicsFile) => ({ path, kind })))) throw Error("저장된 측면 렌더 파일 목록이 다릅니다.");
         return saved.result;
       }
+      if (args.recoveryOnly) throw Error("완료 기록 없는 측면 렌더는 복구에서 새로 실행하지 않습니다. 기존 원본과 출력을 보존합니다.");
       if (fs.readdirSync(output).length) throw Error("완료 기록 없는 기존 측면 출력이 있습니다. 덮어쓰지 않고 보존합니다.");
       if (!fs.existsSync(args.blenderPath)) throw Error("설정된 Blender 실행 파일이 없습니다.");
       const script = path.join(args.resources, "blender/graphics_motion_source.py");
