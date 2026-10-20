@@ -1,5 +1,6 @@
 import type { AssetBinding, AssetRole, Cell, CliffFace, Direction, GenerationRegion, GridMap, PitBottom, StructureFill, StructureSettings, ValidationIssue, Vec3 } from './types';
 import { connectionCells } from './connections';
+import { synchronizeWallMounts } from './wall-mounts';
 
 export const DEFAULT_STRUCTURE_SETTINGS: StructureSettings = {
   ceilingClearance: 4, fillDoorTops: true, fillHeightGaps: true, gapRole: 'wall',
@@ -119,7 +120,7 @@ export function configureStructures(source: GridMap, settings: StructureSettings
 
 /** Pure update of adopted structures. Does not reintroduce removed roof cells or move manual roofs. */
 export function synchronizeStructures(source: GridMap, region?: GenerationRegion): GridMap {
-  if (!source.structureSettings) return structuredClone(source);
+  if (!source.structureSettings) return synchronizeWallMounts(structuredClone(source));
   assertRegion(source, region);
   const map = structuredClone(source), settings = map.structureSettings!, locked = new Set((map.lockedCells ?? []).map(key));
   const ceilingY = automaticCeilingY(map), hasRoof = Boolean(map.ceilings?.length);
@@ -159,7 +160,7 @@ export function synchronizeStructures(source: GridMap, region?: GenerationRegion
   // Old decorative cliffs are superseded only on precisely matching repaired interior edges.
   const pitSides = new Set(map.structureFills.filter(f => f.purpose === 'pitSide').map(f => `${key(f)},${f.direction}`));
   map.cliffs = (map.cliffs ?? []).filter(c => !pitSides.has(`${key(c)},${c.direction}`) || locked.has(key(c)) || !inside(c, region));
-  return map;
+  return synchronizeWallMounts(map);
 }
 
 function deriveStructures(map: GridMap, settings: StructureSettings): { bottoms: PitBottom[]; fills: StructureFill[] } {

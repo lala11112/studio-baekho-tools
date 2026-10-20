@@ -1,14 +1,16 @@
 import { lstat, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
-import { MAP_JSON_SCHEMA, validateMap, parseBindings } from '../../src/shared/map';
+import { MAP_JSON_SCHEMA, mapStructureErrors, validateMap, parseBindings } from '../../src/shared/map';
+import { clearGroupedPropHints } from '../../src/shared/grouped-props';
 import { propCatalogPrompt } from '../../src/shared/props';
 import { analyzeLevelDesign } from '../../src/shared/level-design';
 import { applyGeneratedFeatures, generationConditionIssues } from '../../src/shared/features';
+import { assertResolvedConceptSettings, parseConceptGenerationContext, parseConceptText } from '../../src/shared/concepts';
 import type { CodexModelInfo, CodexStatus, GenerationSettings, GridMap } from '../../src/shared/types';
 import { CodexTransport } from './codex-transport';
 import type { CodexRpc, RpcObject } from './codex-transport';
 import { atomicWrite } from './projects';
-import { imagePrompt, layoutPrompt } from './prompts';
+import { conceptPrompt, imagePrompt, layoutPrompt } from './prompts';
 import { decodePngDataUrl, MAX_IMAGE_BYTES, validateGenerationRegion, validateSettings } from './validation';
 import { discoverCodex, inspectRuntime } from './codex-runtime';
 import type { CodexRuntime } from './codex-runtime';
@@ -18,12 +20,11 @@ export type { CodexRuntime } from './codex-runtime';
 export interface CodexOptions {
   dataDirectory: string;
   executable?: string;
-  timeoutMs?: number;
   discover?: () => Promise<CodexRuntime | null>;
   /** Test/diagnostic override that returns an already initialized transport. */
   connect?: (runtime: CodexRuntime, directory: string) => Promise<CodexRpc>;
 }
-interface ActiveJob { controller: AbortController; threadId?: string; turnId?: string; timedOut: boolean }
+interface ActiveJob { controller: AbortController; threadId?: string; turnId?: string }
 function object(value: unknown): RpcObject { return value && typeof value === 'object' && !Array.isArray(value) ? value as RpcObject : {}; }
 function childOf(root: string, target: string): boolean {
   const relative = path.relative(root, target);
@@ -122,7 +123,7 @@ export class CodexService {
         .filter(model => typeof model.model === 'string' && (!Array.isArray(model.inputModalities) || model.inputModalities.includes('image')))
         .map(model => ({ id: String(model.model), name: typeof model.displayName === 'string' ? model.displayName : String(model.model), isDefault: model.isDefault === true }));
       if (!models.length) return { state: 'error', message: '사용 가능한 이미지 입력 모델을 찾지 못했습니다. Codex 계정과 모델 접근 권한을 확인해 주세요.', version: this.runtime!.version, models: [] };
-      return { state: 'ready', message: 'Codex의 ChatGPT 로그인으로 연결되었습니다. 이미지 생성과 배치 분석은 Codex 사용량에 반영됩니다.', version: this.runtime!.version, models };
+      return { state: 'ready', message: 'Codex의 ChatGPT 로그인으로 연결되었습니다. 컨셉 작성·이미지 생성·배치 분석은 Codex 사용량에 반영됩니다.', version: this.runtime!.version, models };
     } catch (error) {
       if (client && this.rpc === client) this.resetConnection();
       return { state: 'error', message: error instanceof Error ? error.message : 'Codex 연결을 확인하지 못했습니다.', ...(this.runtime ? { version: this.runtime.version } : {}), models: [] };
@@ -159,13 +160,13 @@ export class CodexService {
 
   close(): void { this.disposed = true; this.cancel(); this.resetConnection(); }
 
-  private aborted(job: ActiveJob): Error {
-    return new Error(job.timedOut ? 'Codex 생성이 5분 안에 완료되지 않았습니다. 다시 시도해 주세요.' : 'Codex 생성이 취소되었습니다.');
+  private aborted(): Error {
+    return new Error('Codex 생성이 취소되었습니다.');
   }
 
   private async duringJob<T>(promise: Promise<T>, job: ActiveJob): Promise<T> {
     return new Promise((resolve, reject) => {
-      const onAbort = () => reject(this.aborted(job));
+      const onAbort = () => reject(this.aborted());
       job.controller.signal.addEventListener('abort', onAbort, { once: true });
       if (job.controller.signal.aborted) onAbort();
       promise.then(resolve, reject).finally(() => job.controller.signal.removeEventListener('abort', onAbort));
@@ -174,13 +175,12 @@ export class CodexService {
 
   private async runJob<T>(settings: GenerationSettings, operation: (client: CodexRpc, job: ActiveJob, directory: string) => Promise<T>): Promise<T> {
     if (this.active) throw new Error('이미 Codex 생성이 진행 중입니다. 완료하거나 취소한 뒤 다시 시도해 주세요.');
-    const job: ActiveJob = { controller: new AbortController(), timedOut: false };
+    const job: ActiveJob = { controller: new AbortController() };
     this.active = job;
     let directory: string | undefined;
-    const timer = setTimeout(() => { job.timedOut = true; this.cancel(); }, this.options.timeoutMs ?? 5 * 60 * 1000);
     try {
       const status = await this.duringJob(this.getStatus(), job);
-      if (job.controller.signal.aborted) throw this.aborted(job);
+      if (job.controller.signal.aborted) throw this.aborted();
       if (status.state !== 'ready') throw new Error(status.message);
       if (settings.codexModel && !status.models.some(model => model.id === settings.codexModel)) throw new Error('선택한 모델을 현재 Codex 계정에서 사용할 수 없습니다. 연결 상태를 새로 확인하고 모델을 선택해 주세요.');
       const client = this.rpc!;
@@ -190,19 +190,18 @@ export class CodexService {
         selectedCapabilityRoots: [],
         ...(settings.codexModel ? { model: settings.codexModel } : {}),
         config: { mcp_servers: this.disabledMcpServers },
-        baseInstructions: 'You are a focused map design assistant embedded in Baekho Map Forge. Generate requested PNG images with the native image_generation tool, or interpret the supplied image and return the required JSON map. You have no coding, browsing, terminal, filesystem, app, or delegation task. Work only from the provided map description and image.',
-        developerInstructions: 'You are the map design engine of Baekho Map Forge. Use only the native image generation tool for requested images, and your own visual reasoning for grid extraction. Do not run commands, read unrelated files, use external apps, browse, spawn agents, or modify any project. Follow the exact output contract. Do not replace failures with sample data.',
+        baseInstructions: 'You are a focused map design assistant embedded in Baekho Map Forge. Write a Korean map concept as requested JSON, generate requested PNG images with the native image_generation tool, or interpret the supplied image and return the required JSON map. You have no coding, browsing, terminal, filesystem, app, or delegation task. Work only from the provided settings, map description, catalog and image.',
+        developerInstructions: 'You are the map design engine of Baekho Map Forge. Write concepts without tools, use only the native image generation tool for requested images, and use your own visual reasoning for grid extraction. Explicit generation settings override creative concept details. Do not run commands, read unrelated files, use external apps, browse, spawn agents, or modify any project. Follow the exact output contract. Do not replace failures with sample data.',
       }), job);
       const thread = object(started.thread);
       if (typeof thread.id !== 'string') throw new Error('Codex 작업을 시작하지 못했습니다. CLI를 업데이트해 주세요.');
       job.threadId = thread.id;
-      if (job.controller.signal.aborted) throw this.aborted(job);
+      if (job.controller.signal.aborted) throw this.aborted();
       return await operation(client, job, directory);
     } catch (error) {
-      if (job.controller.signal.aborted) throw this.aborted(job);
+      if (job.controller.signal.aborted) throw this.aborted();
       throw error;
     } finally {
-      clearTimeout(timer);
       if (job.threadId && this.rpc && !job.controller.signal.aborted) {
         await this.rpc.request('thread/unload', { threadId: job.threadId }).catch(() => this.resetConnection());
       }
@@ -230,7 +229,7 @@ export class CodexService {
         if (error && !job.controller.signal.aborted) this.resetConnection();
         error ? reject(error) : resolve([...items.values()]);
       };
-      const onAbort = () => finish(this.aborted(job));
+      const onAbort = () => finish(this.aborted());
       const stopClose = client.onClose(() => finish(new Error('Codex 연결이 작업 중 종료되었습니다. 다시 연결한 뒤 시도해 주세요.')));
       const stopNotifications = client.onNotification((method, notification) => {
         if (notification.threadId !== job.threadId) return;
@@ -257,8 +256,34 @@ export class CodexService {
     });
   }
 
+  async generateConcept(input: unknown, catalogInput?: unknown, contextInput?: unknown): Promise<string> {
+    const settings = validateSettings(input);
+    const catalog = catalogInput === undefined ? undefined : parseBindings(catalogInput);
+    const context = parseConceptGenerationContext(contextInput);
+    if (context?.currentMap && (context.currentMap.width !== settings.width || context.currentMap.height !== settings.height
+      || context.currentMap.cellSize !== settings.cellSize || context.currentMap.maxStepHeight !== settings.maxStepHeight)) {
+      throw new Error('컨셉 작성에 참고할 현재 맵이 생성 설정과 다릅니다.');
+    }
+    return this.runJob(settings, async (client, job) => {
+      const items = await this.turn(client, job, {
+        input: [{ type: 'text', text: conceptPrompt(settings, catalog, context) }],
+        outputSchema: { type: 'object', properties: { text: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['text'], additionalProperties: false },
+      });
+      const messages = items.filter(item => item.type === 'agentMessage' && typeof item.text === 'string');
+      const final = [...messages].reverse().find(item => item.phase === 'final_answer')
+        ?? [...messages].reverse().find(item => item.phase === null || item.phase === undefined);
+      let response: unknown;
+      try { response = JSON.parse(String(final?.text ?? '')); }
+      catch { throw new Error('Codex가 올바른 컨셉 JSON을 반환하지 않았습니다. 컨셉 작성을 다시 시도해 주세요.'); }
+      const fields = object(response);
+      if (Object.keys(fields).length !== 1 || !Object.hasOwn(fields, 'text')) throw new Error('Codex 컨셉 응답은 text만 포함해야 합니다. 다시 시도해 주세요.');
+      return parseConceptText(fields.text, 'ai');
+    });
+  }
+
   async generateImage(input: unknown, regionInput?: unknown, catalogInput?: unknown): Promise<string> {
     const settings = validateSettings(input);
+    assertResolvedConceptSettings(settings);
     const region=validateGenerationRegion(regionInput,settings);
     const catalog=catalogInput===undefined?undefined:parseBindings(catalogInput);
     return this.runJob(settings, async (client, job, directory) => {
@@ -291,6 +316,7 @@ export class CodexService {
 
   async extractLayout(input: unknown, imageDataUrl: unknown, regionInput?: unknown, catalogInput?: unknown): Promise<GridMap> {
     const settings = validateSettings(input);
+    assertResolvedConceptSettings(settings);
     const region=validateGenerationRegion(regionInput,settings);
     const catalog=catalogInput===undefined?undefined:parseBindings(catalogInput);
     decodePngDataUrl(imageDataUrl);
@@ -305,12 +331,16 @@ export class CodexService {
       let map: GridMap;
       try { map = JSON.parse(String(final?.text ?? '')) as GridMap; }
       catch { throw new Error('Codex가 올바른 배치도 JSON을 반환하지 않았습니다. 설계도는 유지되므로 다시 분석해 주세요.'); }
-      const errors = validateMap(map).filter(issue => issue.severity === 'error');
-      if (errors.length) throw new Error(`Codex 배치도가 검증을 통과하지 못했습니다: ${errors.slice(0, 3).map(issue => issue.message).join(' ')} 설계도는 유지되므로 다시 분석해 주세요.`);
+      const structureErrors = mapStructureErrors(map);
+      if (structureErrors.length) throw new Error(`Codex 배치도가 검증을 통과하지 못했습니다: ${structureErrors.slice(0, 3).join(' ')} 설계도는 유지되므로 다시 분석해 주세요.`);
       if (map.width !== settings.width || map.height !== settings.height || map.cellSize !== settings.cellSize || map.maxStepHeight !== settings.maxStepHeight) throw new Error('Codex 배치도 크기 또는 이동 단차가 요청한 설정과 다릅니다. 같은 설계도에서 다시 분석해 주세요.');
       if (map.connections.length !== settings.connectionCount) throw new Error('Codex 배치도의 연결문 수가 요청한 설정과 다릅니다. 같은 설계도에서 다시 분석해 주세요.');
       if (map.assetOverrides.length) throw new Error('AI 배치도는 셀 에셋 지정을 포함할 수 없습니다. 에셋은 앱에서 연결해 주세요.');
       if (map.structureSettings||['ceilings','wallHeights','cliffs','fixtures','markers','lockedCells','zones','pitBottoms','structureFills','propInstances'].some(key => (map as unknown as Record<string,unknown[]>)[key]?.length)) throw new Error('AI 배치도에 허용되지 않는 추가 콘텐츠가 있습니다. 다시 분석해 주세요.');
+      const d=settings.designer;
+      if(d?.propLayout==='grouped'&&(d.props||d.decorations||d.vegetation))map=clearGroupedPropHints(map,region);
+      const errors = validateMap(map, catalog).filter(issue => issue.severity === 'error');
+      if (errors.length) throw new Error(`Codex 배치도가 검증을 통과하지 못했습니다: ${errors.slice(0, 3).map(issue => issue.message).join(' ')} 설계도는 유지되므로 다시 분석해 주세요.`);
       const geography:GridMap = {
         version: 4, name: map.name, width: map.width, height: map.height, cellSize: map.cellSize, rows: [...map.rows],
         elevations: map.elevations.map(row => [...row]), ramps: map.ramps.map(ramp => ({ ...ramp })), maxStepHeight: map.maxStepHeight,
@@ -319,7 +349,7 @@ export class CodexService {
       // The caller merges protected cells first, then applies and checks region-local features.
       if(region)return geography;
       const generated = applyGeneratedFeatures(geography, settings,undefined,catalog);
-      const conditionErrors=[...validateMap(generated),...generationConditionIssues(generated,settings),...(settings.levelDesign?analyzeLevelDesign(generated,settings).issues:[])].filter(issue=>issue.severity==='error');
+      const conditionErrors=[...validateMap(generated,catalog),...generationConditionIssues(generated,settings),...(settings.levelDesign?analyzeLevelDesign(generated,settings).issues:[])].filter(issue=>issue.severity==='error');
       if(conditionErrors.length)throw new Error(`생성 조건을 만족하지 못했습니다: ${conditionErrors.slice(0,3).map(issue=>issue.message).join(' ')} 설계도는 유지됩니다. 다시 분석해 주세요.`);
       return generated;
     });

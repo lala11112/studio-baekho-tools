@@ -1,12 +1,14 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { AssetBinding, Cell, FixtureRole, GridMap, Vec3 } from './shared/types';
-import { connectionAt, connectionPose, doorRotation, FLOOR_THICKNESS_RATIO } from './shared/map';
+import { connectionAt, connectionPose, doorRotation, FLOOR_THICKNESS_RATIO, resolveBinding } from './shared/map';
 import { fixturePosition, markerPosition } from './shared/features';
 import type { ModuleTransform, RegionRect } from './shared/editing';
 import { propPosition } from './shared/props';
 import type { LevelDesignReport } from './shared/level-design';
 import { floorSlabBounds, resolvedStructureFill, resolvedCliffFace } from './shared/structures';
+import { placeholderWallBinding, wallPlaceholderLabel } from './shared/wall-placeholders';
+import { wallBaseClosure } from './shared/wall-geometry';
 
 export interface PreviewState {
   position: { x: number; y: number; z: number };
@@ -60,6 +62,48 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
     connectionKey.textContent = `↗ 외부 연결 ${connections.length}개`;
     host.appendChild(connectionKey);
   }
+  const explicitPropCells = new Set((map.propInstances ?? []).flatMap(prop => prop.cells).map(c => `${c.x}:${c.row}`));
+  const unmeasuredCount = map.rows.reduce((total, row, z) => total + [...row].filter((tile, x) => tile === 'P' && !explicitPropCells.has(`${x}:${z}`)).length, 0);
+  const selectedProp = map.propInstances?.find(prop => options.selectedProp === prop.id
+    || !!options.selected && prop.cells.some(c => c.x === options.selected!.x && c.row === options.selected!.row));
+  const selectedUnmeasured = !!options.selected && map.rows[options.selected.row]?.[options.selected.x] === 'P'
+    && !explicitPropCells.has(`${options.selected.x}:${options.selected.row}`);
+  const selectedWall = map.fixtures?.find(fixture => fixture.id === options.selectedFixture && fixture.wall);
+  const propKey = !selectedWall && (selectedProp || unmeasuredCount) ? document.createElement('div') : null;
+  const meters = (value: number) => String(Number(value.toFixed(3)));
+  if (propKey) {
+    propKey.className = 'preview-prop-key';
+    propKey.setAttribute('role', 'status');
+    const line = (text: string, title = false) => {
+      const element = document.createElement(title ? 'strong' : 'span'); element.textContent = text; propKey.appendChild(element);
+    };
+    if (selectedProp) {
+      propKey.dataset.previewPropSelection = 'measured';
+      line(options.bindings?.find(binding => binding.id === selectedProp.bindingId)?.label ?? selectedProp.bindingId, true);
+      line(`측정 크기 · X ${meters(selectedProp.size.x)} × Y ${meters(selectedProp.size.y)} × Z ${meters(selectedProp.size.z)} m`);
+      line('사용자 배율·회전을 반영한 외곽 박스');
+    } else if (selectedUnmeasured) {
+      const binding = resolveBinding(map, options.bindings ?? [], options.selected!.x, options.selected!.row, 'prop');
+      propKey.dataset.previewPropSelection = 'unmeasured';
+      line(binding?.label ?? '선택한 소품', true);
+      line('크기 미확정 · 임시 표시');
+      line('에셋에서 원본 크기를 등록하면 실제 치수로 배치합니다.');
+    }
+    if (unmeasuredCount) {
+      propKey.dataset.previewPropUnmeasured = String(unmeasuredCount);
+      line(`크기 미확정 · 임시 표시 ${unmeasuredCount}개`);
+    }
+    host.appendChild(propKey);
+  }
+  const wallKey = selectedWall ? document.createElement('div') : null;
+  if (wallKey && selectedWall?.wall) {
+    const wall = selectedWall.wall, binding = options.bindings?.find(item => item.id === selectedWall.bindingId);
+    wallKey.className = 'preview-prop-key'; wallKey.dataset.previewWallSelection = selectedWall.id; wallKey.setAttribute('role', 'status');
+    const title = document.createElement('strong'); title.textContent = wall.placeholder ? wallPlaceholderLabel(wall.placeholder) : binding?.label ?? '벽 부착물'; wallKey.appendChild(title);
+    const vertical = wall.sockets.some(socket => Math.abs(socket.direction.y) > .9), horizontal = wall.sockets.some(socket => Math.hypot(socket.direction.x, socket.direction.z) > .9);
+    const detail = document.createElement('span'); detail.textContent = `${wall.placeholder ? '임시' : '측정'} 충돌 상자 ${wall.bounds.length}개 · 설치 높이 Y ${meters(wall.position.y)}m${wall.runId ? ' · 연결 구간' : ''}${vertical && horizontal ? ' · 가로·세로 연결' : vertical ? ' · 세로 부품' : ''}`; wallKey.appendChild(detail);
+    const note = document.createElement('span'); note.textContent = wall.placeholder ? '배치 확인용 형상 · 선택한 부착물에서 실제 프리팹으로 교체하세요.' : '프리팹 배율·피벗·연결점을 반영한 설치 형상'; wallKey.appendChild(note); host.appendChild(wallKey);
+  }
   const span = Math.max(map.width, map.height) * cell;
   const elevations = map.elevations.flat();
   const minimum = Math.min(0, ...elevations, ...(map.cliffs ?? []).map(cliff => map.elevations[cliff.row][cliff.x] - cliff.depth),
@@ -69,7 +113,8 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
     ...(map.wallHeights ?? []).map(wall => map.elevations[wall.row][wall.x] + wall.height),
     ...connections.map(connection => map.elevations[connection.row][connection.x] + connection.height + cell * 0.6),
     ...(map.structureFills ?? []).map(fill => fill.position.y + fill.size.y / 2),
-    ...(map.propInstances ?? []).map(prop => propPosition(map,prop,options.bindings?.find(b=>b.id===prop.bindingId)).y + prop.size.y));
+    ...(map.propInstances ?? []).map(prop => propPosition(map,prop,options.bindings?.find(b=>b.id===prop.bindingId)).y + prop.size.y),
+    ...(map.fixtures ?? []).flatMap(fixture => fixture.wall?.bounds.map(bounds => bounds.center.y + bounds.size.y / 2) ?? []));
   const verticalSpan = maximum - minimum;
   const comparison = options.comparison;
   const comparisonSpan = comparison ? Math.max(comparison.map.width, comparison.map.height) * comparison.map.cellSize
@@ -113,15 +158,16 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
   };
   const palette = {
     floor: material(0xd6d4c8), wall: material(0x667166), door: material(0xcb9f53),
-    prop: material(0xb77756), connection: material(0x268d86), selectedConnection: material(0x2679dd),
+    prop: material(0xb77756), unmeasured: material(0xc08c39), connection: material(0x268d86), selectedConnection: material(0x2679dd),
     terrain: material(0xa4ad9d), stair: material(0xb69768),
     bridge: material(0x8d7254), ceiling: material(0xc2b995), cliff: material(0x817967),
-    fixture: material(0x8d6b53), water: material(0x4d9fbd), hazard: material(0xd57b3b),
+    fixture: material(0x8d6b53), vegetation: material(0x589b59), water: material(0x4d9fbd), hazard: material(0xd57b3b),
     light: material(0xf9cf6c), character: material(0x3979c9),
     lightHousing: material(0x596365), lightSurface: material(0xfff8e7), selectedLightSurface: material(0x86c2ff),
     deadzone: material(0xd74a60),
   };
   palette.deadzone.transparent = true; palette.deadzone.opacity = .28; palette.deadzone.depthWrite = false;
+  palette.unmeasured.transparent = true; palette.unmeasured.opacity = .42;
   palette.lightSurface.emissive.set(0xffefc4); palette.lightSurface.emissiveIntensity = 1.2;
   palette.selectedLightSurface.emissive.set(0x469bff); palette.selectedLightSurface.emissiveIntensity = 0.8;
   const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
@@ -206,14 +252,19 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
           horizontal ? cell * 0.95 : cell * 0.1, palette.stair, index);
       }
       if (tile === '#') {
-        const wallHeight = map.wallHeights?.find(wall => wall.x === x && wall.row === row)?.height ?? cell * 0.95;
-        top += wallHeight;
-        box(px, y + wallHeight / 2, pz, cell * 0.96, wallHeight, cell * 0.96, palette.wall, index);
+        const binding = resolveBinding(map, bindings, x, row, 'wall'), offset = binding?.offset ?? { x: 0, y: 0, z: 0 };
+        const wallHeight = map.wallHeights?.find(wall => wall.x === x && wall.row === row)?.height
+          ?? (binding?.bounds ? binding.bounds.size.y * binding.scale.y : undefined) ?? map.structureSettings?.defaultWallHeight ?? cell * 0.95;
+        top += wallHeight + offset.y;
+        box(px + offset.x, y + offset.y + wallHeight / 2, pz + offset.z, cell * 0.96, wallHeight, cell * 0.96, palette.wall, index);
+        const closure = wallBaseClosure(map, index, bindings);
+        if (closure) box(px + (binding?.offset.x ?? 0), closure.bottom + closure.height / 2, pz + (binding?.offset.z ?? 0),
+          cell * .96, closure.height, cell * .96, palette.wall, index);
       }
       if (tile === 'P' && !explicitPropCells.has(`${x}:${row}`)) {
         top += cell * 0.6;
-        box(px, y + cell * 0.26, pz, cell * 0.62, cell * 0.52, cell * 0.62, palette.prop, index);
-        box(px, y + cell * 0.56, pz, cell * 0.7, cell * 0.08, cell * 0.7, palette.prop, index);
+        const proxy = box(px, y + cell * 0.3, pz, cell * 0.7, cell * 0.6, cell * 0.7, palette.unmeasured, index);
+        proxy.name = `unmeasured-prop:${x}:${row}`;
       }
       if (tile === 'D') {
         const connection = connectionByCell.get(`${x}:${row}`);
@@ -339,7 +390,7 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
       ((map.height - 1) / 2 - ceiling.row) * cell, cell * 0.96, cell * FLOOR_THICKNESS_RATIO, cell * 0.96, palette.ceiling, ceiling);
   }
   const icons: Record<FixtureRole, string> = { light: '빛', railing: '난간', column: '기둥', arch: '아치', water: '물', hazard: '위험', trap: '함정',
-    gate: '문', switch: '스위치', secretDoor: '비밀문', rest: '휴식', merchant: '상인', altar: '제단', decoration: '장식' };
+    gate: '문', switch: '스위치', secretDoor: '비밀문', rest: '휴식', merchant: '상인', altar: '제단', decoration: '장식', vegetation: '식생' };
   const addIcon = (id: string, label: string, position: Vec3, selected: boolean, userData: Record<string, unknown>, scale = 0.6, accent?: string) => {
     const labelMaterial = new THREE.SpriteMaterial({ map: labelTexture(label, id, selected, accent), transparent: true, depthTest: true });
     materials.add(labelMaterial);
@@ -349,8 +400,15 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
     if (interactive) pickable.push(sprite);
     parent.add(sprite);
   };
+  if (interactive && selectedUnmeasured) {
+    const selected = options.selected!;
+    addIcon('크기 미확정 · 임시 표시', '', { x: (selected.x - (map.width - 1) / 2) * cell,
+      y: map.elevations[selected.row][selected.x] + cell * .8, z: ((map.height - 1) / 2 - selected.row) * cell },
+      true, { cell: selected }, 1.6, '#a7752c');
+  }
   for (const prop of map.propInstances ?? []) {
     const binding=bindings.find(b=>b.id===prop.bindingId),position=propPosition(map,prop,binding);
+    const role=prop.role??binding?.role??'prop',isVegetation=role==='vegetation',roleLabel=isVegetation?'식생':role==='decoration'?'장식':'소품';
     const selected=interactive&&(options.selectedProp===prop.id||!!options.selected&&prop.cells.some(c=>c.x===options.selected!.x&&c.row===options.selected!.row));
     if(!propMaterials.has(prop.category)) {
       let hash=0;for(const c of prop.category)hash=(Math.imul(hash,31)+c.charCodeAt(0))>>>0;
@@ -358,20 +416,74 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
       propMaterials.set(prop.category,material(color.getHex()));
     }
     const mesh=box(position.x,position.y+prop.size.y/2,position.z,prop.size.x,prop.size.y,prop.size.z,
-      selected?palette.selectedConnection:propMaterials.get(prop.category)!,prop);
+      selected?palette.selectedConnection:isVegetation?palette.vegetation:propMaterials.get(prop.category)!,prop);
     mesh.name=`prop:${prop.id}`;mesh.userData.propId=prop.id;
     if(interactive)for(const c of prop.cells)cellTops.set(`${c.x}:${c.row}`,position.y+prop.size.y);
     // Large catalogs use selection labels to avoid thousands of canvas textures.
-    if(selected||(map.propInstances?.length??0)<=40) addIcon(`${prop.category} · ${prop.size.x.toFixed(1)} × ${prop.size.y.toFixed(1)} × ${prop.size.z.toFixed(1)}m`,
-      binding?.label??prop.bindingId,{...position,y:position.y+prop.size.y+cell*.18},selected,{propId:prop.id,cell:{x:prop.x,row:prop.row}},selected?1.5:1.1,'#8a5a3e');
+    if(selected||(map.propInstances?.length??0)<=40) addIcon(`${roleLabel} · ${prop.category} · ${meters(prop.size.x)} × ${meters(prop.size.y)} × ${meters(prop.size.z)}m`,
+      binding?.label??prop.bindingId,{...position,y:position.y+prop.size.y+cell*.18},selected,{propId:prop.id,cell:{x:prop.x,row:prop.row}},selected?1.5:1.1,isVegetation?'#35773b':'#8a5a3e');
   }
   if (options.showFixtures !== false) for (const fixture of map.fixtures ?? []) {
+    if (fixture.wall) {
+      const wall = fixture.wall, selected = interactive && options.selectedFixture === fixture.id;
+      const binding = bindings.find(item => item.id === fixture.bindingId), mat = selected ? palette.selectedConnection : fixture.role === 'light' ? palette.light : palette.fixture;
+      const temporaryBinding = wall.placeholder ? placeholderWallBinding(wall.placeholder) : undefined;
+      const temporaryBoxes = temporaryBinding?.wallMount?.collisionBoxes.length ? temporaryBinding.wallMount.collisionBoxes : temporaryBinding?.bounds ? [temporaryBinding.bounds] : [];
+      for (const [index, bounds] of wall.bounds.entries()) {
+        const pick = (mesh: THREE.Mesh) => { mesh.name = `wall-fixture:${fixture.id}`; mesh.userData.fixtureId = fixture.id; if (interactive) pickable.push(mesh); };
+        if (!wall.placeholder) {
+          pick(box(bounds.center.x, bounds.center.y, bounds.center.z, bounds.size.x, bounds.size.y, bounds.size.z, mat));
+          continue;
+        }
+        const local = temporaryBoxes[index];
+        if (!local) { pick(box(bounds.center.x, bounds.center.y, bounds.center.z, bounds.size.x, bounds.size.y, bounds.size.z, mat)); continue; }
+        const root = new THREE.Group(); root.position.copy(wall.position); root.rotation.set(0, THREE.MathUtils.degToRad(wall.rotationY), THREE.MathUtils.degToRad(wall.rotationZ ?? 0), 'YXZ'); parent.add(root);
+        const group = new THREE.Group(); group.position.copy(local.center); root.add(group);
+        const width = local.size.x, height = local.size.y, depth = local.size.z;
+        const part = (x: number, y: number, z: number, sx: number, sy: number, sz: number, material: THREE.Material) => pick(box(x, y, z, sx, sy, sz, material, undefined, group));
+        const housing = selected ? palette.selectedConnection : palette.lightHousing;
+        if (wall.placeholder.startsWith('pipe')) {
+          // Native compound boxes describe intersecting pipe arms, including elbow turns and tee branches.
+          const values = [width, height, depth], axis = wall.placeholder === 'pipeEndCap' ? 0 : values.indexOf(Math.max(...values));
+          const others = values.filter((_, index) => index !== axis), radius = Math.min(...others) / 2;
+          const geometry = new THREE.CylinderGeometry(radius, radius, values[axis], 12); geometries.add(geometry);
+          const pipe = new THREE.Mesh(geometry, mat);
+          if (axis === 0) pipe.rotation.z = Math.PI / 2; else if (axis === 2) pipe.rotation.x = Math.PI / 2;
+          pipe.castShadow = true; pipe.receiveShadow = true; group.add(pipe); pick(pipe);
+        } else if (wall.placeholder === 'wallLight' || wall.placeholder === 'doorLight') {
+          part(0, 0, -depth * .1, width, height, depth * .8, housing);
+          part(0, 0, depth * .35, width * .78, height * .65, depth * .3, selected ? palette.selectedLightSurface : palette.lightSurface);
+        } else if (wall.placeholder === 'vent') {
+          part(0, 0, -depth * .15, width, height, depth * .7, housing);
+          for (let slat = -2; slat <= 2; slat++) part(0, height * slat * .15, depth * .32, width * .84, height * .075, depth * .3, mat);
+        } else {
+          part(0, 0, -depth * .1, width, height, depth * .8, housing);
+          part(0, 0, depth * .35, width * .84, height * .82, depth * .3, mat);
+        }
+        if (selected || (map.fixtures?.length ?? 0) <= 60) {
+          const edges = new THREE.EdgesGeometry(boxGeometry); geometries.add(edges);
+          const frameMaterial = new THREE.LineDashedMaterial({ color: selected ? 0x1667cd : 0xa7752c, dashSize: .06, gapSize: .04 }); materials.add(frameMaterial);
+          const frame = new THREE.LineSegments(edges, frameMaterial); frame.position.copy(bounds.center); frame.scale.set(bounds.size.x, bounds.size.y, bounds.size.z); frame.computeLineDistances(); frame.name = `wall-placeholder-frame:${fixture.id}`; parent.add(frame);
+        }
+      }
+      if (wall.sockets.length && (selected || (map.fixtures?.length ?? 0) <= 100)) {
+        const lineMat = new THREE.LineBasicMaterial({ color: selected ? 0x1667cd : 0x299b8b, depthTest: !selected }); materials.add(lineMat);
+        for (const socket of wall.sockets) {
+          const length = Math.min(cell * .2, .3);
+          const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(socket.position.x, socket.position.y, socket.position.z), new THREE.Vector3(socket.position.x + socket.direction.x * length, socket.position.y + socket.direction.y * length, socket.position.z + socket.direction.z * length)]);
+          geometries.add(geometry); const line = new THREE.Line(geometry, lineMat); line.name = `wall-socket:${fixture.id}`; line.renderOrder = selected ? 99 : 0; parent.add(line);
+        }
+      }
+      const top = Math.max(wall.position.y, ...wall.bounds.map(bounds => bounds.center.y + bounds.size.y / 2));
+      if (selected || (map.fixtures?.length ?? 0) <= (wall.placeholder ? 20 : 60)) addIcon(wall.placeholder ? wallPlaceholderLabel(wall.placeholder) : binding?.label ?? (fixture.role === 'light' ? '✦ 벽 조명' : '벽 부착물'), wall.placeholder ? '배치 확인 · 실제 프리팹으로 교체 가능' : wall.runId ? '연결 부품' : wall.doorId ? '문 부착물' : '벽 부착물', { ...wall.position, y: top + cell * .13 }, selected, { fixtureId: fixture.id }, selected ? 1.2 : .85, wall.placeholder ? '#a7752c' : fixture.role === 'light' ? '#a77323' : undefined);
+      continue;
+    }
     const position = fixturePosition(map, fixture);
     const group = new THREE.Group(); group.name = `fixture:${fixture.id}`;
     group.position.copy(position); group.rotation.y = THREE.MathUtils.degToRad(fixture.direction); parent.add(group);
     const selected = interactive && options.selectedFixture === fixture.id;
     const mat = selected ? palette.selectedConnection : fixture.role === 'light' ? palette.light : fixture.role === 'water' ? palette.water
-      : fixture.role === 'hazard' || fixture.role === 'trap' ? palette.hazard : palette.fixture;
+      : fixture.role === 'hazard' || fixture.role === 'trap' ? palette.hazard : fixture.role === 'vegetation' ? palette.vegetation : palette.fixture;
     const part = (x: number, y: number, z: number, sx: number, sy: number, sz: number, partMaterial: THREE.Material = mat) => {
       const mesh = box(x, y, z, sx, sy, sz, partMaterial, undefined, group);
       mesh.userData.fixtureId = fixture.id;
@@ -409,9 +521,9 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
     } else {
       part(0, cell * 0.22, 0, cell * 0.45, cell * 0.44, cell * 0.45);
     }
-    const icon = fixture.role === 'light' ? fixture.anchor === 'ceiling' ? '✦ 형광등' : fixture.anchor === 'wall' ? '✦ 발광판' : '✦ 조명' : icons[fixture.role];
+    const icon = fixture.role === 'light' ? fixture.anchor === 'ceiling' ? '✦ 천장 조명' : fixture.anchor === 'wall' ? '✦ 벽 조명' : '✦ 조명' : icons[fixture.role];
     addIcon(fixture.id, icon, { ...position, y: position.y + iconHeight }, selected, { fixtureId: fixture.id }, 0.6,
-      fixture.role === 'light' ? '#a77323' : undefined);
+      fixture.role === 'light' ? '#a77323' : fixture.role === 'vegetation' ? '#35773b' : undefined);
   }
   if (options.showMarkers !== false) for (const marker of map.markers ?? []) {
     const position = markerPosition(map, marker);
@@ -628,6 +740,8 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
       renderer.forceContextLoss();
       renderer.domElement.remove();
       connectionKey?.remove();
+      propKey?.remove();
+      wallKey?.remove();
       designLegend?.remove();
     },
   };

@@ -273,7 +273,7 @@ test('manifest places floors underneath . D P R and creates no spawn/exit marker
   const count = (glyph: string): number => map.rows.join('').split(glyph).length - 1;
   assert.equal(manifest.placements.filter((item) => item.role === 'floor').length, [...'.DPR'].reduce((sum, tile) => sum + count(tile), 0));
   for (const [role, glyph] of [['wall', '#'], ['door', 'D'], ['prop', 'P'], ['stair', 'R']] as const) {
-    assert.equal(manifest.placements.filter((item) => item.role === role).length, count(glyph));
+    assert.equal(manifest.placements.filter((item) => item.role === role && !item.id.endsWith('-base')).length, count(glyph));
   }
   for (const role of ['spawn', 'exit']) {
     const marker = manifest.placements.filter((item) => item.role === role);
@@ -455,7 +455,7 @@ test('project parsing rejects broken structures, bad settings, and external or a
     { ...input, settings: { ...input.settings, width: 3 } },
     { ...input, settings: { ...input.settings, codexModel: null } },
     { ...input, settings: { ...input.settings, prompt: null } },
-    { ...input, settings: { ...input.settings, prompt: ' ' } },
+    { ...input, settings: { ...input.settings, conceptMode: 'invalid' } },
     { ...input, settings: { ...input.settings, prompt: 'a'.repeat(6001) } },
     { ...input, settings: { ...input.settings, codexModel: 'codex model' } },
     { ...input, settings: { ...input.settings, codexModel: 'g'.repeat(101) } },

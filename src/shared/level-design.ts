@@ -1,6 +1,14 @@
 import { connectionCells } from './connections';
 import type { Cell, Direction, GenerationRegion, GenerationSettings, GridMap, LevelDesignSettings, MapFixture, RoomPurpose, ValidationIssue } from './types';
 
+/** Shared qualitative guidance from docs/level-design-principles.md; numeric recipes remain opt-in. */
+export const LEVEL_DESIGN_PRINCIPLES = `DOCUMENTED LEVEL DESIGN PRINCIPLES (docs/level-design-principles.md):
+Metrics: honor the configured player movement, body clearance, door dimensions and enabled features when defining achievable actions. Do not invent movement mechanics or numeric clearance thresholds.
+Encounter: keep entry approaches usable, give the player an opportunity to assess an enabled encounter before committing, and support meaningful approach, retreat or recovery choices within the selected features.
+Flow: keep external connections and mandatory objectives reachable through height-correct paths; preserve safe access that does not force crossing hazards. Gameplay choices must differ in their use or tradeoff, not merely in appearance.
+Purpose: combat goals apply to battle/boss rooms only when the relevant gameplay is enabled. Start, reward and shop rooms prioritize safe preparation, collection or service access; do not add combat or disabled features to create variety.
+These are qualitative gameplay principles, separate from optional numeric design recipes and their automatic checks. Treat concept writing as gameplay intent, blueprint generation as spatial design, and layout extraction as faithful interpretation of the image.`;
+
 export const DEFAULT_LEVEL_DESIGN: LevelDesignSettings = { pattern: 'auto', characterRadius: .4, dodgeDistance: 3 };
 export type DesignPattern = Exclude<LevelDesignSettings['pattern'], 'auto'>;
 export const DESIGN_PATTERN_LABELS: Record<DesignPattern, string> = { openArena: '열린 전투장', flankingArena: '우회 전투장', raisedArena: '고저차 전투장' };
@@ -281,7 +289,13 @@ export function analyzeLevelDesign(map: GridMap, settings: GenerationSettings): 
       if (!switches.length || !switches.some(s => accessible.has(key(s)))) error('locked-switch', '잠금문을 통과하지 않고 연결된 스위치에 접근할 수 있어야 합니다.', [gate, ...switches]);
     }
   }
-  if (recipe.pattern === 'flankingArena') { const flank = flankingRoutes(map, safeGraph); if (!flank.length) error('flanking-routes', '내부 장애물 양쪽으로 이어지는 별도의 우회로가 없습니다.', walkable.slice(0, 1)); else routes.push(...flank); }
+  if (recipe.pattern === 'flankingArena') {
+    const flank = flankingRoutes(map, safeGraph);
+    if (!flank.length) {
+      if (['balanced','grouped'].includes(settings.designer?.propLayout??'')) issues.push({severity:'warning',code:'flanking-routes',message:'안전하게 배치할 수 있는 내부 장애물이 없어 우회 전투 구성을 완성하지 못했습니다. 이동·출입구·회피 공간을 확보한 부분 결과를 유지합니다.',cells:walkable.slice(0,1)});
+      else error('flanking-routes', '내부 장애물 양쪽으로 이어지는 별도의 우회로가 없습니다.', walkable.slice(0, 1));
+    } else routes.push(...flank);
+  }
   if (recipe.pattern === 'raisedArena') { const approaches = raisedApproaches(map, safeGraph); if (approaches.length < 2) error('raised-approaches', '주요 최고 지대에는 서로 떨어진 두 계단 접근로가 필요합니다.', approaches.length ? approaches : map.ramps); }
   return { recipe, issues, walkableArea: walkable.length * map.cellSize ** 2, walkableCells: walkable, reservedEntryCells: entryCells, combatCells: combat?.cells ?? [], ...(combat ? { combatCenter: combat.c } : {}), routes, hazardCells: hazards.map(f => ({ x: f.x, row: f.row })), obstacleChoices: obstacleTactics(map, settings) };
 }
@@ -295,14 +309,14 @@ export function placeLevelDesignContent(source: GridMap, settings: GenerationSet
   const markers = (map.markers ?? []).filter(active), fixtures = (map.fixtures ?? []).filter(movable);
   map.markers = (map.markers ?? []).filter(m => !active(m)); map.fixtures = (map.fixtures ?? []).filter(f => !movable(f));
   const analysis = analyzeLevelDesign(map, settings);
-  const terrainErrors = analysis.issues.filter(i => !['objective-route', 'locked-switch', 'service-route'].includes(i.code ?? ''));
+  const terrainErrors = analysis.issues.filter(i => i.severity==='error'&&!['objective-route', 'locked-switch', 'service-route'].includes(i.code ?? ''));
   if (terrainErrors.length) throw new Error(terrainErrors.slice(0, 3).map(i => i.message).join(' '));
   const entries = new Set(analysis.reservedEntryCells.map(key)), reserved = new Set([...analysis.reservedEntryCells, ...analysis.combatCells, ...analysis.routes.flat(), ...analysis.obstacleChoices.flatMap(choice => choice.routes.flat())].map(key));
   const bypassMargin = Math.max(0, Math.ceil(analysis.recipe.characterRadius / map.cellSize - .5));
   for (const c of analysis.obstacleChoices.flatMap(choice => choice.routes.flat())) {
     for (let dr = -bypassMargin; dr <= bypassMargin; dr++) for (let dx = -bypassMargin; dx <= bypassMargin; dx++) reserved.add(key({ x: c.x + dx, row: c.row + dr }));
   }
-  const occupied = new Set([...map.markers, ...map.fixtures, ...(map.propInstances ?? []).flatMap(p => p.cells)].map(key));
+  const occupied = new Set([...map.markers, ...map.fixtures.filter(f=>!f.wall), ...(map.propInstances ?? []).flatMap(p => p.cells)].map(key));
   let graph = graphFor(map, analysis.recipe);
   const start = map.connections[0];
   const accessible = start ? reachable(graph, key(start)) : new Set(graph.keys());
@@ -312,19 +326,28 @@ export function placeLevelDesignContent(source: GridMap, settings: GenerationSet
   queue.forEach(k => doorDistances.set(k, 0));
   for (let i = 0; i < queue.length; i++) for (const n of graph.get(queue[i]) ?? []) if (!doorDistances.has(n)) { doorDistances.set(n, (doorDistances.get(queue[i]) ?? 0) + 1); queue.push(n); }
   const selectedEnemies = map.markers.filter(m => m.kind === 'enemy');
+  const selectedDressing:Cell[]=[...map.fixtures.filter(f=>!f.wall&&(f.role==='decoration'||f.role==='vegetation')),...(map.propInstances??[]).filter(p=>p.role==='decoration'||p.role==='vegetation').flatMap(p=>p.cells)];
   const choose = (kind: string, avoidCombat: boolean): Cell => {
     const currentReachable = start ? reachable(graph, key(start)) : new Set(graph.keys());
     const usable = candidates.filter(c => currentReachable.has(key(c)) && !occupied.has(key(c)) && !(avoidCombat ? reserved : entries).has(key(c)) && (kind !== 'enemy' || selectedEnemies.every(e => distance(c, e) * map.cellSize >= Math.max(analysis.recipe.characterRadius * 2, map.cellSize))));
     const nearestDoor = (c: Cell) => doorDistances.get(key(c)) ?? 0;
     const score = (c: Cell) => {
+      const dressing=kind==='decoration'||kind==='vegetation';
       const zone = map.zones?.find(z => z.x === c.x && z.row === c.row)?.kind;
       const preference = kind === 'enemy' ? 'combat' : kind === 'reward' ? 'reward' : ['rest', 'merchant', 'altar'].includes(kind) ? 'rest' : undefined;
-      const spacing = kind === 'enemy' && selectedEnemies.length ? Math.min(...selectedEnemies.map(e => distance(c, e))) * 4 : 0;
-      const seedTie = ((Math.imul(c.x + 1, 73856093) ^ Math.imul(c.row + 1, 19349663) ^ (settings.seed ?? 0)) >>> 0) / 4294967296;
+      const spacing = dressing&&selectedDressing.length ? Math.min(...selectedDressing.map(p=>distance(c,p)))*4 : kind === 'enemy' && selectedEnemies.length ? Math.min(...selectedEnemies.map(e => distance(c, e))) * 4 : 0;
+      let seedTie = ((Math.imul(c.x + 1, 73856093) ^ Math.imul(c.row + 1, 19349663) ^ (settings.seed ?? 0)) >>> 0) / 4294967296;
+      if(dressing){
+        let hash=(Math.imul(c.x+1,73856093)^Math.imul(c.row+1,19349663)^Math.imul(settings.seed??0,83492791))>>>0;
+        hash=Math.imul(hash^(hash>>>16),2246822507)>>>0;
+        seedTie=((hash^(hash>>>13))>>>0)/4294967296;
+      }
       const obstacles=(map.propInstances??[]).filter(p=>p.blocksMovement), nearestObstacle=obstacles.length?Math.min(...obstacles.flatMap(p=>p.cells).map(p=>distance(c,p))):0;
       const combatDistance=analysis.combatCenter?distance(c,analysis.combatCenter):0;
-      const tactical=kind==='enemy'&&obstacles.length?-Math.abs(nearestObstacle-2)*4-Math.abs(combatDistance-(analysis.recipe.dodgeDistance/map.cellSize+2))*3:kind==='decoration'&&obstacles.length?-Math.abs(nearestObstacle-1.5)*7:0;
-      return (zone && zone === preference ? 1000 : 0) + spacing + nearestDoor(c) + tactical + seedTie;
+      const tactical=kind==='enemy'&&obstacles.length?-Math.abs(nearestObstacle-2)*4-Math.abs(combatDistance-(analysis.recipe.dodgeDistance/map.cellSize+2))*3:0;
+      // Safety is enforced above; extra distance from a door must not draw all dressing into one corner.
+      const entrancePreference=dressing?Math.min(nearestDoor(c),analysis.recipe.entryClearance/map.cellSize)*.2:nearestDoor(c);
+      return (zone && zone === preference ? 1000 : 0) + spacing + entrancePreference + tactical + seedTie;
     };
     usable.sort((a, b) => score(b) - score(a));
     const chosen = usable[0]; if (!chosen) throw new Error(`${kind} 배치에 필요한 안전한 공간이 없습니다. 입구·회피·접근 경로를 보존하도록 지형 또는 요청 수량을 조정해 주세요.`);
@@ -336,6 +359,7 @@ export function placeLevelDesignContent(source: GridMap, settings: GenerationSet
   }
   for (const fixture of fixtures) {
     const chosen = choose(fixture.role, true); Object.assign(fixture, chosen); map.fixtures.push(fixture);
+    if(fixture.role==='decoration'||fixture.role==='vegetation')selectedDressing.push(fixture);
     if (['switch', 'rest', 'merchant', 'altar'].includes(fixture.role)) for (const door of allDoors) for (const k of path(graph, key(door), key(chosen))) reserved.add(k);
     if (['column', 'gate', 'hazard', 'trap'].includes(fixture.role)) graph = graphFor(map, analysis.recipe, new Set(map.fixtures.filter(f => f.role === 'hazard' || f.role === 'trap').map(key)));
   }

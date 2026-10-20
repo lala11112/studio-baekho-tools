@@ -26,12 +26,12 @@ namespace StudioBaekho
         private static readonly HashSet<string> ExtendedRoles = new HashSet<string>(StringComparer.Ordinal)
         {
             "ceiling", "bridge", "cliff", "slope", "light", "railing", "column", "arch", "water",
-            "hazard", "trap", "gate", "switch", "secretDoor", "rest", "merchant", "altar", "decoration"
+            "hazard", "trap", "gate", "switch", "secretDoor", "rest", "merchant", "altar", "decoration", "vegetation"
         };
         private static readonly HashSet<string> FixtureRoles = new HashSet<string>(StringComparer.Ordinal)
         {
             "light", "railing", "column", "arch", "water", "hazard", "trap", "gate", "switch",
-            "secretDoor", "rest", "merchant", "altar", "decoration"
+            "secretDoor", "rest", "merchant", "altar", "decoration", "vegetation"
         };
 
         [Serializable] private sealed class Manifest
@@ -407,9 +407,9 @@ namespace StudioBaekho
                 ValidateVector(item.position, item.id + ".position", false);
                 ValidateVector(item.rotation, item.id + ".rotation", false);
                 ValidateVector(item.scale, item.id + ".scale", true);
-                if (item.centerXZ && (manifest.schemaVersion != 5 || (item.role != "prop" && item.role != "decoration") ||
+                if (item.centerXZ && (manifest.schemaVersion != 5 || (item.role != "prop" && item.role != "decoration" && item.role != "vegetation") ||
                     PlacementSurface(item) != "bottom" || HasFitSize(item) || item.fitHeight != 0 || item.fitWidth != 0 || item.rotation.x != 0 || item.rotation.z != 0))
-                    throw new InvalidDataException("centerXZ requires a v5 measured prop or decoration, bottom alignment, no X/Z tilt and no fit fields: " + item.id);
+                    throw new InvalidDataException("centerXZ requires a v5 measured prop, decoration or vegetation, bottom alignment, no X/Z tilt and no fit fields: " + item.id);
                 if (HasFitSize(item))
                 {
                     ValidateVector(item.fitSize, item.id + ".fitSize", true);

@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
 import { chromium } from 'playwright';
 
 // Test the outer portable launcher, including its real temporary extraction path.
-// No login, inference, project editing, or existing application process is touched.
+// Connection preference edits use isolated user data; no login, inference, or
+// existing application process is touched.
 const execute = promisify(execFile);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -21,6 +22,8 @@ if (!(await stat(executable)).isFile() || path.extname(executable).toLowerCase()
 }
 const output = path.join(root, '.local', 'portable-smoke', `${path.basename(executable, '.exe')}-${Date.now()}`);
 await mkdir(output, { recursive: true });
+const userData = path.join(output, 'user-data');
+await mkdir(userData, { recursive: true });
 // NSIS uses a fixed extraction subdirectory for each build. Isolate TEMP so an
 // already-open copy cannot be disturbed. Spaces and ~ also exercise file URLs.
 const temporaryRoot = await realpath(path.dirname(output));
@@ -77,7 +80,7 @@ function isDescendant(snapshot, processId, ancestorId) {
 
 const port = await reservePort();
 const endpoint = `http://127.0.0.1:${port}`;
-const launcher = spawn(executable, [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1'], {
+const launcher = spawn(executable, [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', `--user-data-dir=${userData}`], {
   cwd: path.dirname(executable), env: environment, windowsHide: true, stdio: 'ignore',
 });
 let launcherExited = false;
@@ -129,12 +132,42 @@ try {
   await page.waitForSelector('#preview canvas', { timeout: 30000 });
   await page.waitForFunction(() => typeof window.baekho?.getCodexStatus === 'function', undefined, { timeout: 15000 });
   assert.equal(await page.evaluate(() => typeof window.baekho?.saveProjects), 'function');
+  assert.equal(await page.evaluate(() => typeof window.baekho?.generateConcept), 'function', 'Portable preload exposes concept generation.');
+  assert.equal(await page.locator('#conceptMode').inputValue(), 'ai', 'New portable projects default to AI concept writing.');
+  assert.equal(await page.locator('#prompt').count(), 0, 'Manual concept input is optional in AI mode.');
+  await page.locator('#conceptMode').selectOption('manual');
+  assert.equal(await page.locator('#prompt').inputValue(), '');
+  assert.equal(await page.locator('#prompt').getAttribute('maxlength'), '6000');
+  const manualConcept = '포터블 검증: 푸른 결정이 빛나는 지하 정원';
+  await page.locator('#prompt').fill(manualConcept);
+  await page.locator('#conceptMode').selectOption('ai');
+  assert.equal(await page.locator('#prompt').count(), 0);
+  assert.equal(await page.locator('#connectionWidth').inputValue(), '2', 'Portable connection width defaults to 2m.');
+  assert.equal(await page.locator('#connectionHeight').inputValue(), '3', 'Portable connection height defaults to 3m.');
+  await page.locator('#connectionWidth').fill('4.5');
+  await page.locator('#connectionWidth').press('Tab');
+  await page.locator('#connectionHeight').fill('3.75');
+  await page.locator('#connectionHeight').press('Tab');
   await page.locator('[data-view="variants"]').click();
   assert.equal(await page.locator('.variant-gallery-empty').isVisible(), true);
   await page.locator('[data-view="3d"]').click();
   await page.locator('#preview canvas').waitFor();
+  assert.equal(await page.locator('#connectionWidth').inputValue(), '4.5', 'Portable width edit survives renderer updates.');
+  assert.equal(await page.locator('#connectionHeight').inputValue(), '3.75', 'Portable height edit survives renderer updates.');
+  await page.locator('#conceptMode').selectOption('manual');
+  assert.equal(await page.locator('#prompt').inputValue(), manualConcept, 'Portable manual concept survives AI mode and renderer updates.');
+  await page.locator('#conceptMode').selectOption('ai');
   report.pageUrl = page.url();
   report.previewVersion = await page.locator('header.topbar .pill').innerText();
+  const importer = path.join('unity-importer', 'Editor', 'BaekhoMapImporter.cs');
+  const importerSource = await readFile(path.join(root, importer), 'utf8');
+  assert.match(importerSource, /navigationData = BakeNavigation\(root, surfaceType, agentTypeID\)/, 'Importer source must include automatic NavMesh baking.');
+  assert.match(importerSource, /AssetDatabase\.CreateAsset\(navigationData, navigationOutput\)/, 'Importer source must persist baked NavMesh data.');
+  const resources = path.resolve(path.dirname(fileURLToPath(page.url())), '..', '..');
+  assert.equal(await readFile(path.join(resources, importer), 'utf8'), importerSource, 'Actual portable extraction must contain the latest NavMesh importer.');
+  report.importerMatchesSource = true;
+  report.connectionSizeControls = { defaultWidth: 2, defaultHeight: 3, editedWidth: 4.5, editedHeight: 3.75 };
+  report.conceptControls = { defaultMode: 'ai', generateConceptBridge: true, optionalManualInput: true, manualTextPreserved: true };
   const status = await page.evaluate(async () => {
     const result = await window.baekho.getCodexStatus();
     return { state: result.state, message: result.message, version: result.version, modelCount: result.models.length };
@@ -144,19 +177,24 @@ try {
   await page.waitForFunction(() => !document.querySelector('[data-action="codex-refresh"]')?.disabled, undefined, { timeout: 60000 });
   await page.screenshot({ path: report.screenshot });
   assert.equal(status.state, 'ready', `Portable Codex status should be ready: ${status.message}`);
-  const expectedVersion = path.basename(executable).match(/^Baekho-Map-Forge-(.+)-Windows\.exe$/)?.[1] || metadata.version;
-  assert.equal(report.previewVersion, `PREVIEW ${expectedVersion}`, 'Portable header must display the tested package version.');
+  const filenameVersion = path.basename(executable).match(/^Baekho-Map-Forge-(.+)-Windows\.exe$/)?.[1];
+  if (filenameVersion) assert.equal(filenameVersion, metadata.version, 'Portable filename must match package.json.');
+  assert.equal(report.previewVersion, `PREVIEW ${metadata.version}`, 'Portable header must match package.json.');
   assert.deepEqual(rendererErrors, [], 'Portable renderer must not raise page errors.');
   report.result = 'PASS';
-  console.log(`PASS portable EXE: real IPC accepted, Codex ready, ${status.modelCount} models. No login or inference performed.`);
+  console.log(`PASS portable EXE ${metadata.version}: AI/manual concept controls, connection sizes, latest NavMesh importer, real IPC, Codex ready, ${status.modelCount} models. No login or inference performed.`);
 } catch (error) {
   failure = error;
   report.result = 'FAIL';
   report.error = error instanceof Error ? error.message : String(error);
   if (page && ownedBrowser) await page.screenshot({ path: report.screenshot }).catch(() => undefined);
 } finally {
-  // First close only the verified app window; this run never edits a project.
-  if (page && ownedBrowser && !page.isClosed()) await page.evaluate(() => window.close()).catch(() => undefined);
+  // First close only the verified app window; preferences are isolated to this run.
+  // Dirty-control checks may open Electron's synchronous unload confirmation. Do not
+  // let that dialog prevent the ownership-checked process cleanup below from running.
+  if (page && ownedBrowser && !page.isClosed()) await Promise.race([
+    page.evaluate(() => window.close()).catch(() => undefined), delay(1500),
+  ]);
   await Promise.race([exited, delay(15000)]);
   if (!launcherExited || ownedBrowser) {
     try {

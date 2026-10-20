@@ -2,9 +2,38 @@
 
 Baekho의 제작·AI 생성·수정 화면은 외부 데스크톱 앱에서 실행됩니다. 이 작은 어댑터는 앱이 내보낸 배치 JSON을 Unity의 공식 `PrefabUtility`로 실제 `.prefab`으로 저장하는 마지막 단계입니다.
 
+## 앱에서 자동 생성
+
+앱 0.8.0부터 **Unity에 프리팹 생성**으로 아래 수동 과정을 자동화합니다. Unity MCP (`com.coplaydev.unity-mcp`)와 AI Navigation을 설치하고 Unity MCP의 로컬 HTTP 서버를 실행하세요. 앱에서 동일 프로젝트를 연결하면 필요한 스크립트 설치와 컴파일 대기부터 저장까지 처리합니다.
+
+선택 설치되는 `Mcp/BaekhoBuildMapTool.cs`는 `Assets/Baekho/Editor/BaekhoBuildMapTool.cs`로 배치됩니다. `baekho_build_map`은 기존 `BuildFromPath()`를 호출하고 생성한 프리팹을 선택하며 현재 씬을 변경하지 않습니다. 일반 ZIP에는 이 MCP 전용 스크립트를 넣지 않습니다.
+
+앱은 `Library/BaekhoMapForge/integration.json`에 관리 파일 해시를 기록합니다. 기존 사용자 수정 임포터와 런타임 컴포넌트는 보존하고, 수정되지 않은 관리 파일만 갱신합니다. 다른 폴더에 기존 임포터가 있으면 그 위치를 사용하며 동일 파일의 중복 설치는 중단합니다.
+
+수동 설치했거나 수정한 구형 `BaekhoPropCatalog.cs`에 새 등록 기능의 측정 API가 없으면 파일을 쓰기 전에 준비를 중단합니다. 안내된 기존 파일에 최신 exporter 변경을 병합하거나 교체한 뒤 다시 준비하세요. 원본 코드·`.meta`·설치 기록은 그대로 유지합니다.
+
+각 생성 요청은 UUID와 입력 SHA-256으로 식별하며 `Library/BaekhoMapForge/requests/`에 상태와 결과를 기록합니다. 같은 요청은 다시 생성하지 않습니다. 통신 단절 후에는 `status`로 결과를 조회하고, Unity 재시작·도메인 리로드로 실행 여부가 불명확한 요청은 `unknown`으로 남깁니다. 출력 JSON·프리팹·NavMesh는 `Assets/Baekho/Generated/<맵 이름>/`에 저장됩니다. 기존 출력은 덮어쓰지 않습니다.
+
+## 등록 컴포넌트로 모든 종류 가져오기
+
+앱에서 프로젝트를 연결하고 **Unity MCP 연결 설정 → 스크립트 준비**를 실행하면 `Runtime/BaekhoMapAsset.cs`, `Editor/BaekhoMapAssetEditor.cs`, `Editor/BaekhoAssetCatalog.cs`와 MCP 전용 `Editor/BaekhoGetAssetCatalogTool.cs`가 설치됩니다. 등록과 조회에는 AI Navigation이 필요하지 않습니다.
+
+Unity Project에서 사용할 `.prefab` 파일을 선택하고 **Assets → Baekho → Add Map Asset Metadata**를 실행하세요. 폴더·씬 오브젝트가 섞이면 수정하지 않고 안내합니다. 기존 루트 컴포넌트와 Variant에서 상속한 컴포넌트는 중복 추가하지 않습니다. 여러 프리팹을 선택하면 Inspector에서 함께 편집할 수 있습니다.
+
+- **Import Enabled / Role:** 루트에 등록 표시가 있고 종류가 지정된 프리팹을 가져옵니다. `Unspecified`, 등록 해제 항목은 제외 이유를 반환합니다. 자식에만 컴포넌트가 있는 프리팹은 대상이 아닙니다.
+- **Label / 초기 설정:** 선택한 이름·초기 배율·Y 회전·오프셋은 신규 등록에만 적용됩니다. 계단·경사로는 `Stair Native Rise`(기본 1m), 조명은 `Light Anchor`를 지정할 수 있습니다.
+- 앱의 **표시된 프리팹 가져오기**는 `baekho_get_asset_catalog`로 동일 프로젝트를 확인하고 `Assets` 아래 표시된 프리팹을 조회합니다. 원본과 열린 씬을 저장하거나 변경하지 않으며, 임시 Preview Scene에서 루트 배율 1 기준으로 측정합니다. 보이는 메시·콜라이더가 없는 조명은 기존 `BaekhoWallModule.collisionBoxes`로 점유 크기를 지정할 수 있습니다.
+- 별도 형식 `baekho-asset-catalog`, version 1에 GUID·경로·종류·측정 경계·선택 설정과 제외 목록을 반환합니다. 한도는 표시된 프리팹 20,000개·응답 8 MiB이며, 앱 등록 한도는 256개입니다.
+- 재가져오기는 앱의 기존 ID·이름·종류·Transform·배치 조건을 보존하고 경로·크기·벽 연결 정보를 갱신합니다. 기존 배치가 무효가 되면 전체 적용을 취소합니다.
+- 기존 벽 부착물은 `kind/family/sites/heightMode/height/spacing/probability/doorSide`를 보존하고 소스의 `mounts/sockets/collisionBoxes`만 갱신합니다. 소스에 벽 모듈이 없으면 앱 벽 설정을 유지합니다. 보존한 설치 방식과 새 연결점이 호환되지 않으면 적용을 취소하므로, 앱에서 종류를 변경하거나 벽 부착 설정을 해제한 뒤 다시 가져오세요.
+
+오프라인 ZIP에는 등록용 Runtime/Editor 스크립트를 포함하고 MCP 어댑터는 포함하지 않습니다. 기존 **Export Prop Bounds Catalog** 메뉴는 계속 직접 선택한 프리팹만 v1/v2 호환 크기 JSON으로 내보냅니다.
+
 ## 설치와 사용
 
-1. Unity 프로젝트에 다섯 파일을 복사합니다. `Editor/BaekhoMapImporter.cs`, `Editor/BaekhoPropCatalog.cs`는 `Assets/Baekho/Editor/`로, `Runtime/BaekhoMapConnection.cs`, `Runtime/BaekhoGameplayMarker.cs`, `Runtime/BaekhoMapFixture.cs`는 `Assets/Baekho/Runtime/`에 설치합니다. 내보낸 ZIP에는 다섯 파일이 함께 들어 있습니다. **Window → Package Manager → Unity Registry**에서 **AI Navigation** (`com.unity.ai.navigation`)도 설치합니다. 해당 Unity 버전에 호환되는 패키지를 사용하세요.
+앱 0.5.5부터 `decoration`(장식)과 `vegetation`(식생)을 별도 역할로 내보냅니다. 식생을 사용한 맵은 해당 버전 ZIP의 임포터로 갱신한 뒤 가져오세요. ㄱ자·곡선 프리팹의 메시·콜라이더는 유지하며 앱에서는 외접 직사각형 전체를 배치 공간으로 예약합니다.
+
+1. ZIP의 `Unity/Editor/` 파일을 `Assets/Baekho/Editor/`로, `Unity/Runtime/` 파일을 `Assets/Baekho/Runtime/`으로 함께 복사합니다. 기존 파일은 같은 위치에서 갱신하여 중복 설치를 피하세요. **Window → Package Manager → Unity Registry**에서 **AI Navigation** (`com.unity.ai.navigation`)도 설치합니다. 해당 Unity 버전에 호환되는 패키지를 사용하세요.
 2. Baekho 앱에서 내보낸 `.baekhomap.json`을 같은 Unity 프로젝트의 `Assets` 안에 복사합니다. 매핑한 원본 프리팹과 `.meta` GUID가 해당 프로젝트에 있어야 합니다.
 3. Unity Project 창에서 JSON을 선택하고 **Assets → Baekho → Build Prefab**을 실행합니다. 맵 조립이 끝나면 루트에 `NavMeshSurface`를 추가하고 자동 베이크합니다.
 4. JSON 옆에 생성된 프리팹을 씬에 배치하거나 런타임 맵 조합 시스템에서 사용합니다. 프리팹이 참조하는 `<프리팹 이름>.NavMesh.asset`도 함께 보관합니다. 같은 이름이 있으면 Unity가 새 이름을 붙이므로 기존 프리팹과 NavMesh 데이터는 덮어쓰지 않습니다.
@@ -21,7 +50,7 @@ Unity 2022.3 LTS 이상 및 Unity 6용 API로 작성했습니다. 실제 자동 
 - 각 맵 내부의 NavMesh를 생성하며, 여러 맵 사이의 연결은 자동으로 만들지 않습니다. 방 조합 후 연결문에 `NavMeshLink`를 배치하거나 전체 배치에 맞춰 다시 베이크합니다.
 - 자동화에서는 `BuildFromPath(path, true, agentTypeID)`로 특정 Agent Type을 선택할 수 있습니다. 기본값 `-1`은 프로젝트의 첫 Agent Type입니다. 베이크 없이 기존 지형만 가져오려면 `BuildFromPath(path, false)`를 사용합니다.
 
-바닥·천장 두께와 새 지형·게임 표식을 기존 맵에 적용하려면 새 앱에서 저장한 `.baekho.json`을 열어 ZIP을 다시 내보내세요. ZIP의 **다섯 스크립트를 같은 설치 위치에 업데이트**하고 새 JSON으로 **Build Prefab**을 다시 실행합니다. 이미 만들어진 프리팹은 자동으로 수정되지 않습니다. 기존 프로젝트의 배율·오프셋 값은 유지되며, 이전 버전 JSON은 이전 배치 방식을 유지합니다.
+바닥·천장 두께와 새 지형·게임 표식을 기존 맵에 적용하려면 새 앱에서 저장한 `.baekho.json`을 열어 ZIP을 다시 내보내세요. ZIP의 **여섯 스크립트를 같은 설치 위치에 업데이트**하고 새 JSON으로 **Build Prefab**을 다시 실행합니다. 이미 만들어진 프리팹은 자동으로 수정되지 않습니다. 기존 프로젝트의 배율·오프셋 값은 유지되며, 이전 버전 JSON은 이전 배치 방식을 유지합니다.
 
 ## 저장 동작
 
@@ -54,15 +83,25 @@ Unity 2022.3 LTS 이상 및 Unity 6용 API로 작성했습니다. 실제 자동 
 
 게임에서는 `room.GetComponentsInChildren<StudioBaekho.BaekhoMapConnection>()`으로 소켓을 찾을 수 있습니다. 두 방의 호환되는 소켓을 같은 위치에 맞추고 바깥 방향을 서로 반대로 향하게 하면 방을 연결할 수 있습니다. `kind`와 크기 비교, 충돌 검사, 방 선택·조합, 복도 생성과 NavMesh 연결은 게임 프로젝트에서 구현합니다. 이 컴포넌트는 연결 정보를 보관하며 자동 배치 로직을 실행하지 않습니다. 조합 시 치수가 유지되도록 방 루트는 단위 스케일을 사용하는 것을 권장합니다.
 
-자동화 진입점은 `StudioBaekho.BaekhoMapImporter.BuildFromPath("Assets/Maps/example.baekhomap.json")`이며, 새 프리팹의 Assets 상대 경로를 반환합니다. 임포터는 Editor 전용이고, 세 Runtime 컴포넌트는 게임 빌드에도 포함되어 생성된 프리팹의 메타데이터를 읽는 데 사용합니다. `Runtime` 파일을 `Editor` 폴더 안에 넣지 마세요.
+자동화 진입점은 `StudioBaekho.BaekhoMapImporter.BuildFromPath("Assets/Maps/example.baekhomap.json")`이며, 새 프리팹의 Assets 상대 경로를 반환합니다. 임포터는 Editor 전용이고, 네 Runtime 컴포넌트는 게임 빌드에도 포함되어 생성된 프리팹의 메타데이터를 읽는 데 사용합니다. `Runtime` 파일을 `Editor` 폴더 안에 넣지 마세요.
 
 API 참고: [PrefabUtility.InstantiatePrefab](https://docs.unity3d.com/2022.3/Documentation/ScriptReference/PrefabUtility.InstantiatePrefab.html), [PrefabUtility.SaveAsPrefabAsset](https://docs.unity3d.com/2022.3/Documentation/ScriptReference/PrefabUtility.SaveAsPrefabAsset.html).
 
 ## v5 구조와 소품 크기
 
+- 0.5.9의 `BaekhoPropCatalog.cs`는 **Project 창에서 직접 선택한 .prefab 에셋만** 내보냅니다. 폴더·Hierarchy 오브젝트·다른 에셋이 섞여 있거나 선택이 없으면 저장 전에 안내하고 중단합니다. 선택 실패 시 전체 프로젝트를 내보내던 이전 동작과 폴더 하위 자동 확장은 제거했습니다. Unity에 복사한 스크립트도 새 파일로 교체한 뒤, 필요한 프리팹만 선택해 크기 JSON을 다시 만드세요. 이전 JSON은 그대로 유지되므로 파일 안의 불필요한 항목이 자동 제거되지는 않습니다.
 - v5의 `fitSize`는 월드 XYZ 목표 크기이며 `position`은 그 경계의 중심입니다. 벽·절벽·하부 바닥·데드존에 사용합니다. 치우친 피벗은 경계 중심으로 보정하며 중첩 참조는 유지합니다.
 - 데드존은 Trigger를 포함한 원본 Collider의 합집합을 측정합니다. 앱은 Collider나 사망 처리 컴포넌트를 만들지 않습니다.
-- `Assets → Baekho → Export Prop Bounds Catalog`로 선택한 프리팹의 GUID·원본 XYZ 경계를 JSON으로 내보냅니다. 앱의 에셋 탭에서 가져오고 크기와 조건을 수정할 수 있습니다. 실제 소품 메시·상호작용·충돌은 게임 프로젝트에서 검증하세요.
+- `Assets → Baekho → Export Prop Bounds Catalog`로 선택한 프리팹의 GUID·원본 XYZ 경계를 JSON으로 내보냅니다. 앱 0.5.8부터 **에셋 → 크기 가져오기 · 프리팹 일괄 등록**으로 크기와 프리팹을 함께 등록합니다. Unity 프로젝트 미연결 시 폴더를 선택하고, 새 에셋의 종류는 소품·장식·식생 중에서 선택합니다. 기본은 소품이며 다른 종류를 섞으려면 Unity에서 종류별로 선택해 JSON을 따로 내보내세요. 기존 GUID는 중복 추가하지 않고 소품·장식·식생의 크기만 갱신하며 종류·배율·배치 조건은 유지합니다. 등록 후 **현재 맵에 소품·장식 자동 배치**를 별도로 실행합니다. 등록 정보와 크기는 맵 저장·Undo/Redo에 포함됩니다. 이전 크기 JSON도 그대로 사용할 수 있습니다. 실제 소품 메시·상호작용·충돌은 게임 프로젝트에서 검증하세요.
 - 경사로의 기울어진 옆면은 측면이 닫힌 원본 프리팹을 사용해야 합니다. 구조 채움은 직사각형 단차와 개구부를 처리합니다.
 
 - 측정된 v5 소품은 `centerXZ: true`를 사용합니다. 렌더러·Collider(Trigger 포함)의 합집합을 카탈로그와 동일하게 측정해 XZ 중심과 아랫면을 맞추며 원본 배율은 바꾸지 않습니다. 기존 소품은 이 플래그 없이 원래 피벗 배치를 유지합니다.
+
+## 벽 부착물과 배관·케이블
+
+- 원본 프리팹 루트에 **Baekho → Wall Module** 컴포넌트를 추가하면 벽등, 문 위 조명, 표지판, 액자, 환기구와 연속 배관·케이블을 등록할 수 있습니다. `Mounts`는 벽 접촉점이며 파란 +Z가 실내를 향합니다. `Sockets`는 부품 끝 중심이며 파란 +Z가 부품 바깥을 향합니다.
+- 카탈로그 v2는 기존 `guid`, `size`에 피벗 기준 `bounds: {center, size}`와 선택적 `wallMount`를 추가합니다. 선택한 원본 프리팹만 격리된 Preview Scene에서 측정하고 원본 파일과 편집 씬은 바꾸지 않습니다. 기존 v1 JSON도 앱에서 가져올 수 있습니다.
+- 연결 부품은 같은 `Family`를 사용하고 연결점 사이의 실제 길이를 유지합니다. 모서리는 `Inner Corner`/`Outer Corner` 전용 부품과 팔마다 나눈 `Collision Boxes`가 필요합니다. 형상이 ㄱ자일 때 전체 외접 상자 하나로 빈 부분까지 막지 않도록 합니다.
+- 가로 직선·끝마감을 로컬 Z축으로 90°/270° 회전해 세로 배관에도 사용합니다. 0.6.4의 `Elbow`/`Tee`는 한 벽면에서 가로와 세로를 연결하며 Mount 1개, Socket 2개/3개, Collision Box 최소 2개/3개를 지정합니다. 이 종류의 Socket에는 벽면 평면 안의 ±Y 방향도 허용합니다. `BaekhoWallModule.cs`와 `BaekhoPropCatalog.cs`를 함께 갱신하세요.
+- 원본 크기를 유지한 90° 조립을 지원합니다. 길이가 맞지 않으면 남은 여백을 두고 끝마감하며 부품을 자동으로 늘이지 않습니다. 벽 부착물의 최종 루트 자세는 `surface: pivot`과 Y/Z 회전으로 전달하므로 치우친 피벗도 연결점 좌표대로 유지됩니다. Light의 색·강도·범위·그림자 설정을 그대로 보존합니다.
+- **[배관·벽 조명 프리팹 제작 안내](../docs/wall-mounted-prefabs.md)**에 1m/2m 직선관, 안쪽/바깥쪽 코너, 가로·세로 엘보와 T자, 끝마감, 문 위 조명의 좌표 예시와 가져오기 순서를 정리했습니다. 앱에서 내보낸 ZIP에서는 같은 내용을 `Unity/WALL_PREFABS.ko.md`로 볼 수 있습니다.

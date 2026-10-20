@@ -4,6 +4,7 @@ import { readFile, mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { ScanResult } from '../src/shared/types';
 import { CodexService } from './services/codex';
+import { UnityBridgeService } from './services/unity-bridge';
 import { createPageTrustChecker } from './services/page-trust';
 import { scanUnityProject } from './services/unity-project';
 import { atomicWrite, createExportBundle, createProjectCollection, readProject, serializeProject } from './services/projects';
@@ -12,6 +13,7 @@ let window: BrowserWindow | null = null;
 let currentScan: ScanResult | null = null;
 let nativeOperation = false;
 let ai: CodexService;
+let unity: UnityBridgeService;
 const productionPage = path.join(__dirname, '../dist/index.html');
 
 function developmentUrl(): string | null {
@@ -49,6 +51,15 @@ async function nativeAction<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 function registerHandlers(): void {
+  handle('baekho:unity-status', endpoint => unity.getStatus(currentScan, endpoint));
+  handle('baekho:unity-prepare', endpoint => nativeAction(() => unity.prepare(currentScan, endpoint)));
+  handle('baekho:unity-build-start', (project, endpoint) => nativeAction(() => unity.startBuild(project, currentScan, endpoint)));
+  handle('baekho:unity-build-status', requestId => unity.getBuild(requestId));
+  handle('baekho:import-unity-asset-catalog', endpoint => nativeAction(async () => {
+    const result = await unity.importUnityAssetCatalog(currentScan, endpoint);
+    currentScan = result.scan;
+    return result;
+  }));
   handle('baekho:codex-status', () => ai.getStatus());
   handle('baekho:codex-login', async () => { await shell.openExternal(await ai.startLogin()); });
   handle('baekho:codex-select', () => nativeAction(async () => {
@@ -59,6 +70,7 @@ function registerHandlers(): void {
     if (result.canceled || !result.filePaths[0]) return ai.getStatus();
     return ai.selectExecutable(result.filePaths[0]);
   }));
+  handle('baekho:generate-concept', (settings, catalog, context) => ai.generateConcept(settings, catalog, context));
   handle('baekho:generate-image', (settings, region, catalog) => ai.generateImage(settings, region, catalog));
   handle('baekho:extract-layout', (settings, dataUrl, region, catalog) => ai.extractLayout(settings, dataUrl, region, catalog));
   handle('baekho:import-prop-catalog', () => nativeAction(async () => {
@@ -67,7 +79,8 @@ function registerHandlers(): void {
     if((await stat(result.filePaths[0])).size>2*1024*1024)throw new Error('소품 크기 카탈로그는 2 MiB 이하로 선택하세요.');
     const source=await readFile(result.filePaths[0],'utf8');
     if(source.length>2*1024*1024)throw new Error('소품 카탈로그는 2MiB 이하로 만들어 주세요.');
-    return JSON.parse(source);
+    try { return JSON.parse(source.replace(/^\uFEFF/, '')); }
+    catch { throw new Error('소품 크기 JSON을 읽을 수 없습니다. Unity의 Export Prop Bounds Catalog에서 내보낸 파일을 선택해 주세요.'); }
   }));
   handle('baekho:cancel-generation', () => ai.cancel());
   handle('baekho:scan-project', () => nativeAction(async () => {
@@ -140,7 +153,16 @@ function registerHandlers(): void {
     const fixtureScript = await readFile(fixturePath, 'utf8').catch(() => { throw new Error('Unity 배치물 스크립트를 찾지 못했습니다.'); });
     const catalogPath=path.join(app.isPackaged?process.resourcesPath:app.getAppPath(),'unity-importer/Editor/BaekhoPropCatalog.cs');
     const catalogScript=await readFile(catalogPath,'utf8');
-    const bundle = await createExportBundle(value, currentScan, importer, runtimeScript, markerScript, fixtureScript,catalogScript);
+    const wallModuleScript=await readFile(path.join(app.isPackaged?process.resourcesPath:app.getAppPath(),'unity-importer/Runtime/BaekhoWallModule.cs'),'utf8');
+    const wallGuide=await readFile(app.isPackaged?path.join(process.resourcesPath,'unity-importer/WALL_PREFABS.ko.md'):path.join(app.getAppPath(),'docs/wall-mounted-prefabs.md'),'utf8');
+    const resourceRoot = path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'unity-importer');
+    const [assetRuntime, assetEditor, assetCatalog] = await Promise.all([
+      readFile(path.join(resourceRoot, 'Runtime/BaekhoMapAsset.cs'), 'utf8'),
+      readFile(path.join(resourceRoot, 'Editor/BaekhoMapAssetEditor.cs'), 'utf8'),
+      readFile(path.join(resourceRoot, 'Editor/BaekhoAssetCatalog.cs'), 'utf8'),
+    ]);
+    const bundle = await createExportBundle(value, currentScan, importer, runtimeScript, markerScript, fixtureScript,catalogScript,wallModuleScript,wallGuide,
+      { runtime: assetRuntime, editor: assetEditor, catalog: assetCatalog });
     const result = await dialog.showSaveDialog(window!, {
       title: 'Unity 프리팹 제작 번들 내보내기', defaultPath: 'BaekhoMap.zip',
       filters: [{ name: 'Unity import bundle', extensions: ['zip'] }], properties: ['showOverwriteConfirmation'],
@@ -168,7 +190,7 @@ function createWindow(): void {
     const response = dialog.showMessageBoxSync(window, {
       type: 'warning', title: 'Baekho Map Forge', buttons: ['취소', '닫기'], defaultId: 0, cancelId: 0,
       message: '저장되지 않은 맵·후보 또는 진행 중인 작업이 있습니다.',
-      detail: '닫으면 저장하지 않은 편집 내용과 맵 후보가 사라지고 진행 중인 AI 요청이 취소됩니다. 보관할 후보는 후보 비교에서 선택한 맵 저장으로 저장하세요.',
+      detail: '닫으면 저장하지 않은 편집 내용과 맵 후보가 사라지고 진행 중인 AI 요청이 취소됩니다. Unity에서 이미 시작한 프리팹 생성은 계속될 수 있으며, 다시 연결하면 같은 요청의 결과를 확인합니다. 보관할 후보는 후보 비교에서 선택한 맵 저장으로 저장하세요.',
     });
     // Electron's preventDefault overrides the renderer's unload prevention.
     if (response === 1) event.preventDefault();
@@ -181,6 +203,10 @@ function createWindow(): void {
 
 void app.whenReady().then(() => {
   ai = new CodexService({ dataDirectory: path.join(app.getPath('userData'), 'codex') });
+  unity = new UnityBridgeService({
+    dataDirectory: path.join(app.getPath('userData'), 'unity'),
+    resourceDirectory: path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'unity-importer'),
+  });
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
   registerHandlers();
@@ -188,4 +214,4 @@ void app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('window-all-closed', () => { ai.cancel(); if (process.platform !== 'darwin') app.quit(); });
-app.on('will-quit', () => ai?.close());
+app.on('will-quit', () => { ai?.close(); void unity?.close(); });

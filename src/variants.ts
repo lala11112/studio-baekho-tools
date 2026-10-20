@@ -16,7 +16,7 @@ export interface VariantGalleryHooks {
 const escape = (value: unknown): string => String(value).replace(/[&<>"']/g,
   character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]!));
 const statusLabels: Record<VariantStatus, string> = {
-  waiting: '대기 중', image: '설계도 생성 중', extract: '맵 분석 중', ready: '완료', error: '생성 실패', cancelled: '취소됨',
+  waiting: '대기 중', concept: '컨셉 작성 중', image: '설계도 생성 중', extract: '맵 분석 중', ready: '완료', error: '생성 실패', cancelled: '취소됨',
 };
 const tileColors: Record<Tile, string> = { _: '#edf0e8', '.': '#d6dacb', '#': '#637764', D: '#2b8e86', P: '#bb8663', R: '#b399bd', B: '#b69562' };
 const ready = (candidate: MapVariant): boolean => candidate.status === 'ready' && !!candidate.project;
@@ -25,6 +25,12 @@ const blueprint = (candidate?: MapVariant): string | undefined => {
   return source?.startsWith('data:image/png;base64,') ? source : undefined;
 };
 const meters = (number: number): string => Number(number.toFixed(2)).toString();
+
+function conceptSummary(candidate: MapVariant, full = false): string {
+  const concept = candidate.concept ?? candidate.project?.concept;
+  if (!concept) return '';
+  return `<div class="variant-concept ${full ? 'variant-concept-full' : ''}"><div><strong>${full ? '이 맵에 사용한 컨셉' : '맵 컨셉'}</strong><span>${concept.source === 'ai' ? 'AI 자동 작성' : '직접 입력'}</span></div><p>${escape(concept.text)}</p></div>`;
+}
 
 /** Small, actual geometry thumbnails remain useful even when blueprint images look alike. */
 function floorPlan(map: GridMap): string {
@@ -92,8 +98,10 @@ export function createVariantGallery(hooks: VariantGalleryHooks) {
     const isReady = ready(candidate), map = candidate.project?.map, image = blueprint(candidate), id = escape(candidate.id);
     return `<article class="variant-card ${activeId === candidate.id ? 'active' : ''} ${selected.has(candidate.id) ? 'chosen' : ''}" data-variant-card="${id}">
       <div class="variant-card-heading"><label class="variant-selection"><input type="checkbox" data-v-action="select" data-id="${id}" ${selected.has(candidate.id) ? 'checked' : ''} ${isReady ? '' : 'disabled'} aria-label="${escape(candidate.label)} 저장 선택"><strong>${escape(candidate.label)}</strong></label><span class="variant-status status-${candidate.status}">${statusLabels[candidate.status]}</span></div>
-      <button class="variant-cover" data-v-action="preview" data-id="${id}" aria-label="${escape(candidate.label)} 상세 미리보기" aria-pressed="${activeId === candidate.id}">${map ? floorPlan(map) : `<span class="variant-placeholder ${candidate.status === 'image' || candidate.status === 'extract' ? 'working' : ''}"><span aria-hidden="true">${candidate.status === 'error' ? '△' : candidate.status === 'cancelled' ? '−' : '▧'}</span><small>${statusLabels[candidate.status]}</small></span>`}${image ? `<img class="variant-blueprint-thumb" src="${escape(image)}" alt="${escape(candidate.label)} AI 설계도">` : ''}</button>
+      <button class="variant-cover" data-v-action="preview" data-id="${id}" aria-label="${escape(candidate.label)} 상세 미리보기" aria-pressed="${activeId === candidate.id}">${map ? floorPlan(map) : `<span class="variant-placeholder ${candidate.status === 'concept' || candidate.status === 'image' || candidate.status === 'extract' ? 'working' : ''}"><span aria-hidden="true">${candidate.status === 'error' ? '△' : candidate.status === 'cancelled' ? '−' : '▧'}</span><small>${statusLabels[candidate.status]}</small></span>`}${image ? `<img class="variant-blueprint-thumb" src="${escape(image)}" alt="${escape(candidate.label)} AI 설계도">` : ''}</button>
       ${map ? `<div class="variant-card-info"><p class="variant-map-name" title="${escape(map.name)}">${escape(map.name)}</p><p class="variant-dimensions">${map.width} × ${map.height}셀 · ${meters(map.width * map.cellSize)} × ${meters(map.height * map.cellSize)}m</p>${stats(map,candidate.project?.settings)}</div>` : `<p class="variant-card-message">${candidate.error ? escape(candidate.error) : candidate.status === 'waiting' ? '차례가 되면 생성합니다.' : candidate.status === 'cancelled' ? '이 후보의 생성이 취소되었습니다.' : '완료되면 실제 맵 배치를 비교할 수 있습니다.'}</p>`}
+      ${conceptSummary(candidate)}
+      ${candidate.warnings?.length ? `<p class="variant-card-message" data-variant-wall-warning>${escape(candidate.warnings.join(' '))}</p>` : ''}
       <div class="variant-card-actions"><button data-v-action="preview" data-id="${id}" data-v-view="3d" ${isReady ? '' : 'disabled'}>3D 보기</button><button data-v-action="preview" data-id="${id}" data-v-view="image" ${image ? '' : 'disabled'}>설계도</button>${hooks.remove ? `<button class="quiet danger" data-v-action="remove" data-id="${id}" ${hooks.busy() ? 'disabled' : ''} aria-label="${escape(candidate.label)} 제외">제외</button>` : ''}</div>
     </article>`;
   }
@@ -105,6 +113,8 @@ export function createVariantGallery(hooks: VariantGalleryHooks) {
     const mode = modes.get(candidate.id) ?? '3d';
     return `<section class="variant-detail" aria-label="후보 상세 미리보기">
       <div class="variant-detail-heading"><div><p class="eyebrow">CANDIDATE PREVIEW</p><h3>${escape(candidate.label)}</h3></div><span class="variant-status status-${candidate.status}">${statusLabels[candidate.status]}</span></div>
+      ${conceptSummary(candidate, true)}
+      ${candidate.warnings?.length ? `<p class="variant-detail-note" data-variant-wall-warning>${escape(candidate.warnings.join(' '))}</p>` : ''}
       <div class="variant-detail-tools"><button data-v-action="mode" data-v-view="3d" class="${mode === '3d' ? 'selected' : ''}" aria-pressed="${mode === '3d'}">3D</button><button data-v-action="mode" data-v-view="image" class="${mode === 'image' ? 'selected' : ''}" aria-pressed="${mode === 'image'}" ${image ? '' : 'disabled'}>설계도</button><span class="spacer"></span><button data-v-action="ceilings" aria-pressed="${ceilings.get(candidate.id) ?? false}" class="${ceilings.get(candidate.id) ? 'selected' : ''}" ${!isReady || mode !== '3d' ? 'disabled' : ''}>천장</button></div>
       <div class="variant-detail-viewport">${isReady && mode === '3d' ? '<div class="variant-preview-host" data-variant-preview></div><span class="variant-preview-hint">드래그 회전 · 휠 확대 · 우클릭 이동</span>' : image && mode === 'image' ? `<img class="variant-detail-image" src="${escape(image)}" alt="${escape(candidate.label)} AI 설계도">` : `<div class="variant-detail-placeholder"><span aria-hidden="true">${candidate.status === 'error' ? '△' : '▧'}</span><strong>${statusLabels[candidate.status]}</strong><p>${escape(candidate.error ?? (candidate.status === 'cancelled' ? '완료된 다른 후보를 선택해 보세요.' : '생성이 완료되면 3D 맵을 둘러볼 수 있습니다.'))}</p></div>`}</div>
       ${map ? `<div class="variant-detail-summary"><strong>${escape(map.name)}</strong><span>${map.width} × ${map.height}셀 · 셀 ${meters(map.cellSize)}m</span></div>${stats(map,candidate.project?.settings)}` : ''}
@@ -117,7 +127,7 @@ export function createVariantGallery(hooks: VariantGalleryHooks) {
     return `<section class="variant-gallery" aria-label="생성한 맵 후보 비교">
       <div class="variant-gallery-header"><div><h2>맵 후보 비교</h2><p>${candidates.length ? `${complete} / ${candidates.length}개 완료 · 저장할 후보를 체크하세요.` : '여러 가지 배치를 둘러보고 마음에 드는 맵을 골라 보세요.'}</p></div><button class="primary" data-v-action="save" ${!count || hooks.busy() ? 'disabled' : ''}>선택한 ${count}개 저장</button></div>
       <div class="variant-gallery-selection"><span data-variant-selected-count>${count}개 선택</span><button class="quiet" data-v-action="select-all" ${complete ? '' : 'disabled'}>완료 후보 전체 선택</button><button class="quiet" data-v-action="clear-selection" ${count ? '' : 'disabled'}>선택 해제</button></div>
-      ${candidates.length ? `<div class="variant-gallery-body"><div class="variant-cards" aria-label="맵 후보 목록">${candidates.map(card).join('')}</div>${detail()}</div>` : '<div class="variant-gallery-empty"><span aria-hidden="true">▦</span><strong>맵 후보를 한눈에 비교하세요</strong><p>왼쪽에서 후보 수를 정하고<br><b>여러 후보 생성</b>을 눌러 시작하세요.</p><small>각 후보의 실제 배치와 3D, 설계도를 확인할 수 있습니다.</small></div>'}
+      ${candidates.length ? `<div class="variant-gallery-body"><div class="variant-cards" aria-label="맵 후보 목록">${candidates.map(card).join('')}</div>${detail()}</div>` : '<div class="variant-gallery-empty"><span aria-hidden="true">▦</span><strong>맵 후보를 한눈에 비교하세요</strong><p>왼쪽에서 후보 수를 정하고<br><b>여러 후보 생성</b>을 눌러 시작하세요.</p><small>각 후보의 컨셉과 실제 배치, 3D, 설계도를 확인할 수 있습니다.</small></div>'}
       <p class="variant-storage-note">후보는 저장하기 전까지 현재 앱에만 보관됩니다.</p>
     </section>`;
   }

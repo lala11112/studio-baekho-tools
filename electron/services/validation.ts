@@ -1,6 +1,7 @@
 import type { GenerationRegion, GenerationSettings, ProjectFile } from '../../src/shared/types';
 import { parseGenerationSettings } from '../../src/shared/features';
 import { parseBindings } from '../../src/shared/map';
+import { parseMapConcept } from '../../src/shared/concepts';
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -48,7 +49,7 @@ export function publicProject(project: ProjectFile): ProjectFile {
       wallHeights:(project.map.wallHeights??[]).map(w=>({x:w.x,row:w.row,height:w.height,...(w.heightMode?{heightMode:w.heightMode}:{})})),
       bridges:(project.map.bridges??[]).map(b=>({x:b.x,row:b.row,direction:b.direction})),
       cliffs:(project.map.cliffs??[]).map(c=>({x:c.x,row:c.row,direction:c.direction,depth:c.depth})),
-      fixtures:(project.map.fixtures??[]).map(f=>({id:f.id,role:f.role,x:f.x,row:f.row,direction:f.direction,offset:{x:f.offset.x,y:f.offset.y,z:f.offset.z},...(f.anchor?{anchor:f.anchor}:{}),...(f.bindingId?{bindingId:f.bindingId}:{}),...(f.linkedId?{linkedId:f.linkedId}:{})})),
+      fixtures:(project.map.fixtures??[]).map(f=>({id:f.id,role:f.role,x:f.x,row:f.row,direction:f.direction,offset:{x:f.offset.x,y:f.offset.y,z:f.offset.z},...(f.anchor?{anchor:f.anchor}:{}),...(f.bindingId?{bindingId:f.bindingId}:{}),...(f.linkedId?{linkedId:f.linkedId}:{}),...(f.wall?{wall:structuredClone(f.wall)}:{})})),
       markers:(project.map.markers??[]).map(m=>({id:m.id,label:m.label,kind:m.kind,contentKey:m.contentKey,x:m.x,row:m.row,direction:m.direction,offset:{x:m.offset.x,y:m.offset.y,z:m.offset.z}})),
       lockedCells:(project.map.lockedCells??[]).map(c=>({x:c.x,row:c.row})), zones:(project.map.zones??[]).map(z=>({x:z.x,row:z.row,kind:z.kind})),
       ...(project.map.headroom===undefined?{}:{headroom:project.map.headroom}),
@@ -65,13 +66,24 @@ export function publicProject(project: ProjectFile): ProjectFile {
       ...(binding.stairNativeRise === undefined ? {} : { stairNativeRise: binding.stairNativeRise }),
       ...(binding.lightAnchor === undefined ? {} : { lightAnchor: binding.lightAnchor }),
       ...(binding.prop===undefined?{}:{prop:structuredClone(binding.prop)}),
+      ...(binding.bounds===undefined?{}:{bounds:structuredClone(binding.bounds)}),
+      ...(binding.wallMount===undefined?{}:{wallMount:structuredClone(binding.wallMount)}),
     })),
   };
   if (project.blueprintDataUrl !== undefined) {
     decodePngDataUrl(project.blueprintDataUrl);
     result.blueprintDataUrl = project.blueprintDataUrl;
   }
-  if(project.generationDraft!==undefined){decodePngDataUrl(project.generationDraft.imageDataUrl);result.generationDraft={imageDataUrl:project.generationDraft.imageDataUrl,settings:validateSettings(project.generationDraft.settings),...(project.generationDraft.region?{region:{x:project.generationDraft.region.x,row:project.generationDraft.region.row,width:project.generationDraft.region.width,height:project.generationDraft.region.height}}:{})};}
+  if(project.concept!==undefined)result.concept=parseMapConcept(project.concept);
+  if(project.generationDraft!==undefined){
+    const draft=project.generationDraft;
+    decodePngDataUrl(draft.imageDataUrl);
+    result.generationDraft={imageDataUrl:draft.imageDataUrl,settings:validateSettings(draft.settings),
+      ...(draft.region?{region:{x:draft.region.x,row:draft.region.row,width:draft.region.width,height:draft.region.height}}:{}),
+      ...(draft.concept===undefined?{}:{concept:parseMapConcept(draft.concept)}),
+      ...(draft.preferences===undefined?{}:{preferences:validateSettings(draft.preferences)}),
+    };
+  }
   if(project.generationDraft?.catalog!==undefined)result.generationDraft!.catalog=parseBindings(project.generationDraft.catalog);
   return result;
 }

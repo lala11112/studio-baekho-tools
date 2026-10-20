@@ -10,15 +10,17 @@ import type { CodexRpc, RpcObject } from '../electron/services/codex-transport';
 import { atomicWrite, createExportBundle, normalizeProject, readProject, serializeProject } from '../electron/services/projects';
 import { scanUnityProject, verifyBindingProvenance } from '../electron/services/unity-project';
 import { decodePngDataUrl, validateGenerationRegion, validateSettings } from '../electron/services/validation';
-import { DEFAULT_SETTINGS } from '../src/shared/map';
+import { conceptPrompt, imagePrompt, layoutPrompt } from '../electron/services/prompts';
+import { DEFAULT_SETTINGS, validateMap } from '../src/shared/map';
 import { DEFAULT_DESIGNER } from '../src/shared/features';
+import { DEFAULT_LEVEL_DESIGN } from '../src/shared/level-design';
 import type { AssetBinding, AssetRole, GenerationSettings, GridMap, ProjectFile } from '../src/shared/types';
 
 const v4Map = (map: GridMap): GridMap => ({ ...map, version: 4, ceilings: [], wallHeights: [], bridges: [], cliffs: [], fixtures: [], markers: [], lockedCells: [], zones: [] });
 
 const PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
 const PNG = `data:image/png;base64,${PNG_BASE64}`;
-const SETTINGS: GenerationSettings = { ...DEFAULT_SETTINGS, width: 8, height: 8, connectionCount: 1 };
+const SETTINGS: GenerationSettings = { ...DEFAULT_SETTINGS, conceptMode: 'manual', prompt: '서늘한 석조 전투 공간', width: 8, height: 8, connectionCount: 1 };
 const MAP: GridMap = {
   version: 3, name: 'Test dungeon', width: 8, height: 8, cellSize: SETTINGS.cellSize,
   rows: ['#D######', '#......#', '#......#', '#......#', '#......#', '#......#', '#......#', '########'],
@@ -80,9 +82,9 @@ class FakeCodex implements CodexRpc {
   layout(map: unknown): void { this.items = [{ type: 'agentMessage', id: 'answer', phase: 'final_answer', text: JSON.stringify(map) }]; }
 }
 
-async function codexFixture(t: TestContext, fake = new FakeCodex(), timeoutMs = 1000): Promise<{ client: CodexService; fake: FakeCodex; root: string }> {
+async function codexFixture(t: TestContext, fake = new FakeCodex()): Promise<{ client: CodexService; fake: FakeCodex; root: string }> {
   const root = await fixture(t);
-  const client = new CodexService({ dataDirectory: path.join(root, 'codex'), timeoutMs,
+  const client = new CodexService({ dataDirectory: path.join(root, 'codex'),
     discover: async () => ({ executable: 'mock-codex', version: 'test' }), connect: async () => fake });
   t.after(() => client.close());
   return { client, fake, root };
@@ -116,6 +118,104 @@ test('backend rejects malformed or oversized settings and PNG data before any re
   await assert.rejects(client.generateImage({ ...SETTINGS, height: NaN }));
   await assert.rejects(client.extractLayout(SETTINGS, 'data:image/png;base64,aaaa'));
   assert.equal(fake.requests.length, 0);
+});
+
+test('concept generation accepts an empty saved prompt and uses the same isolated model-aware connection', async t => {
+  const { client, fake, root } = await codexFixture(t);
+  const settings: GenerationSettings = { ...SETTINGS, conceptMode: 'ai', prompt: '', codexModel: 'codex-test-model',
+    designer: { ...DEFAULT_DESIGNER, elevation: false, props: false }, connectionWidth: 3, connectionHeight: 4 };
+  const concept = '진입 후 이동할 수 있는 범위를 파악하고 접근과 이탈 시점을 판단한다. 회피 뒤 다시 접근할지 거리를 유지할지 선택하며 이동 여유를 관리한다.';
+  fake.items = [
+    { type: 'agentMessage', id: 'commentary', phase: 'commentary', text: 'This is not the result.' },
+    { type: 'agentMessage', id: 'answer', phase: 'final_answer', text: JSON.stringify({ text: `  ${concept}  ` }) },
+  ];
+  const asset = { ...binding('prop', 'e'.repeat(32)), label: '석조 상자' };
+  const context = { candidateIndex: 1, candidateCount: 3, previousConcepts: ['진입 후 이동 경로를 파악하고 안전하게 회피하는 판단을 익힌다.'], currentMap: MAP };
+  assert.equal(await client.generateConcept(settings, [asset], context), concept);
+  const thread = fake.requests.find(request => request.method === 'thread/start')!.params;
+  assert.equal(thread.ephemeral, true); assert.equal(thread.model, settings.codexModel);
+  assert.equal(thread.sandbox, 'read-only'); assert.deepEqual(thread.config, { mcp_servers: { external: { enabled: false } } });
+  const turn = fake.requests.find(request => request.method === 'turn/start')!.params;
+  assert.deepEqual(turn.outputSchema, { type: 'object', properties: { text: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['text'], additionalProperties: false });
+  const prompt = String((turn.input as RpcObject[])[0].text);
+  assert.match(prompt, /한국어/); assert.match(prompt, /도구를 사용하지 마세요/);
+  assert.match(prompt, /"connectionWidth":3/); assert.match(prompt, /"connectionHeight":4/);
+  assert.match(prompt, /석조 상자/); assert.ok(prompt.includes(context.previousConcepts[0])); assert.match(prompt, /2번 후보/);
+  assert.match(prompt, /현재 맵 참고 정보/); assert.doesNotMatch(prompt, /Assets\/|eeeeeeee|must-not-be-forwarded/);
+  assert.deepEqual(await readdir(path.join(root, 'codex', 'jobs')), []);
+});
+
+test('automatic concept prompts preserve generation constraints without consuming the retained manual input', () => {
+  const prompt = conceptPrompt({ ...SETTINGS, conceptMode: 'ai', prompt: '지금은 사용하지 않는 직접 입력 문구',
+    designer: { ...DEFAULT_DESIGNER, bridges: false }, levelDesign: { pattern: 'auto', characterRadius: .5, dodgeDistance: 2, theme: '우주 정거장' } });
+  assert.match(prompt, /"bridges":false/); assert.match(prompt, /우주 정거장/);
+  assert.match(prompt, /비활성 기능/); assert.match(prompt, /사용자가 지정한 필수 조건/);
+  assert.doesNotMatch(prompt, /지금은 사용하지 않는 직접 입력 문구/);
+});
+
+test('automatic concepts describe gameplay choices without visual or concrete layout instructions', () => {
+  const settings = { ...SETTINGS, conceptMode: 'ai' as const, designer: { ...DEFAULT_DESIGNER, preset: 'shop' as const, enemies: false, hazards: false } };
+  const prompt = conceptPrompt(settings, undefined, { candidateIndex: 1, candidateCount: 2, previousConcepts: ['상인에게 안전하게 접근한 뒤 구매할 시점과 자원 사용을 판단한다.'] });
+  assert.match(prompt, /컨셉은 플레이 의도만 설명합니다/);
+  assert.match(prompt, /시각 디자인, 테마·배경 설정, 분위기, 색감, 조명, 재질, 장식 묘사는 포함하지 마세요/);
+  assert.match(prompt, /구체적인 배치나 설계 지시도 포함하지 마세요/);
+  assert.match(prompt, /플레이 목표 또는 판단·선택의 초점을 다르게/);
+  assert.match(prompt, /같은 방 용도와 활성 기능 안에서/);
+  assert.match(prompt, /"purpose":"shop"/); assert.match(prompt, /"enemies":false/); assert.match(prompt, /"hazards":false/);
+  assert.match(prompt, /기본 블록아웃에서 가능한 플레이 목표와 선택만/);
+  assert.doesNotMatch(prompt, /테마와 분위기, 공간의 시각적 특징|테마·분위기·공간의 인상이 분명히 다른/);
+});
+
+test('concept generation rejects malformed responses, blank or oversized text without making images', async t => {
+  const { client, fake } = await codexFixture(t);
+  const settings = { ...SETTINGS, conceptMode: 'ai' as const, prompt: '' };
+  for (const response of ['not JSON', 'null', '[]', JSON.stringify({ text: '' }), JSON.stringify({ text: '   ' }),
+    JSON.stringify({ text: 3 }), JSON.stringify({ text: '가'.repeat(2001) }), JSON.stringify({ text: '컨셉', unexpected: true })]) {
+    fake.items = [{ type: 'agentMessage', id: 'answer', phase: 'final_answer', text: response }];
+    await assert.rejects(client.generateConcept(settings), /컨셉/);
+  }
+  fake.items = [{ type: 'imageGeneration', id: 'image-only', status: 'completed', result: PNG_BASE64 }];
+  await assert.rejects(client.generateConcept(settings), /컨셉 JSON/);
+  assert.equal(fake.requests.filter(request => request.method === 'turn/start').length, 9);
+  for (const request of fake.requests.filter(request => request.method === 'turn/start')) {
+    assert.deepEqual((request.params.input as RpcObject[]).map(item => item.type), ['text']);
+  }
+});
+
+test('concept context and unresolved generation prompts fail before any Codex request', async t => {
+  const { client, fake } = await codexFixture(t);
+  for (const conceptMode of ['ai', 'manual'] as const) {
+    const settings = { ...SETTINGS, conceptMode, prompt: '   ' };
+    assert.equal(validateSettings(settings).prompt, '');
+    await assert.rejects(client.generateImage(settings), /컨셉/);
+    await assert.rejects(client.extractLayout(settings, PNG), /컨셉/);
+  }
+  await assert.rejects(client.generateConcept(SETTINGS, [{ bad: 'binding' }]));
+  for (const context of [null, [], { unexpected: true }, { previousConcepts: [''] }, { candidateIndex: -1, candidateCount: 3 },
+    { currentMap: { ...MAP, width: 9, rows: MAP.rows.map(row => `${row}#`), elevations: MAP.elevations.map(row => [...row, 0]) } }]) {
+    await assert.rejects(client.generateConcept({ ...SETTINGS, conceptMode: 'ai', prompt: '' }, undefined, context));
+  }
+  assert.equal(fake.requests.length, 0);
+});
+
+test('concept cancellation rejects late answers and retains the busy guard', async t => {
+  const { client, fake, root } = await codexFixture(t);
+  fake.hang = true;
+  const settings = { ...SETTINGS, conceptMode: 'ai' as const, prompt: '' };
+  const started = new Promise<void>(resolve => { fake.turnStarted = resolve; });
+  const first = client.generateConcept(settings);
+  const cancelled = assert.rejects(first, /취소되었습니다/);
+  await started;
+  await new Promise(resolve => setImmediate(resolve));
+  const lateListeners = [...fake.notifications];
+  await assert.rejects(client.generateImage(SETTINGS), /이미 Codex 생성/);
+  client.cancel();
+  for (const listener of lateListeners) listener('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed',
+    items: [{ type: 'agentMessage', id: 'late', text: JSON.stringify({ text: '늦게 도착한 컨셉' }) }] } });
+  await cancelled;
+  assert.equal(fake.closed, true); assert.equal(fake.notifications.size, 0);
+  assert.ok(fake.requests.some(request => request.method === 'turn/interrupt'));
+  assert.deepEqual(await readdir(path.join(root, 'codex', 'jobs')), []);
 });
 
 test('Codex generates native PNG then vision structured JSON using ephemeral isolated threads', async t => {
@@ -162,6 +262,66 @@ test('Codex rejects invalid layouts without substituting a sample', async t => {
   await assert.rejects(client.extractLayout(SETTINGS, PNG), /검증을 통과하지 못했습니다/);
 });
 
+test('new-map prompts require exact connection dimensions and reserve the full multi-cell opening', () => {
+  const settings = { ...SETTINGS, prompt: '연결문은 폭 1m, 높이 2m로 만들어 주세요.', connectionWidth: 4.5, connectionHeight: 5.75 };
+  for (const prompt of [imagePrompt(settings), layoutPrompt(settings)]) {
+    assert.match(prompt, /width exactly 4\.5m/);
+    assert.match(prompt, /height exactly 5\.75m/);
+    assert.match(prompt, /exactly 3 adjacent D cells/);
+    assert.match(prompt, /without rounding it to whole cells/);
+    assert.match(prompt, /Explicit connection dimensions override conflicting text/);
+    assert.doesNotMatch(prompt, /Door openings are normally/);
+  }
+  const legacy = { ...SETTINGS }; delete legacy.connectionWidth; delete legacy.connectionHeight;
+  for (const prompt of [imagePrompt(legacy), layoutPrompt(legacy)]) {
+    assert.match(prompt, /normally 2m wide/); assert.match(prompt, /normally 3m tall/);
+    assert.match(prompt, /honor a different width requested by the brief/);
+  }
+});
+
+test('extraction preserves requested fractional door sizes and rejects mismatches without a designer', async t => {
+  const { client, fake } = await codexFixture(t);
+  const settings = { ...SETTINGS, connectionWidth: 4.5, connectionHeight: 5.75 };
+  const wide = structuredClone(MAP);
+  wide.rows[0] = '#DDD####';
+  wide.connections[0].width = 4.5; wide.connections[0].height = 5.75;
+  fake.layout(wide);
+  const result = await client.extractLayout(settings, PNG);
+  assert.deepEqual(result.connections, wide.connections);
+  assert.equal(result.rows[0], '#DDD####');
+  for (const dimensions of [{ width: 4.25, height: 5.75 }, { width: 4.5, height: 5.5 }]) {
+    const mismatch = structuredClone(wide); Object.assign(mismatch.connections[0], dimensions);
+    fake.layout(mismatch);
+    await assert.rejects(client.extractLayout(settings, PNG), /연결문.*(?:폭|높이)/);
+    assert.deepEqual(mismatch.connections[0], { ...wide.connections[0], ...dimensions }, 'mismatches are rejected, never silently resized');
+  }
+  const legacy = { ...SETTINGS }; delete legacy.connectionWidth; delete legacy.connectionHeight;
+  fake.layout(wide);
+  assert.deepEqual((await client.extractLayout(legacy, PNG)).connections, wide.connections, 'old settings without dimensions keep accepting brief-defined sizes');
+});
+
+test('region image and extraction retain heterogeneous door sizes despite new-map size preferences', async t => {
+  const { client, fake } = await codexFixture(t);
+  const region = { x: 3, row: 3, width: 2, height: 2 };
+  const settings = { ...SETTINGS, connectionCount: 2, connectionWidth: 6.5, connectionHeight: 7.25 };
+  const existing = structuredClone(MAP);
+  existing.rows[0] = '#DDD####'; existing.rows[7] = '#####D##';
+  existing.connections[0].width = 4.5; existing.connections[0].height = 5.75;
+  existing.connections.push({ id: 'south', label: 'South', x: 5, row: 7, direction: 180, width: 1.25, height: 2.25, kind: 'door' });
+  await client.generateImage(settings, region);
+  fake.layout(existing);
+  const result = await client.extractLayout(settings, PNG, region);
+  assert.deepEqual(result.connections, existing.connections);
+  assert.deepEqual(result.rows, existing.rows);
+  for (const request of fake.requests.filter(request => request.method === 'turn/start')) {
+    const prompt = String((request.params.input as RpcObject[])[0].text);
+    assert.match(prompt, /Preserve every existing connection width and height exactly/);
+    assert.match(prompt, /different sizes on different doors/);
+    assert.match(prompt, /Global new-door size settings do not apply/);
+    assert.doesNotMatch(prompt, /width exactly 6\.5m|height exactly 7\.25m|Door openings are normally/);
+  }
+});
+
 test('vision extraction preserves a raised platform and rejects a stair that cannot reach its landing', async t => {
   const { client, fake } = await codexFixture(t);
   const raised = raisedProject().map;
@@ -190,6 +350,54 @@ test('designer conditions fail visibly when AI omits requested structure instead
   await assert.rejects(client.extractLayout({...SETTINGS,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,bridges:true}},PNG),/다리/);
   fake.layout({...MAP,version:4,bridges:[],markers:[{id:'injected',label:'Injected',kind:'enemy',contentKey:'',x:1,row:1,direction:0,offset:{x:0,y:0,z:0}}]});
   await assert.rejects(client.extractLayout({...SETTINGS,designer:{...DEFAULT_DESIGNER,elevation:false,props:false}},PNG),/허용되지 않는 추가 콘텐츠/);
+});
+
+function groupedChokeMap(): GridMap {
+  return { ...structuredClone(MAP), version: 4,
+    rows: ['####D###', '#......#', '####P###', '#......#', '#......#', '#......#', '#......#', '########'],
+    connections: [{ id: 'north', label: 'North', x: 4, row: 0, direction: 0, width: 2, height: 3, kind: 'door' }] };
+}
+function groupedChokeSettings(): GenerationSettings {
+  return { ...SETTINGS, designer: { ...DEFAULT_DESIGNER, preset: 'shop', elevation: false, props: true, propLayout: 'grouped', propCoverage: 1 },
+    levelDesign: { ...DEFAULT_LEVEL_DESIGN, pattern: 'openArena' } };
+}
+
+test('grouped extraction removes optional P choke hints before topology and local content validation', async t => {
+  const { client, fake, root } = await codexFixture(t), geography = groupedChokeMap(), before = structuredClone(geography), config = groupedChokeSettings();
+  const crate = { ...binding('prop', 'e'.repeat(32)), label: 'Crate', prop: { category: '상자', tags: [], blocksMovement: true,
+    size: { x: 1, y: 1, z: 1 }, placement: 'floor' as const, roomTypes: ['shop' as const], weight: 1 } };
+  assert.ok(validateMap(geography).some(issue => issue.severity === 'error'), 'the optional hint initially severs the only connecting path');
+  fake.layout(geography);
+  const result = await client.extractLayout(config, PNG, undefined, [crate]);
+  assert.equal(result.rows[2][4], '.'); assert.deepEqual(result.connections, geography.connections); assert.deepEqual(result.elevations, geography.elevations);
+  assert.deepEqual(validateMap(result).filter(issue => issue.severity === 'error'), []); assert.deepEqual(geography, before);
+  assert.equal(fake.requests.filter(request => request.method === 'turn/start').length, 1);
+  assert.deepEqual(await readdir(path.join(root, 'codex', 'jobs')), []);
+});
+
+test('grouped hint cleanup never accepts AI-authored assignments, locks, fixtures or measured content', async t => {
+  const { client, fake } = await codexFixture(t), config = groupedChokeSettings(), base = groupedChokeMap();
+  const assigned = structuredClone(base); assigned.assetOverrides.push({ x: 4, row: 2, role: 'prop', bindingId: 'prop' });
+  const locked = { ...structuredClone(base), lockedCells: [{ x: 4, row: 2 }] };
+  const fixtureMap = { ...structuredClone(base), fixtures: [{ id: 'injected', role: 'decoration' as const, x: 4, row: 2, direction: 0 as const, offset: { x: 0, y: 0, z: 0 } }] };
+  const measured = { ...structuredClone(base), version: 5 as const, propInstances: [{ id: 'injected-prop', bindingId: 'prop', role: 'prop' as const, x: 4, row: 2,
+    direction: 0 as const, offset: { x: 0, y: 0, z: 0 }, cells: [{ x: 4, row: 2 }], size: { x: 1, y: 1, z: 1 }, blocksMovement: true, category: '상자', provenance: 'generated' as const }] };
+  for (const geography of [assigned, locked, fixtureMap, measured]) {
+    fake.layout(geography);
+    await assert.rejects(client.extractLayout(config, PNG), /허용되지 않는 추가 콘텐츠|AI 배치도는 셀 에셋/);
+  }
+});
+
+test('grouped cleanup leaves real topology errors, malformed tiles, legacy counts and outside-region hints rejected', async t => {
+  const { client, fake } = await codexFixture(t), config = groupedChokeSettings(), blocked = groupedChokeMap();
+  blocked.rows[2] = '########'; fake.layout(blocked);
+  await assert.rejects(client.extractLayout(config, PNG), /검증을 통과하지 못했습니다|연결되어 있지/);
+  const malformed = groupedChokeMap(); malformed.rows[2] = '####X###'; fake.layout(malformed);
+  await assert.rejects(client.extractLayout(config, PNG), /허용되지 않는 문자|검증을 통과하지 못했습니다/);
+  fake.layout(groupedChokeMap());
+  await assert.rejects(client.extractLayout({ ...config, designer: { ...config.designer!, propLayout: 'legacy' } }, PNG), /검증을 통과하지 못했습니다|연결되어 있지/);
+  fake.layout(groupedChokeMap());
+  await assert.rejects(client.extractLayout(config, PNG, { x: 1, row: 3, width: 6, height: 4 }), /검증을 통과하지 못했습니다|연결되어 있지/);
 });
 
 test('region requests validate bounds before calling Codex and explicitly scope image/layout prompts',async t=>{
@@ -256,12 +464,57 @@ test('Codex allows one active request, interrupts on cancel, and cleans isolated
   assert.deepEqual(await readdir(path.join(root, 'codex', 'jobs')), []);
 });
 
-test('Codex aborts requests after timeout', async t => {
-  const fake = new FakeCodex();
+test('concept, image and extraction wait beyond five minutes and accept late successful results', async t => {
+  for (const stage of ['concept', 'image', 'extract'] as const) await t.test(stage, async t => {
+    const { client, fake, root } = await codexFixture(t);
+    fake.hang = true;
+    const concept = '진입 후 이동 여유를 파악하고 접근과 이탈 시점을 선택한다.';
+    if (stage === 'concept') fake.items = [{ type: 'agentMessage', id: 'answer', phase: 'final_answer', text: JSON.stringify({ text: concept }) }];
+    else if (stage === 'extract') fake.layout(MAP);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const started = new Promise<void>(resolve => { fake.turnStarted = resolve; });
+    const generation = stage === 'concept' ? client.generateConcept({ ...SETTINGS, conceptMode: 'ai', prompt: '' })
+      : stage === 'image' ? client.generateImage(SETTINGS) : client.extractLayout(SETTINGS, PNG);
+    let settled = false;
+    const outcome = generation.then(value => { settled = true; return { value }; }, error => { settled = true; return { error }; });
+    await started;
+    await new Promise(resolve => setImmediate(resolve));
+    for (const elapsed of [5 * 60 * 1000 + 1, 60 * 60 * 1000]) {
+      t.mock.timers.tick(elapsed);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(settled, false, 'Elapsed generation time must not settle or cancel the request.');
+      assert.equal(fake.closed, false);
+      assert.ok(!fake.requests.some(request => request.method === 'turn/interrupt'));
+    }
+    await assert.rejects(client.generateImage(SETTINGS), /이미 Codex 생성/);
+    for (const listener of [...fake.notifications]) listener('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: fake.items } });
+    const result = await outcome;
+    if ('error' in result) throw result.error;
+    assert.deepEqual(result.value, stage === 'concept' ? concept : stage === 'image' ? PNG : v4Map(MAP));
+    assert.equal(fake.notifications.size, 0);
+    assert.ok(fake.requests.some(request => request.method === 'thread/unload'));
+    assert.deepEqual(await readdir(path.join(root, 'codex', 'jobs')), []);
+  });
+});
+
+test('closing a long-running generation cancels it and ignores late completion', async t => {
+  const { client, fake, root } = await codexFixture(t);
   fake.hang = true;
-  const { client } = await codexFixture(t, fake, 15);
-  await assert.rejects(client.generateImage(SETTINGS), /5분 안에 완료되지 않았습니다/);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const started = new Promise<void>(resolve => { fake.turnStarted = resolve; });
+  const cancelled = assert.rejects(client.generateImage(SETTINGS), /취소되었습니다/);
+  await started;
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(60 * 60 * 1000);
+  const lateListeners = [...fake.notifications];
+  client.close();
+  for (const listener of lateListeners) listener('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: fake.items } });
+  await cancelled;
   assert.equal(fake.closed, true);
+  assert.equal(fake.notifications.size, 0);
+  assert.ok(fake.requests.some(request => request.method === 'turn/interrupt'));
+  assert.deepEqual(await readdir(path.join(root, 'codex', 'jobs')), []);
+  await assert.rejects(client.generateImage(SETTINGS), /연결이 종료/);
 });
 
 test('Codex refuses failed image tools even when the surrounding turn completed', async t => {
@@ -487,6 +740,18 @@ test('ZIP contains validated manifest, importer, blueprint and instructions, wit
   assert.match(strFromU8(files['README.txt']), /Assets\/Baekho\/Editor\/BaekhoMapImporter\.cs/);
   assert.deepEqual(Buffer.from(files['blueprint.png']), decodePngDataUrl(PNG));
   assert.ok(!strFromU8(files['Map.baekhomap.json']).includes('prefab contents'));
+  const wallBundle=unzipSync(await createExportBundle(project(),scan,'// importer','// connection','// marker','// fixture','// catalog v2','// wall module','# 벽 부착물 제작'));
+  assert.equal(strFromU8(wallBundle['Unity/Editor/BaekhoPropCatalog.cs']),'// catalog v2');
+  assert.equal(strFromU8(wallBundle['Unity/Runtime/BaekhoWallModule.cs']),'// wall module');
+  assert.equal(strFromU8(wallBundle['Unity/WALL_PREFABS.ko.md']),'# 벽 부착물 제작');
+  const assetBundle = unzipSync(await createExportBundle(project(), scan, '// importer', '// connection', '// marker', '// fixture', '// bounds', '// wall', undefined,
+    { runtime: '// map asset', editor: '// multi edit', catalog: '// asset catalog' }));
+  assert.equal(strFromU8(assetBundle['Unity/Runtime/BaekhoMapAsset.cs']), '// map asset');
+  assert.equal(strFromU8(assetBundle['Unity/Editor/BaekhoMapAssetEditor.cs']), '// multi edit');
+  assert.equal(strFromU8(assetBundle['Unity/Editor/BaekhoAssetCatalog.cs']), '// asset catalog');
+  assert.ok(!Object.keys(assetBundle).some(name => /Mcp|GetAssetCatalogTool/.test(name)), 'Offline ZIP remains independent of Unity MCP.');
+  await assert.rejects(createExportBundle(project(), scan, '// importer', '// connection', '// marker', '// fixture', undefined, undefined, undefined,
+    { runtime: '// map asset', editor: '// multi edit', catalog: '// asset catalog' }), /모두 필요/);
   const incomplete = project();
   incomplete.map.connections = [];
   await assert.rejects(createExportBundle(incomplete, scan, '// importer', '// runtime', '// marker fixture', '// fixture metadata'), /맵 오류/);

@@ -7,6 +7,9 @@ import { connectionCells, connectionAt, maximumConnectionWidth, MAX_CONNECTION_W
 import { resolveFixtureBinding } from './light-bindings';
 import { structureDataErrors, structureIssues, synchronizeStructures, FLOOR_THICKNESS_RATIO, resolvedStructureFill, resolvedCliffFace } from './structures';
 import { parsePropDefinition, propStructureErrors, propValidationIssues, propPosition } from './props';
+import { parseMapConcept } from './concepts';
+import { parseLocalBounds, parseWallMountDefinition, wallMountIssues } from './wall-mounts';
+import { wallBaseClosure } from './wall-geometry';
 export { connectionCells, connectionAt, maximumConnectionWidth, MAX_CONNECTION_WIDTH } from './connections';
 
 const MAP_NAME = /^(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:$|\.))(?![\s\u0085])(?![\s\S]*[\s\u0085.]$)[^<>:"\/\\|?*\u0000-\u001F\u007F]+$/;
@@ -21,13 +24,16 @@ export { FLOOR_THICKNESS_RATIO } from './structures';
 const DIRECTIONS = { 0: [0, -1], 90: [1, 0], 180: [0, 1], 270: [-1, 0] } as const;
 
 export const DEFAULT_SETTINGS: GenerationSettings = {
-  prompt: '3인칭 3D 로그라이크의 독립된 방 모듈. 선택한 방 용도와 지형 기능에 맞게 설계하고, 모든 가장자리 연결문에서 목적 공간까지 안전하게 오갈 수 있게 해 주세요.',
+  conceptMode: 'ai',
+  prompt: '',
   width: 16,
   height: 16,
   cellSize: 2,
   elevationStep: 2,
   maxStepHeight: 0.4,
   connectionCount: 4,
+  connectionWidth: 2,
+  connectionHeight: 3,
   codexModel: '',
 };
 
@@ -138,7 +144,7 @@ function cellCoordinate(value: unknown, size: unknown): value is number {
   return isFiniteNumber(value) && Number.isInteger(value) && value >= 0 && isDimension(size) && value < size;
 }
 
-function mapStructureErrors(input: unknown): string[] {
+export function mapStructureErrors(input: unknown): string[] {
   if (!isRecord(input)) return ['map은 객체여야 합니다.'];
   const errors: string[] = [];
   if (extraKeys(input, MAP_KEYS).length) errors.push('map에 지원하지 않는 속성이 있습니다.');
@@ -306,8 +312,8 @@ function outsideVoid(map: GridMap): Set<number> {
   return outside;
 }
 
-/** Validate editable grid shape, exterior ports, and height-aware walkability. */
-export function validateMap(input: unknown): ValidationIssue[] {
+/** Validate grid topology and placements; an available catalog calibrates physical support and collision checks. */
+export function validateMap(input: unknown, bindings?: AssetBinding[]): ValidationIssue[] {
   const issues: ValidationIssue[] = mapStructureErrors(input).map((message) => ({ severity: 'error', message }));
   if (issues.length) return issues;
   const map = input as GridMap;
@@ -389,7 +395,7 @@ export function validateMap(input: unknown): ValidationIssue[] {
     }
   }
   issues.push(...featureValidationIssues(map));
-  issues.push(...structureIssues(map),...propValidationIssues(map));
+  issues.push(...structureIssues(map),...propValidationIssues(map,bindings),...wallMountIssues(map,bindings));
   return issues;
 }
 
@@ -455,7 +461,7 @@ export function parseBindings(input: unknown, legacy = false): AssetBinding[] {
   const usedIds = new Set<string>();
   return Array.from(input, (item: unknown, index: number) => {
     const field = `bindings[${index}]`;
-    if (!isRecord(item) || extraKeys(item, ['id', 'label', 'role', 'prefabGuid', 'prefabPath', 'scale', 'offset', 'rotationY', 'stairNativeRise', 'lightAnchor','prop']).length) {
+    if (!isRecord(item) || extraKeys(item, ['id', 'label', 'role', 'prefabGuid', 'prefabPath', 'scale', 'offset', 'rotationY', 'stairNativeRise', 'lightAnchor','prop','bounds','wallMount']).length) {
       throw new Error(`${field}의 구조가 올바르지 않습니다.`);
     }
     if (typeof item.role !== 'string' || !ROLES.includes(item.role as AssetRole)) throw new Error(`${field}.role이 올바르지 않습니다.`);
@@ -487,13 +493,18 @@ export function parseBindings(input: unknown, legacy = false): AssetBinding[] {
     };
     if (item.role === 'stair' || item.role === 'slope') binding.stairNativeRise = stairNativeRise as number;
     if (item.lightAnchor !== undefined) binding.lightAnchor = item.lightAnchor as 'ceiling' | 'wall';
-    if(item.prop!==undefined){if(!['prop','decoration'].includes(binding.role))throw new Error('소품 정보는 소품·장식 에셋에만 지정할 수 있습니다.');binding.prop=parsePropDefinition(item.prop);}
+    if(item.prop!==undefined){if(!['prop','decoration','vegetation'].includes(binding.role))throw new Error('소품 정보는 소품·장식·식생 에셋에만 지정할 수 있습니다.');binding.prop=parsePropDefinition(item.prop);}
+    if(item.bounds!==undefined)binding.bounds=parseLocalBounds(item.bounds);
+    if(item.wallMount!==undefined){
+      if(!ASSET_ROLES.includes(binding.role)||['floor','wall','door','prop','stair','slope','bridge','ceiling','cliff','deadzone'].includes(binding.role))throw new Error('벽 부착 설정은 조명·장식·시설 에셋에만 지정할 수 있습니다.');
+      binding.wallMount=parseWallMountDefinition(item.wallMount);
+    }
     return binding;
   });
 }
 
 function validateOverrideBindings(map: GridMap, bindings: AssetBinding[]): void {
-  for(const prop of map.propInstances??[])if(!bindings.some(b=>b.id===prop.bindingId&&['prop','decoration'].includes(b.role)))throw new Error(`소품 ${prop.id}의 프리팹 연결을 찾을 수 없습니다.`);
+  for(const prop of map.propInstances??[])if(!bindings.some(b=>b.id===prop.bindingId&&['prop','decoration','vegetation'].includes(b.role)))throw new Error(`소품 ${prop.id}의 프리팹 연결을 찾을 수 없습니다.`);
   for (const fixture of map.fixtures ?? []) if (fixture.bindingId && !resolveFixtureBinding(map, bindings, fixture))
     throw new Error(`시설 ${fixture.id}의 지정 프리팹이 역할 또는 조명 부착 기준과 일치하지 않습니다.`);
   for (const override of map.assetOverrides) {
@@ -526,9 +537,20 @@ export function connectionPose(map: GridMap, connection: MapConnection): { posit
   };
 }
 
+/** Add an opening atomically, including every cell covered by its requested width. */
+export function addMapConnection(map: GridMap, connection: MapConnection, bindings?: AssetBinding[]): GridMap {
+  const candidate = { ...map, connections: [...map.connections, { ...connection }] };
+  const errors = mapStructureErrors(candidate);
+  if (errors.length) throw new Error(errors.slice(0, 3).join(' '));
+  const cells = new Set(connectionCells(map, connection).map(cell => `${cell.x},${cell.row}`));
+  if (map.fixtures?.some(cell => cells.has(`${cell.x},${cell.row}`)) || map.markers?.some(cell => cells.has(`${cell.x},${cell.row}`)))
+    throw new Error('연결문 개구부의 배치물·게임 지점을 먼저 옮기거나 제거하세요.');
+  return updateConnectionGeometry(candidate, connection.id, {}, bindings);
+}
+
 /** Resize/reorient one opening atomically; the returned map contains its complete D-cell footprint. */
 export function updateConnectionGeometry(map: GridMap, id: string,
-  change: Partial<Pick<MapConnection, 'width' | 'height' | 'direction'>>): GridMap {
+  change: Partial<Pick<MapConnection, 'width' | 'height' | 'direction'>>, bindings?: AssetBinding[]): GridMap {
   const original = map.connections.find(item => item.id === id);
   if (!original) throw new Error('크기를 바꿀 연결문을 찾지 못했습니다.');
   const next = { ...original, ...change };
@@ -568,7 +590,7 @@ export function updateConnectionGeometry(map: GridMap, id: string,
   result.zones = (result.zones ?? []).filter(cell => !releasedKeys.has(key(cell)));
   result.assetOverrides = result.assetOverrides.filter(item => cellHasRole(result, item.x, item.row, item.role));
   const synchronized = synchronizeStructures(result);
-  const errors = validateMap(synchronized).filter(issue => issue.severity === 'error');
+  const errors = validateMap(synchronized, bindings).filter(issue => issue.severity === 'error');
   if (errors.length) throw new Error(errors.slice(0, 3).map(issue => issue.message).join(' '));
   return synchronized;
 }
@@ -586,11 +608,11 @@ export function doorRotation(map: GridMap, row: number, column: number): number 
  * Floor Y scale is a thickness multiplier; stair Y scale fits its measured source rise.
  */
 export function buildManifest(map: GridMap, bindings: AssetBinding[]): ExportManifest {
-  const errors = validateMap(map).filter((issue) => issue.severity === 'error');
-  if (errors.length) throw new Error(errors.map((issue) => issue.message).join('\n'));
+  const temporaryWallCount = map.fixtures?.filter(fixture => fixture.wall?.placeholder).length ?? 0;
+  if (temporaryWallCount) throw new Error(`임시 벽 부착물 ${temporaryWallCount}개가 남아 있습니다. 맵 저장은 가능하며, Unity로 내보내기 전에 실제 프리팹으로 교체하거나 제거해 주세요.`);
   const checkedBindings = parseBindings(bindings);
-  const propErrors=propValidationIssues(map,checkedBindings).filter(i=>i.severity==='error');
-  if(propErrors.length)throw new Error(propErrors.map(i=>i.message).join('\n'));
+  const errors = validateMap(map, checkedBindings).filter((issue) => issue.severity === 'error');
+  if (errors.length) throw new Error(errors.map((issue) => issue.message).join('\n'));
   const explicitPropCells=new Set((map.propInstances??[]).flatMap(p=>p.cells.map(c=>`${c.x},${c.row}`)));
   validateOverrideBindings(map, checkedBindings);
   const byRole = new Map(checkedBindings.map((binding) => [binding.role, binding]));
@@ -647,7 +669,14 @@ export function buildManifest(map: GridMap, bindings: AssetBinding[]): ExportMan
         placements.push(placement);
       };
       if (HAS_FLOOR.has(tile)) addPrefab('floor');
-      if (tile === '#') addPrefab('wall', 0, undefined, position, '', map.wallHeights?.find(w=>w.x===column&&w.row===row)?.height);
+      if (tile === '#') {
+        addPrefab('wall', 0, undefined, position, '', map.wallHeights?.find(w=>w.x===column&&w.row===row)?.height);
+        const closure = wallBaseClosure(map, { x: column, row }, checkedBindings);
+        if (closure) {
+          const binding = resolveBinding(map, checkedBindings, column, row, 'wall')!;
+          addPrefab('wall', 0, undefined, { ...position, y: closure.bottom - binding.offset.y }, '-base', closure.height);
+        }
+      }
       if (tile === 'B') addPrefab('bridge', map.bridges!.find(b=>b.x===column&&b.row===row)!.direction);
       const ceiling=map.ceilings?.find(c=>c.x===column&&c.row===row);
       if(ceiling) addPrefab('ceiling',0,undefined,{...position,y:ceiling.undersideY});
@@ -684,6 +713,10 @@ export function buildManifest(map: GridMap, bindings: AssetBinding[]): ExportMan
   for (const fixture of map.fixtures??[]) {
     const binding=resolveFixtureBinding(map, checkedBindings, fixture);
     if(!binding)throw new Error(`시설 ${fixture.id}의 프리팹 슬롯을 연결해 주세요.`);
+    if(fixture.wall){
+      placements.push({id:`fixture-${fixture.id}`,role:fixture.role,prefabGuid:binding.prefabGuid,position:{...fixture.wall.position},rotation:{x:0,y:fixture.wall.rotationY,z:fixture.wall.rotationZ??0},scale:{...binding.scale},surface:'pivot',...(fixture.linkedId?{linkedId:`fixture-${fixture.linkedId}`}:{})});
+      continue;
+    }
     const origin=fixturePosition(map,fixture);
     const position={x:origin.x+binding.offset.x,y:origin.y+binding.offset.y,z:origin.z+binding.offset.z};
     if(![...Object.values(position),fixture.direction+binding.rotationY].every(isTransformNumber))throw new Error('시설의 최종 배치 좌표 또는 회전이 범위를 벗어났습니다.');
@@ -734,7 +767,7 @@ function migrateLegacyMap(input: Record<string, unknown>): unknown {
 
 /** Load old maps into v4 without inventing features or changing legacy wall scale. */
 export function parseProjectFile(input: unknown): ProjectFile {
-  if (!isRecord(input) || extraKeys(input, ['formatVersion', 'map', 'settings', 'bindings', 'blueprintDataUrl', 'generationDraft']).length) {
+  if (!isRecord(input) || extraKeys(input, ['formatVersion', 'map', 'settings', 'bindings', 'blueprintDataUrl', 'generationDraft', 'concept']).length) {
     throw new Error('프로젝트 파일의 구조가 올바르지 않습니다.');
   }
   if (input.formatVersion !== 1) throw new Error('지원하지 않는 프로젝트 formatVersion입니다.');
@@ -770,7 +803,7 @@ export function parseProjectFile(input: unknown): ProjectFile {
       elevations: map.elevations.map((row) => [...row]), ramps: map.ramps.map((ramp) => ({ ...ramp })), maxStepHeight: map.maxStepHeight,
       connections: map.connections.map(connection => ({ ...connection })), assetOverrides: map.assetOverrides.map(override => ({ ...override })),
       ceilings:(map.ceilings??[]).map(c=>({...c})),wallHeights:(map.wallHeights??[]).map(w=>({...w})),bridges:(map.bridges??[]).map(b=>({...b})),cliffs:(map.cliffs??[]).map(c=>({...c})),
-      fixtures:(map.fixtures??[]).map(f=>({...f,offset:{...f.offset}})),markers:(map.markers??[]).map(m=>({...m,offset:{...m.offset}})),lockedCells:(map.lockedCells??[]).map(c=>({...c})),zones:(map.zones??[]).map(z=>({...z})),
+      fixtures:(map.fixtures??[]).map(f=>structuredClone(f)),markers:(map.markers??[]).map(m=>({...m,offset:{...m.offset}})),lockedCells:(map.lockedCells??[]).map(c=>({...c})),zones:(map.zones??[]).map(z=>({...z})),
       ...(map.headroom===undefined?{}:{headroom:map.headroom}),
       ...(map.structureSettings?{structureSettings:structuredClone(map.structureSettings)}:{}),
       ...(map.pitBottoms?{pitBottoms:structuredClone(map.pitBottoms)}:{}),
@@ -782,10 +815,13 @@ export function parseProjectFile(input: unknown): ProjectFile {
   };
   validateOverrideBindings(project.map, project.bindings);
   if (typeof input.blueprintDataUrl === 'string') project.blueprintDataUrl = input.blueprintDataUrl;
+  if (input.concept !== undefined) project.concept = parseMapConcept(input.concept);
   if (input.generationDraft!==undefined) {
     const draft=input.generationDraft;
-    if(!isRecord(draft)||extraKeys(draft,['imageDataUrl','settings','region','catalog']).length||!isPngDataUrl(draft.imageDataUrl))throw new Error('generationDraft에 올바른 PNG와 설정이 필요합니다.');
+    if(!isRecord(draft)||extraKeys(draft,['imageDataUrl','settings','region','catalog','concept','preferences']).length||!isPngDataUrl(draft.imageDataUrl))throw new Error('generationDraft에 올바른 PNG와 설정이 필요합니다.');
     project.generationDraft={imageDataUrl:draft.imageDataUrl,settings:parseGenerationSettings(draft.settings)};
+    if(draft.concept!==undefined)project.generationDraft.concept=parseMapConcept(draft.concept);
+    if(draft.preferences!==undefined)project.generationDraft.preferences=parseGenerationSettings(draft.preferences);
     if(draft.catalog!==undefined)project.generationDraft.catalog=parseBindings(draft.catalog);
     if(draft.region!==undefined){const r=draft.region,s=project.generationDraft.settings;
       if(!isRecord(r)||extraKeys(r,['x','row','width','height']).length||![r.x,r.row,r.width,r.height].every(n=>isFiniteNumber(n)&&Number.isInteger(n))||Number(r.x)<0||Number(r.row)<0||Number(r.width)<1||Number(r.height)<1||Number(r.x)+Number(r.width)>s.width||Number(r.row)+Number(r.height)>s.height)throw new Error('generationDraft.region은 생성 맵 내부 영역이어야 합니다.');

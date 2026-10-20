@@ -1,6 +1,7 @@
 import { DEFAULT_DESIGNER } from './features';
 import { DEFAULT_LEVEL_DESIGN, compileLevelDesign } from './level-design';
 import type { GenerationSettings, RoomPresetId, RoomPurpose } from './types';
+import { DEFAULT_WALL_SETTINGS } from './wall-mounts';
 
 export interface RoomPreset { id: RoomPresetId; label: string; purpose: RoomPurpose; min: number; max: number; enemies: number; rewards: number; connections: number }
 export const ROOM_PRESETS: Record<RoomPresetId, RoomPreset> = {
@@ -27,7 +28,9 @@ export function applyRoomPreset(settings: GenerationSettings, id: RoomPresetId):
   return { ...structuredClone(settings), roomPreset: id, sizeMode: 'preset', sizeResolved: false,
     width: (preset.min + preset.max) / 2, height: (preset.min + preset.max) / 2, cellSize: 2, connectionCount: preset.connections,
     levelDesign: { ...DEFAULT_LEVEL_DESIGN },
-    designer: { ...DEFAULT_DESIGNER, preset: preset.purpose, structureFill: true, pitBottomKind: 'deadzone', gapRole: 'wall',
+    designer: { ...DEFAULT_DESIGNER, propLayout: settings.designer ? settings.designer.propLayout ?? 'legacy' : 'grouped', propCoverage: settings.designer?.propCoverage ?? 12,
+      ...(settings.designer?.wallMounts?{wallMounts:structuredClone(settings.designer.wallMounts)}:!settings.designer?{wallMounts:{...DEFAULT_WALL_SETTINGS,enabled:true}}:{}),
+      preset: preset.purpose, structureFill: true, pitBottomKind: 'deadzone', gapRole: 'wall',
       enemies: preset.enemies > 0, enemyCount: Math.max(1, preset.enemies), rewards: preset.rewards > 0, rewardCount: Math.max(1, preset.rewards),
       elevation: !safe, props: !safe, hazards: false, traps: false, cliffs: false, rests: false, merchants: preset.purpose === 'shop', altars: false },
   };
