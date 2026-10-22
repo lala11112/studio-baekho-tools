@@ -23,7 +23,9 @@ const env = { ...process.env, BAEKHO_DATA: profile, PARTSMITH_DATA: profile, FAL
 delete env.ELECTRON_RUN_AS_NODE; delete env.BAEKHO_DEV_URL;
 const packagedIndex = process.argv.indexOf('--packaged');
 const packaged = packagedIndex >= 0 ? path.resolve(process.argv[packagedIndex + 1]) : null;
-const app = await electron.launch({ executablePath: packaged || electronPath, args: packaged ? [] : ['.'], env, timeout: 45000 });
+const noGpu = process.argv.includes('--no-gpu');
+const launchArgs = [...(packaged ? [] : ['.']), ...(noGpu ? ['--disable-gpu', '--disable-software-rasterizer'] : [])];
+const app = await electron.launch({ executablePath: packaged || electronPath, args: launchArgs, env, timeout: 45000 });
 const errors = [], network = [], consoleErrors = [], checks = [];
 function checked(message) { checks.push(message); console.log(`PASS: ${message}`); }
 async function until(check, message = 'map close confirmation did not arrive') {
@@ -86,6 +88,11 @@ try {
   assert.ok(map);
   await map.setViewportSize({ width: 1024, height: 768 });
   await map.locator('#mapName').waitFor();
+  if (noGpu) {
+    await map.locator('.no-webgl').waitFor();
+    await map.locator('[data-view="grid"]').click();
+    await map.locator('svg.map-svg').waitFor();
+  }
   assert.deepEqual(await map.evaluate(() => [typeof window.require, typeof window.studio, typeof window.desktop, typeof window.baekho?.saveProject]), ['undefined', 'undefined', 'undefined', 'function']);
   assert.equal(await shell.evaluate(() => typeof window.baekho), 'undefined');
   assert.deepEqual(await map.evaluate(() => ['generateConcept', 'getUnityStatus', 'prepareUnityIntegration', 'startUnityPrefabBuild', 'getUnityPrefabBuild', 'importUnityAssetCatalog'].map(key => typeof window.baekho[key])), Array(6).fill('function'));
@@ -200,7 +207,7 @@ try {
   assert.ok(await hit.locator('#search-mode option[value="semantic"]').count());
   checked('integrated animation search exposes semantic mode');
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ ok: true, checks, runtime, generatedCount: 0, audio: 'synthetic export fixture; playback not certified' }, null, 2));
+  console.log(JSON.stringify({ ok: true, checks, runtime, generatedCount: 0, graphics: noGpu ? 'WebGL disabled; existing grid fallback checked' : 'normal graphics mode', audio: 'synthetic export fixture; playback not certified' }, null, 2));
   fs.writeFileSync(path.join(runtime, 'result.json'), JSON.stringify({ ok: true, checks, errors, generatedCount: 0 }, null, 2));
 } catch (error) {
   const debug = path.resolve('artifacts/integration-debug');
