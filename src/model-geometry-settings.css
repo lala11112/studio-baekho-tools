@@ -1,0 +1,33 @@
+.gs-model-geometry {
+  display: grid; gap: var(--ps-space-3, 12px); min-width: 0;
+  font-family: var(--ps-font-family, 'Segoe UI', 'Malgun Gothic', sans-serif); font-size: var(--ps-text, 13px); line-height: 1.5;
+}
+.gs-model-geometry > label { display: grid; gap: var(--ps-space-2, 8px); min-width: 0; font-size: var(--ps-label, 13px); }
+.gs-model-geometry select, .gs-face-inputs input:not([type="range"]) {
+  min-width: 0; width: 100%; box-sizing: border-box; min-height: 34px; padding: var(--ps-space-1, 4px) var(--ps-space-2, 8px);
+  font-family: inherit; font-size: var(--ps-text, 13px); line-height: 1.5;
+  background: var(--ps-surface, #192321); border: 1px solid var(--ps-border, #34433d); border-radius: 8px;
+}
+.gs-model-geometry .gs-choice { min-width: 0; margin: 0; border-color: var(--ps-border, #34433d); }
+.gs-model-geometry .gs-choice legend { font-size: var(--ps-label, 13px); }
+.gs-model-geometry .gs-choice > div { display: flex; flex-wrap: wrap; gap: var(--ps-space-2, 8px); }
+.gs-model-geometry .gs-choice button {
+  min-height: 32px; height: auto; padding: var(--ps-space-1, 4px) var(--ps-space-2, 8px); border-radius: 8px;
+  font-family: inherit; font-size: var(--ps-label, 13px); line-height: 1.5; border-color: var(--ps-border, #34433d);
+  background: var(--ps-surface-raised, var(--ps-raised, #202c29));
+}
+.gs-model-geometry .gs-choice button[aria-pressed="true"] {
+  border-color: var(--ps-accent, #c5dfa9); color: var(--ps-accent, #c5dfa9);
+  background: var(--ps-surface-raised, var(--ps-raised, #202c29)); box-shadow: inset 0 0 0 1px var(--ps-accent, #c5dfa9);
+}
+.gs-face-inputs { display: grid; grid-template-columns: minmax(0, 1fr) minmax(90px, 112px); gap: var(--ps-space-2, 8px) var(--ps-space-3, 12px); align-items: center; min-width: 0; }
+.gs-face-inputs > label { font-size: var(--ps-label, 13px); }
+.gs-face-inputs input { min-width: 0; width: 100%; box-sizing: border-box; font-variant-numeric: tabular-nums; }
+.gs-face-inputs input[type="range"] { grid-column: 1 / -1; min-height: 34px; padding: 0; margin: 0; accent-color: var(--ps-accent, #c5dfa9); cursor: pointer; }
+.gs-model-geometry .gs-fine { margin: 0; color: var(--ps-muted, #a8b8af); font-size: var(--ps-caption, 12px); line-height: 1.5; }
+.gs-geometry-problem, .gs-geometry-notice {
+  margin: 0; padding: var(--ps-space-2, 8px) var(--ps-space-3, 12px); border: 1px solid var(--ps-border, #34433d); border-radius: 8px;
+  overflow-wrap: anywhere; line-height: 1.5; font-size: var(--ps-caption, 12px); background: var(--ps-surface, #192321);
+}
+.gs-geometry-problem { color: #efbb82; border-left: 3px solid #c98d51; }
+.gs-geometry-notice { color: var(--ps-muted, #a8b8af); border-left: 3px solid var(--ps-accent, #c5dfa9); }

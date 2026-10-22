@@ -1,0 +1,73 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { Store } from '../engine/store';
+import { Engine } from '../engine/engine';
+import { GraphicsEngine } from '../engine/graphics';
+import { requiresPartSourcePreparation, type GraphicsWorkspace, type AssetVersion } from '../shared/graphics';
+import type { prepareTripoPartSource, preflightTripoPartSource } from '../engine/tripo-part-source';
+import type { Tripo } from '../engine/tripo';
+import { defaultCreation, setHumanPartsCreation } from '../shared/graphics-creation';
+
+test('independent API part source preparation survives failure/restart without paid replay or adoption', async t => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'part-source-coordinator-'));
+  const store=new Store(root);await store.open(path.resolve('node_modules/sql.js/dist/sql-wasm.wasm'));
+  let remoteCalls=0,localCalls=0,fail=true,preflightCalls=0;
+  const remote=new Proxy({}, {get:()=>()=>{remoteCalls++;throw Error('External request forbidden');}}) as Tripo;
+  const engine=new Engine(store,remote),project=engine.create('Independent head');
+  const file=(rel:string)=>{store.write(project.id,rel,Buffer.from(rel));const bytes=fs.readFileSync(store.file(project.id,rel));return {path:rel,kind:rel.endsWith('json')?'report':'model',sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length};};
+  const raw:AssetVersion={id:'raw',objectId:'human',role:'model',slot:'part-head',label:'Head',files:[file('raw.fbx')],createdAt:'',sourceVersionIds:['head-image'],provenance:{type:'tripo',jobId:'model-job',remoteId:'model-remote'},warnings:[]};
+  const initial:GraphicsWorkspace={schemaVersion:1,id:project.id,projectId:project.id,revision:0,
+    objects:[{id:'human',name:'Human',kind:'character',createdAt:'',selectedTasks:[],settings:{partId:'head'},instruction:'',references:[],accepted:{}}],versions:[raw],
+    tasks:[{id:'model',objectId:'human',taskId:'M01',status:'review',settings:{partId:'head'},instruction:'',createdAt:'',updatedAt:'',inputVersionIds:['head-image'],outputVersionIds:['raw'],backendJobIds:['model-job'],quoteId:'old-quote',requestHash:'unchanged',localOnly:false,message:''}],deliveries:[]};
+  store.put('graphics',project.id,initial);
+  const prepare:typeof prepareTripoPartSource=async args=>{localCalls++;assert.equal(args.sourceVersionId,'raw');assert.equal(args.objectId,'human');assert.equal(args.slot,'part-head');if(fail)throw Error('Unsupported shape');return {files:['asset.blend','asset.fbx','asset.glb','report.json'].map(f=>file('prepared/'+f)),report:{},cached:false};};
+  const preflight:typeof preflightTripoPartSource=async ()=>{preflightCalls++;throw Error('Preflight rejected unsupported structure');};
+  const options={resources:path.resolve('integrations'),preparePartSource:prepare,preflightPartSource:preflight};
+  let graphics=new GraphicsEngine(store,engine,options);
+  const settle=async()=>{for(let i=0;i<100;i++){if(!graphics.isActive(project.id))return;await new Promise(r=>setTimeout(r,5));}throw Error('Local preparation did not finish');};
+  t.after(async()=>{graphics.shutdown();await settle();store.db.close();fs.rmSync(root,{recursive:true,force:true});});
+  assert(requiresPartSourcePreparation(initial,raw));
+  await assert.rejects(graphics.action(project.id,{kind:'accept',objectId:'human',versionId:'raw'}),/작업 사본/);
+  await graphics.action(project.id,{kind:'prepare-part-source',versionId:'raw'});await settle();
+  assert.equal(graphics.get(project.id).tasks[0].status,'failed');assert.deepEqual(graphics.get(project.id).versions,[raw]);
+  const interrupted=graphics.get(project.id);interrupted.tasks[0].status='running';store.put('graphics',project.id,interrupted);
+  graphics=new GraphicsEngine(store,engine,options);assert.equal(graphics.get(project.id).tasks[0].status,'failed');fail=false;
+  await graphics.action(project.id,{kind:'recover',taskId:'model'});await settle();
+  const after=graphics.get(project.id),derived=after.versions.at(-1)!;
+  assert.equal(after.versions.length,2);assert.deepEqual(after.versions[0],raw);assert.deepEqual(after.objects[0].accepted,{});
+  assert.equal(derived.partSource?.providerVersionId,'raw');assert(!requiresPartSourcePreparation(after,derived));
+  assert.equal(after.tasks[0].status,'review');assert.equal(after.tasks[0].requestHash,'unchanged');assert.equal(after.tasks[0].quoteId,'old-quote');
+  await graphics.action(project.id,{kind:'prepare-part-source',versionId:'raw'});assert.equal(localCalls,2);assert.equal(remoteCalls,0);
+  await graphics.action(project.id,{kind:'accept',objectId:'human',versionId:derived.id});
+  await graphics.action(project.id,{kind:'prepare',objectId:'human',taskId:'T01'});
+  const uv=graphics.get(project.id).tasks.at(-1)!;assert.equal(uv.status,'awaiting_approval');assert.equal(uv.cost?.credits,20);
+  await assert.rejects(graphics.action(project.id,{kind:'approve',taskId:uv.id}),/Preflight rejected/);
+  assert.equal(preflightCalls,1);assert.equal(remoteCalls,0,'Preflight failure happens before even balance query');
+  const rejected=graphics.get(project.id).tasks.at(-1)!;assert.equal(rejected.status,'awaiting_approval');assert.equal(rejected.paidApproval,undefined);assert.deepEqual(rejected.backendJobIds,[]);
+  assert.equal(store.project(project.id).jobs.length,0);
+});
+
+test('assembly freezes one compatible effective version per part and keeps local assembly local', async t => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'assembly-material-coordinator-'));
+  const store=new Store(root);await store.open(path.resolve('node_modules/sql.js/dist/sql-wasm.wasm'));
+  const engine=new Engine(store,new Proxy({}, {get:()=>()=>{throw Error('External request forbidden');}}) as Tripo),project=engine.create('Assembly');
+  const graphics=new GraphicsEngine(store,engine,{resources:path.resolve('integrations')});
+  t.after(()=>{graphics.shutdown();store.db.close();fs.rmSync(root,{recursive:true,force:true});});
+  const creation=setHumanPartsCreation(defaultCreation('character'),'independent-parts');
+  creation.stageSettings.assembly={instruction:'Keep placement',values:{assemblyMode:'assemble',assemblyPlacement:'keep'}};
+  const versions:AssetVersion[]=['head','body','hair'].map(part=>{const rel=part+'.fbx';store.write(project.id,rel,Buffer.from(part));return {id:part,objectId:'human',role:'model',slot:'part-'+part,label:part,files:[{path:rel,kind:'model',sha256:createHash('sha256').update(part).digest('hex'),bytes:part.length}],createdAt:'',sourceVersionIds:[],provenance:{type:'local'},warnings:[]};});
+  const material:AssetVersion={...versions[0],id:'head-material',role:'material',sourceVersionIds:['head']};versions.push({...material,id:'head-material-base'}, {...material,sourceVersionIds:['head-material-base']});
+  const initial:GraphicsWorkspace={schemaVersion:1,id:project.id,projectId:project.id,revision:0,objects:[{id:'human',name:'Human',kind:'character',createdAt:'',selectedTasks:[],settings:{assemblyPlacement:'keep'},instruction:'Keep placement',references:[],creation,accepted:{'model:part-head':'head','model:part-body':'body','model:part-hair':'hair','material:part-head':'head-material'}}],versions,tasks:[],deliveries:[]};
+  store.put('graphics',project.id,initial);
+  const request=await graphics.action(project.id,{kind:'prepare',objectId:'human',taskId:'M08'}),task=request.tasks.at(-1)!;
+  assert.deepEqual(task.inputVersionIds,['head-material','body','hair']);assert.equal(task.localOnly,true);
+  assert.equal(task.settings.assemblyPlacement,'keep');assert.deepEqual(task.backendJobIds,[]);
+  await graphics.action(project.id,{kind:'cancel',taskId:task.id});
+  const changed=graphics.get(project.id);changed.versions.push({...versions[0],id:'different-head',sourceVersionIds:[]});changed.objects[0].accepted['model:part-head']='different-head';store.put('graphics',project.id,changed);
+  await assert.rejects(graphics.action(project.id,{kind:'prepare',objectId:'human',taskId:'M08'}),/다른 형상/);
+  assert.equal(graphics.get(project.id).tasks.length,1);assert.equal(store.project(project.id).jobs.length,0);
+});

@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "isolation": {
+    "node": "undefined",
+    "process": "undefined",
+    "api": "function"
+  },
+  "projectId": "5bb076fc-1570-4937-b701-2a5b49c9e775",
+  "buildId": "e0341daa-81d1-4f25-b413-a1b737a5325e",
+  "probe": "Blender\nBlender 5.0.0\n\nUnity\nm_EditorVersion: 6000.3.21f1\n\nURP\n17.3.0",
+  "restartRecovered": true,
+  "errors": []
+}

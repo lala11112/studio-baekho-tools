@@ -1,0 +1,73 @@
+/** Real app-dispatched rabbit rig; this check never generates or accepts assets. */
+import fs from "node:fs";
+import path from "node:path";
+import assert from "node:assert/strict";
+import {createHash} from "node:crypto";
+import {_electron as electron} from "playwright";
+import {Store} from "../engine/store";
+import {validateAnatomicalRig} from "../engine/rig-inspect";
+const projectId="26122336-8a7c-48b5-b15f-fa193ca157fd",workbenchId="1839dc9e-c05b-459b-b985-6ceca49fac76";
+const packageVersion=process.env.PARTSMITH_CHECK_VERSION??"0.6.15";
+const checkSkeleton=process.env.PARTSMITH_CHECK_SKELETON==="1";
+const source=path.join(process.env.APPDATA!,"partsmith/projects",projectId);
+const project=JSON.parse(fs.readFileSync(path.join(source,"project.json"),"utf8"));
+const workbench=JSON.parse(fs.readFileSync(path.join(source,"workbench",workbenchId,"workbench.json"),"utf8"));
+const job=workbench.jobs.find((j:any)=>j.step==="rig");
+assert(!workbench.activeJobId);assert.equal(job?.status,"review");
+assert.equal(job.candidates.length,1);assert.equal(workbench.selections.rig,undefined);
+assert.equal(job.dependencies.assembly.jobId,"94716773-5d3b-4c05-9a48-52a2d256aab4");
+assert.equal(job.request.rigProfile,"quadruped");assert.deepEqual(job.request.rigControls,{ears:true,tail:true});
+assert.equal(job.approval.studioCreditLimit,0);assert.equal(job.approval.imageCreditLimit,0);
+const artifacts=job.candidates[0].artifacts;
+const base=workbench.jobs.find((j:any)=>j.id===job.dependencies.assembly.jobId).candidates.find((c:any)=>c.id===job.dependencies.assembly.candidateId);
+for(const a of [...artifacts,...base.artifacts])assert.equal(createHash("sha256").update(fs.readFileSync(path.join(source,a.path))).digest("hex"),a.sha256);
+assert(artifacts.some((a:any)=>a.kind==="blend"));assert(artifacts.some((a:any)=>a.path.endsWith(".fbx")));
+const model=artifacts.find((a:any)=>a.kind==="model"&&a.path.endsWith(".glb"));assert(model);
+const glb=fs.readFileSync(path.join(source,model.path));
+const gltf=JSON.parse(glb.subarray(20,20+glb.readUInt32LE(12)).toString("utf8").trim());
+assert(gltf.skins?.length>0);assert(gltf.meshes.every((m:any)=>m.primitives.every((p:any)=>p.attributes.JOINTS_0!==undefined&&p.attributes.WEIGHTS_0!==undefined)));
+const host=JSON.parse(fs.readFileSync(path.join(source,`workbench/${workbenchId}/jobs/${job.id}/host-scene-inspection.json`),"utf8"));
+validateAnatomicalRig(job.request,host);
+assert.equal(host.missingImages.length,0);assert(host.objects.every((o:any)=>o.weightedVertices===o.vertices && o.invalidWeightVertices===0));
+assert(!host.actions.some((a:any)=>["Rabbit_Idle","Rabbit_Jump"].includes(a.name)));
+const data=path.resolve("artifacts/runtime/rabbit-rig-result-"+Date.now());
+const store=new Store(data);await store.open(path.resolve("node_modules/sql.js/dist/sql-wasm.wasm"));
+store.put("project",projectId,project);store.put("workbench",workbenchId,workbench);store.db.close();fs.cpSync(source,path.join(data,"projects",projectId),{recursive:true});
+const errors:string[]=[],consoleErrors:string[]=[],responses:number[]=[];
+const launch=async()=>{
+ const app=await electron.launch({executablePath:path.resolve(`release/${packageVersion}/win-unpacked/Partsmith.exe`),env:{...process.env,PARTSMITH_DATA:data}});
+ const page=await app.firstWindow();page.setDefaultTimeout(15000);
+ page.on("pageerror",e=>errors.push(e.message));page.on("console",m=>{if(m.type()==="error")consoleErrors.push(m.text());});
+ page.on("response",r=>{if(r.url().includes(".glb"))responses.push(r.status());});
+ await page.locator(`[data-testid="project-card"][data-project-id="${projectId}"]`).getByTestId("project-open").click();
+ await page.getByTestId("workbench-step-rig").click();return {app,page};
+};
+let {app,page}=await launch();
+try{
+ await page.locator(".wb-model canvas").first().waitFor();
+ for(let n=0;n<20&&!responses.length;n++)await new Promise(r=>setTimeout(r,500));
+ assert(responses.includes(200));await new Promise(r=>setTimeout(r,1500));assert.equal(await page.locator(".viewport-error").count(),0);
+ await page.locator(".wb-model").first().scrollIntoViewIfNeeded();await page.screenshot({path:"artifacts/runtime/rabbit-rig-result.png"});
+ if(checkSkeleton){
+   const viewport=page.locator('.wb-model .viewport').first(),toggle=viewport.getByTestId('viewport-skeleton-toggle');
+   assert.equal(await viewport.getAttribute('data-bone-count'),'25');
+   assert.equal(await toggle.getAttribute('aria-pressed'),'true');
+   const on=await viewport.screenshot({path:'artifacts/runtime/rabbit-skeleton-on.png'}),loaded=responses.length;
+   await toggle.click();await page.waitForTimeout(250);
+   assert.equal(await viewport.getAttribute('data-skeleton-visible'),'false');
+   const off=await viewport.screenshot({path:'artifacts/runtime/rabbit-skeleton-off.png'});
+   assert(!on.equals(off));assert.equal(responses.length,loaded);
+   await toggle.click();assert.equal(await toggle.getAttribute('aria-pressed'),'true');
+ }
+ assert.match(await page.getByTestId("workbench-execute-rig").textContent()??"",/리깅 수정/);
+ await app.close();({app,page}=await launch());
+ assert.equal(await page.getByTestId("workbench-rig-profile").inputValue(),"quadruped");
+ assert(await page.getByTestId("workbench-rig-ears").isChecked());assert(await page.getByTestId("workbench-rig-tail").isChecked());
+ const state:any=await page.evaluate(()=>(window as any).desktop.call({type:"state"}));
+ const w=state.workbenches.find((w:any)=>w.id===workbenchId),j=w.jobs.find((j:any)=>j.id===job.id);
+ assert.equal(j.status,"review");assert.deepEqual(j.candidates,job.candidates);assert.deepEqual(w.selections.assembly,workbench.selections.assembly);
+ assert.equal(w.selections.rig,undefined);assert.equal(w.activeJobId,undefined);assert.deepEqual(errors,[]);assert.deepEqual(consoleErrors,[]);
+ const report={package:packageVersion,skeletonToggle:checkSkeleton,jobId:job.id,sourceAndOutputHashes:true,skinnedGlb:200,anatomicalRig:true,allVerticesWeighted:true,
+   restartPreserved:true,rigAutoSelected:false,additionalPaidSubmissions:0,errors};
+ fs.writeFileSync("artifacts/runtime/rabbit-rig-result-check.json",JSON.stringify(report,null,2));console.log(JSON.stringify(report));
+}finally{await app.close();}

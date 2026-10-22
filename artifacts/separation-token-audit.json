@@ -1,0 +1,419 @@
+{
+  "schemaVersion": 1,
+  "auditDate": "2026-10-09",
+  "method": "Read-only aggregate of existing separation worker JSONL and saved instructions. No worker, image-generation or paid operation was executed. No original prompt, user path, project/session ID or credentials are included.",
+  "logCount": 11,
+  "totals": {
+    "completedTurns": 20,
+    "inputTokens": 5896726,
+    "cachedInputTokens": 4909824,
+    "noncachedInputTokens": 986902,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 56615,
+    "reasoningOutputTokens": 5076
+  },
+  "recentThreeCompletedPhases": {
+    "samples": 3,
+    "inputTokens": 1010313,
+    "cachedInputTokens": 859904,
+    "noncachedInputTokens": 150409,
+    "outputTokens": 9055,
+    "reasoningOutputTokens": 393
+  },
+  "samples": [
+    {
+      "sample": 1,
+      "phase": "separate-head-right",
+      "threadStarts": 1,
+      "completedTurns": 0,
+      "usage": [],
+      "commandsCompleted": 0,
+      "mcpCallsCompleted": 0,
+      "explicitSkillReadCommands": 0,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 0,
+      "invalidJsonLines": 0,
+      "logWriteSpanSeconds": 12,
+      "savedPromptCharacters": 5334,
+      "listedImageInputs": 4,
+      "cliImageArgumentCountInferredFromCode": 4,
+      "hasSavedRepairPrompt": false
+    },
+    {
+      "sample": 2,
+      "phase": "separate-head-left",
+      "threadStarts": 1,
+      "completedTurns": 1,
+      "usage": [
+        {
+          "inputTokens": 453039,
+          "cachedInputTokens": 397952,
+          "noncachedInputTokens": 55087,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 3383,
+          "reasoningOutputTokens": 181
+        }
+      ],
+      "commandsCompleted": 6,
+      "mcpCallsCompleted": 0,
+      "explicitSkillReadCommands": 1,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 21549,
+      "invalidJsonLines": 0,
+      "logWriteSpanSeconds": 204,
+      "savedPromptCharacters": 5089,
+      "listedImageInputs": 3,
+      "cliImageArgumentCountInferredFromCode": 3,
+      "hasSavedRepairPrompt": false
+    },
+    {
+      "sample": 3,
+      "phase": "separate-head-back",
+      "threadStarts": 1,
+      "completedTurns": 1,
+      "usage": [
+        {
+          "inputTokens": 329374,
+          "cachedInputTokens": 279808,
+          "noncachedInputTokens": 49566,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 2703,
+          "reasoningOutputTokens": 80
+        }
+      ],
+      "commandsCompleted": 5,
+      "mcpCallsCompleted": 0,
+      "explicitSkillReadCommands": 1,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 21057,
+      "invalidJsonLines": 0,
+      "logWriteSpanSeconds": 189,
+      "savedPromptCharacters": 4848,
+      "listedImageInputs": 2,
+      "cliImageArgumentCountInferredFromCode": 2,
+      "hasSavedRepairPrompt": false
+    },
+    {
+      "sample": 4,
+      "phase": "separate-head-front",
+      "threadStarts": 1,
+      "completedTurns": 1,
+      "usage": [
+        {
+          "inputTokens": 227900,
+          "cachedInputTokens": 182144,
+          "noncachedInputTokens": 45756,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 2969,
+          "reasoningOutputTokens": 132
+        }
+      ],
+      "commandsCompleted": 4,
+      "mcpCallsCompleted": 0,
+      "explicitSkillReadCommands": 1,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 21062,
+      "invalidJsonLines": 0,
+      "logWriteSpanSeconds": 178,
+      "savedPromptCharacters": 4606,
+      "listedImageInputs": 1,
+      "cliImageArgumentCountInferredFromCode": 1,
+      "hasSavedRepairPrompt": false
+    },
+    {
+      "sample": 5,
+      "phase": "separate-head-back",
+      "threadStarts": 4,
+      "completedTurns": 4,
+      "usage": [
+        {
+          "inputTokens": 346672,
+          "cachedInputTokens": 286976,
+          "noncachedInputTokens": 59696,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 2332,
+          "reasoningOutputTokens": 24
+        },
+        {
+          "inputTokens": 197585,
+          "cachedInputTokens": 151040,
+          "noncachedInputTokens": 46545,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1472,
+          "reasoningOutputTokens": 31
+        },
+        {
+          "inputTokens": 197922,
+          "cachedInputTokens": 151168,
+          "noncachedInputTokens": 46754,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1198,
+          "reasoningOutputTokens": 15
+        },
+        {
+          "inputTokens": 195348,
+          "cachedInputTokens": 149504,
+          "noncachedInputTokens": 45844,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1102,
+          "reasoningOutputTokens": 13
+        }
+      ],
+      "commandsCompleted": 15,
+      "mcpCallsCompleted": 0,
+      "explicitSkillReadCommands": 1,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 91525,
+      "invalidJsonLines": 2,
+      "logWriteSpanSeconds": 378,
+      "savedPromptCharacters": 5810,
+      "listedImageInputs": 3,
+      "cliImageArgumentCountInferredFromCode": 3,
+      "hasSavedRepairPrompt": true
+    },
+    {
+      "sample": 6,
+      "phase": "separate-body",
+      "threadStarts": 1,
+      "completedTurns": 1,
+      "usage": [
+        {
+          "inputTokens": 222921,
+          "cachedInputTokens": 178816,
+          "noncachedInputTokens": 44105,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 2151,
+          "reasoningOutputTokens": 40
+        }
+      ],
+      "commandsCompleted": 4,
+      "mcpCallsCompleted": 0,
+      "explicitSkillReadCommands": 1,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 20711,
+      "invalidJsonLines": 0,
+      "logWriteSpanSeconds": 148,
+      "savedPromptCharacters": 4035,
+      "listedImageInputs": 1,
+      "cliImageArgumentCountInferredFromCode": 1,
+      "hasSavedRepairPrompt": false
+    },
+    {
+      "sample": 7,
+      "phase": "separate-hair",
+      "threadStarts": 3,
+      "completedTurns": 3,
+      "usage": [
+        {
+          "inputTokens": 317767,
+          "cachedInputTokens": 270720,
+          "noncachedInputTokens": 47047,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 2949,
+          "reasoningOutputTokens": 89
+        },
+        {
+          "inputTokens": 168531,
+          "cachedInputTokens": 126080,
+          "noncachedInputTokens": 42451,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1942,
+          "reasoningOutputTokens": 180
+        },
+        {
+          "inputTokens": 160977,
+          "cachedInputTokens": 122624,
+          "noncachedInputTokens": 38353,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1019,
+          "reasoningOutputTokens": 29
+        }
+      ],
+      "commandsCompleted": 12,
+      "mcpCallsCompleted": 0,
+      "explicitSkillReadCommands": 1,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 78948,
+      "invalidJsonLines": 1,
+      "logWriteSpanSeconds": 352,
+      "savedPromptCharacters": 4030,
+      "listedImageInputs": 1,
+      "cliImageArgumentCountInferredFromCode": 1,
+      "hasSavedRepairPrompt": true
+    },
+    {
+      "sample": 8,
+      "phase": "separate-head",
+      "threadStarts": 2,
+      "completedTurns": 2,
+      "usage": [
+        {
+          "inputTokens": 304878,
+          "cachedInputTokens": 260864,
+          "noncachedInputTokens": 44014,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 2842,
+          "reasoningOutputTokens": 86
+        },
+        {
+          "inputTokens": 452682,
+          "cachedInputTokens": 374656,
+          "noncachedInputTokens": 78026,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 5928,
+          "reasoningOutputTokens": 1183
+        }
+      ],
+      "commandsCompleted": 16,
+      "mcpCallsCompleted": 0,
+      "explicitSkillReadCommands": 1,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 78826,
+      "invalidJsonLines": 0,
+      "logWriteSpanSeconds": 469,
+      "savedPromptCharacters": 4017,
+      "listedImageInputs": 1,
+      "cliImageArgumentCountInferredFromCode": 1,
+      "hasSavedRepairPrompt": true
+    },
+    {
+      "sample": 9,
+      "phase": "separate",
+      "threadStarts": 7,
+      "completedTurns": 6,
+      "usage": [
+        {
+          "inputTokens": 392878,
+          "cachedInputTokens": 338432,
+          "noncachedInputTokens": 54446,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 4552,
+          "reasoningOutputTokens": 959
+        },
+        {
+          "inputTokens": 256529,
+          "cachedInputTokens": 212736,
+          "noncachedInputTokens": 43793,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 2288,
+          "reasoningOutputTokens": 212
+        },
+        {
+          "inputTokens": 330322,
+          "cachedInputTokens": 282752,
+          "noncachedInputTokens": 47570,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 2557,
+          "reasoningOutputTokens": 156
+        },
+        {
+          "inputTokens": 226123,
+          "cachedInputTokens": 181632,
+          "noncachedInputTokens": 44491,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 2378,
+          "reasoningOutputTokens": 213
+        },
+        {
+          "inputTokens": 259961,
+          "cachedInputTokens": 214400,
+          "noncachedInputTokens": 45561,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 3058,
+          "reasoningOutputTokens": 169
+        },
+        {
+          "inputTokens": 268150,
+          "cachedInputTokens": 223744,
+          "noncachedInputTokens": 44406,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 2333,
+          "reasoningOutputTokens": 176
+        }
+      ],
+      "commandsCompleted": 30,
+      "mcpCallsCompleted": 0,
+      "explicitSkillReadCommands": 6,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 133384,
+      "invalidJsonLines": 0,
+      "logWriteSpanSeconds": 1664,
+      "savedPromptCharacters": 3925,
+      "listedImageInputs": 1,
+      "cliImageArgumentCountInferredFromCode": 1,
+      "hasSavedRepairPrompt": false
+    },
+    {
+      "sample": 10,
+      "phase": "attempt-2",
+      "threadStarts": 1,
+      "completedTurns": 0,
+      "usage": [],
+      "commandsCompleted": 8,
+      "mcpCallsCompleted": 1,
+      "explicitSkillReadCommands": 1,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 22977,
+      "invalidJsonLines": 0,
+      "logWriteSpanSeconds": 372,
+      "savedPromptCharacters": 3742,
+      "listedImageInputs": null,
+      "cliImageArgumentCountInferredFromCode": null,
+      "hasSavedRepairPrompt": false
+    },
+    {
+      "sample": 11,
+      "phase": "attempt-1",
+      "threadStarts": 1,
+      "completedTurns": 1,
+      "usage": [
+        {
+          "inputTokens": 587167,
+          "cachedInputTokens": 523776,
+          "noncachedInputTokens": 63391,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 7459,
+          "reasoningOutputTokens": 1108
+        }
+      ],
+      "commandsCompleted": 7,
+      "mcpCallsCompleted": 0,
+      "explicitSkillReadCommands": 1,
+      "explicitAgentsReadCommands": 0,
+      "commandOutputCharacters": 23969,
+      "invalidJsonLines": 0,
+      "logWriteSpanSeconds": 583,
+      "savedPromptCharacters": 3742,
+      "listedImageInputs": null,
+      "cliImageArgumentCountInferredFromCode": null,
+      "hasSavedRepairPrompt": false
+    }
+  ],
+  "findings": [
+    {
+      "status": "observed",
+      "text": "Latest completed front/back/left workers attach 1/2/3 input images inferred from saved immutable-input lists and unchanged --image construction. Each starts a new CLI thread and explicitly reads SKILL.md once."
+    },
+    {
+      "status": "observed",
+      "text": "The latest three completed turns report 393 reasoning output tokens altogether. Logs do not disclose the selected reasoning-effort setting."
+    },
+    {
+      "status": "observed",
+      "text": "A prior head-back log records four completed turns; the final three appended recovery turns add 590855 input, 451712 cached input, 139143 noncached input and 3772 output tokens."
+    },
+    {
+      "status": "inference",
+      "text": "Repeated independent worker contexts and accumulated reference images are plausible input-token drivers. Per-image versus tool-schema versus system-context attribution is unavailable, so their exact contribution and savings are not measured."
+    }
+  ],
+  "limitations": [
+    "Input-token counts include cached input. Noncached input is arithmetic input minus cached input; no cost or account-quota conversion is made.",
+    "Reasoning output is reported separately as a subset; it is not added again to output-token totals.",
+    "Image-generation model token usage is not separately exposed in these CLI events. Native image-tool calls are not reliably enumerated, so no generation-call count is inferred from absence of events.",
+    "Filesystem log creation-to-last-write duration is an approximate write span, not an instrumented worker duration. Multi-thread logs include intervals between attempts.",
+    "Three malformed/truncated JSONL lines could not be parsed. Completed-turn usage remains directly available, but tool inventory is a lower bound.",
+    "Explicit AGENTS.md command-read count excludes instructions injected by the CLI. Source and prompt character counts are not token counts.",
+    "Counts are historical baseline, not a measured result of the new 2x2 batching or token optimization."
+  ]
+}

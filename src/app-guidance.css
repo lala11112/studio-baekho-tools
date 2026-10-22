@@ -1,0 +1,42 @@
+/* Shared novice shell. Graphics keeps its own object navigation. */
+html:root { --ps-text: 14px; --ps-caption: 13px; --ps-label: 14px; --ps-section: 16px; --ps-title: 20px; }
+.guided-shell > .sidebar { display: none; }
+.guided-shell.app .app-body > .topbar { min-height: 64px; height: auto; padding: 12px 20px; gap: 16px; }
+.guided-shell .breadcrumbs { min-width: 0; flex-wrap: wrap; gap: 10px; }
+.guided-shell .breadcrumbs > span, .guided-shell .breadcrumbs > svg, .guided-shell .breadcrumbs > button:not(.shell-home) { display: none; }
+.guided-shell .breadcrumbs select { max-width: 260px; min-width: 160px; }
+.guided-shell .shell-home { font-size: 20px; font-weight: 700; background: transparent; border: 0; padding-left: 0; }
+.guided-shell button, .guided-shell select, .guided-shell input:not([type=checkbox]):not([type=range]) { min-height: 36px; }
+.guided-shell button.primary { min-height: 40px; }
+.shell-tools { position: relative; }
+.shell-tools > summary { cursor: pointer; padding: 8px 12px; border: 1px solid var(--ps-border); border-radius: 8px; }
+.shell-tools-menu { position: absolute; z-index: 30; right: 0; top: 44px; width: 240px; display: grid; gap: 8px; padding: 16px; background: #192321; border: 1px solid var(--ps-border); border-radius: 10px; box-shadow: 0 12px 36px #0008; }
+.shell-tools-menu button { justify-content: flex-start; }
+.shell-tools-menu small { color: var(--ps-muted); }
+.home-start { padding: 28px; border: 1px solid var(--ps-border); border-radius: 12px; background: #192321; margin-bottom: 28px; }
+.home-start h2 { margin: 8px 0; font-size: 24px; }
+.home-start p, .home-start > small { color: var(--ps-muted); }
+.home-start-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 24px 0 16px; }
+.home-start-actions .start-card { padding: 24px 20px; min-height: 164px; white-space: normal; text-align: left; align-items: flex-start; flex-direction: column; gap: 12px; }
+.start-card strong { font-size: 16px; }
+.start-card span { font-size: 13px; opacity: .85; }
+.settings-return { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 16px 28px 0; }
+.settings-return span { color: var(--ps-muted); font-size: 13px; }
+.connection-guidance { padding: 16px; border: 1px solid #c5dfa9; border-radius: 8px; margin-bottom: 20px; line-height: 1.6; }
+.provider-highlight { outline: 2px solid #c5dfa9; outline-offset: 3px; }
+.project-choice-list { display: grid; gap: 8px; max-height: 300px; overflow-y: auto; margin: 16px 0; }
+.project-choice-list button { justify-content: flex-start; white-space: normal; text-align: left; }
+.project-choice-list button svg:last-child { margin-left: auto; }
+@media(max-width: 900px) {
+  .guided-shell .topbar { padding: 10px 12px; flex-wrap: wrap; }
+  .guided-shell .saved { display: none; }
+  .guided-shell .top-actions { margin-left: auto; }
+  .home-start { padding: 20px; }
+  .home-start-actions { gap: 10px; }
+  .home-start-actions .start-card { padding: 18px 14px; }
+}
+@media(max-width: 640px) {
+  .home-start-actions { grid-template-columns: 1fr; }
+  .home-start-actions .start-card { min-height: 110px; }
+  .guided-shell .breadcrumbs select { max-width: 180px; min-width: 100px; }
+}

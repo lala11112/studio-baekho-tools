@@ -1,0 +1,50 @@
+import { catalog } from './catalog';
+import type { AssetVersion, GraphicsTask } from './graphics';
+
+/** Resolve the generation task from immutable ancestry, not today's form selection. */
+export function modelProductionLabel(version: AssetVersion, versions: AssetVersion[], tasks: GraphicsTask[]): string {
+  const seen = new Set<string>();
+  let frontier = [version];
+  while (frontier.length) {
+    const labels = new Set<string>();
+    const next: AssetVersion[] = [];
+    for (const item of frontier) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      const task = tasks.find(task => task.objectId === version.objectId && task.outputVersionIds.includes(item.id));
+      if (task && ['M01', 'M02', 'M03', 'M04', 'M15'].includes(task.taskId)) {
+        const id = String(task.settings.model ?? '');
+        labels.add(['M01', 'M02', 'M03'].includes(task.taskId)
+          ? `Tripo ${catalog.model.find(model => model.id === id)?.label ?? '모델 미확인'}${id ? ` · ${id}` : ''}`
+          : task.taskId === 'M04' ? 'Blender 프리셋' : 'Blender + Astra');
+      }
+      next.push(...item.sourceVersionIds.flatMap(id => versions.filter(source => source.id === id && source.objectId === version.objectId)));
+    }
+    if (labels.size) return [...labels].join(' / ');
+    frontier = next;
+  }
+  return '제작 모델 미확인 · 가져온 자료 또는 이전 기록';
+}
+
+/** Frozen generation settings only. A correction's current form must not rewrite source history. */
+export function modelProductionGeometry(version: AssetVersion, versions: AssetVersion[], tasks: GraphicsTask[]): string {
+  const seen = new Set<string>();
+  let frontier = [version];
+  while (frontier.length) {
+    const labels = new Set<string>(), next: AssetVersion[] = [];
+    for (const item of frontier) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      const task = tasks.find(task => task.objectId === version.objectId && task.outputVersionIds.includes(item.id));
+      if (task && ['M01', 'M02', 'M03', 'M04', 'M07', 'M15'].includes(task.taskId)) {
+        const count = task.settings.faceLimit;
+        const topology = task.settings.quad === true ? '쿼드' : task.settings.quad === false ? '삼각형' : '미확인';
+        labels.add(`요청 토폴로지 ${topology} · 목표 ${typeof count === 'number' && Number.isSafeInteger(count) && count > 0 ? `${count.toLocaleString('ko-KR')}면` : '면수 미확인'}`);
+      }
+      next.push(...item.sourceVersionIds.flatMap(id => versions.filter(source => source.id === id && source.objectId === version.objectId)));
+    }
+    if (labels.size) return [...labels].join(' / ');
+    frontier = next;
+  }
+  return '요청 토폴로지·목표 면수 미확인';
+}

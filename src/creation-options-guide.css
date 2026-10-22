@@ -1,0 +1,17 @@
+.gs-creation-options .gs-options-detail {
+  margin-block: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #45484e);
+  border-radius: 8px;
+}
+.gs-creation-options .gs-options-detail > summary {
+  cursor: pointer;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.gs-creation-options .gs-options-detail[open] > summary { margin-bottom: 12px; }
+.gs-creation-options :is(button, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--accent, #88b9ff);
+  outline-offset: 3px;
+}
+.gs-creation-options .gs-part-status { overflow-wrap: anywhere; }

@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "checks": [
+    "Observed controls, editable prompts, native select, stale IDs and workspace-only file upload",
+    "Normal click cannot charge; displayed-cost match and durable single-attempt reservation enforced",
+    "Native Electron download persisted with run/stage lineage and SHA256",
+    "Authenticated loopback and real child stdio MCP initialize/tools-list/tools-call round trip",
+    "Mesh-edit canvas drags use real bounded Electron mouse events; missing context, non-canvas, stale, covered and invalid normalized targets are blocked",
+    "Mesh Edit enforces observed quota/price, blocks exhausted/missing quota and new Generate, journals free uses once, and refuses duplicate or recovery submissions",
+    "Detached observed canvas is rejected before input events",
+    "Combined Sign up/Log in and password page halts worker for user input"
+  ],
+  "workspace": "C:\\Users\\김민준\\Desktop\\3D tool\\artifacts\\runtime\\studio-browser-smoke\\9aafb017-2ce5-407a-8bad-8f233b2b5ba4",
+  "actualStudio": false,
+  "packagedMcp": true,
+  "mcpExecutable": "C:\\Users\\김민준\\Desktop\\3D tool\\release\\0.5.0\\win-unpacked\\Partsmith.exe",
+  "mcpEntry": "C:\\Users\\김민준\\Desktop\\3D tool\\release\\0.5.0\\win-unpacked\\resources\\app.asar\\dist-electron\\production-mcp.cjs",
+  "browserHost": "offline development fixture",
+  "realPaidCalls": 0,
+  "fixtureCreditsReserved": 100
+}

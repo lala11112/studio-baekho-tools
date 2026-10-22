@@ -1,0 +1,130 @@
+{
+  "name": "partsmith",
+  "version": "0.12.0",
+  "private": true,
+  "description": "Studio Baekho workspace for graphics, SainGeom items, background music and combat tools",
+  "author": "Studio Baekho",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run build:map && tsc --noEmit && vite build && node scripts/build.mjs",
+    "start": "electron .",
+    "start:partsmith": "electron . --partsmith",
+    "test": "node --import tsx --test --test-force-exit --test-concurrency=4 tests/*.test.ts",
+    "test:combat": "node --test Desktop/tests/*.test.cjs",
+    "test:hit-timer": "node --test Apps/AutoHitTimer/tests/*.test.cjs",
+    "test:integration": "node scripts/studio-smoke.mjs",
+    "test:ui": "node scripts/smoke.mjs",
+    "package": "npm run build && electron-builder --win dir",
+    "build:map": "node scripts/build-map.mjs",
+    "test:map": "npm --prefix Apps/AutoMapPrefabMaker test",
+    "test:updates": "node --import tsx scripts/studio-updates-smoke.mjs"
+  },
+  "dependencies": {
+    "ffmpeg-static": "5.3.0",
+    "lucide-react": "^0.468.0",
+    "pngjs": "^7.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "sql.js": "^1.13.0",
+    "three": "^0.180.0",
+    "zod": "^4.1.0",
+    "fflate": "^0.8.2",
+    "@modelcontextprotocol/sdk": "^1.32.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pngjs": "^6.0.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/sql.js": "^1.4.9",
+    "@types/three": "^0.180.0",
+    "@vitejs/plugin-react": "5.0.4",
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.55.0",
+    "prettier": "3.9.9",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "7.3.7"
+  },
+  "build": {
+    "appId": "local.partsmith.app",
+    "productName": "Baekho Tools",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "Desktop/src/**/*.cjs",
+      "Desktop/renderer/**/*",
+      "Apps/AutoHitTimer/src/**/*.cjs",
+      "Apps/AutoHitTimer/renderer/**/*",
+      "node_modules/sql.js/dist/sql-wasm.wasm",
+      "!node_modules/ffmpeg-static/**/*",
+      "package.json",
+      "Apps/AutoMapPrefabMaker/dist/**/*",
+      "Apps/AutoMapPrefabMaker/dist-electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "Packages/com.studiobaekho.auto-hit-timer",
+        "to": "auto-hit-timer-kit/Packages/com.studiobaekho.auto-hit-timer"
+      },
+      {
+        "from": "Integrations/FourTigerSword/AutoHitTimer",
+        "to": "auto-hit-timer-kit/Integrations/FourTigerSword/AutoHitTimer"
+      },
+      {
+        "from": "Installer",
+        "to": "auto-hit-timer-kit/Installer"
+      },
+      {
+        "from": "integrations",
+        "to": "integrations",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
+        "from": "node_modules/ffmpeg-static",
+        "to": "media",
+        "filter": [
+          "ffmpeg.exe",
+          "ffmpeg.exe.LICENSE",
+          "ffmpeg.exe.README",
+          "LICENSE"
+        ]
+      },
+      {
+        "from": "Packages",
+        "to": "Packages"
+      },
+      {
+        "from": "scripts",
+        "to": "scripts",
+        "filter": [
+          "*.ps1"
+        ]
+      },
+      {
+        "from": "Apps/AutoMapPrefabMaker/unity-importer",
+        "to": "map-forge/unity-importer"
+      },
+      {
+        "from": "Apps/AutoMapPrefabMaker/docs/wall-mounted-prefabs.md",
+        "to": "map-forge/unity-importer/WALL_PREFABS.ko.md"
+      }
+    ],
+    "win": {
+      "target": "dir",
+      "signAndEditExecutable": false
+    }
+  }
+}

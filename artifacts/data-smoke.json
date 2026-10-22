@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "encryptedKey": true,
+  "keyRestoredAndDeleted": true,
+  "maskAlphaVerified": true,
+  "originalPreserved": true,
+  "lockedPartProtected": true,
+  "blenderAssembly": true,
+  "staleExportBlocked": true,
+  "backupReopened": true
+}

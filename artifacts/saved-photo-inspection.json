@@ -1,0 +1,21 @@
+{
+  "date": "2026-10-08",
+  "passed": true,
+  "source": "read-only inspection of existing stopped user separation",
+  "savedRoles": [
+    "head",
+    "hair"
+  ],
+  "missingRoles": [
+    "body"
+  ],
+  "visualWarningCount": 1,
+  "failedObservationPreserved": true,
+  "workerCalls": 0,
+  "imageGenerationCalls": 0,
+  "paidRequests": 0,
+  "userImageAndMetadataHashesUnchanged": true,
+  "userImageAndMetadataMtimesUnchanged": true,
+  "fullSetAccepted": false,
+  "actualCharacterQualityVerified": false
+}

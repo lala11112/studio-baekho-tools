@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "isPackaged": true,
+  "version": "0.6.3",
+  "isolatedStore": true,
+  "workbenchDefaultScreen": true,
+  "cliAvailable": true,
+  "codexLoginDetected": true,
+  "chatgptWebDefault": true,
+  "chatgptWebReady": false,
+  "chatgptConnectionState": "closed",
+  "explicitReconnectAvailable": true,
+  "loginPreflightCreatedJobs": 0,
+  "workerInferenceCalls": 0,
+  "paidRequests": 0,
+  "actualProductionVerified": false,
+  "errors": []
+}

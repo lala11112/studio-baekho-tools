@@ -1,0 +1,49 @@
+.gs-subject-chooser {
+  min-width: 0; padding: var(--ps-space-3, 12px); margin: 0;
+  border: 1px solid var(--ps-border, #34433d); border-radius: 10px; background: var(--ps-surface, #192321);
+  font-family: var(--ps-font-family, 'Segoe UI', 'Malgun Gothic', sans-serif); font-size: var(--ps-text, 13px); line-height: 1.5;
+}
+.gs-subject-chooser legend { font-size: var(--ps-section, 15px); font-weight: 600; padding: 0 var(--ps-space-1, 4px); }
+.gs-subject-groups, .gs-subject-targets { display: flex; flex-wrap: wrap; gap: var(--ps-space-2, 8px); }
+.gs-subject-groups { margin-bottom: var(--ps-space-3, 12px); }
+.gs-subject-chooser button {
+  min-height: 32px; height: auto; max-width: 100%; padding: var(--ps-space-1, 4px) var(--ps-space-2, 8px);
+  font-family: inherit; font-size: var(--ps-label, 13px); line-height: 1.5; white-space: normal; overflow-wrap: anywhere;
+  border: 1px solid var(--ps-border, #34433d); border-radius: 8px; background: var(--ps-surface-raised, var(--ps-raised, #202c29));
+}
+.gs-subject-chooser button[aria-pressed="true"] {
+  border-color: var(--ps-accent, #c5dfa9); background: var(--ps-surface-raised, var(--ps-raised, #202c29));
+  color: var(--ps-accent, #c5dfa9); box-shadow: inset 0 0 0 1px var(--ps-accent, #c5dfa9);
+}
+.gs-subject-chooser button:focus-visible { outline: 2px solid var(--ps-accent, #c5dfa9); outline-offset: 2px; }
+.gs-subject-chooser button:disabled { opacity: .55; }
+.gs-subject-description, .gs-subject-current { font-size: var(--ps-caption, 12px); line-height: 1.5; margin: var(--ps-space-2, 8px) 0 0; overflow-wrap: anywhere; }
+.gs-subject-description { color: var(--ps-muted, #a8b8af); }
+.gs-subject-current { font-weight: 600; }
+.gs-subject-cards { padding: 0; border: 0; background: transparent; }
+.gs-subject-cards > legend { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.gs-subject-cards h3 { font-size: var(--ps-section, 15px); font-weight: 600; margin: 0 0 var(--ps-space-3, 12px); }
+.gs-subject-cards .gs-subject-groups { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--ps-space-2, 8px); margin-bottom: var(--ps-space-5, 24px); }
+.graphics-studio .gs-subject-cards .gs-subject-groups button {
+  display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; text-align: left;
+  gap: var(--ps-space-2, 8px); padding: var(--ps-space-3, 12px); min-height: 112px; height: auto;
+  border: 1px solid var(--ps-border, #34433d); border-radius: 10px; background: var(--ps-surface-raised, var(--ps-raised, #202c29));
+}
+.gs-subject-cards .gs-subject-groups button > span { font-size: var(--ps-label, 13px); font-weight: 600; }
+.gs-subject-cards .gs-subject-groups button > small { font-size: var(--ps-caption, 12px); font-weight: 400; line-height: 1.5; color: var(--ps-muted, #a8b8af); }
+.gs-subject-cards .gs-subject-targets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--ps-space-2, 8px); }
+.graphics-studio .gs-subject-cards .gs-subject-targets button {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--ps-space-2, 8px); min-height: 40px; height: auto; text-align: left;
+  font-size: var(--ps-label, 13px); padding: var(--ps-space-2, 8px) var(--ps-space-3, 12px); border: 1px solid var(--ps-border, #34433d); border-radius: 8px;
+}
+.graphics-studio .gs-subject-cards button[aria-pressed="true"] {
+  border-color: var(--ps-accent, #c5dfa9); background: var(--ps-surface-raised, var(--ps-raised, #202c29));
+  color: var(--ps-accent, #c5dfa9); box-shadow: inset 0 0 0 1px var(--ps-accent, #c5dfa9);
+}
+.gs-subject-cards .gs-subject-description { margin-top: var(--ps-space-3, 12px); }
+.gs-subject-cards .gs-subject-current { display: none; }
+@media (max-width: 760px) {
+  .gs-subject-cards .gs-subject-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .graphics-studio .gs-subject-cards .gs-subject-groups button { min-height: 84px; }
+  .gs-subject-cards .gs-subject-targets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

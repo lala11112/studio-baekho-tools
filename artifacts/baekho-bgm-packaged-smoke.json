@@ -1,0 +1,144 @@
+{
+  "ok": true,
+  "mode": "packaged",
+  "checkedAt": "2026-10-14T10:13:34.804Z",
+  "executablePath": "C:\\Users\\a0102\\Documents\\codex yes\\백호툴\\Baekho-All-0.10.0\\App\\Baekho Tools.exe",
+  "runtime": "C:\\Users\\a0102\\Documents\\Codex\\2026-10-14\\task\\baekho-bgm-integration\\artifacts\\runtime\\baekho-bgm-packaged-ZQg1pW",
+  "profile": "C:\\Users\\a0102\\Documents\\Codex\\2026-10-14\\task\\baekho-bgm-integration\\artifacts\\runtime\\baekho-bgm-packaged-ZQg1pW\\profile",
+  "sourceBgm": "C:\\Users\\a0102\\Documents\\codex yes\\백호툴\\Baekho-All-0.10.0\\Data\\bgm",
+  "originalFileCount": 7,
+  "sourceItems": "C:\\Users\\a0102\\Documents\\codex yes\\백호툴\\Baekho-All-0.10.0\\Data\\four-tiger-items\\93190cd9-a826-4b58-b257-cf4ba077b827",
+  "originalItemFileCount": 66,
+  "itemProjectId": "93190cd9-a826-4b58-b257-cf4ba077b827",
+  "itemExports": [
+    {
+      "suffix": "initial",
+      "projectId": "93190cd9-a826-4b58-b257-cf4ba077b827",
+      "directory": "profile\\four-tiger-items\\93190cd9-a826-4b58-b257-cf4ba077b827\\review-bundle\\93190cd9-a826-4b58-b257-cf4ba077b827-r72-bde8bce5-2ba2-4057-a2d0-ca4b637edb27",
+      "itemCount": 20,
+      "iconCount": 20,
+      "contentStatus": "draft",
+      "catalogSha256": "697ad3fd8fb261aa4efd2262cd2cc5df16000e6c3c26c65ab237d0bf404c68a2",
+      "originalRevision": 72,
+      "exportRevision": 72
+    },
+    {
+      "suffix": "restart",
+      "projectId": "93190cd9-a826-4b58-b257-cf4ba077b827",
+      "directory": "profile\\four-tiger-items\\93190cd9-a826-4b58-b257-cf4ba077b827\\review-bundle\\93190cd9-a826-4b58-b257-cf4ba077b827-r73-21949d8d-875c-4a65-be5f-49007798987a",
+      "itemCount": 20,
+      "iconCount": 20,
+      "contentStatus": "draft",
+      "catalogSha256": "3db750fc683bc1bce30fa3c44a26824861163b34b455f298a688ef0d0ad95c89",
+      "originalRevision": 72,
+      "exportRevision": 73
+    }
+  ],
+  "modelProjectId": "29f39368-583d-435f-a498-5daede292e54",
+  "generatedCount": 0,
+  "generatedIconCount": 0,
+  "reservedUsdBefore": 0.12,
+  "checks": [
+    "all five tool cards are available, including the existing item workshop",
+    "twenty original item icons load; every item preview/select works; Unity JSON/PNG draft export preserves reviews and hashes",
+    "latest GraphicsStudio opens by default and retains its local object draft across navigation",
+    "combat native workspace renders with its isolated bridge",
+    "hit-timing native workspace renders with its isolated bridge",
+    "three existing tracks play, select and export identically; BGM draft survives navigation",
+    "restart preserves twenty original item drafts and icons; a second verified Unity JSON/PNG draft export succeeds",
+    "restart preserves all request IDs, reservations, selection and three offline exports",
+    "no renderer errors, external network attempts or generation jobs",
+    "original BGM ledger, journals and MP3 files remain byte-identical",
+    "original item draft, history and all icon files remain byte-identical"
+  ],
+  "playback": [
+    {
+      "id": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6",
+      "restart": false,
+      "duration": 30.772167,
+      "currentTime": 0.218412,
+      "readyState": 4
+    },
+    {
+      "id": "40fde825-c271-4b8a-b15f-55d035006e1f",
+      "restart": false,
+      "duration": 30.772167,
+      "currentTime": 0.212121,
+      "readyState": 4
+    },
+    {
+      "id": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2",
+      "restart": false,
+      "duration": 30.772167,
+      "currentTime": 0.211339,
+      "readyState": 4
+    },
+    {
+      "id": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6",
+      "restart": true,
+      "duration": 30.772167,
+      "currentTime": 0.22422,
+      "readyState": 4
+    },
+    {
+      "id": "40fde825-c271-4b8a-b15f-55d035006e1f",
+      "restart": true,
+      "duration": 30.772167,
+      "currentTime": 0.227847,
+      "readyState": 4
+    },
+    {
+      "id": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2",
+      "restart": true,
+      "duration": 30.772167,
+      "currentTime": 0.232252,
+      "readyState": 4
+    }
+  ],
+  "exports": [
+    {
+      "id": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6",
+      "suffix": "initial",
+      "file": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6-initial.mp3",
+      "bytes": 746248,
+      "sha256": "18160d50bd7aa3e8362cf4a5f149cfb18d61f62a159d38c2bfb9fc64d5dc54b3"
+    },
+    {
+      "id": "40fde825-c271-4b8a-b15f-55d035006e1f",
+      "suffix": "initial",
+      "file": "40fde825-c271-4b8a-b15f-55d035006e1f-initial.mp3",
+      "bytes": 746248,
+      "sha256": "5ce035528111a2af726836f06252d2cd08f4ccca2b4a8579e44297f0d850a5d4"
+    },
+    {
+      "id": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2",
+      "suffix": "initial",
+      "file": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2-initial.mp3",
+      "bytes": 746248,
+      "sha256": "4de17fd636df773dee2de53f464f6a1d164ee321bcb048ad9a2fdef96d25a0a8"
+    },
+    {
+      "id": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6",
+      "suffix": "restart",
+      "file": "9ceaceee-e06d-45f8-9c7f-937ff5d9dcf6-restart.mp3",
+      "bytes": 746248,
+      "sha256": "18160d50bd7aa3e8362cf4a5f149cfb18d61f62a159d38c2bfb9fc64d5dc54b3"
+    },
+    {
+      "id": "40fde825-c271-4b8a-b15f-55d035006e1f",
+      "suffix": "restart",
+      "file": "40fde825-c271-4b8a-b15f-55d035006e1f-restart.mp3",
+      "bytes": 746248,
+      "sha256": "5ce035528111a2af726836f06252d2cd08f4ccca2b4a8579e44297f0d850a5d4"
+    },
+    {
+      "id": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2",
+      "suffix": "restart",
+      "file": "80f6e5c1-ad08-4385-9e63-230cd6f36fa2-restart.mp3",
+      "bytes": 746248,
+      "sha256": "4de17fd636df773dee2de53f464f6a1d164ee321bcb048ad9a2fdef96d25a0a8"
+    }
+  ],
+  "rendererErrors": [],
+  "networkAttempts": []
+}

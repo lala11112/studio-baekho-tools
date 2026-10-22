@@ -1,0 +1,181 @@
+{
+  "passed": true,
+  "checks": [
+    "PNG service produces common 2048 canvas and same-part silhouette height/center from four differently sized source canvases",
+    "Real encoded PNG derivatives preserve left/right colors and raw/anchor SHA lineage",
+    "Second service call uses cached files without rewriting; input artifact metadata and raw source bytes stay unchanged",
+    "Opaque background remains raw and receives an explicit normalization issue instead of a guessed crop",
+    "Stopped real saved job inspected read-only; generated photos copied to test workspace and normalized with zero worker/generation calls"
+  ],
+  "synthetic": [
+    {
+      "view": "front",
+      "width": 2048,
+      "height": 2048,
+      "silhouette": {
+        "x": 853,
+        "y": 683,
+        "width": 342,
+        "height": 682,
+        "transparentPixels": 3950016
+      }
+    },
+    {
+      "view": "back",
+      "width": 2048,
+      "height": 2048,
+      "silhouette": {
+        "x": 887,
+        "y": 683,
+        "width": 274,
+        "height": 682,
+        "transparentPixels": 4003040
+      }
+    },
+    {
+      "view": "left",
+      "width": 2048,
+      "height": 2048,
+      "silhouette": {
+        "x": 853,
+        "y": 683,
+        "width": 342,
+        "height": 682,
+        "transparentPixels": 3952108
+      }
+    },
+    {
+      "view": "right",
+      "width": 2048,
+      "height": 2048,
+      "silhouette": {
+        "x": 853,
+        "y": 683,
+        "width": 342,
+        "height": 682,
+        "transparentPixels": 3956256
+      }
+    }
+  ],
+  "actual": {
+    "found": true,
+    "storedStatus": "needs_input",
+    "inspectionStatus": "needs_input",
+    "recoveredImageCount": 4,
+    "normalizedImageCount": 4,
+    "warningCount": 8,
+    "rawHashesUnchanged": true,
+    "manifestUnchanged": true,
+    "workerCalls": 0,
+    "images": [
+      {
+        "role": "head",
+        "view": "front",
+        "sourceDimensions": [
+          4096,
+          4096
+        ],
+        "normalizedDimensions": [
+          2048,
+          2048
+        ],
+        "sourceSilhouette": {
+          "x": 1782,
+          "y": 252,
+          "width": 414,
+          "height": 491,
+          "transparentPixels": 16626761
+        },
+        "normalizedSilhouette": {
+          "x": 921,
+          "y": 901,
+          "width": 207,
+          "height": 246,
+          "transparentPixels": 4156590
+        }
+      },
+      {
+        "role": "head",
+        "view": "back",
+        "sourceDimensions": [
+          1254,
+          1254
+        ],
+        "normalizedDimensions": [
+          2048,
+          2048
+        ],
+        "sourceSilhouette": {
+          "x": 319,
+          "y": 270,
+          "width": 615,
+          "height": 722,
+          "transparentPixels": 1240442
+        },
+        "normalizedSilhouette": {
+          "x": 920,
+          "y": 901,
+          "width": 209,
+          "height": 246,
+          "transparentPixels": 4155798
+        }
+      },
+      {
+        "role": "hair",
+        "view": "front",
+        "sourceDimensions": [
+          1254,
+          1254
+        ],
+        "normalizedDimensions": [
+          2048,
+          2048
+        ],
+        "sourceSilhouette": {
+          "x": 336,
+          "y": 28,
+          "width": 559,
+          "height": 607,
+          "transparentPixels": 1398534
+        },
+        "normalizedSilhouette": {
+          "x": 568,
+          "y": 527,
+          "width": 913,
+          "height": 992,
+          "transparentPixels": 3722935
+        }
+      },
+      {
+        "role": "body",
+        "view": "front",
+        "sourceDimensions": [
+          1254,
+          1254
+        ],
+        "normalizedDimensions": [
+          2048,
+          2048
+        ],
+        "sourceSilhouette": {
+          "x": 385,
+          "y": 48,
+          "width": 486,
+          "height": 1180,
+          "transparentPixels": 1291190
+        },
+        "normalizedSilhouette": {
+          "x": 670,
+          "y": 164,
+          "width": 708,
+          "height": 1720,
+          "transparentPixels": 3588526
+        }
+      }
+    ]
+  },
+  "workerCalls": 0,
+  "realGenerationCalls": 0,
+  "realPaidCalls": 0,
+  "userDataWritten": false
+}
