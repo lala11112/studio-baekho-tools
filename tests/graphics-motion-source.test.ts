@@ -50,9 +50,31 @@ test("local side bundle preserves source and accepted design; restart reuses has
   assert.equal(result.role, "design"); assert.equal(result.slot, "motion-source"); assert.equal(result.files.filter(file => file.kind === "image").length, 2);
   assert.deepEqual(result.usage, { localOnly: true, modelTurns: 0, paidSubmissions: 0 });
   assert.equal(fileHash(f.source), hash); assert.deepEqual(f.args.object.accepted, accepted);
-  assert.deepEqual(await createGraphicsMotionSourceExecutor({ runBlender: f.runBlender })(f.args), result); assert.equal(f.count(), 1);
+  assert.deepEqual(await createGraphicsMotionSourceExecutor({ runBlender: f.runBlender })({ ...f.args, recoveryOnly: true }), result); assert.equal(f.count(), 1);
   fs.appendFileSync(path.join(f.root, result.files[0].path), "changed");
-  await assert.rejects(f.execute(f.args), /해시/); assert.equal(f.count(), 1);
+  await assert.rejects(f.execute({ ...f.args, recoveryOnly: true }), /해시/); assert.equal(f.count(), 1);
+});
+
+test('N01 saved-only recovery never creates directories or renders without a complete checkpoint', async t => {
+  const f = fixture(t), original = fileHash(f.source), accepted = structuredClone(f.args.object.accepted);
+  const output = path.join(f.root, 'graphics/jobs/sides-task/motion-source');
+  await assert.rejects(f.execute({ ...f.args, recoveryOnly: true }), /복구에서 새로 실행하지 않습니다/);
+  assert.equal(fs.existsSync(path.join(f.root, 'graphics')), false);
+  fs.mkdirSync(output, { recursive: true });
+  await assert.rejects(f.execute({ ...f.args, recoveryOnly: true }), /복구에서 새로 실행하지 않습니다/);
+  assert.deepEqual(fs.readdirSync(output), []);
+  const partial = path.join(output, 'left.png'); fs.writeFileSync(partial, 'incomplete saved output');
+  const partialHash = fileHash(partial);
+  await assert.rejects(f.execute({ ...f.args, recoveryOnly: true }), /복구에서 새로 실행하지 않습니다/);
+  assert.deepEqual(fs.readdirSync(output), ['left.png']); assert.equal(fileHash(partial), partialHash);
+  assert.equal(f.count(), 0); assert.equal(fileHash(f.source), original); assert.deepEqual(f.args.object.accepted, accepted);
+});
+
+test('N01 failed first render cannot be silently repeated by recovery', async t => {
+  const f = fixture(t); f.invalid();
+  await assert.rejects(f.execute(f.args), /전신 여백/); assert.equal(f.count(), 1);
+  await assert.rejects(f.execute({ ...f.args, recoveryOnly: true }), /복구에서 새로 실행하지 않습니다/);
+  assert.equal(f.count(), 1); assert.deepEqual(fs.readdirSync(path.join(f.root, 'graphics/jobs/sides-task/motion-source')), []);
 });
 
 test("bad full-body framing is rejected before registering either side", async t => {
@@ -62,9 +84,9 @@ test("bad full-body framing is rejected before registering either side", async t
 
 test("changed accepted bytes and frozen axis stop before rerender or overwrite", async t => {
   const f = fixture(t); await f.execute(f.args); f.args.task.settings.motionSourceAxis = "Y";
-  await assert.rejects(f.execute(f.args), /요청이 다릅니다/); assert.equal(f.count(), 1);
+  await assert.rejects(f.execute({ ...f.args, recoveryOnly: true }), /요청이 다릅니다/); assert.equal(f.count(), 1);
   f.args.task.settings.motionSourceAxis = "X"; fs.appendFileSync(f.source, "mutated");
-  await assert.rejects(f.execute(f.args), /해시/); assert.equal(f.count(), 1);
+  await assert.rejects(f.execute({ ...f.args, recoveryOnly: true }), /해시/); assert.equal(f.count(), 1);
 });
 
 const blender = process.env.PARTSMITH_TEST_BLENDER ?? "C:/Program Files/Blender Foundation/Blender 5.0/blender.exe";

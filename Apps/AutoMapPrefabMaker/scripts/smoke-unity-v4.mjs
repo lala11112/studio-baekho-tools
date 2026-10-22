@@ -45,7 +45,7 @@ for (const [source, destination] of [
   ['unity-importer/Editor/BaekhoMapImporter.cs', 'Assets/Editor/BaekhoMapImporter.cs'],
   ['unity-importer/Editor/BaekhoPropCatalog.cs', 'Assets/Editor/BaekhoPropCatalog.cs'],
   ['tests/unity/BaekhoImporterSmoke.cs', 'Assets/Editor/BaekhoImporterSmoke.cs'],
-  ...['BaekhoMapConnection', 'BaekhoGameplayMarker', 'BaekhoMapFixture'].map(name =>
+  ...['BaekhoMapConnection', 'BaekhoGameplayMarker', 'BaekhoMapFixture','BaekhoWallModule'].map(name =>
     [`unity-importer/Runtime/${name}.cs`, `Assets/Baekho/Runtime/${name}.cs`]),
 ]) await copyFile(resolve(root, source), resolve(projectPath, destination));
 if (!process.argv.includes('--export-only')) {

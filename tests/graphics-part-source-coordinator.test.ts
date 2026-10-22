@@ -60,7 +60,7 @@ test('assembly freezes one compatible effective version per part and keeps local
   const creation=setHumanPartsCreation(defaultCreation('character'),'independent-parts');
   creation.stageSettings.assembly={instruction:'Keep placement',values:{assemblyMode:'assemble',assemblyPlacement:'keep'}};
   const versions:AssetVersion[]=['head','body','hair'].map(part=>{const rel=part+'.fbx';store.write(project.id,rel,Buffer.from(part));return {id:part,objectId:'human',role:'model',slot:'part-'+part,label:part,files:[{path:rel,kind:'model',sha256:createHash('sha256').update(part).digest('hex'),bytes:part.length}],createdAt:'',sourceVersionIds:[],provenance:{type:'local'},warnings:[]};});
-  const material:AssetVersion={...versions[0],id:'head-material',role:'material',sourceVersionIds:['head']};versions.push(material);
+  const material:AssetVersion={...versions[0],id:'head-material',role:'material',sourceVersionIds:['head']};versions.push({...material,id:'head-material-base'}, {...material,sourceVersionIds:['head-material-base']});
   const initial:GraphicsWorkspace={schemaVersion:1,id:project.id,projectId:project.id,revision:0,objects:[{id:'human',name:'Human',kind:'character',createdAt:'',selectedTasks:[],settings:{assemblyPlacement:'keep'},instruction:'Keep placement',references:[],creation,accepted:{'model:part-head':'head','model:part-body':'body','model:part-hair':'hair','material:part-head':'head-material'}}],versions,tasks:[],deliveries:[]};
   store.put('graphics',project.id,initial);
   const request=await graphics.action(project.id,{kind:'prepare',objectId:'human',taskId:'M08'}),task=request.tasks.at(-1)!;

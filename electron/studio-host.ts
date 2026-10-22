@@ -29,7 +29,7 @@ export function installStudioHost(options: { window: BrowserWindow; root: string
   const mapRoot = path.join(app.getAppPath(), 'Apps/AutoMapPrefabMaker');
   const { createMapWindowService } = require(path.join(mapRoot, 'dist-electron/window-service.cjs')) as {
     createMapWindowService(options: { dataRoot: string; resourceRoot: string; integrated: boolean }): {
-      open(): void; isOpen(): boolean; focus(): void; shutdown(): void;
+      open(): void; isOpen(): boolean; focus(): void; shutdown(): Promise<void>;
     };
   };
   const map = createMapWindowService({ dataRoot: path.join(options.root, 'map-forge'), resourceRoot: app.isPackaged ? path.join(process.resourcesPath, 'map-forge') : mapRoot, integrated: true });
@@ -140,11 +140,11 @@ export function installStudioHost(options: { window: BrowserWindow; root: string
   });
   function shutdown(): Promise<void> {
     if (shutdownPromise) return shutdownPromise;
-    map.shutdown();
+    const mapShutdown = Promise.resolve().then(() => map.shutdown());
     disposed = true; hideAll();
     for (const entry of Object.values(entries)) { if (entry.view && !entry.view.webContents.isDestroyed()) entry.view.webContents.close(); entry.view = undefined; }
     for (const channel of channels) ipcMain.removeHandler(channel);
-    shutdownPromise = Promise.allSettled(Object.values(entries).map(entry => Promise.resolve().then(() => entry.service.shutdown()))).then(results => {
+    shutdownPromise = Promise.allSettled([mapShutdown, ...Object.values(entries).map(entry => Promise.resolve().then(() => entry.service.shutdown()))]).then(results => {
       if (results.some(result => result.status === "rejected")) throw new Error("작업 정리 중 일부 오류가 발생했습니다. 다음 실행에서 저장 상태를 확인하세요.");
     });
     return shutdownPromise;

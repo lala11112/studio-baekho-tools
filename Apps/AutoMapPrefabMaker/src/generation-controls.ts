@@ -1,9 +1,21 @@
-import type { GenerationSettings, RoomPresetId } from './shared/types';
+import type { GenerationSettings, MapConcept, RoomPresetId } from './shared/types';
+import { conceptMode } from './shared/concepts';
 import { ROOM_PRESETS, applyRoomPreset } from './shared/room-presets';
 import { DEFAULT_LEVEL_DESIGN } from './shared/level-design';
 import { parseGenerationSettings } from './shared/features';
 
 const esc=(v:unknown)=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+export function renderConceptControls(settings: GenerationSettings, busy: boolean): string {
+  const mode = conceptMode(settings), disabled = busy ? 'disabled' : '';
+  return `<section class="concept-controls"><label class="field"><span>맵 컨셉</span><select id="conceptMode" data-generation-control="conceptMode" ${disabled}><option value="ai" ${mode === 'ai' ? 'selected' : ''}>AI 자동 작성</option><option value="manual" ${mode === 'manual' ? 'selected' : ''}>직접 입력</option></select></label>${mode === 'manual' ? `<label class="field"><span>직접 작성할 컨셉</span><textarea id="prompt" maxlength="6000" placeholder="플레이 목표와 플레이어가 판단할 선택을 입력하세요. 예: 진입 후 적의 압박을 파악하고 접근과 이탈 시점을 선택하는 전투." ${disabled}>${esc(settings.prompt)}</textarea></label>` : '<p class="caption">맵 생성 시 AI가 선택한 조건에 맞춰 플레이 목표와 선택 중심의 컨셉을 작성합니다. 여러 후보는 플레이 경험의 초점을 달리합니다.</p>'}</section>`;
+}
+export function renderConceptResult(concept: MapConcept | undefined, label: string, kind: string): string {
+  return concept ? `<section class="concept-result" data-concept-result="${esc(kind)}" aria-label="${esc(label)}"><div><strong>${esc(label)}</strong><span>${concept.source === 'ai' ? 'AI 작성' : '직접 입력'}</span></div><p>${esc(concept.text)}</p></section>` : '';
+}
+export function renderConnectionSizeControls(settings:GenerationSettings,busy:boolean):string {
+  const disabled=busy?'disabled':'',width=settings.connectionWidth??settings.cellSize,height=settings.connectionHeight??3;
+  return `<div class="pair"><label class="field"><span>새 연결문 폭 (m)</span><input id="connectionWidth" data-generation-control="connectionWidth" type="number" value="${width}" min="0.25" max="40" step="0.25" ${disabled}></label><label class="field"><span>새 연결문 높이 (m)</span><input id="connectionHeight" data-generation-control="connectionHeight" type="number" value="${height}" min="0.25" max="20" step="0.25" ${disabled}></label></div><p class="caption">다음 맵 생성과 수동 연결문 추가에 적용합니다. 폭 ${width}m는 셀 간격 ${settings.cellSize}m에서 ${Math.ceil(width/settings.cellSize)}셀을 사용합니다. 기존 문은 선택해서 개별 수정할 수 있습니다.</p>`;
+}
 export function renderGenerationControls(settings:GenerationSettings,busy:boolean):string {
   const disabled=busy?'disabled':'',preset=settings.roomPreset&&ROOM_PRESETS[settings.roomPreset],design=settings.levelDesign;
   const input=(field:string,label:string,value:number,min:number,max:number,step:number)=>`<label class="field"><span>${label}</span><input data-generation-control="${field}" type="number" value="${value}" min="${min}" max="${max}" step="${step}" ${disabled}></label>`;
@@ -13,7 +25,9 @@ export function renderGenerationControls(settings:GenerationSettings,busy:boolea
 export function updateGenerationControl(source:GenerationSettings,field:string,value:string):GenerationSettings {
   if(field==='preset')return value==='custom'?{...structuredClone(source),sizeMode:'custom',sizeResolved:false}:applyRoomPreset(source,value as RoomPresetId);
   const settings=structuredClone(source);settings.sizeResolved=false;
-  if(field==='enabled'){if(value==='true')settings.levelDesign={...DEFAULT_LEVEL_DESIGN};else delete settings.levelDesign;}
+  if(field==='conceptMode') { if(value!=='ai'&&value!=='manual')throw new Error('컨셉 작성 모드를 확인해 주세요.'); settings.conceptMode=value; }
+  else if(field==='connectionWidth'||field==='connectionHeight')settings[field]=Number(value);
+  else if(field==='enabled'){if(value==='true')settings.levelDesign={...DEFAULT_LEVEL_DESIGN};else delete settings.levelDesign;}
   else if(field==='seed'){if(!value.trim())delete settings.seed;else settings.seed=Number(value);}
   else if(settings.levelDesign){if(field==='theme')settings.levelDesign.theme=value.trim();else if(field==='pattern')settings.levelDesign.pattern=value as NonNullable<GenerationSettings['levelDesign']>['pattern'];else if(field==='characterRadius'||field==='dodgeDistance')settings.levelDesign[field]=Number(value);}
   return parseGenerationSettings(settings);

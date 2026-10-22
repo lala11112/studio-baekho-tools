@@ -4,6 +4,8 @@ using System.IO;
 using System.Linq;
 using System.Collections.Generic;
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEditor;
@@ -11,7 +13,8 @@ using UnityEditor.Animations;
 using UnityEditor.SceneManagement;
 
 namespace Partsmith.Graphics {
- [Serializable] public class FileEntry { public string source,destination,path,sha256,kind; public long bytes; }
+ [Serializable] public class FileEntry { public string source,destination,path,sha256,kind,normalizedSha256; public long bytes;public bool absent; }
+ [Serializable] public class TargetProfilePolicy {public int schemaVersion;public string kind,urpVersion,activeColorSpace,playerSettingsSha256;}
  [Serializable] public class DeliveryRequest {
   public int schemaVersion; public string requestId,objectId,objectName,destination,resultPath,profileFingerprint,unityVersion,pipeline,converterVersion,structure,rigType,mode,materialManifest;
   public FileEntry[] files,sources,profileFiles; public string[] expectedClips; public float spritePixelsPerUnit;
@@ -19,6 +22,7 @@ namespace Partsmith.Graphics {
   public ClipSettings[] clipSettings;
   public PhysicalSizeSettings physicalSize;
   public RigContract rigContract;
+  public int profileFingerprintVersion;public TargetProfilePolicy profilePolicy;
  }
  [Serializable] public class HumanBinding { public string boneName,humanName; }
  [Serializable] public class RigContract { public int schemaVersion;public string versionId,producerVersionId,producerTaskId,rigType,hairBinding;public bool fingers;public string[] requiredParts;public HumanBinding[] humanBones; }
@@ -77,11 +81,120 @@ namespace Partsmith.Graphics {
   static void Atomic(string file,string content){Directory.CreateDirectory(Path.GetDirectoryName(file));File.WriteAllText(file+".tmp",content);if(File.Exists(file))File.Delete(file);File.Move(file+".tmp",file);}
   static void Folder(string relative){Directory.CreateDirectory(Safe(relative));}
   static void ValidateFile(string file,string expected){if(!File.Exists(file)||Hash(file)!=expected)throw new Conflict("Immutable file changed: "+file);}
+  // PROFILE_NORMALIZATION_BEGIN: kept in parity with shared/graphics-unity-profile.ts.
+  public static string SerializedColorSpace(string text){
+   var fields=Regex.Matches(text,@"^[ \t]*m_ActiveColorSpace:[^\n]*$",RegexOptions.Multiline);
+   if(fields.Count!=1)return null;var value=Regex.Match(fields[0].Value,@"^[ \t]*m_ActiveColorSpace:[ \t]*([01])[ \t]*\r?$");
+   return !value.Success?null:value.Groups[1].Value=="0"?"gamma":"linear";
+  }
+  public static string NormalizeLinearIntensity(string text,string colorSpace){
+   if(colorSpace!="gamma"&&colorSpace!="linear")return null;
+   var fields=Regex.Matches(text,@"^[ \t]*m_LightsUseLinearIntensity:[^\n]*$",RegexOptions.Multiline);
+   if(fields.Count!=1||!Regex.IsMatch(fields[0].Value,@"^[ \t]*m_LightsUseLinearIntensity:[ \t]*[01][ \t]*\r?$"))return null;
+   return Regex.Replace(text,@"^([ \t]*m_LightsUseLinearIntensity:[ \t]*)[01]([ \t]*\r?)$",m=>m.Groups[1].Value+(colorSpace=="linear"?"1":"0")+m.Groups[2].Value,RegexOptions.Multiline);
+  }
+  public static string HashProfileText(string text){using(var h=SHA256.Create())return BitConverter.ToString(h.ComputeHash(Encoding.UTF8.GetBytes(text))).Replace("-","").ToLowerInvariant();}
+  static int JsonStringEnd(string text,int start){for(int i=start+1;i<text.Length;i++){if(text[i]=='\\'){i++;continue;}if(text[i]=='"')return i+1;}throw new Exception("Invalid JSON string");}
+  static string LiteralJsonKey(string text){if(text.IndexOf('\\')>=0)throw new Exception("Escaped request field names are unsupported");return text.Substring(1,text.Length-2);}
+  public static void ValidateUniqueJsonKeys(string text){
+   var stack=new List<HashSet<string>>();for(int i=0;i<text.Length;i++){
+    char c=text[i];if(c=='"'){int end=JsonStringEnd(text,i),after=end;while(after<text.Length&&char.IsWhiteSpace(text[after]))after++;if(after<text.Length&&text[after]==':'&&stack.Count>0&&stack[stack.Count-1]!=null){var key=LiteralJsonKey(text.Substring(i,end-i));if(!stack[stack.Count-1].Add(key))throw new Exception("Duplicate frozen request field");}i=end-1;}
+    else if(c=='{')stack.Add(new HashSet<string>());else if(c=='[')stack.Add(null);else if(c=='}'||c==']'){if(stack.Count==0)throw new Exception("Invalid JSON nesting");stack.RemoveAt(stack.Count-1);}
+   }if(stack.Count!=0)throw new Exception("Incomplete JSON request");
+  }
+  static int JsonValueEnd(string text,int start){
+   if(text[start]=='"')return JsonStringEnd(text,start);if(text[start]=='{'||text[start]=='['){int depth=0;for(int i=start;i<text.Length;i++){char c=text[i];if(c=='"'){i=JsonStringEnd(text,i)-1;continue;}if(c=='{'||c=='[')depth++;else if(c=='}'||c==']'){depth--;if(depth==0)return i+1;}}throw new Exception("Incomplete JSON value");}
+   int end=start;while(end<text.Length&&text[end]!=','&&text[end]!='}'&&text[end]!=']'&&!char.IsWhiteSpace(text[end]))end++;if(end==start)throw new Exception("Invalid JSON value");return end;
+  }
+  public static Dictionary<string,string> ProfileJsonFields(string raw){
+   string text=raw.Trim();if(text.Length<2||text[0]!='{'||text[text.Length-1]!='}')throw new Exception("Profile object required");var result=new Dictionary<string,string>();int i=1;
+   while(i<text.Length-1){while(i<text.Length-1&&char.IsWhiteSpace(text[i]))i++;if(i==text.Length-1)break;if(text[i]!='"')throw new Exception("Profile field required");int end=JsonStringEnd(text,i);string key=LiteralJsonKey(text.Substring(i,end-i));i=end;while(i<text.Length&&char.IsWhiteSpace(text[i]))i++;if(i>=text.Length||text[i++]!=':')throw new Exception("Invalid profile field");while(i<text.Length&&char.IsWhiteSpace(text[i]))i++;end=JsonValueEnd(text,i);result.Add(key,text.Substring(i,end-i));i=end;while(i<text.Length&&char.IsWhiteSpace(text[i]))i++;if(i<text.Length-1){if(text[i++]!=',')throw new Exception("Invalid profile separator");}}
+   return result;
+  }
+  public static string[] ProfileJsonArray(string raw){string text=raw.Trim();if(text.Length<2||text[0]!='['||text[text.Length-1]!=']')throw new Exception("Profile inventory array required");var result=new List<string>();int i=1;while(i<text.Length-1){while(i<text.Length-1&&char.IsWhiteSpace(text[i]))i++;if(i==text.Length-1)break;int end=JsonValueEnd(text,i);result.Add(text.Substring(i,end-i));i=end;while(i<text.Length&&char.IsWhiteSpace(text[i]))i++;if(i<text.Length-1&&text[i++]!=',')throw new Exception("Invalid inventory separator");}return result.ToArray();}
+  public static void ValidateProfilePolicyJson(string raw){var fields=ProfileJsonFields(raw);if(fields.Count!=5||new[]{"schemaVersion","kind","urpVersion","activeColorSpace","playerSettingsSha256"}.Any(k=>!fields.ContainsKey(k))||fields["schemaVersion"]!="1"||fields.Where(f=>f.Key!="schemaVersion").Any(f=>f.Value.Length<2||f.Value[0]!='"'||JsonStringEnd(f.Value,0)!=f.Value.Length))throw new Exception("Incomplete supplied profile policy");}
+  // PROFILE_NORMALIZATION_END
   static void Profile(DeliveryRequest q){
    if(Application.unityVersion!=q.unityVersion)throw new Conflict("Unity Editor version differs from the frozen target profile");
-   foreach(var file in q.profileFiles??Array.Empty<FileEntry>())ValidateFile(Safe(file.path),file.sha256);
+   var inventory=q.profileFiles??Array.Empty<FileEntry>();var policy=q.profilePolicy;
+   if(q.profileFingerprintVersion!=0&&q.profileFingerprintVersion!=2)throw new Conflict("Unsupported target profile fingerprint version");
+   if(inventory.Select(f=>f.path).Distinct().Count()!=inventory.Length)throw new Conflict("Duplicate frozen target profile file");
+   if(q.profileFingerprintVersion==2&&new[]{"ProjectSettings/ProjectVersion.txt","ProjectSettings/GraphicsSettings.asset","ProjectSettings/QualitySettings.asset","Packages/manifest.json","ProjectSettings/ProjectSettings.asset"}.Any(p=>!inventory.Any(f=>f.path==p)))throw new Conflict("Incomplete v2 target profile inventory");
+   if(policy!=null){
+    if(q.profileFingerprintVersion!=2||q.pipeline!="urp"||policy.schemaVersion!=1||policy.kind!="urp-linear-intensity-v1"||policy.urpVersion!="17.3.0"||(policy.activeColorSpace!="gamma"&&policy.activeColorSpace!="linear")||policy.playerSettingsSha256==null||!Regex.IsMatch(policy.playerSettingsSha256,@"^[a-f\d]{64}$"))throw new Conflict("Incomplete frozen URP color-space policy");
+    var player=inventory.SingleOrDefault(f=>f.path=="ProjectSettings/ProjectSettings.asset");
+    if(player==null||player.absent||player.sha256!=policy.playerSettingsSha256)throw new Conflict("Frozen PlayerSettings evidence differs");
+    ValidateFile(Safe(player.path),policy.playerSettingsSha256);
+    if(SerializedColorSpace(File.ReadAllText(Safe(player.path)))!=policy.activeColorSpace)throw new Conflict("Frozen color space changed or is ambiguous");
+    var package=UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages().Where(p=>p.name=="com.unity.render-pipelines.universal").ToArray();
+    if(package.Length!=1||package[0].version!="17.3.0")throw new Conflict("URP normalization requires verified package 17.3.0");
+    if(inventory.Count(f=>f.path=="ProjectSettings/GraphicsSettings.asset"&&f.normalizedSha256!=null&&Regex.IsMatch(f.normalizedSha256,@"^[a-f\d]{64}$"))!=1)throw new Conflict("Missing canonical GraphicsSettings evidence");
+   }
+   foreach(var file in inventory){
+    var full=Safe(file.path);
+    if(file.absent){if(q.profileFingerprintVersion!=2||file.path!="ProjectSettings/ProjectSettings.asset"||file.sha256!=""||file.normalizedSha256!=null||File.Exists(full))throw new Conflict("Frozen absent PlayerSettings changed");continue;}
+    if(file.sha256==null||!Regex.IsMatch(file.sha256,@"^[a-f\d]{64}$"))throw new Conflict("Invalid frozen profile SHA");
+    if(file.normalizedSha256!=null){
+     if(policy==null||file.path!="ProjectSettings/GraphicsSettings.asset")throw new Conflict("Unexpected profile normalization");
+     // GetString retains a UTF-8 BOM, unlike ReadAllText: canonical hash preserves BOM and CRLF.
+     var raw=Encoding.UTF8.GetString(File.ReadAllBytes(full));var canonical=NormalizeLinearIntensity(raw,policy.activeColorSpace);
+     if(canonical==null||HashProfileText(canonical)!=file.normalizedSha256||!new[]{"gamma","linear"}.Any(c=>HashProfileText(NormalizeLinearIntensity(raw,c))==file.sha256))throw new Conflict("Canonical GraphicsSettings changed");
+    }else ValidateFile(full,file.sha256);
+   }
    string actual=GraphicsSettings.currentRenderPipeline?GraphicsSettings.currentRenderPipeline.GetType().Name:"Built-in";
    if(q.pipeline=="urp"&&!actual.Contains("Universal")||q.pipeline=="hdrp"&&!actual.Contains("HDRender")||q.pipeline=="builtin"&&GraphicsSettings.currentRenderPipeline)throw new Conflict("Current renderer differs from the inspected PC target: "+actual);
+  }
+  [Serializable] class JsonPropertyName { public string value; }
+  static bool HasRootProperty(string json,string name){
+   int depth=0;
+   for(int i=0;i<json.Length;i++){
+    char c=json[i];
+    if(c=='"'){
+     int start=i,end=i+1;bool escaped=false;
+     for(;end<json.Length;end++){char next=json[end];if(escaped){escaped=false;continue;}if(next=='\\'){escaped=true;continue;}if(next=='"')break;}
+     if(end>=json.Length)throw new Exception("Invalid JSON string");
+     int after=end+1;while(after<json.Length&&char.IsWhiteSpace(json[after]))after++;
+     if(depth==1&&after<json.Length&&json[after]==':'&&JsonUtility.FromJson<JsonPropertyName>("{\"value\":"+json.Substring(start,end-start+1)+"}").value==name)return true;
+     i=end;
+    }else if(c=='{'||c=='[')depth++;else if(c=='}'||c==']')depth--;
+   }
+   return false;
+  }
+  // Unity synthesizes empty nested objects even when optional JSON fields are absent.
+  // Detect actual top-level presence so omitted contracts differ from supplied partial objects.
+  public static DeliveryRequest ParseDeliveryRequest(string json,DeliveryRequest q=null){
+   ValidateUniqueJsonKeys(json);var profileFields=ProfileJsonFields(json);
+   q=q??new DeliveryRequest();JsonUtility.FromJsonOverwrite(json,q);
+   if(!profileFields.ContainsKey("profileFingerprintVersion"))q.profileFingerprintVersion=0;
+   else if(profileFields["profileFingerprintVersion"]!="2")throw new Exception("Unsupported explicit target fingerprint version");
+   if(!profileFields.ContainsKey("profilePolicy"))q.profilePolicy=null;else ValidateProfilePolicyJson(profileFields["profilePolicy"]);
+   if(profileFields.ContainsKey("profileFiles")&&profileFields["profileFiles"]!="null"){
+    var entries=ProfileJsonArray(profileFields["profileFiles"]);if(q.profileFiles==null||entries.Length!=q.profileFiles.Length)throw new Exception("Profile inventory differs from JSON");
+    for(int i=0;i<entries.Length;i++){var fields=ProfileJsonFields(entries[i]);var file=q.profileFiles[i];if(!fields.ContainsKey("normalizedSha256"))file.normalizedSha256=null;else if(file.normalizedSha256==null||!Regex.IsMatch(file.normalizedSha256,@"^[a-f\d]{64}$")||!fields["normalizedSha256"].StartsWith("\""))throw new Exception("Invalid supplied canonical profile SHA");if(!fields.ContainsKey("absent"))file.absent=false;else if(fields["absent"]!="true"&&fields["absent"]!="false")throw new Exception("Invalid supplied profile absence flag");}
+   }
+   if(!HasRootProperty(json,"rigContract"))q.rigContract=null;
+   if(q.rigContract!=null){var c=q.rigContract;
+    if((c.schemaVersion!=1&&c.schemaVersion!=2)||string.IsNullOrWhiteSpace(c.versionId)||string.IsNullOrWhiteSpace(c.producerVersionId)||string.IsNullOrWhiteSpace(c.producerTaskId)||
+       (c.rigType!="generic"&&c.rigType!="humanoid")||(c.hairBinding!="head"&&c.hairBinding!="controls")||c.requiredParts==null||c.humanBones==null)
+     throw new Exception("Supplied rig contract is incomplete");
+    if(c.schemaVersion==2)ValidateExternalMapping(c);
+   }
+   return q;
+  }
+  static Dictionary<string,string> ExternalParents(RigContract c){
+   var map=c.humanBones.ToDictionary(b=>b.humanName,b=>b.boneName);var p=new Dictionary<string,string>{{"Spine","Hips"},{"Chest","Spine"},{"UpperChest","Chest"},{"Neck",map.ContainsKey("UpperChest")?"UpperChest":"Chest"},{"Head","Neck"},{"LeftEye","Head"},{"RightEye","Head"},{"Jaw","Head"}};
+   foreach(var side in new[]{"Left","Right"}){
+    string torso=map.ContainsKey("UpperChest")?"UpperChest":"Chest";
+    p[side+"Shoulder"]=torso;p[side+"UpperArm"]=map.ContainsKey(side+"Shoulder")?side+"Shoulder":torso;p[side+"LowerArm"]=side+"UpperArm";p[side+"Hand"]=side+"LowerArm";p[side+"UpperLeg"]="Hips";p[side+"LowerLeg"]=side+"UpperLeg";p[side+"Foot"]=side+"LowerLeg";p[side+"Toes"]=side+"Foot";
+    foreach(var finger in new[]{"Thumb","Index","Middle","Ring","Little"}){string previous=side+"Hand";foreach(var joint in new[]{"Proximal","Intermediate","Distal"}){string human=side+finger+joint;p[human]=previous;previous=human;}}
+   }return p;
+  }
+  static void ValidateExternalMapping(RigContract c){
+   if(c.rigType!="humanoid"||c.humanBones.Any(b=>b==null||string.IsNullOrWhiteSpace(b.boneName)||string.IsNullOrWhiteSpace(b.humanName))||c.humanBones.Select(b=>b.boneName).Distinct().Count()!=c.humanBones.Length||c.humanBones.Select(b=>b.humanName).Distinct().Count()!=c.humanBones.Length)throw new Exception("External Humanoid mapping must be explicit and unique");
+   var names=new HashSet<string>(c.humanBones.Select(b=>b.humanName));var p=ExternalParents(c);
+   var required=new List<string>{"Hips","Spine","Chest","Neck","Head"};
+   foreach(var side in new[]{"Left","Right"}){required.AddRange(new[]{"UpperArm","LowerArm","Hand","UpperLeg","LowerLeg","Foot"}.Select(n=>side+n));if(c.fingers)foreach(var finger in new[]{"Thumb","Index","Middle","Ring","Little"})required.AddRange(new[]{"Proximal","Intermediate","Distal"}.Select(n=>side+finger+n));}
+   if(required.Any(n=>!names.Contains(n))||names.Any(n=>n!="Hips"&&(!p.ContainsKey(n)||!names.Contains(p[n]))))throw new Exception("External Humanoid mapping is incomplete or unsupported");
   }
   static void Process(string requestFile){
    DeliveryRequest q=null;
@@ -89,7 +202,7 @@ namespace Partsmith.Graphics {
    var errors=new List<string>();
    var r=new DeliveryReport{status="failed",unityVersion=Application.unityVersion,playbackVerified=false,clips=Array.Empty<string>()};
    try{
-    q=JsonUtility.FromJson<DeliveryRequest>(File.ReadAllText(requestFile));
+    q=new DeliveryRequest();ParseDeliveryRequest(File.ReadAllText(requestFile),q);
     if(q==null||q.schemaVersion!=1||!System.Text.RegularExpressions.Regex.IsMatch(q.requestId??"","^[a-f0-9]{32}$")||string.IsNullOrWhiteSpace(q.objectId))throw new Exception("Invalid graphics request");
     r.requestId=q.requestId;r.objectId=q.objectId;r.profileFingerprint=q.profileFingerprint;r.converterVersion=q.converterVersion;r.pipeline=q.pipeline;
     if(q.destination==null||!System.Text.RegularExpressions.Regex.IsMatch(q.destination,"^Assets/PartsmithGraphics/[A-Za-z0-9_-]{1,64}$"))throw new Exception("Unsafe graphics destination");
@@ -325,6 +438,10 @@ namespace Partsmith.Graphics {
   static ImportedRig VerifyHumanoid(DeliveryRequest q,GameObject model,ModelImporter importer,Avatar avatar){
    var evidence=ReadRigManifest(q);
    if(importer.animationType!=ModelImporterAnimationType.Human||!avatar||!avatar.isValid||!avatar.isHuman)throw new Exception("Humanoid Avatar validity/human checks failed");
+   if(q.rigContract.schemaVersion==2){
+    ValidateExternalMapping(q.rigContract);var mapping=q.rigContract.humanBones.ToDictionary(b=>b.humanName,b=>b.boneName);var transforms=model.GetComponentsInChildren<Transform>(true);var parents=ExternalParents(q.rigContract);
+    foreach(var pair in parents.Where(p=>mapping.ContainsKey(p.Key)&&mapping.ContainsKey(p.Value))){var bone=transforms.Single(t=>t.name==mapping[pair.Key]);var ancestor=bone.parent;while(ancestor&&ancestor.name!=mapping[pair.Value]){if(mapping.Values.Contains(ancestor.name))throw new Exception("Unexpected mapped anatomical ancestor: "+pair.Key);ancestor=ancestor.parent;}if(!ancestor)throw new Exception("External Humanoid anatomical ancestry differs: "+pair.Key);}
+   }
    foreach(var binding in q.rigContract.humanBones){
     var human=(HumanBodyBones)Enum.Parse(typeof(HumanBodyBones),binding.humanName);
     if(!importer.humanDescription.human.Any(b=>b.boneName==binding.boneName&&b.humanName==HumanTrait.BoneName[(int)human]))throw new Exception("Imported HumanDescription differs from canonical mapping");
@@ -336,11 +453,15 @@ namespace Partsmith.Graphics {
     var matches=skins.Where(s=>s.name==part.meshName).ToArray();
     if(matches.Length!=1||!matches[0].sharedMesh||matches[0].bones.Length<1||matches[0].bones.Any(b=>!b))throw new Exception("Humanoid part skin/bone references missing: "+part.meshName);
     var skin=matches[0];var mesh=skin.sharedMesh;
+    if(q.rigContract.schemaVersion==2){
+     if(mesh.bindposes.Length!=skin.bones.Length)throw new Exception("External Humanoid bind pose inventory differs");
+     for(int i=0;i<skin.bones.Length;i++){var expected=skin.bones[i].worldToLocalMatrix*skin.transform.localToWorldMatrix;var actual=mesh.bindposes[i];for(int row=0;row<4;row++)for(int column=0;column<4;column++)if(float.IsNaN(actual[row,column])||float.IsInfinity(actual[row,column])||Math.Abs(actual[row,column]-expected[row,column])>.002f)throw new Exception("External Humanoid rest/bind matrix differs: "+skin.bones[i].name);}
+    }
     if(mesh.vertexCount<part.vertices)throw new Exception("Humanoid source vertices missing: "+part.meshName);
     var counts=mesh.GetBonesPerVertex();var weights=mesh.GetAllBoneWeights();int cursor=0;
     try{
      if(counts.Length!=mesh.vertexCount)throw new Exception("Humanoid skin weights are inaccessible");
-     foreach(var count in counts){float total=0;for(int index=0;index<count;index++){var weight=weights[cursor++];if(float.IsNaN(weight.weight)||float.IsInfinity(weight.weight)||weight.weight<0||weight.boneIndex<0||weight.boneIndex>=skin.bones.Length)throw new Exception("Invalid imported Humanoid weight");total+=weight.weight;if(part.partId=="hair"&&q.rigContract.hairBinding=="head"&&weight.weight>.000001f&&skin.bones[weight.boneIndex].name!="head")throw new Exception("Hair no longer follows Head exclusively");}if(Math.Abs(total-1)>.001f)throw new Exception("Imported Humanoid weights are not normalized");}
+     foreach(var count in counts){float total=0;for(int index=0;index<count;index++){var weight=weights[cursor++];if(float.IsNaN(weight.weight)||float.IsInfinity(weight.weight)||weight.weight<0||weight.boneIndex<0||weight.boneIndex>=skin.bones.Length)throw new Exception("Invalid imported Humanoid weight");total+=weight.weight;if(part.partId=="hair"&&q.rigContract.hairBinding=="head"&&weight.weight>.000001f&&skin.bones[weight.boneIndex].name!=(q.rigContract.schemaVersion==2?q.rigContract.humanBones.Single(b=>b.humanName=="Head").boneName:"head"))throw new Exception("Hair no longer follows Head exclusively");}if(Math.Abs(total-1)>.001f)throw new Exception("Imported Humanoid weights are not normalized");}
     }finally{counts.Dispose();weights.Dispose();}
     parts.Add(new RigPart{meshName=part.meshName,meshId=part.meshId,partId=part.partId,armatureName=part.armatureName,vertices=mesh.vertexCount,boneCount=skin.bones.Length,normalizedWeights=true});
    }

@@ -1,6 +1,6 @@
 {
   "name": "partsmith",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "description": "Studio Baekho workspace for graphics, SainGeom items, background music and combat tools",
   "author": "Studio Baekho",
@@ -12,14 +12,15 @@
     "build": "npm run build:map && tsc --noEmit && vite build && node scripts/build.mjs",
     "start": "electron .",
     "start:partsmith": "electron . --partsmith",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test --test-force-exit --test-concurrency=4 tests/*.test.ts",
     "test:combat": "node --test Desktop/tests/*.test.cjs",
     "test:hit-timer": "node --test Apps/AutoHitTimer/tests/*.test.cjs",
     "test:integration": "node scripts/studio-smoke.mjs",
     "test:ui": "node scripts/smoke.mjs",
     "package": "npm run build && electron-builder --win dir",
     "build:map": "node scripts/build-map.mjs",
-    "test:map": "npm --prefix Apps/AutoMapPrefabMaker test"
+    "test:map": "npm --prefix Apps/AutoMapPrefabMaker test",
+    "test:updates": "node --import tsx scripts/studio-updates-smoke.mjs"
   },
   "dependencies": {
     "ffmpeg-static": "5.3.0",
@@ -30,7 +31,8 @@
     "sql.js": "^1.13.0",
     "three": "^0.180.0",
     "zod": "^4.1.0",
-    "fflate": "^0.8.2"
+    "fflate": "^0.8.2",
+    "@modelcontextprotocol/sdk": "^1.32.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -114,6 +116,10 @@
       {
         "from": "Apps/AutoMapPrefabMaker/unity-importer",
         "to": "map-forge/unity-importer"
+      },
+      {
+        "from": "Apps/AutoMapPrefabMaker/docs/wall-mounted-prefabs.md",
+        "to": "map-forge/unity-importer/WALL_PREFABS.ko.md"
       }
     ],
     "win": {

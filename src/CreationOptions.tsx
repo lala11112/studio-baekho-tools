@@ -18,9 +18,12 @@ import {
 } from "../shared/graphics-creation";
 import { ModelGeometrySettings } from './ModelGeometrySettings';
 import './human-parts-workflow.css';
+import './creation-options-guide.css';
 
 type Value = string | number | boolean;
 type Props = {
+  taskId?: string;
+  autoRigFileExport?: boolean;
   kind: GraphicsKind;
   spec: CreationSpec;
   stage: CreationStage;
@@ -75,6 +78,8 @@ function Choices({
   );
 }
 export function CreationOptions({
+  taskId,
+  autoRigFileExport,
   kind,
   spec,
   stage,
@@ -142,11 +147,14 @@ export function CreationOptions({
       className="gs-creation-options"
       data-testid="graphics-creation-options"
     >
-      <h2>{stageQuestions[stage]}</h2>
+      <h2>{stage === 'unity' && taskId === 'X04' ? '파일을 어떻게 내보낼까요?' : stageQuestions[stage]}</h2>
       {splitWhole && <section className="gs-human-workflow" aria-label="인간형 파트 제작 순서">
         <strong>전체 제작 후 3파트 분리</strong>
-        <p>전체 무텍스처 모델 → 머리 / 몸통 / 머리카락 분리 → 필요시 빠진 면 보완 → 파트별 UV·4K 텍스처 → 조립 → Humanoid → Unity</p>
-        <p className="gs-fine">몸통에는 팔·손·손가락·다리·발과 의상이 포함됩니다. 분리된 파트는 원본의 실제 면 수를 이어받습니다.</p>
+        <p>전체 모델을 만든 뒤 머리·몸통·머리카락을 분리합니다. 각 결과를 확인하고 채택하며 진행하세요.</p>
+        <details className="gs-options-detail"><summary>전체 제작 순서와 파트 범위</summary>
+          <p className="gs-fine">전체 무텍스처 모델 → 3파트 분리 → 필요한 빠진 면 보완 → 파트별 UV·4K 텍스처 → 조립 → Humanoid → Unity</p>
+          <p className="gs-fine">몸통에는 팔·손·손가락·다리·발과 의상이 포함됩니다. 분리된 파트는 원본의 실제 면 수를 이어받습니다.</p>
+        </details>
         {stage === 'model' && <p className="gs-fine">현재 파트 선택과 관계없이 전체 모델을 제작합니다. 아래 목표 면 수는 세 파트의 합계입니다.</p>}
         {stage === 'surface' && <p className="gs-fine">현재 파트: {activePart?.label ?? '선택 필요'}. 이 파트의 채택 모델에만 UV·텍스처를 적용합니다.</p>}
       </section>}
@@ -180,6 +188,7 @@ export function CreationOptions({
               rows={3}
               placeholder="예: 윗면은 평평하고 아래쪽만 거친 바위"
               value={spec.instruction}
+              disabled={disabled}
               maxLength={12000}
               onChange={(event) =>
                 onChange({ ...spec, instruction: event.target.value })
@@ -196,8 +205,8 @@ export function CreationOptions({
             ["parts", "파트별 이미지"],
           ])}
           {composition('완성 모델 구성')}
-          <details>
-            <summary>세부 외형 · 구도 옵션</summary>
+          <details className="gs-options-detail">
+            <summary>상세 설정 · <span>세부 외형 · 구도 옵션</span></summary>
             {attributeOptions(true)}
             {choice("방향", "direction", "front", [
               ["front", "정면"],
@@ -238,8 +247,8 @@ export function CreationOptions({
               ["motion", "동작을 위한 넓은 여백"],
             ])}
           </details>
-          <details>
-            <summary>수정할 때 유지할 특징</summary>
+          <details className="gs-options-detail">
+            <summary>상세 설정 · <span>수정할 때 유지할 특징</span></summary>
             <p className="gs-fine">
               선택한 특징을 수정 요청에 함께 전달합니다. 결과에서도 유지되었는지
               확인한 뒤 채택하세요.
@@ -249,6 +258,7 @@ export function CreationOptions({
                 <label key={option.id}>
                   <input
                     type="checkbox"
+                    disabled={disabled}
                     checked={spec.locks.includes(option.id)}
                     onChange={(event) =>
                       onChange({
@@ -304,7 +314,8 @@ export function CreationOptions({
       {(stage === "design" || stage === "model" || stage === "surface" || stage === "assembly") &&
         spec.attributes.composition === "parts" && (
           <div className="gs-parts">
-            <h3>제작할 파트</h3>
+            <h3>파트 선택과 준비 상태</h3>
+            <p className="gs-fine">현재 파트를 선택한 뒤 준비 상태를 확인하세요. 파트 선택이나 결과 생성만으로 채택이 완료되지는 않습니다.</p>
             <p className="gs-fine">
               {splitWhole ? '전체 채택 모델에서 아래 파트를 분리합니다. 텍스처용 파트 참조는 이미지 단계의 ‘파트별 이미지’ 또는 파트 이미지 가져오기로 직접 준비하고 채택하세요.' : '파트마다 이미지를 확인하고 모델을 제작합니다. 각 파트의 기존 결과는 보존합니다.'}
             </p>
@@ -342,7 +353,7 @@ export function CreationOptions({
                 >
                   {spec.activePartId === part.id ? "현재 파트" : "이 파트 설정"}
                 </button>
-                {partStatus?.[part.id] && <p className="gs-part-status">{partStatus[part.id]}</p>}
+                <p className="gs-part-status">{part.enabled ? partStatus?.[part.id] || '준비 상태 확인 필요' : '이번 제작에서 제외'}</p>
                 {splitWhole && <p className="gs-fine">면 수: 전체 모델 분리 결과의 실제 면 수 유지</p>}
                 {spec.activePartId === part.id && (
                   <>
@@ -472,11 +483,14 @@ export function CreationOptions({
           </p>
           {settings.surfaceOperation !== "uv" &&
             settings.textureMode === "local" && (
+              <details className="gs-options-detail">
+                <summary>상세 설정 · 기본 재질 수치</summary>
               <div className="gs-settings-grid">
                 <label>
                   기본 색
                   <input
                     aria-label="기본 색"
+                    disabled={disabled}
                     type="color"
                     value={String(settings.color ?? "#808080")}
                     onChange={(event) => onSetting("color", event.target.value)}
@@ -492,6 +506,7 @@ export function CreationOptions({
                     {label}
                     <input
                       aria-label={String(label)}
+                      disabled={disabled}
                       type="number"
                       min={0}
                       max={key === "emission" ? 10 : 1}
@@ -504,6 +519,7 @@ export function CreationOptions({
                   </label>
                 ))}
               </div>
+              </details>
             )}
         </>
       )}
@@ -612,6 +628,7 @@ export function CreationOptions({
           <label>
             <input
               type="checkbox"
+              disabled={disabled}
               checked={settings.rootMotion === true}
               onChange={(event) =>
                 onSetting("rootMotion", event.target.checked)
@@ -632,11 +649,13 @@ export function CreationOptions({
             ["files", "FBX · GLB 파일 내보내기"],
           ])}
           <p>
-            {settings.deliveryMode === "files"
+            {taskId === "X04"
               ? "채택한 결과를 로컬 FBX · GLB 파일로 내보냅니다. 원본은 유지하며 Unity 프로젝트 임포트는 실행하지 않습니다."
               : "채택한 모델·재질·리그·클립을 연결된 Unity 프로젝트에 전달합니다. 기존 원본은 유지하며, 기본 동작은 임포트입니다."}
           </p>
-          {choice("충돌체", "collider", "none", [
+          {taskId === 'X04' && autoRigFileExport && <p className="gs-fine" data-testid="graphics-auto-rig-export-note">게임용 리그는 이전에 검증한 FBX를 그대로 복사합니다. 함께 내보내는 GLB는 변형 검사용이며 게임용 본 구조를 보장하지 않습니다. FBX 또는 FBX + 변형 검사용 GLB를 선택하세요.</p>}
+          {taskId === 'X04' && autoRigFileExport && settings.exportFormat === 'glb' && <p role="alert">자동 리그는 GLB만 내보낼 수 없습니다. 출력 형식을 FBX 또는 FBX + 변형 검사용 GLB로 바꾸세요.</p>}
+          {taskId !== 'X04' && <>{choice("충돌체", "collider", "none", [
             ["none", "추가 안 함"],
             ["box", "상자"],
             ["mesh", "메시"],
@@ -645,6 +664,7 @@ export function CreationOptions({
           <label>
             <input
               type="checkbox"
+              disabled={disabled}
               checked={settings.lodEnabled === true}
               onChange={(event) =>
                 onSetting("lodEnabled", event.target.checked)
@@ -657,6 +677,7 @@ export function CreationOptions({
               LOD 면 비율
               <input
                 type="number"
+                disabled={disabled}
                 min={0.05}
                 max={0.95}
                 step={0.05}
@@ -667,11 +688,12 @@ export function CreationOptions({
               />
             </label>
           )}
-          <details>
-            <summary>Unity 전달본 최적화</summary>
+          <details className="gs-options-detail">
+            <summary>상세 설정 · Unity 전달본 최적화</summary>
             <label>
               전달본 텍스처 크기
               <select
+                disabled={disabled}
                 value={String(settings.deliveryTextureSize ?? 0)}
                 onChange={(event) =>
                   onSetting("deliveryTextureSize", Number(event.target.value))
@@ -698,6 +720,7 @@ export function CreationOptions({
               원본은 그대로 두고 Unity 전달본에만 적용합니다.
             </p>
           </details>
+          </>}
         </>
       )}
     </div>

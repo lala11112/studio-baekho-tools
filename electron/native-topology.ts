@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import type { AssetVersion } from '../shared/graphics';
+import { importedModelSourceProblem, type AssetVersion } from '../shared/graphics';
 import { validateNativeTopologyMap, type NativeTopologyResult } from '../shared/native-topology';
 
 type Options = {
@@ -59,6 +59,7 @@ export class NativeTopologyManager {
       const permission = this.allowed.get(`${id}:${file}`);
       if (!permission) return false;
       const version = this.options.version(id, permission.versionId);
+      if (version && importedModelSourceProblem(version)) return false;
       if (!version?.files.some(value => value.path === permission.sourcePath && value.sha256 === permission.sourceHash) ||
         !version.files.some(value => value.path === permission.oldPreviewPath && value.sha256 === permission.oldPreviewHash)) return false;
       checkedFile(root, permission.sourcePath, permission.sourceHash);
@@ -75,6 +76,8 @@ export class NativeTopologyManager {
   private async prepare(id: string, versionId: string): Promise<NativeTopologyResult> {
     const root = fs.realpathSync(this.options.projectRoot(id)), version = this.options.version(id, versionId);
     if (!version) throw Error('검사할 원본 버전을 찾지 못했습니다.');
+    const sourceProblem = importedModelSourceProblem(version);
+    if (sourceProblem) throw Error(sourceProblem);
     const source = version.files.find(file => /\.blend$/i.test(file.path)) ?? version.files.find(file => /\.fbx$/i.test(file.path));
     const originalPreview = version.files.find(file => file.path === version.preview && /\.glb$/i.test(file.path)) ?? version.files.find(file => /\.glb$/i.test(file.path));
     if (!source || !originalPreview) throw Error('원본 면 정보가 있는 Blender·FBX 원본과 연결된 GLB가 필요합니다. 현재 자료는 게임용 삼각형 보기만 가능합니다.');

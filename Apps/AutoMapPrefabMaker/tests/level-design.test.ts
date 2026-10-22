@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DEFAULT_SETTINGS } from '../src/shared/map';
 import { applyGeneratedFeatures, DEFAULT_DESIGNER, generationConditionIssues } from '../src/shared/features';
-import { analyzeLevelDesign, compileLevelDesign, DEFAULT_LEVEL_DESIGN, parseLevelDesignSettings, placeLevelDesignContent } from '../src/shared/level-design';
-import { imagePrompt, layoutPrompt } from '../electron/services/prompts';
+import { analyzeLevelDesign, compileLevelDesign, DEFAULT_LEVEL_DESIGN, LEVEL_DESIGN_PRINCIPLES, parseLevelDesignSettings, placeLevelDesignContent } from '../src/shared/level-design';
+import { conceptPrompt, imagePrompt, layoutPrompt } from '../electron/services/prompts';
 import type { AssetBinding, GenerationSettings, GridMap, GameplayMarker, MapFixture } from '../src/shared/types';
 
 const settings = (): GenerationSettings => ({ ...DEFAULT_SETTINGS, seed: 4, levelDesign: { ...DEFAULT_LEVEL_DESIGN, pattern: 'openArena' }, designer: { ...DEFAULT_DESIGNER, elevation: false } });
@@ -26,6 +26,64 @@ test('recipes honor enabled terrain and are identical in both AI prompts', () =>
   assert.match(imagePrompt(s), /safe shop/); assert.equal(compileLevelDesign(s).combatRequired, false);
   assert.throws(() => parseLevelDesignSettings({ ...DEFAULT_LEVEL_DESIGN, characterRadius: NaN }), /characterRadius/);
   assert.throws(() => parseLevelDesignSettings({ ...DEFAULT_LEVEL_DESIGN, extra: true }), /지원하지 않는/);
+});
+
+test('documented gameplay principles reach all AI stages while numeric recipes remain optional', () => {
+  for (const enabled of [false, true]) {
+    const s = settings();
+    if (!enabled) delete s.levelDesign;
+    const concept = conceptPrompt(s);
+    const image = imagePrompt(s), layout = layoutPrompt(s);
+    for (const prompt of [concept, image, layout]) {
+      assert.equal(prompt.split(LEVEL_DESIGN_PRINCIPLES).length, 2);
+      assert.match(prompt, /docs\/level-design-principles\.md/);
+    }
+    assert.doesNotMatch(concept, /LOCAL LEVEL DESIGN RECIPE/);
+    if (enabled) {
+      assert.ok(image.includes(compileLevelDesign(s).prompt));
+      assert.ok(layout.includes(compileLevelDesign(s).prompt));
+    } else {
+      assert.doesNotMatch(image, /LOCAL LEVEL DESIGN RECIPE/);
+      assert.doesNotMatch(layout, /LOCAL LEVEL DESIGN RECIPE/);
+    }
+  }
+  assert.match(LEVEL_DESIGN_PRINCIPLES, /Start, reward and shop rooms prioritize safe/);
+  assert.match(LEVEL_DESIGN_PRINCIPLES, /Do not invent movement mechanics or numeric clearance thresholds/);
+});
+
+test('blueprints prefer structural asymmetry within user settings and region preservation limits', () => {
+  const s = settings(); s.designer!.preset = 'boss'; s.prompt = '좌우 대칭을 유지하는 보스 전투방';
+  const region = { x: 2, row: 3, width: 5, height: 6 };
+  for (const prompt of [imagePrompt(s), imagePrompt(s, region)]) {
+    assert.match(prompt, /purposeful structural asymmetry/);
+    assert.match(prompt, /When possible, vary at least two permitted structural aspects/);
+    assert.match(prompt, /outer silhouette, usable-area proportions, enabled terrain heights, stair approaches, obstacle groups, and new external door positions or spacing/);
+    assert.match(prompt, /Preserve explicitly fixed door locations, and every existing door during a region edit/);
+    assert.match(prompt, /explicitly requested symmetry, room purpose, enabled features, exact counts and dimensions take priority/);
+    assert.match(prompt, /do not create narrow passages or add features merely to break symmetry/);
+    assert.ok(prompt.includes(s.prompt));
+    assert.doesNotMatch(prompt, /large clear central fighting area/);
+  }
+  const partial = imagePrompt(s, region);
+  assert.match(partial, /ONLY inside unlocked editable cells/);
+  assert.match(partial, /Preserve outside cells, locked cells, existing connections, elevations and region seams exactly/);
+  assert.match(partial, /x=2\.\.6, row=3\.\.8/);
+});
+
+test('extraction preserves symmetric or asymmetric image geometry instead of composing a new layout', () => {
+  const s = settings(); s.designer!.propLayout = 'legacy';
+  for (const prompt of [layoutPrompt(s), layoutPrompt(s, { x: 1, row: 1, width: 6, height: 6 })]) {
+    assert.match(prompt, /Preserve the visible symmetry or asymmetry/);
+    assert.match(prompt, /Do not mirror, regularize, recenter or redesign visible geometry/);
+    assert.match(prompt, /Preserve the visible obstacle positions and count, including any mirrored groups/);
+    assert.doesNotMatch(prompt, /SPATIAL COMPOSITION:|Prefer a few unequal, off-center obstacle groups|Avoid mirrored pairs/);
+  }
+  s.designer!.propLayout = 'balanced';
+  assert.match(layoutPrompt(s), /interpret object hints without reshaping the room/);
+  assert.doesNotMatch(layoutPrompt(s), /Plan usable space for large anchor props/);
+  delete s.designer; delete s.levelDesign;
+  assert.match(layoutPrompt(s), /Preserve the visible raised platforms and stairs/);
+  assert.doesNotMatch(layoutPrompt(s), /Use raised platforms and stairs where useful/);
 });
 
 test('open arena reports actual traversable area, door approaches, connected routes and dodge cross', () => {

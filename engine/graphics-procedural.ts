@@ -1,3 +1,4 @@
+import { isGraphicsProductionFile } from '../shared/graphics';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -65,8 +66,8 @@ function prepare(args: GraphicsNativeArgs) {
   for (const v of args.inputs) for (const f of v.files) verify(root, f);
   if (args.task.taskId === 'M04') return { root, source: undefined, version: undefined };
   const accepted = args.task.objectSnapshot?.accepted ?? {};
-  const version = ['model', 'material'].flatMap(role => args.inputs.filter(v => v.role === role && accepted[`${v.role}:${v.slot}`] === v.id)).find(v => v.files.some(f => /\.(blend|glb|fbx)$/i.test(f.path)));
-  const source = ['blend', 'glb', 'fbx'].map(ext => version?.files.find(f => f.path.toLowerCase().endsWith('.' + ext))).find(Boolean);
+  const version = ['model', 'material'].flatMap(role => args.inputs.filter(v => v.role === role && accepted[`${v.role}:${v.slot}`] === v.id)).find(v => v.files.some(f => isGraphicsProductionFile(f) && /\.(blend|glb|fbx)$/i.test(f.path)));
+  const source = ['blend', 'glb', 'fbx'].map(ext => version?.files.find(f => isGraphicsProductionFile(f) && f.path.toLowerCase().endsWith('.' + ext))).find(Boolean);
   if (!version || !source) throw Error('채택한 모델·재질의 BLEND/GLB/FBX 원본이 필요합니다.');
   return { root, source, version };
 }
@@ -111,7 +112,7 @@ export function createGraphicsProceduralExecutor(deps: { runBlender?: RunBlender
       if (args.recoveryOnly || fs.readdirSync(output).length) throw Error('완료 기록 없는 로컬 제작은 자동 재실행하지 않습니다. 기존 출력을 보존하고 새 작업으로 실행하세요.');
       if (!fs.existsSync(args.blenderPath)) throw Error('설정된 Blender 실행 파일이 없습니다.');
       staging = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-proc-')); const input = path.join(staging, 'input'), out = path.join(staging, 'output'); fs.mkdirSync(input);
-      const files = (version?.files ?? []).map((file, index) => { const local = path.join(input, `${index}-${path.basename(file.path)}`); fs.copyFileSync(verify(root, file), local, fs.constants.COPYFILE_EXCL); return { ...file, local, original: path.resolve(root, file.path) }; });
+      const files = (version?.files ?? []).filter(isGraphicsProductionFile).map((file, index) => { const local = path.join(input, `${index}-${path.basename(file.path)}`); fs.copyFileSync(verify(root, file), local, fs.constants.COPYFILE_EXCL); return { ...file, local, original: path.resolve(root, file.path) }; });
       const spec = path.join(staging, 'request.json');
       fs.writeFileSync(spec, JSON.stringify({ schemaVersion: 1, identity, taskId: args.task.taskId, settings: args.task.settings, source: files.find(f => f.path === source?.path)?.local,
         sourceSha256: source?.sha256, inputRoot: input, output: out, files }));

@@ -41,7 +41,7 @@ await mkdir(resolve(projectPath, 'Assets/Baekho/Runtime'), { recursive: true });
 for (const [source, destination] of [
   ['unity-importer/Editor/BaekhoMapImporter.cs', 'Assets/Editor/BaekhoMapImporter.cs'],
   ['tests/unity/BaekhoNavMeshSmoke.cs', 'Assets/Editor/BaekhoNavMeshSmoke.cs'],
-  ...['BaekhoMapConnection', 'BaekhoGameplayMarker', 'BaekhoMapFixture'].map(name =>
+  ...['BaekhoMapConnection', 'BaekhoGameplayMarker', 'BaekhoMapFixture','BaekhoWallModule'].map(name =>
     [`unity-importer/Runtime/${name}.cs`, `Assets/Baekho/Runtime/${name}.cs`]),
 ]) await copyFile(resolve(root, source), resolve(projectPath, destination));
 

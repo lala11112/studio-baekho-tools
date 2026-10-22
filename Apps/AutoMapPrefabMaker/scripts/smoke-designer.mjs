@@ -20,7 +20,7 @@ for (const [index, role] of roles.entries()) {
   await writeFile(resolve(fixture, `Assets/Modules/${role}.prefab`), '%YAML 1.1\n');
   await writeFile(resolve(fixture, `Assets/Modules/${role}.prefab.meta`), `fileFormatVersion: 2\nguid: ${String(index + 1).repeat(32)}\n`);
 }
-const comparisonProject = { formatVersion: 1, map: createDemoMap(), settings: { ...DEFAULT_SETTINGS }, bindings: roles.map((role, index) => ({
+const comparisonProject = { formatVersion: 1, map: createDemoMap(), settings: { ...DEFAULT_SETTINGS, conceptMode: 'manual', prompt: 'Smoke designer regression room' }, bindings: roles.map((role, index) => ({
   id: role, label: role, role, prefabGuid: String(index + 1).repeat(32), prefabPath: `Assets/Modules/${role}.prefab`,
   scale: { x: 1, y: 1, z: 1 }, offset: { x: 0, y: 0, z: 0 }, rotationY: 0,
 })) };

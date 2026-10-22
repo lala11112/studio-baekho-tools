@@ -1,3 +1,4 @@
+import { revealGraphicsControl, openGraphicsInspection } from './graphics-ui-disclosures';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -19,7 +20,9 @@ test('assembly adoption is explicit beside the preview and in details while indi
   const app = await electron.launch({ executablePath: electronBinary as unknown as string, args: [path.join(root, 'main.cjs')] });
   try {
     const page = await app.firstWindow(), errors: string[] = []; page.on('pageerror', error => errors.push(error.message)); page.setDefaultTimeout(8000);
+    await revealGraphicsControl(page.getByTestId('graphics-version-assembled'));
     await page.getByTestId('graphics-version-assembled').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-accept-preview').innerText(), '이 조립과 파트 채택');
     assert.equal(await page.getByTestId('graphics-accept-version').innerText(), '이 조립과 파트 채택');
     assert.match(await page.getByTestId('graphics-preview-actions').innerText(), /이후 파트 UV도 이 배치를 사용/);
@@ -31,10 +34,14 @@ test('assembly adoption is explicit beside the preview and in details while indi
     await page.evaluate(() => (window as any).setAccepted({ 'model:main': 'assembled', 'model:part-head': 'placed-head', 'model:part-body': 'placed-body' }));
     await page.waitForFunction(() => (document.querySelector('[data-testid="graphics-accept-preview"]') as HTMLButtonElement).disabled);
     assert.equal(await page.getByTestId('graphics-accept-preview').innerText(), '현재 채택한 조립·파트');
+    await revealGraphicsControl(page.getByTestId('graphics-version-legacy-main'));
     await page.getByTestId('graphics-version-legacy-main').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-accept-preview').innerText(), '이 모델 채택');
     await page.evaluate(() => (window as any).setAccepted({}));
+    await revealGraphicsControl(page.getByTestId('graphics-version-placed-head'));
     await page.getByTestId('graphics-version-placed-head').click();
+    await openGraphicsInspection(page);
     assert.equal(await page.getByTestId('graphics-accept-preview').innerText(), '이 모델 채택');
     assert.equal(await page.evaluate(() => (window as any).actions.length), 1); assert.deepEqual(errors, []);
   } finally { await app.close(); }

@@ -1,6 +1,6 @@
 {
   "ok": true,
-  "date": "2026-10-14T09:53:30.706Z",
+  "date": "2026-10-22T00:30:25.781Z",
   "checks": [
     "home loads real isolated records; shell APIs isolated",
     "new modeling projects open the latest GraphicsStudio by default",
@@ -14,6 +14,7 @@
     "native workspace survives minimize and restore",
     "1180x760 shell and native workspace remain within window",
     "third tool remains usable inside the compact window",
+    "fourth React tool hides native views and preserves unsaved state in both directions",
     "no renderer exceptions",
     "no Unity command requests created by navigation or report viewing"
   ],

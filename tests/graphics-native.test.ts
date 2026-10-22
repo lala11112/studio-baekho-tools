@@ -457,7 +457,7 @@ test("local transform freezes exact settings, preserves source, and reuses verif
     calls++;
     assert(command.includes("--disable-autoexec"));
     const spec = JSON.parse(fs.readFileSync(command.at(-1)!, "utf8"));
-    assert.equal(spec.source, original); assert.equal(spec.scale, 2.5); assert.equal(spec.pivot, "bottom");
+    assert.notEqual(spec.source, original); assert.equal(hash(spec.source), originalHash); assert.match(spec.source, /work[\\/]input[\\/]/); assert.equal(spec.scale, 2.5); assert.equal(spec.pivot, "bottom");
     for (const file of ["asset.blend", "asset.glb", "asset.fbx"]) fs.writeFileSync(path.join(spec.output, file), "mock local output " + file);
     fs.writeFileSync(path.join(spec.output, "report.json"), JSON.stringify({ identity: spec.identity, operation: "A05", originalPreserved: true, sourceSha256: originalHash, files: ["asset.blend", "asset.glb", "asset.fbx"], warnings: [] }));
   } });
@@ -468,6 +468,141 @@ test("local transform freezes exact settings, preserves source, and reuses verif
   await execute(f.args);
   assert.equal(calls, 1);
 });
+
+for (const taskId of ["A05", "X04"]) {
+  test(`${taskId} stages exact source-version image companions without touching originals`, async t => {
+    const f = fixture(t, taskId), source = f.addInput(".fbx", "fbx"), image = path.join(f.root, "registered", "Texture.PNG");
+    fs.mkdirSync(path.dirname(image)); png(image);
+    const companion = { path: "registered/Texture.PNG", kind: "image", bytes: fs.statSync(image).size, sha256: hash(image) };
+    f.args.inputs[0].files.push(companion);
+    const originalHashes = [hash(source), hash(image)]; let calls = 0;
+    const execute = createGraphicsNativeExecutor({ runBlender: async (_exe, command) => {
+      calls++; const spec = JSON.parse(fs.readFileSync(command.at(-1)!, "utf8"));
+      assert.notEqual(spec.source, source); assert.equal(hash(spec.source), originalHashes[0]);
+      assert.deepEqual(spec.sourceCompanions, [companion]); assert.equal(spec.sourceManifestVersion, 1);
+      assert.equal(spec.companionResources.length, 1);
+      assert.equal(path.dirname(spec.source), path.dirname(spec.companionResources[0].stagedPath));
+      assert.equal(path.basename(spec.companionResources[0].stagedPath), "Texture.PNG");
+      assert.equal(hash(spec.companionResources[0].stagedPath), originalHashes[1]);
+      for (const name of ["asset.blend", "asset.glb", "asset.fbx"]) fs.writeFileSync(path.join(spec.output, name), "saved " + name);
+      fs.writeFileSync(path.join(spec.output, "report.json"), JSON.stringify({ identity: spec.identity, operation: taskId, originalPreserved: true, sourceSha256: spec.sourceSha256, sourceManifestVersion: 1, sourceCompanions: spec.sourceCompanions, files: ["asset.blend", "asset.glb", "asset.fbx"] }));
+    } });
+    const result = await execute(f.args); assert.equal(calls, 1);
+    assert.deepEqual([hash(source), hash(image)], originalHashes);
+    assert.deepEqual(await execute({ ...f.args, recoveryOnly: true, blenderPath: "missing", resources: "missing" }), result);
+    assert.equal(calls, 1);
+    fs.unlinkSync(path.join(f.root, "graphics/jobs/task-1/checkpoint.json"));
+    const reportPath = path.join(f.root, "graphics/jobs/task-1/outputs/report.json"), report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+    report.sourceCompanions = []; fs.writeFileSync(reportPath, JSON.stringify(report));
+    await assert.rejects(execute({ ...f.args, recoveryOnly: true }), /동반 이미지 목록/); assert.equal(calls, 1);
+  });
+
+  test(`${taskId} rejects duplicate registered image basenames before invoking Blender`, async t => {
+    const f = fixture(t, taskId); f.addInput(".fbx", "fbx"); let calls = 0;
+    for (const relative of ["one/Texture.PNG", "two/texture.png"]) {
+      const file = path.join(f.root, relative); fs.mkdirSync(path.dirname(file)); png(file);
+      f.args.inputs[0].files.push({ path: relative, kind: "image", bytes: fs.statSync(file).size, sha256: hash(file) });
+    }
+    const execute = createGraphicsNativeExecutor({ runBlender: async () => { calls++; } });
+    await assert.rejects(execute(f.args), /파일 이름이 중복/); assert.equal(calls, 0);
+  });
+
+  test(`${taskId} private staging rejects a junction to the original project folder`, async t => {
+    const f = fixture(t, taskId), source = f.addInput(".fbx", "fbx"), before = hash(source); let calls = 0;
+    const work = path.join(f.root, "graphics/jobs/task-1/work"); fs.mkdirSync(work, { recursive: true });
+    fs.symlinkSync(f.root, path.join(work, "input"), process.platform === "win32" ? "junction" : "dir");
+    const execute = createGraphicsNativeExecutor({ runBlender: async () => { calls++; } });
+    await assert.rejects(execute(f.args), /격리 입력 폴더의 경로 연결/);
+    assert.equal(calls, 0); assert.equal(hash(source), before);
+    assert(!fs.existsSync(path.join(work, "local-request.json")));
+  });
+
+  test(`${taskId} legacy complete report remains saved-only readable without claiming a new companion manifest`, async t => {
+    const f = fixture(t, taskId), source = f.addInput(".blend", "blend"), image = path.join(f.root, "texture.png"); png(image);
+    f.args.inputs[0].files.push({ path: "texture.png", kind: "image", bytes: fs.statSync(image).size, sha256: hash(image) });
+    let calls = 0;
+    const execute = createGraphicsNativeExecutor({ runBlender: async (_exe, command) => {
+      calls++; const spec = JSON.parse(fs.readFileSync(command.at(-1)!, "utf8"));
+      for (const name of ["asset.blend", "asset.glb", "asset.fbx"]) fs.writeFileSync(path.join(spec.output, name), "legacy saved " + name);
+      fs.writeFileSync(path.join(spec.output, "report.json"), JSON.stringify({ identity: spec.identity, operation: taskId, originalPreserved: true, sourceSha256: hash(source), files: ["asset.blend", "asset.glb", "asset.fbx"] }));
+    } });
+    // A newly executed worker must supply the companion manifest. Its already saved
+    // bytes then model a historical pre-manifest report without a host checkpoint.
+    await assert.rejects(execute(f.args), /동반 이미지 목록/);
+    const reportPath = path.join(f.root, "graphics/jobs/task-1/outputs/report.json"), before = fs.readFileSync(reportPath);
+    const result = await execute({ ...f.args, recoveryOnly: true, blenderPath: "missing", resources: "missing" });
+    assert.equal(calls, 1); assert.equal(result.files.length, 4); assert.deepEqual(fs.readFileSync(reportPath), before);
+    assert.equal(JSON.parse(before.toString()).sourceManifestVersion, undefined);
+  });
+
+  test(`${taskId} failed/interrupted saved-only recovery never starts or repeats Blender`, async t => {
+    const f = fixture(t, taskId), source = f.addInput(".blend", "blend"), sourceHash = hash(source);
+    let calls = 0;
+    const execute = createGraphicsNativeExecutor({ runBlender: async (_exe, command) => {
+      calls++;
+      const spec = JSON.parse(fs.readFileSync(command.at(-1)!, "utf8"));
+      fs.writeFileSync(path.join(spec.output, "asset.blend"), "interrupted partial output");
+      throw Error("interrupted local conversion");
+    } });
+    f.args.task.status = "failed";
+    await assert.rejects(execute({ ...f.args, recoveryOnly: true }), /복구에서 Blender를 새로 실행하지 않습니다/);
+    assert.equal(calls, 0);
+    const specPath = path.join(f.root, "graphics/jobs/task-1/work/local-request.json");
+    assert(!fs.existsSync(specPath));
+    await assert.rejects(execute(f.args), /interrupted local conversion/);
+    const savedSpec = fs.readFileSync(specPath), partial = path.join(f.root, "graphics/jobs/task-1/outputs/asset.blend");
+    for (const status of ["failed", "cancelled"] as const) {
+      f.args.task.status = status;
+      await assert.rejects(execute({ ...f.args, recoveryOnly: true, blenderPath: "missing-tool", resources: "missing-tools" }), /복구에서 Blender를 새로 실행하지 않습니다/);
+      assert.equal(calls, 1);
+      assert.deepEqual(fs.readFileSync(specPath), savedSpec);
+      assert.equal(fs.readFileSync(partial, "utf8"), "interrupted partial output");
+    }
+    assert.equal(hash(source), sourceHash);
+  });
+
+  test(`${taskId} complete report/checkpoint recovery reads saved files with changed tools and rejects changed input`, async t => {
+    const f = fixture(t, taskId), source = f.addInput(".blend", "blend"), sourceHash = hash(source);
+    const aborted = new AbortController();
+    let calls = 0;
+    const execute = createGraphicsNativeExecutor({ runBlender: async (_exe, command) => {
+      calls++;
+      const spec = JSON.parse(fs.readFileSync(command.at(-1)!, "utf8"));
+      for (const name of ["asset.blend", "asset.glb", "asset.fbx"]) fs.writeFileSync(path.join(spec.output, name), "saved " + name);
+      fs.writeFileSync(path.join(spec.output, "report.json"), JSON.stringify({ identity: spec.identity, operation: taskId, originalPreserved: true, sourceSha256: sourceHash, files: ["asset.blend", "asset.glb", "asset.fbx"] }));
+      aborted.abort();
+    } });
+    await assert.rejects(execute({ ...f.args, signal: aborted.signal }), /abort/i);
+    const checkpoint = path.join(f.root, "graphics/jobs/task-1/checkpoint.json"), specPath = path.join(f.root, "graphics/jobs/task-1/work/local-request.json");
+    assert(!fs.existsSync(checkpoint));
+    const savedSpec = fs.readFileSync(specPath);
+    const recovery = { ...f.args, recoveryOnly: true, blenderPath: "changed-missing-tool", resources: "changed-missing-tools" };
+    const result = await execute(recovery);
+    assert.equal(calls, 1); assert.equal(result.files.length, 4);
+    assert.deepEqual(fs.readFileSync(specPath), savedSpec);
+    assert.deepEqual(await execute(recovery), result); assert.equal(calls, 1);
+    fs.unlinkSync(checkpoint);
+    const originalSettings = f.args.task.settings;
+    f.args.task.settings = { scale: 2 };
+    await assert.rejects(execute(recovery), /검증에 실패/);
+    f.args.task.settings = originalSettings;
+    fs.writeFileSync(source, "changed source bytes");
+    await assert.rejects(execute(recovery), /원본|변경/);
+    assert.equal(calls, 1);
+  });
+
+  test(`${taskId} malformed or incomplete saved reports never trigger Blender recovery`, async t => {
+    const f = fixture(t, taskId); f.addInput(".blend", "blend"); let calls = 0;
+    const execute = createGraphicsNativeExecutor({ runBlender: async () => { calls++; } });
+    const outputs = path.join(f.root, "graphics/jobs/task-1/outputs"); fs.mkdirSync(outputs, { recursive: true });
+    const report = path.join(outputs, "report.json");
+    for (const bytes of ["{", JSON.stringify({ files: [] })]) {
+      fs.writeFileSync(report, bytes);
+      await assert.rejects(execute({ ...f.args, recoveryOnly: true }));
+      assert.equal(calls, 0); assert.equal(fs.readFileSync(report, "utf8"), bytes);
+    }
+  });
+}
 
 test("real Blender applies exact uniform scale and bottom pivot into new immutable exports", { timeout: 120_000 }, async t => {
   const blender = process.env.PARTSMITH_TEST_BLENDER;

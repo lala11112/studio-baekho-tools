@@ -1,3 +1,4 @@
+import { isGraphicsProductionFile } from '../shared/graphics';
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -6,13 +7,41 @@ import { spawn } from "node:child_process";
 import { CodexWorker, type ProductionWorker } from "./codex-worker";
 import { prepareGraphicsMotionFrames } from "./graphics-motion-frames";
 import type { GraphicsNativeArgs, GraphicsNativeResult } from "./graphics-native";
-import type { AssetVersion, GraphicsRole } from "../shared/graphics";
+import type { AssetVersion, GraphicsRole, GraphicsWorkspace } from "../shared/graphics";
 import { isGraphicsClipName } from "../shared/graphics";
-import { rigContractForProducer } from "../shared/graphics-rig";
+import { freezeUnityRigContract, rigContractForProducer } from "../shared/graphics-rig";
 import { createGraphicsContactExecutor } from './graphics-contact';
 import type { ProductionRun, ProductionStage } from "../shared/production";
 
 export const graphicsAstraOperations = ["M05", "M06", "M07", "M08", "M09", "M15", "R01", "R02", "R03", "N04", "N05", "N06"] as const;
+
+/** Resolve anatomical roles from the adopted source lineage, never today's rig settings. */
+export function externalAnimationRigContract(workspace: GraphicsWorkspace, source: AssetVersion) {
+  const visited = new Set<string>(), external = new Set<string>(), missing = new Set<string>();
+  let autoRig=false;
+  const walk = (version: AssetVersion) => {
+    if (visited.has(version.id)) return;
+    visited.add(version.id);
+    if(version.autoRig)autoRig=true;
+    if (version.externalRig) external.add(version.id);
+    for (const id of version.sourceVersionIds) {
+      const parent = workspace.versions.find(v => v.id === id && v.objectId === source.objectId);
+      if (!parent) missing.add(id);
+      else walk(parent);
+    }
+  };
+  walk(source);
+  if(autoRig)throw Error('자동 리그의 AI 동작·웨이트 절차는 아직 검증되지 않았습니다. 자동 리그 검사와 선택 보정 기능을 사용하세요.');
+  if (!external.size) return undefined;
+  if (missing.size) throw Error('동작 원본 리그의 버전 계보가 없습니다.');
+  if (external.size !== 1) throw Error('외부 리그의 동작 원본 계보가 중복됐습니다.');
+  const object = workspace.objects.find(o => o.id === source.objectId);
+  const rigs = workspace.versions.filter(v => v.objectId === source.objectId && v.role === 'rig' && visited.has(v.id) && object?.accepted[`rig:${v.slot}`] === v.id);
+  if (rigs.length !== 1) throw Error('동작 원본 계보의 정확한 외부 리그를 먼저 채택하세요.');
+  const contract = freezeUnityRigContract(workspace, rigs);
+  if (contract?.schemaVersion !== 2 || !external.has(contract.producerVersionId)) throw Error('동작 원본과 채택 외부 리그 계약이 다릅니다.');
+  return contract;
+}
 type Dependencies = {
   workerFactory?: () => ProductionWorker;
   runBlender?: (executable: string, args: string[], signal: AbortSignal) => Promise<void>;
@@ -100,7 +129,7 @@ function selectInputs(args: GraphicsNativeArgs, root: string) {
   if (ids.size !== args.task.inputVersionIds.length || ids.size !== args.inputs.length) throw Error("고정한 Astra 입력 버전 목록이 다릅니다.");
   for (const version of args.inputs) {
     if (!ids.delete(version.id) || !version.files.length) throw Error("고정한 Astra 입력 버전이 없습니다.");
-    for (const file of version.files) files.push({ ...file, version, localPath: fileWithin(root, file.path) });
+    for (const file of version.files.filter(isGraphicsProductionFile)) files.push({ ...file, version, localPath: fileWithin(root, file.path) });
   }
   unchanged(files);
   const operation = args.task.taskId, animation = operation.startsWith("N"), clipName = String(args.task.settings.clipName ?? "");
@@ -194,9 +223,11 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     }
     const rigFeatures = requestedRigFeatures(task.settings);
     const rigContract = task.taskId === "R01" ? rigContractForProducer(task, task.id) : undefined;
+    const adoptedRigContract = ['N04','N05','N06','R03'].includes(task.taskId)
+      ? externalAnimationRigContract(fs.existsSync(args.workspacePath) ? read(args.workspacePath) : { objects: [args.object], versions: args.inputs, tasks: [] } as unknown as GraphicsWorkspace, source.version) : undefined;
     const folder = path.resolve(root, "graphics/jobs", task.id, "astra"), work = path.join(folder, "work");
     directory(root, folder); directory(root, work);
-    const identity = hash(JSON.stringify({ schemaVersion: 1, taskId: task.id, operation: task.taskId, requestHash: task.requestHash, settings: task.settings, instruction: task.instruction, object: task.objectSnapshot ?? args.object, inputs: files.map(file => ({ versionId: file.version.id, role: file.version.role, slot: file.version.slot, path: file.path, sha256: file.sha256, bytes: file.bytes })), source: source.version.id }));
+    const identity = hash(JSON.stringify({ schemaVersion: 1, taskId: task.id, operation: task.taskId, requestHash: task.requestHash, settings: task.settings, instruction: task.instruction, object: task.objectSnapshot ?? args.object, inputs: files.map(file => ({ versionId: file.version.id, role: file.version.role, slot: file.version.slot, path: file.path, sha256: file.sha256, bytes: file.bytes })), source: source.version.id, ...(adoptedRigContract ? {adoptedRigContract} : {}) }));
     const checkpointPath = path.join(folder, "checkpoint.json"), dispatchPath = path.join(folder, "dispatch.json"), preparedPath = path.join(folder, "prepared.json");
     const script = path.join(args.resources, "blender/graphics_astra_validate.py"), glbHelper = path.join(args.resources, "blender/graphics_glb.py"), humanoidHelper = path.join(args.resources, "blender/graphics_humanoid.py");
     if (!fs.existsSync(script) || !fs.existsSync(glbHelper) || !fs.existsSync(humanoidHelper)) throw Error("Astra 원본·장면 검증 스크립트가 없습니다.");
@@ -244,7 +275,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
       const nonce = randomUUID();
       const prepareSource = async (input: Input, outputBlend: string, report: string, name: string, prepareNonce = nonce) => {
         const originalCopy = copies.find(copy => copy.sourcePath === input.path && copy.versionId === input.version.id)!;
-        const request = { mode: "prepare", identity, nonce: prepareNonce, operation: task.taskId, sourceSha256: input.sha256, outputBlend, report, actionName, ...(contract.candidateRevision ? { candidateRevision: true } : {}) };
+        const request = { mode: "prepare", identity, nonce: prepareNonce, operation: task.taskId, sourceSha256: input.sha256, outputBlend, report, actionName, ...(contract.candidateRevision ? { candidateRevision: true } : {}), ...(adoptedRigContract ? {adoptedRigContract} : {}) };
         if (!/\.(fbx|glb)$/i.test(originalCopy.localPath)) {
           await invoke({ ...request, source: originalCopy.localPath }, name);
           return;
@@ -391,6 +422,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
         "No browser production, paid/cloud service, image generation, video generation, Tripo, remote upload, API key or external account operation. No separate asset regeneration except the explicitly requested NEW LOCAL MODEL operation M15. Keep all existing integrations enabled. Do not inspect credentials or unrelated projects. Only author this task's local output.",
         `Operation: ${task.taskId}. Object kind: ${args.object.kind}. Blender: ${JSON.stringify(args.blenderPath)}. Open ${JSON.stringify(prepared.preparedBlend)} with load_ui=False,use_scripts=False. Original/source copies are immutable. Save ONE new editable, uncompressed .blend ONLY to ${JSON.stringify(outputBlend)}. Never save over source.blend or any input file. Retain packed original textures at full resolution and original partsmith_id on every mesh. No external linked libraries/textures.`,
         modes[task.taskId],
+        ...(adoptedRigContract ? [`Frozen adopted external anatomical mapping: ${JSON.stringify(adoptedRigContract)}. Use these exact existing bone names for their human roles. Preserve unmapped twist/intermediary bones, hierarchy and rest matrices; never rename to canonical names or infer roles from current settings. Existing keyed poses may differ from bind pose. This mapping does not establish anatomical placement or animation quality.`] : []),
         ...(contract.candidateRevision ? [`This is explicit static candidate revision: source ${source.version.id}, role ${source.version.role}, slot ${source.version.slot}. Adoption is unchanged. Edit vertex positions only; preserve all original polygons/UVs/materials/mesh IDs, other object properties, transforms, hierarchy and all original face topology. No new modifiers, objects, rigs, shape keys or animation. Host exports native non-triangulated FBX before the GLB preview for later UV work.`] : []),
         ...(rigContract ? ["Unity Humanoid transform names must be unambiguous. No scene object display name may equal a mapped canonical bone name (for example a mesh named head conflicts with the head bone). Prefix mesh/object display names when needed, for example Part_head/Part_body/Part_hair; preserve every partsmith_id, partsmith_part_id, geometry, material and transform."] : []),
         `Independent candidate variationSeed: ${JSON.stringify(task.settings.variationSeed ?? null)}; candidateIndex: ${JSON.stringify(task.settings.candidateIndex ?? null)}. For a candidate batch, create a distinct authored interpretation of this same request within all preservation constraints. Do not duplicate another candidate's scene or merely rename/re-save identical geometry/actions. No borrowing prior candidate outputs. If the allowed edit has no meaningful independent variation, report needs_input rather than claim multiple originals.`,
@@ -438,7 +470,7 @@ export function createGraphicsAstraExecutor(dependencies: Dependencies = {}) {
     const reportPath = path.join(validation, "report.json"), nonce = randomUUID();
     args.onProgress("실제 Blender에서 원본 계보·메시·웨이트·액션·변형을 검사하고 미리보기를 만듭니다.");
     await invoke({ mode: "validate", identity, nonce, validatorFingerprint, operation: task.taskId, sourceSha256: source.sha256, sourceBlend: prepared.preparedBlend, outputBlend: blend, baseline: prepared.baseline, output: validation, report: reportPath, actionName, clipName, fps, duration, loop: Boolean(task.settings.loop), ...contract,
-      rigFeatures, ...(task.taskId === "M08" ? { assemblyPlacement: localAssembly ? "keep" : "fit" } : {}), ...(rigContract ? { rigContract } : {}) }, "validate-request");
+      rigFeatures, ...(task.taskId === "M08" ? { assemblyPlacement: localAssembly ? "keep" : "fit" } : {}), ...(rigContract ? { rigContract } : {}), ...(adoptedRigContract ? {adoptedRigContract} : {}) }, "validate-request");
     unchanged(protectedFiles);
     if (hashFile(prepared.baseline) !== prepared.baselineSha256) throw Error("원본 Blender 검사 기록이 변경됐습니다.");
     const report = read(reportPath);

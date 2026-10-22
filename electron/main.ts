@@ -21,7 +21,12 @@ import { ProductionEngine } from "../engine/production";
 import { restoreProductionArchives } from "../engine/production-backup";
 import { WorkbenchEngine } from "../engine/workbench";
 import { GraphicsEngine } from "../engine/graphics";
+import { readUnityTarget } from '../engine/graphics-unity';
+import { queuedUnityOpenTarget } from '../shared/graphics-unity-open';
+import { unityTargetProfileMatches } from '../shared/graphics-unity-profile';
 import { NativeTopologyManager } from "./native-topology";
+import { externalRigPreparedFile } from './external-rig';
+import { autoRigInspectionPreviewAllowed } from './auto-rig-preview';
 import { createGraphicsVideoExecutor } from "../engine/graphics-video";
 import { probeGraphicsConnections } from "../engine/graphics-connections";
 import { CodexWorkbenchExecutor } from "../engine/workbench-executor";
@@ -140,6 +145,16 @@ const projectPatch = z
 async function dispatch(c: Command): Promise<unknown> {
   if (!c || typeof c.type !== "string") throw new Error("잘못된 명령");
   switch (c.type) {
+    case 'graphics.external-rig-open': {
+      const file = externalRigPreparedFile(store.directory(c.id), graphics.get(c.id), c.handoffId);
+      if (c.target === 'file') { shell.showItemInFolder(file); return '준비한 FBX를 선택했습니다.'; }
+      if (c.target !== 'application') throw Error('잘못된 리깅 열기 요청입니다.');
+      const executable = path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'AccuRIG', 'AccuRIG.exe');
+      if (!fs.existsSync(executable)) throw Error('AccuRIG 설치를 찾지 못했습니다. 준비한 파일을 설치된 AccuRIG에서 직접 열어 주세요.');
+      const error = await shell.openPath(executable);
+      if (error) throw Error(error);
+      return 'AccuRIG에서 준비한 FBX를 불러오고 관절 위치를 확인해 주세요.';
+    }
     case "state":
       return {
         projects: store.projects(),
@@ -154,6 +169,21 @@ async function dispatch(c: Command): Promise<unknown> {
     case "graphics.topology":
       return nativeTopology.inspect(c.id, c.versionId);
     case "graphics.action": {
+      if (c.action.kind === 'prepare-import-preview') {
+        const action = c.action;
+        const version = graphics.get(c.id).versions.find(version => version.id === action.versionId && version.objectId === action.objectId && version.provenance.type === 'import');
+        if (!version) throw Error('미리보기를 준비할 가져온 원본을 선택하세요.');
+        if (!version.files.some(file => /\.(fbx|blend|obj|stl|glb)$/i.test(file.path))) throw Error('로컬 모델 미리보기를 지원하는 원본 형식이 아닙니다.');
+        return graphics.prepareImportedPreviews(c.id, [version.id], (projectId, source) => local.previewModel(projectId, source), true);
+      }
+      if (c.action.kind === 'inspect-external-rig') {
+        const selected = await dialog.showOpenDialog(win, {
+          title: 'AccuRIG에서 내보낸 캐릭터 전용 FBX 선택',
+          properties: ['openFile'], filters: [{ name: '리깅 결과 FBX', extensions: ['fbx'] }],
+        });
+        if (selected.canceled || !selected.filePaths[0]) return graphics.get(c.id);
+        return graphics.action(c.id, { ...c.action, returnedPath: selected.filePaths[0] });
+      }
       if (c.action.kind === "import") {
         const animation = c.action.role === "animation";
         const motion = c.action.role === 'motion-reference';
@@ -164,7 +194,9 @@ async function dispatch(c: Command): Promise<unknown> {
         });
         if (result.canceled) return graphics.get(c.id);
         if (motion) return graphics.importMotionFile(c.id, c.action.objectId, result.filePaths[0], c.action.clipName ?? '');
-        return graphics.importFiles(c.id, c.action.objectId, c.action.role, result.filePaths, c.action.clipName);
+        const previous = new Set(graphics.get(c.id).versions.map(version => version.id));
+        const imported = graphics.importFiles(c.id, c.action.objectId, c.action.role, result.filePaths, c.action.clipName);
+        return graphics.prepareImportedPreviews(c.id, imported.versions.filter(version => !previous.has(version.id)).map(version => version.id), (projectId, source) => local.previewModel(projectId, source));
       }
       return graphics.action(c.id, c.action);
     }
@@ -617,6 +649,29 @@ async function dispatch(c: Command): Promise<unknown> {
       return local.importUnity(c.id, c.buildId);
     case "unity.result":
       return local.result(c.id);
+    case "unity.open": {
+      const project = store.project(c.id), editor = store.settings.unityEditorPath;
+      let unityPath=project.unityPath;
+      if(c.deliveryId!==undefined||c.taskId!==undefined||c.objectId!==undefined){
+        if(!c.deliveryId||!c.taskId||!c.objectId)throw new Error('Unity를 열 현재 전달 요청을 다시 확인하세요.');
+        const queued=queuedUnityOpenTarget(graphics.get(c.id),c.id,c.objectId,c.taskId,c.deliveryId);
+        if(!queued||!unityTargetProfileMatches(readUnityTarget(queued.target.projectPath),queued.target))throw new Error('고정한 Unity 전달 요청·대상 프로젝트가 일치하지 않습니다.');
+        unityPath=queued.target.projectPath;
+      }
+      if (!unityPath || !fs.existsSync(path.join(unityPath, "ProjectSettings", "ProjectVersion.txt")))
+        throw new Error("연결 설정에서 Unity 프로젝트 폴더를 확인하세요.");
+      if (!editor || !fs.existsSync(editor) || path.basename(editor).toLowerCase() !== "unity.exe")
+        throw new Error("연결 설정에서 Unity Editor 실행 파일을 확인하세요.");
+      // An open editor already owns the project; never launch another import or Play Mode run.
+      if (fs.existsSync(path.join(unityPath, "Temp", "UnityLockfile")))
+        return "이 프로젝트가 Unity에 열려 있습니다. Unity 창에서 전달된 프리팹을 확인하세요.";
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(editor, ["-projectPath", unityPath], { detached: true, stdio: "ignore", windowsHide: true, shell: false });
+        child.once("error", reject);
+        child.once("spawn", () => { child.unref(); resolve(); });
+      });
+      return "Unity 프로젝트를 여는 요청을 보냈습니다. Play Mode는 실행하지 않습니다.";
+    }
     case "folder.open":
       return shell.openPath(c.id ? store.directory(c.id) : store.root);
     default:
@@ -758,6 +813,7 @@ app.whenReady().then(async () => {
         !knownProductionArtifact &&
         !knownWorkbenchArtifact &&
         !graphics.get(id).versions.some(v => v.files.some(f => store.file(id, f.path) === file)) &&
+        !autoRigInspectionPreviewAllowed(store.directory(id), graphics.get(id), file) &&
         !nativeTopology.isAllowed(id, file)
       )
         return new Response("", { status: 403 });

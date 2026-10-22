@@ -1,3 +1,4 @@
+import { isGraphicsProductionFile } from '../shared/graphics';
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -44,7 +45,7 @@ export function prepareGraphicsMotionSource(args: Args) {
     args.inputs.length !== args.task.inputVersionIds.length || args.inputs.some(input => !args.task.inputVersionIds.includes(input.id))) throw Error("고정된 측면 입력 목록이 다릅니다.");
   const root = fs.realpathSync(args.projectRoot);
   for (const input of args.inputs) for (const file of input.files) verified(root, file);
-  const source = ["blend", "glb", "fbx"].map(ext => version.files.find(file => file.path.toLowerCase().endsWith("." + ext))).find(Boolean);
+  const source = ["blend", "glb", "fbx"].map(ext => version.files.find(file => isGraphicsProductionFile(file) && file.path.toLowerCase().endsWith("." + ext))).find(Boolean);
   if (!source) throw Error("측면 렌더에는 BLEND·GLB·FBX 원본이 필요합니다.");
   const axis = String(args.task.settings.motionSourceAxis ?? "X");
   if (!["X", "Y"].includes(axis)) throw Error("측면 촬영 축은 X 또는 Y입니다.");
@@ -83,6 +84,7 @@ export function createGraphicsMotionSourceExecutor(dependencies: { runBlender?: 
     active.add(key);
     let staging: string | undefined;
     try {
+      if (args.recoveryOnly && !fs.existsSync(checkpoint)) throw Error("완료 기록 없는 측면 렌더는 복구에서 새로 실행하지 않습니다. 기존 원본과 출력을 보존합니다.");
       directory(root, output);
       if (fs.existsSync(checkpoint)) {
         const saved = JSON.parse(fs.readFileSync(checkpoint, "utf8"));
@@ -91,6 +93,7 @@ export function createGraphicsMotionSourceExecutor(dependencies: { runBlender?: 
         if (JSON.stringify(saved.result.files) !== JSON.stringify(saved.files.map(({ path, kind }: GraphicsFile) => ({ path, kind })))) throw Error("저장된 측면 렌더 파일 목록이 다릅니다.");
         return saved.result;
       }
+      if (args.recoveryOnly) throw Error("완료 기록 없는 측면 렌더는 복구에서 새로 실행하지 않습니다. 기존 원본과 출력을 보존합니다.");
       if (fs.readdirSync(output).length) throw Error("완료 기록 없는 기존 측면 출력이 있습니다. 덮어쓰지 않고 보존합니다.");
       if (!fs.existsSync(args.blenderPath)) throw Error("설정된 Blender 실행 파일이 없습니다.");
       const script = path.join(args.resources, "blender/graphics_motion_source.py");
@@ -98,7 +101,7 @@ export function createGraphicsMotionSourceExecutor(dependencies: { runBlender?: 
       // Short private paths avoid Blender's native Windows path limit and isolate FBX embedded texture extraction.
       staging = fs.mkdtempSync(path.join(os.tmpdir(), "ps-gms-"));
       const input = path.join(staging, "input"), out = path.join(staging, "output"); fs.mkdirSync(input); fs.mkdirSync(out);
-      const files = version.files.map((file, index) => {
+      const files = version.files.filter(isGraphicsProductionFile).map((file, index) => {
         const target = path.join(input, `${index}-${path.basename(file.path)}`);
         fs.copyFileSync(verified(root, file), target, fs.constants.COPYFILE_EXCL);
         return { ...file, original: path.resolve(root, file.path), local: target };

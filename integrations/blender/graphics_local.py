@@ -7,8 +7,9 @@ import pathlib
 import sys
 from mathutils import Matrix, Vector
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from graphics_glb import export_packed_glb
+from graphics_glb import export_packed_glb, active_uv_first_export
 from graphics_size import apply_physical_size
+from graphics_source_images import import_fbx_deferred, pack_registered_companions
 
 spec_path = pathlib.Path(sys.argv[sys.argv.index('--') + 1]).resolve()
 q = json.loads(spec_path.read_text(encoding='utf8'))
@@ -16,6 +17,8 @@ source = pathlib.Path(q['source']).resolve()
 out = pathlib.Path(q['output']).resolve()
 out.mkdir(parents=True, exist_ok=True)
 original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+if q.get('sourceSha256') and original_hash != q['sourceSha256']:
+    raise RuntimeError('Frozen source hash changed')
 operation = q['operation']
 scale = float(q['scale'])
 pivot = q['pivot']
@@ -32,9 +35,10 @@ elif source.suffix.lower() == '.glb':
     bpy.ops.import_scene.gltf(filepath=str(source))
 elif source.suffix.lower() == '.fbx':
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.import_scene.fbx(filepath=str(source), use_image_search=False)
+    import_fbx_deferred(source)
 else:
     raise RuntimeError('Expected Blender, GLB or FBX source')
+source_images = pack_registered_companions(q, source)
 meshes = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH']
 if not meshes:
     raise RuntimeError('No mesh in the selected source')
@@ -99,16 +103,18 @@ for obj in selected:
 bpy.context.view_layer.objects.active = meshes[0]
 bpy.ops.wm.save_as_mainfile(filepath=str(out / 'asset.blend'), compress=False)
 files.append('asset.blend')
-if q['format'] in ('glb', 'both'):
-    glb_images = export_packed_glb(out / 'asset.glb', use_selection=True, export_animations=True)
-    files.append('asset.glb')
-if q['format'] in ('fbx', 'both'):
-    bpy.ops.export_scene.fbx(filepath=str(out / 'asset.fbx'), use_selection=True,
-        object_types={'ARMATURE', 'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y',
-        apply_unit_scale=True, apply_scale_options='FBX_SCALE_UNITS', add_leaf_bones=False,
-        bake_anim=True, bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False,
-        bake_anim_simplify_factor=0.0, path_mode='COPY', embed_textures=True)
-    files.append('asset.fbx')
+with active_uv_first_export(meshes, fbx=q['format'] in ('fbx','both')) as export_uv:
+    if q['format'] in ('glb', 'both'):
+        glb_images = export_packed_glb(out / 'asset.glb', use_selection=True, export_animations=True)
+        files.append('asset.glb')
+    if q['format'] in ('fbx', 'both'):
+        bpy.ops.export_scene.fbx(filepath=str(out / 'asset.fbx'), use_selection=True,
+            object_types={'ARMATURE', 'MESH', 'EMPTY'}, axis_forward='-Z', axis_up='Y',
+            apply_unit_scale=True, apply_scale_options='FBX_SCALE_UNITS', add_leaf_bones=False,
+            use_custom_props=True,
+            bake_anim=True, bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False,
+            bake_anim_simplify_factor=0.0, path_mode='COPY', embed_textures=True)
+        files.append('asset.fbx')
 if hashlib.sha256(source.read_bytes()).hexdigest() != original_hash:
     raise RuntimeError('Original source changed during local export')
 report = {'schemaVersion': 1, 'identity': q['identity'], 'operation': operation,
@@ -118,6 +124,11 @@ report = {'schemaVersion': 1, 'identity': q['identity'], 'operation': operation,
     'geometryAuthored': False, 'motionAuthored': False, 'unityPlaybackVerified': False,
     'warnings': warnings, 'glbImages': glb_images}
 report['physicalSize'] = physical_size
+report['exportUV'] = export_uv
+if q.get('sourceManifestVersion') == 1:
+    report['sourceManifestVersion'] = 1
+    report['sourceCompanions'] = q.get('sourceCompanions', [])
+report['sourceImages'] = source_images
 temporary = out / 'report.json.tmp'
 temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf8')
 temporary.replace(out / 'report.json')

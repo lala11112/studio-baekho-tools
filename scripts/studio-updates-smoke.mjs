@@ -2,6 +2,7 @@ import { _electron as electron } from 'playwright';
 import electronPath from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createServer } from 'node:http';
 import assert from 'node:assert/strict';
 import { unzipSync } from 'fflate';
 import { createDemoMap, DEFAULT_SETTINGS } from '../Apps/AutoMapPrefabMaker/src/shared/map.ts';
@@ -24,6 +25,34 @@ const packagedIndex = process.argv.indexOf('--packaged');
 const packaged = packagedIndex >= 0 ? path.resolve(process.argv[packagedIndex + 1]) : null;
 const app = await electron.launch({ executablePath: packaged || electronPath, args: packaged ? [] : ['.'], env, timeout: 45000 });
 const errors = [], network = [], checks = [];
+let unityMock;
+const unityRequests = [];
+async function startUnityMock(projectRoot) {
+  const server = createServer(async (request, response) => {
+    if (request.method !== 'POST') { response.writeHead(405).end(); return; }
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    const message = JSON.parse(body);
+    unityRequests.push({ method: message.method, params: message.params });
+    if (message.id === undefined) { response.writeHead(202).end(); return; }
+    const resource = {
+      'mcpforunity://instances': { instances: [{ id: 'integration-fixture' }] },
+      'mcpforunity://project/info': { projectRoot },
+      'mcpforunity://editor/state': { compilation: {}, editor: { play_mode: {} }, assets: {} },
+    };
+    let result;
+    if (message.method === 'initialize') result = { protocolVersion: message.params.protocolVersion, capabilities: { resources: {}, tools: {} }, serverInfo: { name: 'isolated-unity-fixture', version: '1' } };
+    else if (message.method === 'resources/read' && resource[message.params.uri]) result = { contents: [{ uri: message.params.uri, mimeType: 'application/json', text: JSON.stringify(resource[message.params.uri]) }] };
+    else if (message.method === 'tools/call' && message.params.name === 'set_active_instance') result = { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
+    else if (message.method === 'tools/call' && message.params.name === 'read_console') result = { content: [{ type: 'text', text: JSON.stringify({ data: [] }) }] };
+    else if (message.method === 'ping') result = {};
+    const payload = result ? { jsonrpc: '2.0', id: message.id, result } : { jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Fixture forbids unrecognized operations' } };
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  unityMock = server;
+  return `http://127.0.0.1:${server.address().port}/mcp`;
+}
 app.context().on('page', p => p.on('pageerror', e => errors.push(e.message)));
 try {
   await app.evaluate(({ session }) => {
@@ -40,6 +69,11 @@ try {
   await map.locator('#mapName').waitFor();
   assert.deepEqual(await map.evaluate(() => [typeof window.require, typeof window.studio, typeof window.desktop, typeof window.baekho?.saveProject]), ['undefined', 'undefined', 'undefined', 'function']);
   assert.equal(await shell.evaluate(() => typeof window.baekho), 'undefined');
+  assert.deepEqual(await map.evaluate(() => ['generateConcept', 'getUnityStatus', 'prepareUnityIntegration', 'startUnityPrefabBuild', 'getUnityPrefabBuild', 'importUnityAssetCatalog'].map(key => typeof window.baekho[key])), Array(6).fill('function'));
+  assert.equal((await map.evaluate(() => window.baekho.getUnityStatus())).state, 'no-project');
+  assert.equal((await map.evaluate(() => window.baekho.prepareUnityIntegration())).state, 'no-project');
+  assert.equal(fs.existsSync(path.join(profile, 'unity')), false, 'map Unity storage never escapes the map profile');
+  checks.push('latest map Unity IPC is available and requires an explicit project before preparation');
   await map.locator('#mapName').fill('Unsent map draft');
   await map.locator('#mapName').press('Tab');
   await shell.getByTestId('tool-map').click();
@@ -69,6 +103,8 @@ try {
   const unity = path.join(runtime, 'Unity');
   fs.mkdirSync(path.join(unity, 'Assets'), { recursive: true });
   fs.mkdirSync(path.join(unity, 'ProjectSettings'), { recursive: true });
+  fs.mkdirSync(path.join(unity, 'Packages'), { recursive: true });
+  fs.writeFileSync(path.join(unity, 'Packages/manifest.json'), JSON.stringify({ dependencies: { 'com.unity.ai.navigation': '1.1.0' } }));
   fs.writeFileSync(path.join(unity, 'ProjectSettings/ProjectVersion.txt'), 'm_EditorVersion: 6000.3.10f1\n');
   fixture.bindings = ['wall', 'floor', 'door', 'prop', 'stair'].map((role, index) => {
     const prefabGuid = String(index + 1).repeat(32), prefabPath = `Assets/${role}.prefab`;
@@ -80,8 +116,19 @@ try {
   await map.evaluate(() => window.baekho.scanProject());
   await map.evaluate(value => window.baekho.exportBundle(value), fixture);
   const zip = unzipSync(fs.readFileSync(bundleFile));
-  for (const name of ['Map.baekhomap.json', 'Unity/Editor/BaekhoMapImporter.cs', 'Unity/Editor/BaekhoPropCatalog.cs', 'Unity/Runtime/BaekhoMapConnection.cs', 'Unity/Runtime/BaekhoGameplayMarker.cs', 'Unity/Runtime/BaekhoMapFixture.cs']) assert.ok(zip[name]?.length, name);
-  checks.push('map save/open/recovery/export retain all five Unity scripts');
+  for (const name of ['Map.baekhomap.json', 'Unity/Editor/BaekhoMapImporter.cs', 'Unity/Editor/BaekhoPropCatalog.cs', 'Unity/Runtime/BaekhoMapConnection.cs', 'Unity/Runtime/BaekhoGameplayMarker.cs', 'Unity/Runtime/BaekhoMapFixture.cs', 'Unity/Runtime/BaekhoWallModule.cs', 'Unity/Runtime/BaekhoMapAsset.cs', 'Unity/Editor/BaekhoMapAssetEditor.cs', 'Unity/Editor/BaekhoAssetCatalog.cs']) assert.ok(zip[name]?.length, name);
+  checks.push('map save/open/recovery/export retain wall and asset catalog scripts');
+  const endpoint = await startUnityMock(path.resolve(unity));
+  const assetsBefore = fs.readdirSync(path.join(unity, 'Assets'));
+  const unityStatus = await map.evaluate(address => window.baekho.getUnityStatus(address), endpoint);
+  assert.equal(unityStatus.state, 'needs-setup', JSON.stringify(unityStatus));
+  assert.equal(unityStatus.projectPath.toLowerCase(), path.resolve(unity).toLowerCase());
+  assert.ok(unityRequests.some(request => request.method === 'initialize'));
+  assert.ok(unityRequests.some(request => request.method === 'tools/call' && request.params.name === 'set_active_instance'));
+  assert.deepEqual(fs.readdirSync(path.join(unity, 'Assets')), assetsBefore, 'connection status never installs scripts or generates a prefab');
+  assert.ok(fs.existsSync(path.join(profile, 'map-forge/unity/unity-settings.json')));
+  assert.ok(unityRequests.every(request => request.method !== 'tools/call' || ['set_active_instance', 'read_console'].includes(request.params.name)));
+  checks.push('bundled MCP client completes loopback HTTP handshake and project routing without Unity writes');
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(w => w.webContents.getURL().includes('AutoMapPrefabMaker'))?.close());
   await new Promise(r => setTimeout(r, 200));
   assert.equal(map.isClosed(), false, 'cancel closing preserves dirty map');
@@ -89,6 +136,16 @@ try {
   await new Promise(r => setTimeout(r, 200));
   assert.equal(map.isClosed(), true);
   checks.push('dirty map close can be cancelled before an explicit discard');
+  const requestsBeforeReopen = unityRequests.length;
+  await shell.getByTestId('tool-map').click();
+  const reopenedMap = await app.waitForEvent('window', { predicate: p => p !== shell, timeout: 10000 }).catch(() => app.context().pages().find(p => p !== shell && p.url().includes('AutoMapPrefabMaker')));
+  assert.ok(reopenedMap);
+  await reopenedMap.locator('#mapName').waitFor();
+  assert.equal((await reopenedMap.evaluate(() => window.baekho.getUnityStatus())).state, 'no-project');
+  assert.equal(await reopenedMap.evaluate(async () => (await window.baekho.loadRecovery()).map.name), fixture.map.name);
+  assert.equal(unityRequests.length, requestsBeforeReopen, 'reopening never automatically reconnects or replays Unity requests');
+  checks.push('closing and reopening recreates the map Unity service and retains recovery without replay');
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(w => w.webContents.getURL().includes('AutoMapPrefabMaker'))?.close());
 
   await shell.getByTestId('tool-bgm').click();
   await shell.getByTestId('bgm-description').fill('Preserved BGM draft');
@@ -121,4 +178,8 @@ try {
     for (const win of BrowserWindow.getAllWindows()) if (win.webContents.getURL().includes('AutoMapPrefabMaker')) win.close();
   }).catch(() => {});
   await app.close();
+  if (unityMock) {
+    unityMock.closeAllConnections();
+    await new Promise(resolve => unityMock.close(resolve));
+  }
 }

@@ -1,3 +1,9 @@
+import { importedModelSourceProblem, isGraphicsProductionFile } from '../shared/graphics';
+import { runGraphicsExternalRig } from './graphics-external-rig';
+import { runGraphicsAutoRig, inspectSavedGraphicsAutoRig, probeGraphicsAutoRig } from './graphics-auto-rig';
+import { autoRigOrientation, validateAutoRigRepairs, validateAutoRigPartPolicy, validateAutoRigPartReport, type AutoRigPartPolicy, type AutoRigAction, type AutoRigRun, type AutoRigInspection } from '../shared/graphics-auto-rig';
+import type { ExternalRigAction, ExternalRigWorkspaceHandoff } from '../shared/graphics-external-rig';
+import { validateUnityRigContract, type UnityRigContract } from '../shared/graphics-rig';
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -14,9 +20,13 @@ import { restoreTripoPartPreservation } from './tripo-part-preservation';
 import { prepareTripoPartSource, preflightTripoPartSource } from './tripo-part-source';
 import { inspectGraphicsSurface } from './graphics-surface-preflight';
 import { repairGraphicsSurface } from './graphics-surface-repair';
+import { runGraphicsPlanar, validatePlanarReport, validateSavedPlanarCandidate, planarCompanions } from './graphics-planar';
+import { validatePlanarSelection, type PlanarSelection, type PlanarInspection, CURRENT_PLANAR_ALGORITHM } from '../shared/graphics-planar';
 import { compileCreation, validateCreation, creationCompositionStrategy } from "../shared/graphics-creation";
 import { freezeUnityRigContract } from '../shared/graphics-rig';
+import { prepareAutoRigExport } from './graphics-auto-rig-export';
 import { DEFAULT_MODEL_FACE_LIMIT, requireModelGeometry } from '../shared/graphics-model-geometry';
+import { graphicsInputSupportProblem } from '../shared/graphics-input-support';
 import { executeGraphicsProcedural, proceduralProblem } from "./graphics-procedural";
 import { executeGraphicsNative } from "./graphics-native";
 import { executeGraphicsAstra } from "./graphics-astra";
@@ -72,12 +82,19 @@ type Options = {
   preflightPartSource?: typeof preflightTripoPartSource;
   inspectSurface?: typeof inspectGraphicsSurface;
   repairSurface?: typeof repairGraphicsSurface;
+  externalRig?: typeof runGraphicsExternalRig;
+  autoRig?: typeof runGraphicsAutoRig;
+  autoRigProbe?: typeof probeGraphicsAutoRig;
+  planar?: typeof runGraphicsPlanar;
   legacyActive?: (id: string) => boolean;
   probe?: () => Promise<NonNullable<GraphicsWorkspace["connections"]>>;
 };
 
 /** Object workspace is an adapter over the existing submission journal, not another paid-job engine. */
 export class GraphicsEngine {
+  private planarQueue:{projectId:string;versionId:string}[]=[];
+  private planarTimer?:ReturnType<typeof setTimeout>;
+  private closing=false;
   private preparing = new Set<string>();
   private active = new Map<string, { projectId: string; controller: AbortController }>();
   private pendingApprovals = new Map<string, { projectId: string; approvalId: string; resolve: (answer: WorkbenchRuntimeAnswer) => void }>();
@@ -94,6 +111,10 @@ export class GraphicsEngine {
       let changed = false;
       for (const t of w.tasks.filter(t => t.status === "running")) {
         this.closeRuntimeApproval(t, "interrupted");
+        if(t.taskId==='LOCAL_PLANAR_INSPECT'||t.taskId==='LOCAL_PLANAR_REPAIR'){
+          t.status='failed';t.message='앱 종료로 로컬 검사가 중단됐습니다. 저장된 완전한 결과만 복구하며 새 실행하지 않습니다.';
+          changed=true;continue;
+        }
         if (t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId || t.surfaceRecoveryVersionId) {
           t.status = 'failed'; t.message = '로컬 처리가 중단됐습니다. 저장된 API 결과만 복구하며 새 제출은 하지 않습니다.';
           changed = true; continue;
@@ -107,6 +128,8 @@ export class GraphicsEngine {
         }
         changed = true;
       }
+      for(const h of w.externalRigHandoffs??[]){if(['preparing','inspecting'].includes(h.state)){h.state='failed';h.error='앱 종료로 중단됐습니다. 저장된 완전한 결과만 명시적으로 복구할 수 있습니다.';h.updatedAt=now();changed=true;}}
+      for(const run of w.autoRigRuns??[])if(run.state==='running'){run.state='failed';run.message='앱 종료로 중단됐습니다. 저장된 결과만 복구할 수 있으며 자동으로 리깅하지 않습니다.';run.updatedAt=now();changed=true;}
       if (changed) this.save(w);
     }
   }
@@ -118,13 +141,18 @@ export class GraphicsEngine {
     };
   }
   private save(w: GraphicsWorkspace) {
+    const previous=this.store.get<GraphicsWorkspace>('graphics',w.projectId);
+    const added=previous?w.versions.filter(v=>!previous.versions.some(old=>old.id===v.id)&&v.role==='model'&&v.files.some(f=>/\.(blend|fbx)$/i.test(f.path))):[];
     w.revision++;
     this.store.put("graphics", w.projectId, w);
     this.store.write(w.projectId, "graphics/workspace.json", JSON.stringify(w, null, 2));
+    for(const version of added)this.planarQueue.push({projectId:w.projectId,versionId:version.id});
+    if(added.length)this.schedulePlanar();
     return w;
   }
+  private schedulePlanar(){if(this.closing||this.planarTimer||!this.planarQueue.length)return;this.planarTimer=setTimeout(()=>{this.planarTimer=undefined;const next=this.planarQueue[0];if(!next)return;if(this.isActive(next.projectId)||this.options.legacyActive?.(next.projectId)||this.engine.isProjectActive(next.projectId)){this.schedulePlanar();return;}this.planarQueue.shift();try{const w=this.get(next.projectId);if(!w.planarInspections?.[next.versionId]&&!w.tasks.some(t=>t.taskId==='LOCAL_PLANAR_INSPECT'&&t.inputVersionIds.includes(next.versionId)))this.planar(next.projectId,next.versionId);}catch{/* A refused local preflight never retries automatically. */}this.schedulePlanar();},500);this.planarTimer.unref?.();}
   isActive(id: string) { return [...this.active.values()].some(a => a.projectId === id) || this.get(id).tasks.some(t => t.status === "running" && t.taskId === "X05"); }
-  shutdown() { for (const a of this.active.values()) a.controller.abort(); }
+  shutdown() { this.closing=true;if(this.planarTimer)clearTimeout(this.planarTimer);this.planarQueue=[];for (const a of this.active.values()) a.controller.abort(); }
   private closeRuntimeApproval(task: GraphicsTask, decision: NonNullable<GraphicsTask["runtimeApprovalHistory"]>[number]["decision"]) {
     const request = task.runtimeApproval;
     if (!request) return;
@@ -197,6 +225,9 @@ export class GraphicsEngine {
   private selected(w: GraphicsWorkspace, o: GraphicsObject, role: GraphicsRole) {
     const slot = o.settings.partId && ['design', 'model', 'material'].includes(role) ? `part-${o.settings.partId}` : 'main';
     return w.versions.find(v => v.id === o.accepted[`${role}:${slot}`] && v.objectId === o.id && v.role === role && v.slot === slot);
+  }
+  private assertImportedSource(version: AssetVersion) {
+    const problem=importedModelSourceProblem(version);if(problem)throw Error(problem);
   }
   private inputs(w: GraphicsWorkspace, o: GraphicsObject, taskId: string): AssetVersion[] {
     const refs = [...new Set(o.references.map(r => r.versionId))].map(id => w.versions.find(v => v.id === id)).filter((v): v is AssetVersion => !!v);
@@ -326,7 +357,7 @@ export class GraphicsEngine {
       }
     }
     values = [...new Map(values.map(v => [v.id, v])).values()];
-    for (const v of values) for (const f of v.files) this.verified(w.projectId, f);
+    for (const v of values) { this.assertImportedSource(v); for (const f of v.files) this.verified(w.projectId, f); }
     return values;
   }
   importFiles(id: string, objectId: string, role: GraphicsRole, sources: string[], clipName?: string) {
@@ -341,26 +372,82 @@ export class GraphicsEngine {
     }
     const allowed = /\.(png|jpe?g|webp|fbx|glb|blend|obj|mtl|stl|mp4|webm)$/i;
     for (const source of sources) if (!allowed.test(source) || !fs.statSync(source).isFile()) throw Error("지원되는 원본 파일을 선택하세요.");
-    const groups = role === "design" ? sources.map(source => [source]) : [sources];
+    if(new Set(sources.map(source=>fs.realpathSync(source))).size!==sources.length)throw Error('같은 원본 파일을 중복 선택할 수 없습니다.');
+    const main=sources.filter(source=>model.test(source)),sidecars=sources.filter(source=>!model.test(source));
+    if(role!=='design'&&main.length&&sidecars.length){
+      if(sidecars.some(source=>!image.test(source)&&!/\.mtl$/i.test(source)))throw Error('3D 원본의 동반 파일은 이미지 또는 OBJ 재질 MTL만 지원합니다.');
+      const folder=fs.realpathSync(path.dirname(main[0]));
+      if(sources.some(source=>fs.realpathSync(path.dirname(source))!==folder))throw Error('동반 파일은 같은 폴더에서 선택하세요.');
+    }
+    const groups = role === "design" ? sources.map(source => [source]) : main.length ? main.map(source=>[source,...sidecars]) : [sources];
+    // Validate every group and read every source before creating any original/version.
+    for(const group of groups){const names=new Set<string>();for(const source of group){const name=path.basename(source).normalize('NFC').toUpperCase().toLowerCase();if(names.has(name))throw Error('동반 파일 이름이 중복됩니다.');names.add(name);}}
+    const bytes=new Map(sources.map(source=>[source,fs.readFileSync(source)]));
+    const additions:AssetVersion[]=[];
     for (const group of groups) {
       const versionId = uid(), prefix = `graphics/originals/${versionId}`;
-      const common = path.dirname(group[0]);
-      const names = new Set<string>();
+      const directory=this.store.file(id,prefix),root=fs.realpathSync(this.store.directory(id));let ancestor=path.dirname(directory);while(!fs.existsSync(ancestor))ancestor=path.dirname(ancestor);
+      const actual=fs.realpathSync(ancestor);if(actual!==root&&!actual.startsWith(root+path.sep))throw Error('가져오기 저장 경로가 프로젝트 밖입니다.');
+      fs.mkdirSync(path.dirname(directory),{recursive:true});fs.mkdirSync(directory);
       const files = group.map(source => {
         // Keep companion names; reject collisions rather than silently renaming texture links.
         const name = path.basename(source);
-        if (names.has(name.toLowerCase())) throw Error("동반 파일 이름이 중복됩니다."); names.add(name.toLowerCase());
-        if (group.length > 1 && path.dirname(source) !== common) throw Error("동반 파일은 같은 폴더에서 선택하세요.");
         const rel = `${prefix}/${name}`;
-        this.store.write(id, rel, fs.readFileSync(source));
+        fs.writeFileSync(this.store.file(id,rel),bytes.get(source)!,{flag:'wx'});
         return this.file(id, rel, role === "animation" ? "blend" : image.test(name) ? "image" : model.test(name) ? "model" : /\.(mp4|webm)$/i.test(name) ? "video" : "companion");
       });
       const part = o.creation?.attributes.composition === 'parts' && o.creation.activePartId && (role === 'model' && creationCompositionStrategy(o.creation) === 'independent-parts' || role === 'design' && o.creation.stageSettings.design?.values.designMode === 'parts') ? o.creation.activePartId : undefined;
-      w.versions.push({ id: versionId, objectId: o.id, role, slot: role === "animation" ? clipName! : part ? `part-${part}` : "main", label: path.basename(group[0]), files,
+      additions.push({ id: versionId, objectId: o.id, role, slot: role === "animation" ? clipName! : part ? `part-${part}` : "main", label: path.basename(group[0]), files,
         createdAt: now(), sourceVersionIds: [], provenance: { type: "import" }, warnings: [],
         preview: files.find(f => image.test(f.path))?.path });
     }
+    w.versions.push(...additions);
     return this.save(w);
+  }
+  /** Optional local viewport derivative. Import is durable even if Blender cannot preview it. */
+  async prepareImportedPreviews(id: string, versionIds: string[], prepare: (projectId: string, sourcePath: string) => Promise<string>, throwOnFailure = false) {
+    if (this.closing || this.isActive(id) || this.engine.isProjectActive(id) || this.options.legacyActive?.(id)) throw Error('현재 작업이 끝난 뒤 로컬 미리보기를 준비하세요.');
+    const key = `import-preview:${id}`, controller = new AbortController();
+    this.active.set(key, { projectId: id, controller });
+    try {
+    for (const versionId of versionIds) {
+      const version = this.get(id).versions.find(v => v.id === versionId && v.provenance.type === 'import');
+      if(version)this.assertImportedSource(version);
+      if (!version || version.files.some(f => /\.glb$/i.test(f.path))) continue;
+      const source = version.files.find(f => /\.(fbx|blend|obj|stl)$/i.test(f.path));
+      if (!source) continue;
+      const sourceFiles = version.files.map(f => ({ ...f }));
+      try {
+        for (const file of sourceFiles) this.verified(id, file);
+        const relative = (await prepare(id, source.path)).replaceAll('\\', '/');
+        if (!relative.startsWith('previews/') || !/\.glb$/i.test(relative)) throw Error('미리보기 출력 경로가 잘못됐습니다.');
+        const preview = this.file(id, relative, 'preview');
+        const data = fs.readFileSync(this.verified(id, preview));
+        if (data.length < 12 || data.toString('ascii', 0, 4) !== 'glTF' || data.readUInt32LE(4) !== 2 || data.readUInt32LE(8) !== data.length) throw Error('미리보기 GLB 형식이 잘못됐습니다.');
+        const reportFile = this.file(id, relative.replace(/\.glb$/i, '.report.json'), 'report');
+        if (reportFile.bytes > 1024 * 1024) throw Error('미리보기 검사 기록이 너무 큽니다.');
+        const report = JSON.parse(fs.readFileSync(this.verified(id, reportFile), 'utf8'));
+        if (report.schemaVersion !== 1 || report.mode !== 'convert' || report.previewOnly !== true || report.nativeSourceSha256 !== source.sha256 || ![report.faces, report.triangles].every(v => Number.isSafeInteger(v) && v > 0) || report.triangles < report.faces) throw Error('미리보기와 원본 검사 기록이 일치하지 않습니다.');
+        const latest = this.get(id), current = latest.versions.find(v => v.id === versionId);
+        this.store.assertProjectAvailable(id);
+        if (this.closing || controller.signal.aborted) throw Error('미리보기 등록이 중단됐습니다. 원본은 유지됩니다.');
+        if (!current || JSON.stringify(current.files) !== JSON.stringify(sourceFiles)) throw Error('미리보기 처리 중 가져온 원본이 변경됐습니다.');
+        for (const file of sourceFiles) this.verified(id, file);
+        current.files.push(preview, reportFile);
+        current.warnings = current.warnings.filter(warning => !warning.startsWith('로컬 미리보기 준비 실패'));
+        current.preview = preview.path;
+        this.save(latest);
+      } catch (error) {
+        const latest = this.get(id), current = latest.versions.find(v => v.id === versionId);
+        if (current) {
+          current.warnings.push(`로컬 미리보기 준비 실패 · 원본은 보존됐습니다. ${error instanceof Error ? error.message : String(error)}`);
+          this.save(latest);
+        }
+        if (throwOnFailure) throw error;
+      }
+    }
+    return this.get(id);
+    } finally { this.active.delete(key); }
   }
   async importMotionFile(id: string, objectId: string, source: string, clipName: string) {
     const o = this.object(this.get(id), objectId);
@@ -379,9 +466,242 @@ export class GraphicsEngine {
       return this.save(w);
     } finally { this.active.delete(versionId); }
   }
+  private async externalRigAction(id: string, action: ExternalRigAction): Promise<GraphicsWorkspace> {
+    const w=this.get(id), object=this.object(w,action.objectId); let h:ExternalRigWorkspaceHandoff;
+    if(action.kind==='prepare-external-rig') {
+      if(this.isActive(id)||this.engine.isProjectActive(id))throw Error('현재 작업을 먼저 완료하세요.');
+      const v=w.versions.find(v=>v.id===action.versionId&&v.objectId===object.id&&v.role==='model'&&v.slot==='main');
+      if(!v||object.accepted['model:main']!==v.id||object.kind!=='character'||object.creation?.subject!=='human')throw Error('채택한 사람 전체 모델이 필요합니다.');
+      this.assertImportedSource(v);
+      if(w.externalRigHandoffs?.some(v=>v.objectId===object.id&&!['failed','blocked','cancelled'].includes(v.state)&&!v.candidateVersionId))throw Error('기존 외부 리그 전달을 먼저 확인하세요.');
+      for(const f of v.files)this.verified(id,f);
+      const source=v.files.find(f=>isGraphicsProductionFile(f)&&/\.blend$/i.test(f.path))??v.files.find(f=>isGraphicsProductionFile(f)&&/\.fbx$/i.test(f.path)); if(!source)throw Error('원본 BLEND 또는 FBX가 필요합니다.');
+      h={id:uid(),objectId:object.id,sourceVersionId:v.id,source,requiredParts:(object.creation?.parts??[]).filter(p=>p.enabled).map(p=>p.id).sort(),state:'preparing',operation:'prepare',createdAt:now(),updatedAt:now()};
+      (w.externalRigHandoffs??=[]).push(h);this.save(w);
+    } else {
+      h=w.externalRigHandoffs?.find(v=>v.id===action.handoffId&&v.objectId===object.id)!;if(!h)throw Error('전달 기록이 없습니다.');
+      if(action.kind==='cancel-external-rig'){this.active.get(h.id)?.controller.abort();h.state='cancelled';h.updatedAt=now();return this.save(w);}
+      if(action.kind!=='recover-external-rig'){const source=w.versions.find(v=>v.id===h.sourceVersionId);if(!source)throw Error('전달 원본 버전이 없습니다.');this.assertImportedSource(source);}
+      if(h.state==='cancelled'||h.candidateVersionId)throw Error('취소되거나 완료한 전달은 반복하지 않습니다.');
+      if(this.isActive(id)||this.engine.isProjectActive(id))throw Error('현재 작업을 먼저 완료하세요.');this.verified(id,h.source);
+      if(action.kind==='inspect-external-rig') {
+        if(h.preparation?.state!=='awaiting-external'||h.returnedFbx)throw Error('준비 완료 후 반환 파일 한 개를 선택하세요.');
+        if(action.sourceToReturnedMatrix!==undefined&&(!Array.isArray(action.sourceToReturnedMatrix)||action.sourceToReturnedMatrix.length!==4||action.sourceToReturnedMatrix.some(r=>!Array.isArray(r)||r.length!==4||r.some(v=>typeof v!=='number'||!Number.isFinite(v)))))throw Error('명시적인 좌표 변환 행렬을 확인하세요.');
+        h.sourceToReturnedMatrix=action.sourceToReturnedMatrix&&structuredClone(action.sourceToReturnedMatrix);
+        const returned=path.resolve(action.returnedPath);if(!/\.fbx$/i.test(returned)||!fs.statSync(returned).isFile()||fs.lstatSync(returned).isSymbolicLink())throw Error('반환 FBX를 선택하세요.');
+        const rel='graphics/external-rig/'+h.id+'/returned-original.fbx',dest=this.store.file(id,rel);fs.mkdirSync(path.dirname(dest),{recursive:true});if(fs.existsSync(dest)){if(hash(fs.readFileSync(dest))!==hash(fs.readFileSync(returned)))throw Error('저장된 반환 원본과 선택한 FBX가 다릅니다.');}else fs.copyFileSync(returned,dest,fs.constants.COPYFILE_EXCL);h.returnedFbx=this.file(id,rel,'returned-fbx');h.operation='inspect-return';
+      }
+      if(action.kind==='import-external-rig') {
+        if(h.inspection?.state!=='review'||!h.returnedFbx)throw Error('반환 검사와 명시적인 본 매핑이 필요합니다.');
+        const reportFile=h.inspection.files.find(f=>f.kind==='report')!;const report=JSON.parse(fs.readFileSync(this.verified(id,reportFile),'utf8'));
+        const names=new Set((report.bones??[]).map((b:{name:string})=>b.name));
+        if(!Array.isArray(action.humanBones)||action.humanBones.some(b=>!names.has(b.boneName)))throw Error('검사된 실제 본 이름만 매핑하세요.');
+        const contract:UnityRigContract={schemaVersion:2,versionId:h.id,producerVersionId:h.id,producerTaskId:h.id,rigType:'humanoid',fingers:action.fingers,hairBinding:'head',requiredParts:h.requiredParts,humanBones:action.humanBones};validateUnityRigContract([{id:h.id,role:'rig'} as AssetVersion],contract);
+        h.humanBones=structuredClone(action.humanBones);h.fingers=action.fingers;h.operation='import-return';
+      }
+      h.state=h.operation==='prepare'?'preparing':'inspecting';h.updatedAt=now();delete h.error;this.save(w);
+    }
+    const controller=new AbortController();this.active.set(h.id,{projectId:id,controller});
+    try {
+      const result=await(this.options.externalRig??runGraphicsExternalRig)({projectRoot:this.store.directory(id),handoffId:h.id,sourceVersionId:h.sourceVersionId,source:h.source,operation:h.operation,blenderPath:this.store.settings.blenderPath,workerPath:path.join(this.options.resources,'blender','graphics_external_rig.py'),signal:controller.signal,preparationReport:h.preparation?.files.find(f=>f.kind==='report'),returnedFbx:h.returnedFbx,sourceToReturnedMatrix:h.sourceToReturnedMatrix,humanBones:h.humanBones,fingers:h.fingers,recoveryOnly:action.kind==='recover-external-rig'});
+      const latest=this.get(id),current=latest.externalRigHandoffs!.find(v=>v.id===h.id)!;if(controller.signal.aborted||current.state==='cancelled')throw Error('전달을 취소했습니다.');
+      current.state=result.handoff.state;current.error=result.handoff.error;current.updatedAt=now();
+      if(h.operation==='prepare')current.preparation=result.handoff;else if(h.operation==='inspect-return')current.inspection=result.handoff;else {
+        current.imported=result.handoff;
+        if(result.handoff.state==='review') {
+          if(!current.humanBones)throw Error('확인한 본 매핑이 없습니다.');
+          const versionId=uid(),contract:UnityRigContract={schemaVersion:2,versionId,producerVersionId:versionId,producerTaskId:current.id,rigType:'humanoid',fingers:current.fingers===true,hairBinding:'head',requiredParts:current.requiredParts,humanBones:current.humanBones};
+          const candidate:AssetVersion={id:versionId,objectId:object.id,role:'rig',slot:'main',label:'외부 반환 리그 · 검토 필요',files:result.files,createdAt:now(),sourceVersionIds:[current.sourceVersionId],provenance:{type:'local',jobId:current.id},warnings:['구조 검사만 완료했습니다. 관절 배치·포즈 변형·국소 웨이트 및 Unity Humanoid 검증은 아직 완료하지 않았습니다.'],externalRig:{schemaVersion:1,handoffId:current.id,reportPath:result.handoff.reportPath!,reportSha256:result.handoff.reportSha256,sourceSha256:current.source.sha256,returnedFbxSha256:current.returnedFbx?.sha256,contract}};
+          validateUnityRigContract([candidate],contract);latest.versions.push(candidate);current.candidateVersionId=versionId;
+        }
+      }return this.save(latest);
+    }catch(error){const latest=this.get(id),current=latest.externalRigHandoffs!.find(v=>v.id===h.id)!;current.state=controller.signal.aborted||current.state==='cancelled'?'cancelled':'failed';current.error=error instanceof Error?error.message:String(error);current.updatedAt=now();this.save(latest);throw error;}finally{this.active.delete(h.id);}
+  }
+  private autoRigFingerprint(run: AutoRigRun) {
+    return hash(JSON.stringify({objectId:run.objectId,sourceVersionId:run.sourceVersionId,source:run.source,operation:run.operation,settings:run.settings,repairs:run.repairs,inspectionRunId:run.inspectionRunId,toolSha256:run.toolSha256,...(run.partPolicy?{partPolicy:run.partPolicy}:{}),...(run.toolDependencies?{toolDependencies:run.toolDependencies}:{})}));
+  }
+  private assembledAutoRigPartPolicy(w:GraphicsWorkspace, source:AssetVersion, seen=new Set<string>()):AutoRigPartPolicy|undefined {
+    if(seen.has(source.id))throw Error('자동 리그 원본 파트 출처가 순환합니다.');seen.add(source.id);
+    const producers=w.tasks.filter(t=>t.id===source.provenance.jobId&&t.objectId===source.objectId&&t.taskId==='M08');
+    if(producers.length){
+      const t=producers[0],snapshot=t.objectSnapshot,parts=snapshot?.creation?.parts.filter(p=>p.enabled).map(p=>p.id).sort();
+      const frozen={taskId:t.taskId,objectId:t.objectId,inputVersionIds:t.inputVersionIds,settings:t.settings,instruction:t.instruction};
+      if(producers.length!==1||t.status!=='review'||!t.outputVersionIds.includes(source.id)||!snapshot||snapshot.creation?.attributes.composition!=='parts'||!parts?.length||t.requestHash!==hash(JSON.stringify({...frozen,object:snapshot,target:t.targetProfile}))||JSON.stringify(source.sourceVersionIds)!==JSON.stringify(t.inputVersionIds))throw Error('조립 원본의 고정 파트·제작 기록이 없습니다. 조립 결과를 다시 확인하세요.');
+      const inputs=t.inputVersionIds.map(id=>w.versions.find(v=>v.id===id&&v.objectId===source.objectId));
+      const geometry=inputs.filter((v):v is AssetVersion=>!!v&&['model','material'].includes(v.role)&&/^part-[A-Za-z0-9_-]+$/.test(v.slot));
+      const references=inputs.filter(v=>!v||!geometry.includes(v));
+      if(references.length>1||references.some(v=>!v||v.role!=='design'||v.slot!=='main'||snapshot.accepted['design:main']!==v.id)||geometry.some(v=>snapshot.accepted[`${v.role}:${v.slot}`]!==v.id))throw Error('조립 원본의 정확한 채택 파트·외형 참조가 없습니다.');
+      const ids=geometry.map(v=>v.slot.slice(5)).sort();
+      if(JSON.stringify(ids)!==JSON.stringify(parts))throw Error('조립 원본의 필수 파트가 고정 입력과 다릅니다.');
+      return validateAutoRigPartPolicy({schemaVersion:1,requiredParts:ids,headBoundParts:ids.filter(id=>id==='hair')});
+    }
+    if(source.sourceVersionIds.some(id=>w.versions.some(v=>v.id===id&&v.objectId===source.objectId&&v.slot.startsWith('part-')&&['model','material'].includes(v.role))))throw Error('조립 원본의 고정 제작 기록이 없습니다. 조립 결과를 다시 확인하세요.');
+    if(source.provenance.type==='import')return;
+    // Follow the geometry source only; later inputs may be appearance references.
+    const producer=w.tasks.find(t=>t.id===source.provenance.jobId&&t.objectId===source.objectId);
+    if(producer&&(producer.status!=='review'||!producer.outputVersionIds.includes(source.id)||JSON.stringify(source.sourceVersionIds)!==JSON.stringify(producer.inputVersionIds)))throw Error('전체 원본의 고정 제작 입력이 변경됐습니다.');
+    const parentId=typeof producer?.settings.sourceVersionId==='string'?producer.settings.sourceVersionId:source.sourceVersionIds[0];
+    if(parentId!==undefined&&!source.sourceVersionIds.includes(parentId))throw Error('전체 원본의 형상 출처가 고정 입력과 다릅니다.');
+    const parent=w.versions.find(v=>v.id===parentId&&v.objectId===source.objectId&&v.slot==='main'&&['model','material'].includes(v.role));
+    return parent?this.assembledAutoRigPartPolicy(w,parent,new Set(seen)):undefined;
+  }
+  private autoRigOutput(id:string, run:AutoRigRun) { return this.store.file(id,`graphics/auto-rig/${run.id}`); }
+  private checkAutoRigInspection(value:unknown, operation:AutoRigRun['operation']): AutoRigInspection {
+    const v=value as AutoRigInspection;
+    const text=(s:unknown):s is string=>typeof s==='string'&&s.length>0&&s.length<1000;
+    const required=operation==='rig'?['sourceHashBound','restGeometry','topology','uv','attributes','materials','images','allWeighted','normalized','exportedBoneNames']:['sourceHashBound','geometryAndUV','outsideWeights','attributes','materials','images','skeleton','exportedBoneNames'];
+    if(!v||!Array.isArray(v.checks)||required.some(id=>!v.checks.some(c=>c.id===id&&c.passed===true))||v.checks.some(c=>c.passed!==true)||!Array.isArray(v.humanBones)||!Array.isArray(v.warnings)||v.warnings.some(s=>!text(s))||!Array.isArray(v.boneNames)||!v.boneNames.length||v.boneNames.some(s=>!text(s))||new Set(v.boneNames).size!==v.boneNames.length||!Array.isArray(v.islands)||!v.islands.length||v.islands.length>100000)throw Error('자동 리그의 필수 보존 검사와 본·부위 기록이 완전하지 않습니다.');
+    const ids=new Set<string>();
+    for(const island of v.islands){const key=JSON.stringify([island.mesh,island.islandId]);if(!text(island.mesh)||!text(island.islandId)||ids.has(key)||!Number.isSafeInteger(island.vertices)||island.vertices<1||!Array.isArray(island.bones)||island.bones.some(b=>!text(b.name)||!Number.isFinite(b.meanWeight)||b.meanWeight<0||!Number.isFinite(b.maxWeight)||b.maxWeight<0))throw Error('검사한 연결 부위의 식별자·웨이트 기록이 잘못됐습니다.');
+      if(island.vertexIndices!==undefined){const vertices=island.vertexIndices;if(!Array.isArray(vertices)||vertices.length!==island.vertices||vertices.some((value,index)=>!Number.isSafeInteger(value)||value<0||index>0&&value<=vertices[index-1])||hash('['+vertices.join(', ')+']')!==island.islandId)throw Error('검사한 부위의 정확한 정점 목록·해시가 다릅니다.');}
+      ids.add(key);}
+    return structuredClone(v);
+  }
+  private validateAutoRigCandidate(id:string,w:GraphicsWorkspace,candidate:AssetVersion,seen=new Set<string>()){
+    const meta=candidate.autoRig;if(!meta)return;
+    if(candidate.role!=='rig'||candidate.slot!=='main')throw Error('자동 리그는 검사한 전체 리그 슬롯으로만 사용할 수 있습니다.');
+    if(seen.has(candidate.id))throw Error('자동 리그의 복사본 출처가 순환합니다.');seen.add(candidate.id);
+    if(meta.derivedFromVersionId){
+      const parents=w.versions.filter(v=>v.id===meta.derivedFromVersionId&&v.objectId===candidate.objectId);
+      if(parents.length!==1||!parents[0].autoRig||JSON.stringify(candidate.sourceVersionIds)!==JSON.stringify([parents[0].id]))throw Error('자동 리그 복사본의 정확한 원본이 없습니다.');
+      const parent=parents[0];this.validateAutoRigCandidate(id,w,parent,seen);
+      const producers=w.tasks.filter(t=>t.id===candidate.provenance.jobId&&t.objectId===candidate.objectId&&t.taskId==='X04'&&t.status==='review'&&t.outputVersionIds.includes(candidate.id));
+      if(producers.length!==1||JSON.stringify(producers[0].inputVersionIds)!==JSON.stringify([parent.id])||JSON.stringify(validateUnityRigContract([parent],producers[0].unityRigContract))!==JSON.stringify(validateUnityRigContract([parent],parent.autoRig!.contract)))throw Error('자동 리그 복사본의 고정 내보내기 기록이 다릅니다.');
+      const copied=this.autoRigCopyMetadata(id,parent,candidate,producers[0]);
+      if(JSON.stringify(meta)!==JSON.stringify(copied))throw Error('자동 리그 복사본의 검사·본 매핑 출처가 다릅니다.');
+      validateUnityRigContract([candidate],meta.contract);return;
+    }
+    const run=w.autoRigRuns?.find(r=>r.id===meta.runId&&r.objectId===candidate.objectId&&r.candidateVersionId===candidate.id);
+    if(!run||run.state!=='review'||run.operation==='inspect'||run.requestHash!==this.autoRigFingerprint(run)||meta.sourceSha256!==run.source.sha256||JSON.stringify(run.files)!==JSON.stringify(candidate.files)||JSON.stringify(run.reportFile)!==JSON.stringify(meta.reportFile)||candidate.provenance.jobId!==run.id||JSON.stringify(candidate.sourceVersionIds)!==JSON.stringify([run.sourceVersionId]))throw Error('자동 리그의 고정 원본·결과·실행 기록이 다릅니다.');
+    const sourceVersion=w.versions.find(v=>v.id===run.sourceVersionId&&v.objectId===candidate.objectId);
+    if(!sourceVersion?.files.some(f=>JSON.stringify(f)===JSON.stringify(run.source)))throw Error('자동 리그의 원본 버전·파일 연결이 변경됐습니다.');
+    const inherited=sourceVersion.autoRig?.contract??sourceVersion.externalRig?.contract;
+    if(run.partPolicy&&JSON.stringify(run.partPolicy)!==JSON.stringify(run.operation==='rig'?this.assembledAutoRigPartPolicy(w,sourceVersion):sourceVersion.autoRig?.partPolicy))throw Error('자동 리그의 고정 파트 출처가 변경됐습니다.');
+    if(meta.contract.fingers!==run.settings.fingers||meta.contract.hairBinding!=='head'||JSON.stringify(meta.contract.requiredParts)!==JSON.stringify(run.partPolicy?.requiredParts??inherited?.requiredParts??[])||JSON.stringify(meta.partPolicy)!==JSON.stringify(run.partPolicy))throw Error('자동 리그의 손가락·파트 설정이 고정 원본과 다릅니다.');
+    this.verified(id,run.source);for(const file of run.files)this.verified(id,file);this.verified(id,meta.reportFile);
+    const saved=inspectSavedGraphicsAutoRig(this.autoRigOutput(id,run));
+    if(run.toolSha256!==undefined&&saved.toolSha256!==run.toolSha256)throw Error('자동 리그의 고정 작업 도구가 변경됐습니다.');
+    const request=JSON.parse(fs.readFileSync(saved.requestPath,'utf8'));
+    if(request.sourceSha256!==run.source.sha256||request.operation!==run.operation||request.fingers!==run.settings.fingers||JSON.stringify(request.repairs)!==JSON.stringify(run.repairs)||JSON.stringify(request.sourceToRigMatrix)!==JSON.stringify(run.operation==='rig'?autoRigOrientation(run.settings.frontAxis):undefined)||JSON.stringify(request.partPolicy)!==JSON.stringify(run.partPolicy)||JSON.stringify(request.workerResources)!==JSON.stringify(run.toolDependencies))throw Error('저장된 자동 리그 요청이 변경됐습니다.');
+    const inspection=this.checkAutoRigInspection(saved.report.inspection,run.operation);
+    if(JSON.stringify(inspection)!==JSON.stringify(run.inspection)||JSON.stringify(meta.contract.humanBones)!==JSON.stringify(inspection.humanBones)||meta.contract.producerTaskId!==run.id||meta.contract.versionId!==candidate.id||meta.contract.producerVersionId!==candidate.id||meta.contract.exportPolicy!=='auto-rig-fbx'||!candidate.files.some(f=>JSON.stringify(f)===JSON.stringify(meta.exportFbx)&&/\.fbx$/i.test(f.path)))throw Error('확인한 본 매핑·내보내기 결과가 변경됐습니다.');
+    validateUnityRigContract([candidate],meta.contract);
+  }
+  private autoRigCopyMetadata(id:string,parent:AssetVersion,candidate:AssetVersion,task:GraphicsTask){
+    if(!parent.autoRig||candidate.role!=='rig'||candidate.slot!==parent.slot||task.taskId!=='X04')throw Error('자동 리그 복사본의 종류·슬롯이 다릅니다.');
+    const plan=prepareAutoRigExport({projectRoot:this.store.directory(id),object:this.object(this.get(id),parent.objectId),inputs:[parent],task,resources:this.options.resources,workspacePath:this.store.file(id,'graphics/workspace.json'),blenderPath:this.store.settings.blenderPath,signal:new AbortController().signal,onProgress:()=>{}});
+    if(!plan)throw Error('검증된 자동 리그 복사 요청이 아닙니다.');
+    const modelFiles=candidate.files.filter(f=>isGraphicsProductionFile(f)&&/\.(blend|fbx|glb)$/i.test(f.path)||f.kind==='preview'&&f.path.endsWith('/diagnostic.glb'));
+    if(modelFiles.length!==plan.files.length)throw Error('자동 리그 복사본의 파일 수가 다릅니다.');
+    for(const item of plan.files){const matches=modelFiles.filter(f=>f.path.endsWith('/'+item.name)&&f.sha256===item.file.sha256&&f.bytes===item.file.bytes);if(matches.length!==1)throw Error('자동 리그의 검증된 파일과 복사본이 다릅니다.');this.verified(id,matches[0]);}
+    const reportFile=candidate.files.find(f=>f.kind==='report'&&f.path.endsWith('/report.json'));
+    if(!reportFile)throw Error('자동 리그 복사 검사 기록이 없습니다.');
+    const report=JSON.parse(fs.readFileSync(this.verified(id,reportFile),'utf8'));
+    if(report.schemaVersion!==1||JSON.stringify(report.metadata)!==JSON.stringify(parent.autoRig)||report.format!==plan.format||JSON.stringify(report.outputFiles)!==JSON.stringify(plan.files.map(item=>{const f=modelFiles.find(f=>f.path.endsWith('/'+item.name))!;return {path:f.path,sha256:f.sha256,bytes:f.bytes};}))||report.operation!=='X04'||report.policy!==plan.policy||report.sourceVersionId!==parent.id||report.originalPreserved!==true||report.diagnosticGlb!==(plan.format==='both')||JSON.stringify(report.sourceFiles)!==JSON.stringify(plan.files.map(item=>item.file)))throw Error('자동 리그 복사 검사와 고정 원본이 다릅니다.');
+    const exportFbx=modelFiles.find(f=>f.path.endsWith('/asset.fbx'))!;
+    return {...structuredClone(parent.autoRig),derivedFromVersionId:parent.id,exportFbx,contract:{...validateUnityRigContract([parent],parent.autoRig.contract)!,versionId:candidate.id,producerVersionId:candidate.id}};
+  }
+  private assertA05Rig(object:GraphicsObject,w:GraphicsWorkspace,inputs:AssetVersion[]){
+    const frozen={...w,objects:w.objects.map(o=>o.id===object.id?object:o)};
+    if(inputs.some(v=>v.autoRig)||freezeUnityRigContract(frozen,inputs)?.exportPolicy==='auto-rig-fbx')throw Error('자동 리그의 크기·피벗 보정은 아직 지원하지 않습니다. 모델 단계에서 크기·피벗을 먼저 맞춘 뒤 리깅하세요.');
+  }
+  private x04RigContract(id:string,w:GraphicsWorkspace,object:GraphicsObject,inputs:AssetVersion[],task:GraphicsTask){
+    const frozen={...w,objects:w.objects.map(o=>o.id===object.id?object:o)};
+    const contract=freezeUnityRigContract(frozen,inputs);
+    for(const source of inputs)if(source.autoRig)this.validateAutoRigCandidate(id,w,source);
+    prepareAutoRigExport({projectRoot:this.store.directory(id),workspacePath:this.store.file(id,'graphics/workspace.json'),object,inputs,task:{...task,unityRigContract:contract},resources:this.options.resources,blenderPath:this.store.settings.blenderPath,signal:new AbortController().signal,onProgress:()=>{}});
+    return contract;
+  }
+  private async autoRigAction(id:string,action:AutoRigAction):Promise<GraphicsWorkspace>{
+    if(action.kind==='probe-auto-rig'){
+      if(this.isActive(id)||this.engine.isProjectActive(id))throw Error('실행이 끝난 후 설치를 확인하세요.');
+      const result=await(this.options.autoRigProbe??probeGraphicsAutoRig)(this.store.settings.blenderPath,path.join(this.options.resources,'blender','graphics_auto_rig.py'));
+      const latest=this.get(id);latest.autoRigReadiness=result;return this.save(latest);
+    }
+    const w=this.get(id),object=this.object(w,action.objectId);let run:AutoRigRun;
+    if(action.kind==='cancel-auto-rig'||action.kind==='recover-auto-rig'){
+      const current=w.autoRigRuns?.find(r=>r.id===action.runId&&r.objectId===object.id);if(!current)throw Error('자동 리그 실행 기록이 없습니다.');run=current;
+      if(action.kind==='cancel-auto-rig'){
+        if(run.state!=='running')throw Error('현재 실행 중인 작업만 중단할 수 있습니다.');
+        this.active.get(run.id)?.controller.abort();run.state='cancelled';run.message='로컬 작업을 중단했습니다. 기존 원본과 채택본은 유지합니다.';run.updatedAt=now();return this.save(w);
+      }
+      if(run.candidateVersionId||run.state==='review')return w;
+      if(run.state==='cancelled')throw Error('취소한 실행은 복구·재실행하지 않습니다. 기존 결과를 사용하세요.');
+      if(run.requestHash!==this.autoRigFingerprint(run))throw Error('복구할 고정 요청이 변경됐습니다.');
+    }else{
+      if(!('versionId' in action))throw Error('지원하지 않는 자동 리그 명령입니다.');
+      const version=w.versions.find(v=>v.id===action.versionId&&v.objectId===object.id&&v.slot==='main');
+      if(!version||object.kind!=='character'||object.creation?.subject!=='human')throw Error('사람 형태의 전체 모델 또는 리그가 필요합니다.');
+      this.assertImportedSource(version);
+      if(action.kind==='start-auto-rig'&&(!['model','material'].includes(version.role)||object.accepted[`${version.role}:main`]!==version.id||!['neg-y','pos-y','pos-x','neg-x'].includes(action.frontAxis)||typeof action.fingers!=='boolean'))throw Error('채택한 전체 모델과 앞 방향·손가락 설정을 확인하세요.');
+      if(action.kind!=='start-auto-rig'&&version.role!=='rig')throw Error('검사·보정할 리그 결과를 선택하세요.');
+      if(action.kind!=='start-auto-rig'&&version.autoRig)this.validateAutoRigCandidate(id,w,version);
+      for(const file of version.files)this.verified(id,file);
+      const source=version.files.find(f=>isGraphicsProductionFile(f)&&/\.blend$/i.test(f.path))??(action.kind==='start-auto-rig'?version.files.find(f=>isGraphicsProductionFile(f)&&/\.fbx$/i.test(f.path)):undefined);
+      if(!source)throw Error('자동 리깅은 BLEND·FBX, 기존 리그 보정은 편집 가능한 Auto-Rig Pro BLEND가 필요합니다.');
+      let repairs:AutoRigRun['repairs']=[];
+      if(action.kind==='repair-auto-rig'){
+        const inspection=w.autoRigRuns?.find(r=>r.id===action.inspectionRunId&&r.objectId===object.id&&r.sourceVersionId===version.id&&r.operation==='inspect'&&r.state==='review');
+        if(!inspection?.inspection||!inspection.reportFile||inspection.source.sha256!==source.sha256||inspection.requestHash!==this.autoRigFingerprint(inspection))throw Error('현재 원본을 검사한 부위·본 기록이 필요합니다.');
+        this.verified(id,inspection.reportFile);this.verified(id,inspection.source);
+        const saved=inspectSavedGraphicsAutoRig(this.autoRigOutput(id,inspection));
+        if(inspection.toolSha256!==undefined&&saved.toolSha256!==inspection.toolSha256)throw Error('부위 검사의 고정 작업 도구가 변경됐습니다.');
+        const request=JSON.parse(fs.readFileSync(saved.requestPath,'utf8'));
+        if(request.sourceSha256!==inspection.source.sha256||request.operation!=='inspect'||JSON.stringify(request.repairs)!==JSON.stringify([])||request.sourceToRigMatrix!==undefined||request.fingers!==inspection.settings.fingers||JSON.stringify(request.partPolicy)!==JSON.stringify(inspection.partPolicy)||JSON.stringify(request.workerResources)!==JSON.stringify(inspection.toolDependencies)||JSON.stringify(saved.report.inspection)!==JSON.stringify(inspection.inspection))throw Error('저장된 부위 검사가 변경됐습니다.');
+        repairs=validateAutoRigRepairs(inspection.inspection,action.repairs);
+      }
+      const inherited=version.autoRig?.contract??version.externalRig?.contract;
+      const partPolicy=action.kind==='start-auto-rig'?this.assembledAutoRigPartPolicy(w,version):version.autoRig?.partPolicy;
+      if(partPolicy)validateAutoRigPartPolicy(partPolicy);
+      run={id:uid(),objectId:object.id,sourceVersionId:version.id,source:structuredClone(source),operation:action.kind==='start-auto-rig'?'rig':action.kind==='inspect-auto-rig'?'inspect':'repair',state:'running',createdAt:now(),updatedAt:now(),message:'로컬 작업을 접수했습니다. 정확한 원본과 설치된 도구를 확인합니다.',settings:{frontAxis:action.kind==='start-auto-rig'?action.frontAxis:'neg-y',fingers:action.kind==='start-auto-rig'?action.fingers:inherited?.fingers??true},repairs,files:[],...(partPolicy?{partPolicy:structuredClone(partPolicy)}:{}),...(action.kind==='repair-auto-rig'?{inspectionRunId:action.inspectionRunId}:{})};
+      run.toolSha256=hash(fs.readFileSync(path.join(this.options.resources,'blender','graphics_auto_rig.py')));
+      const partHelper=path.join(this.options.resources,'blender','graphics_auto_rig_parts.py');
+      if(fs.existsSync(partHelper))run.toolDependencies={'graphics_auto_rig_parts.py':hash(fs.readFileSync(partHelper))};
+      run.requestHash=this.autoRigFingerprint(run);
+      const existing=w.autoRigRuns?.find(r=>r.requestHash===run.requestHash&&['running','review'].includes(r.state));
+      if(existing)return w;
+    }
+    if(this.isActive(id)||this.engine.isProjectActive(id)||this.options.legacyActive?.(id))throw Error('현재 실행이 끝난 후 자동 리깅을 진행하세요.');
+    this.verified(id,run.source);
+    if(!w.autoRigRuns?.some(r=>r.id===run.id))(w.autoRigRuns??=[]).push(run);
+    run.state='running';delete run.error;run.updatedAt=now();this.save(w);
+    const controller=new AbortController();this.active.set(run.id,{projectId:id,controller});
+    try{
+      const result=await(this.options.autoRig??runGraphicsAutoRig)({blenderPath:this.store.settings.blenderPath,workerPath:path.join(this.options.resources,'blender','graphics_auto_rig.py'),sourceBlend:this.verified(id,run.source),sourceSha256:run.source.sha256,outputDir:this.autoRigOutput(id,run),operation:run.operation,fingers:run.settings.fingers,repairs:run.repairs,...(run.partPolicy?{partPolicy:run.partPolicy}:{}),...(run.toolDependencies?{workerResources:run.toolDependencies}:{}),sourceToRigMatrix:run.operation==='rig'?autoRigOrientation(run.settings.frontAxis):undefined,recoveryOnly:action.kind==='recover-auto-rig'},{signal:controller.signal,onProgress:message=>{
+        const latest=this.get(id),current=latest.autoRigRuns?.find(r=>r.id===run.id);if(current?.state==='running'&&current.message!==message&&!controller.signal.aborted){current.message=message;current.updatedAt=now();this.save(latest);}
+      }});
+      const latest=this.get(id),current=latest.autoRigRuns!.find(r=>r.id===run.id)!;
+      if(controller.signal.aborted||current.state==='cancelled')throw Error('작업을 중단했습니다.');
+      if(current.requestHash!==this.autoRigFingerprint(current))throw Error('실행 도중 고정 요청이 변경됐습니다.');
+      if(current.toolSha256!==undefined&&result.toolSha256!==current.toolSha256)throw Error('고정한 작업 도구와 실행·복구 결과가 다릅니다.');
+      this.verified(id,current.source);
+      if(result.report.sourceSha256!==current.source.sha256||result.report.operation!==current.operation||result.report.osInputUsed!==false||result.report.paidSubmissions!==0||result.report.status!=='exported-review-pending')throw Error('작업 결과와 고정 원본이 일치하지 않습니다.');
+      validateAutoRigPartReport(current.partPolicy,result.report);
+      const inspection=this.checkAutoRigInspection(result.report.inspection,current.operation);
+      const register=(absolute:string,kind:string)=>{const rel=path.relative(this.store.directory(id),absolute);if(!rel||rel.startsWith('..')||path.isAbsolute(rel)||!path.resolve(absolute).startsWith(path.resolve(this.autoRigOutput(id,current))+path.sep))throw Error('작업 폴더 밖의 결과입니다.');return this.file(id,rel,kind);};
+      const files=[register(result.blendPath,'blend'),register(result.fbxPath,'fbx'),register(result.glbPath,'glb')];
+      current.files=files;current.reportFile=register(result.reportPath,'auto-rig-report');current.inspection=inspection;
+      if(current.operation!=='inspect'){
+        const versionId=uid(),sourceVersion=latest.versions.find(v=>v.id===current.sourceVersionId&&v.objectId===object.id)!;
+        const oldContract=sourceVersion.autoRig?.contract??sourceVersion.externalRig?.contract;
+        const contract:UnityRigContract={schemaVersion:2,versionId,producerVersionId:versionId,producerTaskId:current.id,rigType:'humanoid',fingers:current.settings.fingers,hairBinding:'head',requiredParts:structuredClone(current.partPolicy?.requiredParts??oldContract?.requiredParts??[]),humanBones:inspection.humanBones,exportPolicy:'auto-rig-fbx'};
+        const candidate:AssetVersion={id:versionId,objectId:object.id,role:'rig',slot:'main',label:current.operation==='repair'?'선택 부위 웨이트 보정 · 외형 검토 대기':'Auto-Rig Pro · 외형 검토 대기',files,createdAt:now(),sourceVersionIds:[current.sourceVersionId],provenance:{type:'local',jobId:current.id},warnings:['시험 동작은 검사 전용이며 게임용 애니메이션으로 전달하지 않습니다.','구조 검사와 외형 검토는 별개입니다. 어깨·무릎·장식의 변형을 확인하세요.'],autoRig:{schemaVersion:1,runId:current.id,sourceSha256:current.source.sha256,reportFile:current.reportFile,exportFbx:files[1],contract,...(current.partPolicy?{partPolicy:structuredClone(current.partPolicy)}:{})}};
+        validateUnityRigContract([candidate],contract);latest.versions.push(candidate);current.candidateVersionId=versionId;
+      }
+      current.state='review';current.message=current.operation==='inspect'?'연결 부위·본 영향 검사를 저장했습니다. 보정할 부위를 선택하세요.':'구조 검사 통과 · 외형 검토 대기. 결과 사용과 내보내기는 직접 선택하세요.';current.updatedAt=now();return this.save(latest);
+    }catch(error){const latest=this.get(id),current=latest.autoRigRuns!.find(r=>r.id===run.id)!;current.state=controller.signal.aborted||current.state==='cancelled'?'cancelled':'failed';current.error=error instanceof Error?error.message:String(error);current.message=current.state==='cancelled'?'작업을 중단했습니다. 원본과 이전 채택을 유지합니다.':'로컬 작업이 완료되지 않았습니다. 기존 결과는 보존됩니다.';current.updatedAt=now();this.save(latest);throw error;}finally{this.active.delete(run.id);}
+  }
   async action(id: string, action: GraphicsAction): Promise<GraphicsWorkspace> {
+    if(action?.kind==='inspect-planar'||action?.kind==='repair-planar'){
+      const identifier=(value:unknown)=>typeof value==='string'&&value.length>0&&value.length<=500;
+      if(!identifier(action.versionId))throw Error('경계 검사 원본 버전이 잘못됐습니다.');
+      if(action.kind==='repair-planar'&&(!identifier(action.inspectionId)||!identifier(action.meshId)||!['preserve','reuse-existing-pattern'].includes(action.materialPolicy)||![action.selectedBoundaryIds,action.keptBoundaryIds].every(values=>Array.isArray(values)&&values.length<=10000&&values.every(identifier))))throw Error('경계 보완 선택·유지 목록과 재질 정책이 잘못됐습니다.');
+    }
     const w = this.get(id);
     switch (action.kind) {
+      case 'prepare-import-preview': throw Error('앱의 로컬 미리보기 준비 연결을 사용하세요.');
+      case 'probe-auto-rig': case 'start-auto-rig': case 'inspect-auto-rig': case 'repair-auto-rig': case 'recover-auto-rig': case 'cancel-auto-rig': return this.autoRigAction(id,action);
+      case 'prepare-external-rig': case 'inspect-external-rig': case 'import-external-rig': case 'recover-external-rig': case 'cancel-external-rig': return this.externalRigAction(id, action);
       case "create-object": {
         if (!["character", "weapon", "prop", "environment", "sprite", "ui", "vfx"].includes(action.objectKind)) throw Error("잘못된 대상 종류입니다.");
         const name = action.name.trim(); if (!name || name.length > 100) throw Error("이름을 1–100자로 입력하세요.");
@@ -405,6 +725,7 @@ export class GraphicsEngine {
       case "accept": {
         const o = this.object(w, action.objectId), v = w.versions.find(v => v.id === action.versionId && v.objectId === o.id);
         if (!v) throw Error("이 대상의 결과가 아닙니다.");
+        this.assertImportedSource(v);
         if (v.contact && (!['repair', 'reconstruct'].includes(v.contact.phase) || v.contact.status !== 'repaired') || v.slot === 'contact-review')
           throw Error('접합 영역 분석은 채택할 모델이 아닙니다. 확인된 영역의 보정 결과를 비교하세요.');
         if (v.slot.startsWith('part-') && w.tasks.some(task => task.id === v.provenance.jobId && task.taskId === 'M06' && ['repair', 'reconstruct'].includes(String(task.settings.contactPhase))))
@@ -461,7 +782,16 @@ export class GraphicsEngine {
         }
         // Verify the entire assembly before changing even one accepted slot.
         for (const candidate of candidates) {
+          this.validateAutoRigCandidate(id,w,candidate);
+          if(candidate.externalRig){
+            const meta=candidate.externalRig, handoff=w.externalRigHandoffs?.find(h=>h.id===meta.handoffId&&h.candidateVersionId===candidate.id&&h.objectId===candidate.objectId);
+            if(!handoff?.imported||handoff.imported.state!=='review'||handoff.imported.reportPath!==meta.reportPath||handoff.imported.reportSha256!==meta.reportSha256||handoff.source.sha256!==meta.sourceSha256||handoff.returnedFbx?.sha256!==meta.returnedFbxSha256||JSON.stringify(handoff.imported.files)!==JSON.stringify(candidate.files))throw Error('외부 리그의 저장된 검사 출처가 다릅니다.');
+            for(const f of [...handoff.preparation!.files,...handoff.inspection!.files,...handoff.imported.files,handoff.source,handoff.returnedFbx!])this.verified(id,f);
+            validateUnityRigContract([candidate],meta.contract);
+            if(JSON.stringify(meta.contract.humanBones)!==JSON.stringify(handoff.humanBones))throw Error('확인한 본 매핑이 변경됐습니다.');
+          }
           for (const file of candidate.files) this.verified(id, file);
+          validateSavedPlanarCandidate(this.store.directory(id),w,candidate);
           if (requiresPartSpaceRestoration(w, candidate)) throw Error('파트의 원래 크기·위치를 먼저 복원·검사하세요. API 원본은 별도로 보존합니다.');
           if (requiresPartSourcePreparation(w, candidate)) throw Error('파트 원본의 로컬 작업 사본을 먼저 준비하세요. API 원본은 별도로 보존합니다.');
         }
@@ -471,6 +801,20 @@ export class GraphicsEngine {
       }
       case 'prepare-contact': return this.prepareContact(id, action.versionId, action.phase);
       case 'recover-contact-procedure': return this.recoverContactProcedure(id, action.taskId);
+      case 'set-unity-target': {
+        if (typeof action.projectPath !== 'string' || !action.projectPath.trim() || action.projectPath.length > 32767) throw Error('Unity 프로젝트 경로를 입력하세요.');
+        if (this.isActive(id) || this.engine.isProjectActive(id) || this.options.legacyActive?.(id) || [...this.preparing].some(key => key.startsWith(`${id}:`)) ||
+            w.tasks.some(task => ['running', 'awaiting_approval', 'submission_unknown'].includes(task.status)) ||
+            w.deliveries.some(delivery => delivery.status === 'queued')) throw Error('진행 중이거나 승인·확인을 기다리는 작업과 Unity 전달을 먼저 완료하거나 취소하세요.');
+        // Validate the complete target before changing either stored selection.
+        // Existing requests and delivery receipts retain their frozen profiles.
+        const target = readUnityTarget(action.projectPath.trim());
+        const project = this.store.project(id);
+        project.unityPath = target.projectPath;
+        this.store.save(project);
+        w.target = target;
+        return this.save(w);
+      }
       case "inspect-target": w.target = readUnityTarget(this.store.project(id).unityPath || this.store.settings.unityPath); return this.save(w);
       case "audit-usage": return this.audit(id);
       case "inspect-storage": return { ...w, storageReport: await inspectGraphicsStorage({
@@ -505,6 +849,8 @@ export class GraphicsEngine {
       case 'restore-part-space': return this.restorePartSpace(id, action.versionId);
       case 'prepare-part-source': return this.preparePartSource(id, action.versionId);
       case 'repair-surface-uv': return this.repairSurface(id, action.versionId);
+      case 'inspect-planar': return this.planar(id, action.versionId);
+      case 'repair-planar': return this.planar(id, action.versionId, action);
       case "refresh-parts": return this.refreshParts(id, action.taskId);
       case "runtime-approval": {
         const task = w.tasks.find(value => value.id === action.taskId), pending = this.pendingApprovals.get(action.taskId);
@@ -530,7 +876,7 @@ export class GraphicsEngine {
         if (t.status === "review") throw Error("완료한 결과는 취소하지 않습니다. 다른 버전을 채택할 수 있습니다.");
         this.closeRuntimeApproval(t, "cancelled");
         this.active.get(t.id)?.controller.abort();
-        if (!t.partSpaceRecoveryVersionId && !t.partSourceRecoveryVersionId && !t.surfaceRecoveryVersionId) for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
+        if (!t.taskId.startsWith('LOCAL_PLANAR_') && !t.partSpaceRecoveryVersionId && !t.partSourceRecoveryVersionId && !t.surfaceRecoveryVersionId) for (const jid of t.backendJobIds) this.engine.cancel(id, jid);
         if (t.deliveryId && t.targetProfile) {
           const index = w.deliveries.findIndex(d => d.id === t.deliveryId);
           if (index >= 0) {
@@ -540,7 +886,7 @@ export class GraphicsEngine {
             }
           }
         }
-        t.status = "cancelled"; t.message = t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId || t.surfaceRecoveryVersionId ? '로컬 처리를 중지했습니다. 기존 API 결과는 유지합니다.' : "사용자가 중지했습니다. 이미 제출한 원격 작업의 과금 취소를 뜻하지는 않습니다."; t.updatedAt = now();
+        t.status = "cancelled"; t.message = t.partSpaceRecoveryVersionId || t.partSourceRecoveryVersionId || t.surfaceRecoveryVersionId || t.taskId.startsWith('LOCAL_PLANAR_') ? '로컬 처리를 중지했습니다. 기존 API 결과는 유지합니다.' : "사용자가 중지했습니다. 이미 제출한 원격 작업의 과금 취소를 뜻하지는 않습니다."; t.updatedAt = now();
         return this.save(w);
       }
       case "import": throw Error("앱 파일 선택 창을 사용하세요.");
@@ -619,7 +965,7 @@ export class GraphicsEngine {
   }
   private async requireTextureSurface(id: string, source: AssetVersion, signal: AbortSignal) {
     // Inspect the same first native file selected by apiQuote, not a different preview.
-    const file = source.files.find(file => /\.(fbx|glb|obj|stl)$/i.test(file.path));
+    const file = source.files.find(file => isGraphicsProductionFile(file) && /\.(fbx|glb|obj|stl)$/i.test(file.path));
     if (!file) throw Error('텍스처 입력에는 FBX/GLB/OBJ/STL 원본이 필요합니다.');
     this.verified(id, file);
     const result = await (this.options.inspectSurface ?? inspectGraphicsSurface)({
@@ -630,6 +976,7 @@ export class GraphicsEngine {
     if (!result.report.ready) throw Error(`텍스처 준비 불가 · ${source.label}: ${result.report.reason} UV 작업 결과를 확인·채택한 뒤 텍스처를 준비하세요. 업로드·유료 제출은 하지 않았습니다.`);
   }
   private async prepare(id: string, objectId: string, taskId: string) {
+    if(taskId==='LOCAL_PLANAR_INSPECT'||taskId==='LOCAL_PLANAR_REPAIR')throw Error('로컬 평면 작업은 모델의 경계 검사 화면에서 명시적으로 선택하세요.');
     const key = `${id}:${objectId}`;
     if (this.preparing.has(key)) throw Error('같은 오브젝트의 입력을 확인 중입니다. 잠시 기다려 주세요.');
     this.preparing.add(key);
@@ -651,6 +998,9 @@ export class GraphicsEngine {
     if (graphicsProceduralTasks.has(taskId)) { const problem = proceduralProblem({ ...o.settings, count: 1 }, taskId); if (problem) throw Error(problem); }
     if (w.tasks.some(t => t.objectId === o.id && ["awaiting_approval", "running", "submission_unknown"].includes(t.status))) throw Error("이 대상의 기존 작업을 확인하거나 취소한 뒤 새 작업을 준비하세요.");
     const inputs = this.inputs(w, o, taskId);
+    if(taskId==='A05')this.assertA05Rig(o,w,inputs);
+    const inputSupportProblem = graphicsInputSupportProblem(taskId, inputs, o.kind);
+    if (inputSupportProblem) throw Error(inputSupportProblem);
     if (inputs.some(version => requiresPartSpaceRestoration(w, version))) throw Error('API 파트 결과의 원래 크기·위치 복원을 먼저 완료하세요. 원본은 유지됩니다.');
     if (inputs.some(version => requiresPartSourcePreparation(w, version))) throw Error('API 파트 원본의 로컬 작업 사본 준비를 먼저 완료하세요. 원본은 유지됩니다.');
     if (['M06', 'M09'].includes(taskId) && o.settings.meshSelectionVersionId !== undefined && inputs[0]?.id !== o.settings.meshSelectionVersionId)
@@ -694,6 +1044,7 @@ export class GraphicsEngine {
     const t: GraphicsTask = { ...snapshot, id: uid(), createdAt: now(), updatedAt: now(), status: "awaiting_approval", requestHash: hash(JSON.stringify(snapshot)), outputVersionIds: [], backendJobIds: [], localOnly: definition.executor === "local", message: "요청을 저장했습니다. 실행 전까지 작업자·유료 서비스 호출은 없습니다." };
     if (taskId === 'M08' && t.settings.assemblyPlacement === 'keep') t.localOnly = true;
     t.objectSnapshot = { name: o.name, kind: o.kind, references: structuredClone(o.references), accepted: structuredClone(o.accepted), ...(o.creation ? { creation: structuredClone(o.creation) } : {}) };
+    if(taskId==='X04')t.unityRigContract=this.x04RigContract(id,w,o,inputs,t);
     if (taskId === "X05") { t.targetProfile = structuredClone(w.target); t.unityClipSettings = freezeUnityClipSettings(w, inputs); t.unityRigContract = freezeUnityRigContract(w, inputs); }
     t.requestHash = hash(JSON.stringify({ ...snapshot, object: t.objectSnapshot, target: t.targetProfile, ...(t.unityClipSettings ? { unityClipSettings: t.unityClipSettings } : {}), ...(t.unityRigContract ? { unityRigContract: t.unityRigContract } : {}) }));
     if (API.has(taskId)) {
@@ -708,7 +1059,7 @@ export class GraphicsEngine {
   private apiQuote(w: GraphicsWorkspace, o: GraphicsObject, t: GraphicsTask, inputs: AssetVersion[]): Quote {
     const p = this.store.project(w.projectId);
     const alias = (v: AssetVersion, isImage: boolean) => {
-      const f = v.files.find(f => (isImage ? image : /\.(fbx|glb|obj|stl)$/i).test(f.path));
+      const f = v.files.find(f => isGraphicsProductionFile(f) && (isImage ? image : /\.(fbx|glb|obj|stl)$/i).test(f.path));
       if (!f) throw Error(isImage ? "원본 이미지가 필요합니다." : "API 입력에는 FBX/GLB/OBJ/STL 원본이 필요합니다. 먼저 형식 내보내기를 실행하세요.");
       this.verified(w.projectId, f);
       let a = p.assets.find(a => a.id === `graphics-${v.id}`);
@@ -748,7 +1099,9 @@ export class GraphicsEngine {
     if (!t || t.status !== "awaiting_approval") throw Error("승인 대기 중인 요청이 아닙니다.");
     if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error("다른 제작이 진행 중입니다. 완료 후 실행하세요.");
     const o = { ...this.object(w, t.objectId), ...t.objectSnapshot }, inputs = t.inputVersionIds.map(vid => w.versions.find(v => v.id === vid)!);
-    for (const v of inputs) { if (!v) throw Error("고정 입력 버전이 없습니다."); for (const f of v.files) this.verified(id, f); }
+    for (const v of inputs) { if (!v) throw Error("고정 입력 버전이 없습니다."); this.assertImportedSource(v); for (const f of v.files) this.verified(id, f); }
+    if(t.taskId==='A05')this.assertA05Rig(o,w,inputs);
+    if(t.taskId==='X04'&&JSON.stringify(this.x04RigContract(id,w,o,inputs,t))!==JSON.stringify(t.unityRigContract))throw Error('파일 내보내기의 고정 리그 계약이 다릅니다. 새 작업으로 다시 준비하세요.');
     if (t.taskId === "X05") {
       if (!t.objectSnapshot?.accepted) throw Error("이전 Unity 요청에 채택 버전의 고정 기록이 없습니다. 기존 요청을 취소하고 전달을 다시 준비하세요.");
       const issues = getGraphicsCompatibility(o, w.versions);
@@ -775,7 +1128,7 @@ export class GraphicsEngine {
           w = latest; t = current;
         }
         if (['T01', 'T03'].includes(t.taskId) && t.settings.partId) {
-          const source = inputs[0], sourceFile = source?.files.find(file => /\.fbx$/i.test(file.path));
+          const source = inputs[0], sourceFile = source?.files.find(file => isGraphicsProductionFile(file) && /\.fbx$/i.test(file.path));
           if (!sourceFile || source.slot !== `part-${t.settings.partId}`) throw Error('파트 UV·텍스처에는 같은 파트의 원본 FBX와 식별자가 필요합니다. 업로드·제출하지 않았습니다.');
           if (requiresPartSourcePreparation(w, source) || requiresPartSpaceRestoration(w, source)) throw Error('파트 작업 사본·크기 복원을 먼저 완료하세요. 업로드·제출하지 않았습니다.');
           t.message = '유료 제출 전 파트 원본·식별자·복구 가능 구조를 로컬에서 검사합니다.'; this.save(w);
@@ -866,9 +1219,13 @@ export class GraphicsEngine {
   private async execute(id: string, taskId: string, signal: AbortSignal, recoveryOnly = false) {
     let w = this.get(id); const t = w.tasks.find(t => t.id === taskId)!;
     const o = { ...this.object(w, t.objectId), ...t.objectSnapshot }, inputs = t.inputVersionIds.map(vid => w.versions.find(v => v.id === vid)!);
+    if(!recoveryOnly)for(const version of inputs)this.assertImportedSource(version);
+    if(t.taskId==='A05'&&!recoveryOnly)this.assertA05Rig(o,w,inputs);
+    if(t.taskId==='X04'&&!recoveryOnly&&JSON.stringify(this.x04RigContract(id,w,o,inputs,t))!==JSON.stringify(t.unityRigContract))throw Error('파일 내보내기의 고정 리그 계약이 다릅니다.');
     if (t.taskId === "X05") {
       if (!t.targetProfile) throw Error("고정된 Unity 프로젝트 설정이 없습니다.");
-      const delivery = await this.unity({ projectRoot: this.store.directory(id), object: { ...o, settings: t.settings }, versions: inputs, clipSettings: t.unityClipSettings, rigContract: t.unityRigContract, profile: t.targetProfile, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal });
+      const saved=t.deliveryId?w.deliveries.find(d=>d.id===t.deliveryId):undefined;
+      const delivery = recoveryOnly&&saved?inspectUnityDelivery(t.targetProfile.projectPath,saved):await this.unity({ projectRoot: this.store.directory(id), object: { ...o, settings: t.settings }, versions: inputs, clipSettings: t.unityClipSettings, rigContract: t.unityRigContract, profile: t.targetProfile, blenderPath: this.store.settings.blenderPath, resources: this.options.resources, signal, recoveryOnly, ...(!recoveryOnly?{approvedTaskId:t.id}:{}) });
       w = this.get(id); if (signal.aborted) return;
       const priorIndex = w.deliveries.findIndex(d => d.id === delivery.id);
       if (priorIndex < 0) w.deliveries.push(delivery); else w.deliveries[priorIndex] = delivery;
@@ -893,6 +1250,7 @@ export class GraphicsEngine {
         onProgress: message => { const latest = this.get(id), task = latest.tasks.find(x => x.id === taskId)!; if (task.status === "running" && !task.runtimeApproval) { task.message = `${executions.length > 1 ? `후보 ${candidateIndex + 1}/${executions.length} · ` : ''}${message}`; task.updatedAt = now(); this.save(latest); } } });
       if (signal.aborted) return;
       w = this.get(id); const current = w.tasks.find(x => x.id === taskId)!;
+      if(t.taskId==='X04'&&t.unityRigContract?.exportPolicy==='auto-rig-fbx'&&!result.autoRigSourceVersionId)throw Error('자동 리그 내보내기 결과의 검증된 출처가 없습니다.');
       const files = result.files.map(f => this.file(id, f.path, f.kind));
       const groups = result.candidates ?? (["I01", "I02", "I03", "I05", "I06", "I07", "I08"].includes(t.taskId)
         ? files.filter(f => image.test(f.path)).map(f => ({ files: [f], role: result.role, slot: result.slot, label: result.imageCandidates?.find(c => c.path === f.path)?.label ?? result.label, warnings: result.warnings }))
@@ -909,10 +1267,16 @@ export class GraphicsEngine {
               contact.phase === 'reconstruct' && (t.settings.contactTopologyReconstructionConfirmed !== true || t.settings['lock.topology'] !== false))
             throw Error('접합 결과가 고정한 요청·원본·파트와 다릅니다. 기존 채택은 유지됩니다.');
         }
-        return { id: uid(), objectId: o.id, role: group.role, slot: t.settings.partId && ['design','model','material'].includes(group.role) ? `part-${t.settings.partId}` : group.slot,
+        const candidate:AssetVersion={ id: uid(), objectId: o.id, role: group.role, slot: t.settings.partId && ['design','model','material'].includes(group.role) ? `part-${t.settings.partId}` : group.slot,
           label: `${group.label}${executions.length > 1 ? ` · 후보 ${candidateIndex + 1}` : ''}`, files: verified, createdAt: now(), sourceVersionIds: t.inputVersionIds,
           provenance: { type: t.localOnly ? "local" : graphicsVideoTasks.has(t.taskId) ? "runway" : "codex", jobId: child.id },
           preview: group.role === "motion-reference" ? verified.find(f => /\.(mp4|webm)$/i.test(f.path))?.path : verified.find(f => image.test(f.path))?.path, warnings: group.warnings, ...(contact ? { contact } : {}) };
+        if(result.autoRigSourceVersionId){
+          const parent=inputs.length===1&&inputs[0].id===result.autoRigSourceVersionId?inputs[0]:undefined;
+          if(t.taskId!=='X04'||groups.length!==1||!parent?.autoRig)throw Error('자동 리그 복사본의 고정 원본이 다릅니다.');
+          this.validateAutoRigCandidate(id,w,parent);candidate.autoRig=this.autoRigCopyMetadata(id,parent,candidate,t);
+        }
+        return candidate;
       });
       if (t.settings.contactPhase && !versions.some(version => version.contact)) throw Error('접합 검토 결과가 누락됐습니다. 기존 원본·채택은 유지됩니다.');
       if (t.settings.contactPhase === 'reconstruct') {
@@ -1023,7 +1387,7 @@ export class GraphicsEngine {
     if (this.isActive(id) || this.options.legacyActive?.(id) || this.engine.isProjectActive(id)) throw Error('다른 제작이 실행 중입니다.');
     const existing = w.versions.find(version => version.partSource?.providerVersionId === provider.id);
     if (existing) { for (const file of existing.files) this.verified(id, file); return w; }
-    const source = provider.files.find(file => /\.fbx$/i.test(file.path));
+    const source = provider.files.find(file => isGraphicsProductionFile(file) && /\.fbx$/i.test(file.path));
     if (!source) throw Error('파트 작업 사본에는 원본 FBX가 필요합니다.');
     for (const file of provider.files) this.verified(id, file);
     const controller = new AbortController(); this.active.set(task.id, { projectId: id, controller });
@@ -1068,8 +1432,9 @@ export class GraphicsEngine {
     if (existing) { for (const file of existing.files) this.verified(id, file); return w; }
     const source = w.versions.find(version => version.id === task.inputVersionIds[0]);
     if (!source || source.objectId !== provider.objectId || source.slot !== provider.slot || !provider.provenance.jobId) throw Error('API 파트의 고정 입력 연결이 없습니다.');
-    const sourceFile = source.files.find(file => /\.fbx$/i.test(file.path));
-    const providerFile = provider.files.find(file => /\.fbx$/i.test(file.path));
+    this.assertImportedSource(source); this.assertImportedSource(provider);
+    const sourceFile = source.files.find(file => isGraphicsProductionFile(file) && /\.fbx$/i.test(file.path));
+    const providerFile = provider.files.find(file => isGraphicsProductionFile(file) && /\.fbx$/i.test(file.path));
     if (!sourceFile || !providerFile) throw Error('크기·위치 복원에는 입력과 결과의 원본 FBX가 필요합니다.');
     for (const version of [source, provider]) for (const file of version.files) this.verified(id, file);
     const controller = new AbortController();
@@ -1109,6 +1474,35 @@ export class GraphicsEngine {
     }).finally(() => { this.active.delete(task.id); });
     return this.get(id);
   }
+  private planar(id:string,versionId:string,selection?:PlanarSelection,recovery?:GraphicsTask) {
+    if(recovery&&recovery.settings.algorithmVersion!==CURRENT_PLANAR_ALGORITHM)throw Error('이전 평면 작업은 새 알고리즘으로 재실행하지 않습니다. 이미 저장된 완료 후보는 유지됩니다. 새 복구는 명시적으로 다시 검사하세요.');
+    const w=this.get(id),source=w.versions.find(v=>v.id===versionId);
+    if(!source || source.role!=='model')throw Error('검사할 정적 모델을 선택하세요.');
+    if(!recovery)this.assertImportedSource(source);
+    const file=source.files.find(f=>isGraphicsProductionFile(f)&&/\.blend$/i.test(f.path))??source.files.find(f=>isGraphicsProductionFile(f)&&/\.fbx$/i.test(f.path));
+    if(!file)throw Error('검사에는 BLEND 또는 FBX 원본이 필요합니다.');
+    for(const f of source.files)this.verified(id,f);
+    const sourceCompanions=planarCompanions(source.files);
+    if(recovery && sourceCompanions.length && recovery.settings.sourceCompanionsJson!==JSON.stringify(sourceCompanions))throw Error('동반 이미지가 고정된 작업과 다릅니다. 명시적으로 다시 검사하세요.');
+    const inspection=recovery?.planarInspection??(recovery&&selection?undefined:w.planarInspections?.[versionId]);
+    if(recovery&&recovery.settings.sourceSha256!==file.sha256)throw Error('중단된 로컬 작업의 고정 원본이 변경됐습니다.');
+    if(selection){if(sourceCompanions.length && (inspection?.sourceManifestVersion!==1 || JSON.stringify(inspection?.sourceCompanions??[])!==JSON.stringify(sourceCompanions)))throw Error('동반 이미지의 명시적 재검사가 필요합니다.');if(!inspection||inspection.sourceSha256!==file.sha256)throw Error('현재 원본의 경계 검사가 필요합니다.');validatePlanarSelection(inspection,selection);if(!inspection.reportFile)throw Error('저장된 경계 검사 파일이 없습니다.');this.verified(id,inspection.reportFile);const stored=JSON.parse(fs.readFileSync(this.store.file(id,inspection.reportFile.path),'utf8'));if(JSON.stringify(stored)!==JSON.stringify(Object.fromEntries(Object.entries(inspection).filter(([k])=>k!=='reportFile'))))throw Error('경계 검사 기록이 달라졌습니다.');}
+    const frozen=selection?{versionId,inspectionId:selection.inspectionId,meshId:selection.meshId,selectedBoundaryIds:[...selection.selectedBoundaryIds],keptBoundaryIds:[...selection.keptBoundaryIds],materialPolicy:selection.materialPolicy}:undefined;
+    const requestHash=hash(JSON.stringify({source:versionId,sha:file.sha256,...(sourceCompanions.length?{sourceCompanions,sourceManifestVersion:1}:{}),selection:frozen??null,inspectionReportSha256:inspection?.reportFile?.sha256??null,inspectionIdentity:inspection?.identity??null,algorithmVersion:inspection?.algorithmVersion??CURRENT_PLANAR_ALGORITHM}));
+    const prior=w.tasks.find(t=>t.taskId==='LOCAL_PLANAR_REPAIR'&&t.requestHash===requestHash);
+    if(prior&&!recovery)return w;
+    if(this.isActive(id)||this.options.legacyActive?.(id)||this.engine.isProjectActive(id))throw Error('다른 제작이 실행 중입니다.');
+    const task=(recovery?w.tasks.find(t=>t.id===recovery.id):undefined)??{id:uid(),objectId:source.objectId,taskId:selection?'LOCAL_PLANAR_REPAIR':'LOCAL_PLANAR_INSPECT',createdAt:now(),updatedAt:now(),status:'running' as const,inputVersionIds:[versionId],settings:{algorithmVersion:CURRENT_PLANAR_ALGORITHM,sourceSha256:file.sha256,...(sourceCompanions.length?{sourceCompanionsJson:JSON.stringify(sourceCompanions),sourceManifestVersion:1}:{})},instruction:'명시적으로 선택한 정적 평면 경계만 로컬 검사·보완',requestHash,outputVersionIds:[],backendJobIds:[],message:'로컬 검사 준비 · GPT 0 · 유료 제출 0',localOnly:true,...(frozen?{planarSelection:frozen,planarInspection:structuredClone(inspection!)}:{})};
+    if(!recovery)w.tasks.push(task);task.status='running';task.updatedAt=now();this.save(w);
+    const controller=new AbortController();this.active.set(task.id,{projectId:id,controller});
+    void(this.options.planar??runGraphicsPlanar)({projectRoot:this.store.directory(id),source:file,...(sourceCompanions.length?{sourceCompanions}:{}),sourceVersionId:versionId,resources:this.options.resources,blenderPath:this.store.settings.blenderPath,signal:controller.signal,mode:selection?'repair':'inspect',inspectionAttempt:selection?undefined:task.id,selection:frozen,inspection:selection?inspection:undefined,recoveryOnly:!!recovery,onProgress:message=>{if(controller.signal.aborted)return;const current=this.get(id),t=current.tasks.find(t=>t.id===task.id);if(t?.status==='running'){t.message=message;t.updatedAt=now();this.save(current);}}}).then(result=>{
+      controller.signal.throwIfAborted();const current=this.get(id),t=current.tasks.find(t=>t.id===task.id)!;if(t.status!=='running')throw Error('로컬 검사 상태가 변경됐습니다.');for(const f of source.files)this.verified(id,f);for(const f of result.files)this.verified(id,f);
+      validatePlanarReport(result.report,{projectRoot:this.store.directory(id),source:file,...(sourceCompanions.length?{sourceCompanions}:{}),sourceVersionId:versionId,resources:this.options.resources,blenderPath:this.store.settings.blenderPath,signal:controller.signal,mode:selection?'repair':'inspect',selection:frozen},result.report.identity);const reportFile=result.files.find(f=>f.kind==='report');if(!reportFile||result.report.passed!==true||result.report.sourceVersionId!==versionId||result.report.sourceSha256!==file.sha256||result.report.localOnly!==true||result.report.modelTurns!==0||result.report.paidSubmissions!==0||JSON.stringify(JSON.parse(fs.readFileSync(this.store.file(id,reportFile.path),'utf8')))!==JSON.stringify(result.report))throw Error('고정된 로컬 결과 기록이 다릅니다.');
+      if(!selection){current.planarInspections??={};current.planarInspections[versionId]={...result.report,reportFile} as PlanarInspection;t.message='경계 검사 완료 · 검사 기록은 채택할 모델이 아닙니다.';}
+      else{if(!['.blend','.fbx','.glb'].every(ext=>result.files.some(f=>f.path.endsWith(ext))))throw Error('완전한 보완 파일이 없습니다.');const v:AssetVersion={id:uid(),objectId:source.objectId,role:source.role,slot:source.slot,label:source.label+' · 평면 경계 보완',files:result.files,createdAt:now(),sourceVersionIds:[versionId],provenance:{type:'local'},warnings:result.report.warnings??[],planarRepair:{schemaVersion:1,...frozen!,sourceSha256:file.sha256,identity:result.report.identity,algorithmVersion:CURRENT_PLANAR_ALGORITHM,reportPath:reportFile.path}};current.versions.push(v);t.outputVersionIds.push(v.id);t.message='선택한 경계 보완 완료 · 원본은 보존됩니다. 결과를 검토하고 채택하세요.';}
+      t.status='review';t.updatedAt=now();this.save(current);
+    }).catch(error=>{const current=this.get(id),t=current.tasks.find(t=>t.id===task.id);if(t&&t.status!=='cancelled'){t.status='failed';t.message='로컬 보완 보류 · '+(error instanceof Error?error.message:String(error));t.updatedAt=now();this.save(current);}}).finally(()=>this.active.delete(task.id));return this.get(id);
+  }
   private repairSurface(id: string, versionId: string) {
     const w = this.get(id), provider = w.versions.find(version => version.id === versionId);
     const lineage = provider && surfaceRepairSources(w, provider);
@@ -1120,7 +1514,8 @@ export class GraphicsEngine {
     if (existing) { for (const file of existing.files) this.verified(id, file); return w; }
     const { repair, original } = lineage;
     const versions = [provider, repair, original];
-    const files = versions.map(version => version.files.find(file => /\.fbx$/i.test(file.path)));
+    for(const version of versions)this.assertImportedSource(version);
+    const files = versions.map(version => version.files.find(file => isGraphicsProductionFile(file) && /\.fbx$/i.test(file.path)));
     if (files.some(file => !file)) throw Error('기존 재질 복구에는 텍스처·보완·보완 전 원본의 FBX가 필요합니다.');
     for (const version of versions) for (const file of version.files) this.verified(id, file);
     const controller = new AbortController();
@@ -1172,7 +1567,9 @@ export class GraphicsEngine {
   }
   async recover(id: string, taskId: string) {
     const w = this.get(id), t = w.tasks.find(t => t.id === taskId);
-    if (!t || !["failed", "submission_unknown"].includes(t.status)) throw Error("복구할 중단 작업이 없습니다.");
+    if (!t || !["failed", "submission_unknown", ...(t.taskId.startsWith("LOCAL_PLANAR_") ? ["cancelled"] : [])].includes(t.status)) throw Error("복구할 중단 작업이 없습니다.");
+    if(t.taskId==='LOCAL_PLANAR_INSPECT')return this.planar(id,t.inputVersionIds[0],undefined,t);
+    if (t.planarSelection) return this.planar(id,t.planarSelection.versionId,t.planarSelection,t);
     if (t.contactProcedureRecoveryRequested) return this.recoverContactProcedure(id, taskId);
     if (t.partSpaceRecoveryVersionId) return this.restorePartSpace(id, t.partSpaceRecoveryVersionId);
     if (t.partSourceRecoveryVersionId) return this.preparePartSource(id, t.partSourceRecoveryVersionId);
@@ -1255,7 +1652,7 @@ export class GraphicsEngine {
                 throw Error("API 결과의 입력 연결이 고정한 버전과 다릅니다.");
               for (const [index, sourceId] of sourceIds.entries()) {
                 const alias = p.assets.find(asset => asset.id === sourceId);
-                const original = inputs[index]!.files.find(file => (["M01", "M02"].includes(t.taskId) || t.taskId === "T03" && index > 0 ? image : /\.(fbx|glb|obj|stl)$/i).test(file.path));
+                const original = inputs[index]!.files.find(file => isGraphicsProductionFile(file) && (["M01", "M02"].includes(t.taskId) || t.taskId === "T03" && index > 0 ? image : /\.(fbx|glb|obj|stl)$/i).test(file.path));
                 if (!alias || !original || alias.file !== original.path || (alias.nativeFile ?? alias.file) !== original.path)
                   throw Error("API 업로드 원본과 고정한 입력 파일이 다릅니다.");
               }

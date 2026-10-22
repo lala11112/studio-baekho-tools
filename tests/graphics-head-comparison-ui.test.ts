@@ -1,3 +1,4 @@
+import { revealGraphicsControl } from './graphics-ui-disclosures';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultCreation, setHumanPartsCreation } from '../shared/graphics-creation';
@@ -36,11 +37,14 @@ test('image and model adoption are beside previews; head comparison shares displ
   try {
     const page = await app.firstWindow(), errors: string[] = []; page.on('pageerror', error => errors.push(error.message)); page.setDefaultTimeout(15000);
     const second = page.getByTestId('graphics-candidate-image-2');
+    await revealGraphicsControl(page.getByTestId('graphics-version-image-1'));
+    await page.getByTestId('graphics-version-image-1').click();
     await second.waitFor();
-    assert.equal(await second.getByRole('button', { name: '이 이미지 채택', exact: true }).isVisible(), true);
+    assert.equal(await second.getByRole('button', { name: '이 이미지 사용 · 다음 설정', exact: true }).isVisible(), true);
     await second.getByTestId('graphics-accept-image-image-2').click();
-    assert.equal(await second.getByRole('button', { name: '채택한 이미지', exact: true }).isDisabled(), true);
+    await page.waitForFunction(() => (window as any).workspace.objects[0].accepted['design:part-head'] === 'image-2');
     assert.deepEqual(await page.evaluate(() => (window as any).actions), [{ kind: 'accept', objectId: 'human', versionId: 'image-2' }]);
+    await revealGraphicsControl(page.getByTestId('graphics-version-new'));
     await page.getByTestId('graphics-version-new').click();
     assert.equal(await page.getByTestId('graphics-accept-preview').innerText(), '이 모델 채택');
     await page.getByTestId('graphics-compare-heads').click();
@@ -64,6 +68,10 @@ test('image and model adoption are beside previews; head comparison shares displ
     assert.match(await page.getByTestId('head-comparison-status-new').innerText(), /이 화면에서 검토 표시함[\s\S]*미채택/);
     assert.equal(await page.evaluate(() => (window as any).actions.length), 1);
     await page.getByTestId('graphics-accept-preview').click();
+    await revealGraphicsControl(page.getByTestId('graphics-version-new'));
+    await page.getByTestId('graphics-version-new').click();
+    await page.getByTestId('graphics-compare-heads').click();
+    await compare.waitFor();
     assert.equal(await compare.getByLabel('머리 비교 기준 버전').inputValue(), 'old');
     assert.match(await page.getByTestId('head-comparison-status-new').innerText(), /현재 채택 버전/);
     assert.equal(await page.getByTestId('graphics-accept-preview').isDisabled(), true);

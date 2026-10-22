@@ -11,7 +11,7 @@ const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJA
 const output = resolve('.local/variants-smoke');
 const userData = resolve('.local/variants-smoke-user', `run-${Date.now()}`);
 await mkdir(output, { recursive: true }); await mkdir(userData, { recursive: true });
-const original = parseProjectFile({ formatVersion: 1, map: createDemoMap(), settings: { ...DEFAULT_SETTINGS, designer: { ...DEFAULT_DESIGNER } },
+const original = parseProjectFile({ formatVersion: 1, map: createDemoMap(), settings: { ...DEFAULT_SETTINGS, conceptMode: 'manual', prompt: '기둥 사이를 오갈 수 있는 넓은 고대 전투방', designer: { ...DEFAULT_DESIGNER } },
   bindings: [{ id: 'floor', label: '바닥', role: 'floor', prefabGuid: '1'.repeat(32), prefabPath: 'Assets/Floor.prefab', scale: { x: 2, y: .6, z: 2 }, offset: { x: .1, y: .2, z: 0 }, rotationY: 90 },
     { id: 'light', label: '천장 형광등', role: 'light', lightAnchor: 'ceiling', prefabGuid: '2'.repeat(32), prefabPath: 'Assets/Light.prefab', scale: { x: 1, y: 1, z: 1 }, offset: { x: 0, y: -.1, z: 0 }, rotationY: 0 }] });
 const maps = Array.from({ length: 3 }, (_, index) => {
@@ -94,6 +94,9 @@ try {
   await cards().nth(0).locator('[data-v-view="image"]').click(); await page.locator('.variant-detail-image').waitFor();
   await idle();
   assert.equal(await cards().count(), 3); assert.equal(await page.locator('.variant-card .status-ready').count(), 3);
+  assert.equal(await page.locator('.variant-card .variant-concept').count(), 3);
+  assert.match(await page.locator('.variant-concept-full').innerText(), /직접 입력/);
+  assert.match(await page.locator('.variant-concept-full').innerText(), new RegExp(original.settings.prompt));
   assert.equal(await select(0).isChecked(), true); assert.equal(await select(1).isChecked(), false); assert.equal(await select(2).isChecked(), false);
   assert.deepEqual(await callList(), ['image0', 'extract0', 'image1', 'extract1', 'image2', 'extract2']);
   assert.equal(await app.evaluate(() => new Set(globalThis.variantsSmoke.prompts).size), 3);
@@ -110,7 +113,7 @@ try {
   assert.equal(entries.length, 2); assert.ok(zip['README.txt']);
   const chosen = entries.map(name => parseProjectFile(JSON.parse(strFromU8(zip[name]))));
   assert.deepEqual(chosen.map(project => project.map.name), ['1번 후보 - 구조 1', '3번 후보 - 구조 3']);
-  for (const project of chosen) { assert.deepEqual(project.bindings, original.bindings); assert.deepEqual(project.settings, original.settings); assert.equal(project.blueprintDataUrl, PNG); }
+  for (const project of chosen) { assert.deepEqual(project.bindings, original.bindings); assert.deepEqual(project.settings, original.settings); assert.equal(project.blueprintDataUrl, PNG); assert.deepEqual(project.concept, { source: 'manual', text: original.settings.prompt }); }
 
   console.log('variants smoke: detail controls, apply/Undo and native reopening');
   await cards().nth(2).locator('[data-v-view="3d"]').click();

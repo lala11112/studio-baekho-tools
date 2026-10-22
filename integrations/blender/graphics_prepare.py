@@ -218,11 +218,21 @@ def material_binding(material):
                 raise UnsupportedMaterial('Normal requires an unmodified tangent-space Normal Map node')
             if normal.uv_map and any(len(o.data.uv_layers)!=1 or o.data.uv_layers[0].name!=normal.uv_map for o in meshes if material in o.data.materials[:]):
                 raise UnsupportedMaterial('Normal Map UV name does not match the single exported UV map')
-            normal_image = image_input(normal.inputs['Color'],'Non-Color')
-            record['normalTexture'] = image_files[normal_image.name]['path']
             record['normalScale'] = float(normal.inputs['Strength'].default_value)
             if not math.isfinite(record['normalScale']) or not 0<=record['normalScale']<=8:
                 raise UnsupportedMaterial('Normal strength is outside the supported 0..8 range')
+            if normal.inputs['Color'].is_linked:
+                normal_image = image_input(normal.inputs['Color'],'Non-Color')
+                record['normalTexture'] = image_files[normal_image.name]['path']
+            else:
+                # Blender's FBX importer leaves a connected Normal Map node even
+                # when the FBX has no normal texture. Its constant tangent-space
+                # (0.5, 0.5, 1) is exactly the unperturbed surface normal; do not
+                # discard the independently valid base-color image in that case.
+                color = list(normal.inputs['Color'].default_value)
+                if len(color)!=4 or any(not math.isfinite(v) or v!=expected for v,expected in zip(color,[0.5,0.5,1.0,1.0])):
+                    raise UnsupportedMaterial('Unlinked Normal Map color must be the neutral tangent normal')
+                record['normalSource'] = {'kind':'neutral-tangent','color':color,'strength':record['normalScale']}
         metallic,roughness = scalar_input(inputs['Metallic']),scalar_input(inputs['Roughness'])
         if record['normalTexture'] and any('image' in value and image_files[value['image'].name]['path']==record['normalTexture'] for value in (metallic,roughness)):
             raise UnsupportedMaterial('One texture used as both normal and scalar data needs distinct Unity importer assets')
@@ -262,7 +272,7 @@ structure = {'meshes': sorted([signature(o) for o in meshes], key=lambda m:m['na
                        for rig in rigs for b in rig.data.bones]}
 if q.get('rigContract', {}).get('rigType') == 'humanoid':
     from graphics_humanoid import inspect_humanoid
-    rig_evidence = inspect_humanoid(q['rigContract'])
+    rig_evidence = inspect_humanoid(q['rigContract'], imported_auto_rig_fbx=suffix == '.fbx' and q['rigContract'].get('exportPolicy') == 'auto-rig-fbx')
     rig_evidence['sourceSha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
     (out/'rig.json').write_text(json.dumps(rig_evidence, ensure_ascii=False), encoding='utf8')
 clips = sorted(a.name for a in bpy.data.actions if a.frame_range[1] > a.frame_range[0])
@@ -316,7 +326,25 @@ if optimization.get('collider') in {'mesh','convex'} and rigs:
     raise RuntimeError('Mesh/convex collision delivery supports static meshes only; choose box for a rig')
 (out/'optimization.json').write_text(json.dumps({'schemaVersion':1,'settings':optimization,'lods':lods},ensure_ascii=False),encoding='utf8')
 
-if suffix == '.fbx' and not lod_enabled and not physical_size['transformed']:
+export_uv=[]
+if q.get('activeUvOnly'):
+    if rigs or clips or any(o.data.shape_keys or o.modifiers or o.constraints for o in meshes):
+        raise RuntimeError('Active-only UV delivery requires the verified static planar model')
+    for obj in meshes:
+        active=obj.data.uv_layers.active
+        if active is None:
+            raise RuntimeError('Verified planar model is missing its active delivery UV')
+        name=active.name
+        expected=[tuple(item.uv) for item in active.data]
+        # Private export data only: never save or rewrite the editable native source/layers.
+        obj.data=obj.data.copy()
+        for other in [layer.name for layer in obj.data.uv_layers]:
+            if other!=name: obj.data.uv_layers.remove(obj.data.uv_layers[other])
+        obj.data.uv_layers.active_index=0;obj.data.uv_layers[0].active_render=True
+        if expected!=[tuple(item.uv) for item in obj.data.uv_layers[0].data]:
+            raise RuntimeError('Active delivery UV changed while creating the export copy')
+        export_uv.append({'mesh':obj.name,'layer':name,'uv0MatchesActive':True,'sourceLayersPreserved':True})
+if suffix == '.fbx' and not lod_enabled and not physical_size['transformed'] and not q.get('activeUvOnly'):
     # Preserve native animation curves and original FBX bytes instead of re-encoding them.
     shutil.copyfile(source, out/'Asset.fbx')
     # FBX take names are reported by Unity rather than guessed from Blender action names.
@@ -334,4 +362,4 @@ else:
 warnings.append('Import checks do not establish visual material fidelity or animation playback quality.')
 (out/'inspection.json').write_text(json.dumps({'structure':structure,'clips':clips,
     'bones':sum(len(r.data.bones) for r in rigs),'warnings':warnings,
-    'sourceChanged':False,'animationAuthored':False,'physicalSize':physical_size},ensure_ascii=False),encoding='utf8')
+    'sourceChanged':False,'animationAuthored':False,'physicalSize':physical_size,'exportUv':export_uv},ensure_ascii=False),encoding='utf8')

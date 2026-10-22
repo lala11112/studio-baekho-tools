@@ -58,7 +58,7 @@ bpy.ops.export_scene.gltf(filepath=${JSON.stringify(originalPreview)},export_for
   assert.equal(made.status, 0, made.stdout + made.stderr);
   const sourceHash = hash(source), previewHash = hash(originalPreview);
   const version: AssetVersion = { id: 'version', objectId: 'object', role: 'animation', slot: 'Idle', label: 'fixture', createdAt: '', sourceVersionIds: [], provenance: { type: 'import' }, warnings: [], preview: 'source.glb',
-    files: [source, originalPreview].map(file => ({ path: path.basename(file), sha256: hash(file), bytes: fs.statSync(file).size, kind: path.extname(file).slice(1) })) };
+    files: [source, originalPreview].map(file => ({ path: path.basename(file), sha256: hash(file), bytes: fs.statSync(file).size, kind: file === originalPreview ? 'preview' : 'blend' })) };
   const options = { projectRoot: () => root, version: (_id: string, versionId: string) => versionId === 'version' ? version : undefined, blenderPath: () => blender, resources: () => resources };
   const manager = new NativeTopologyManager(options);
   const [result, concurrent] = await Promise.all([manager.inspect('project', 'version'), manager.inspect('project', 'version')]);
@@ -76,6 +76,12 @@ bpy.ops.export_scene.gltf(filepath=${JSON.stringify(originalPreview)},export_for
   assert.ok(seams.primitives.some(primitive => primitive.sourceVertices.length > new Set(primitive.sourceVertices).size));
   const derivative = path.join(root, result.preview.path);
   assert.equal(manager.isAllowed('project', derivative), true); assert.equal(manager.isAllowed('project', source), false);
+  version.files.push({ path: 'other.fbx', sha256: '0'.repeat(64), bytes: 0, kind: 'model' });
+  assert.equal(manager.isAllowed('project', derivative), false, 'a cached overlay cannot authorize a newly ambiguous imported source');
+  const ambiguous = await manager.inspect('project', 'version');
+  assert.equal(ambiguous.status, 'unavailable');
+  if (ambiguous.status === 'unavailable') assert.match(ambiguous.reason, /여러 3D 원본/);
+  version.files.pop();
   const longRoot = path.join(root, 'long-project-path-'.repeat(11), 'nested-project'); fs.mkdirSync(longRoot, { recursive: true });
   fs.copyFileSync(source, path.join(longRoot, 'source.blend')); fs.copyFileSync(originalPreview, path.join(longRoot, 'source.glb'));
   assert.ok(path.join(longRoot, 'source.blend').length > 260, 'fixture must exceed Windows MAX_PATH');
@@ -144,7 +150,7 @@ bpy.ops.export_scene.gltf(filepath=${JSON.stringify(glb)},export_format='GLB',us
   assert.equal(built.status, 0, built.stdout + built.stderr);
   const names = fs.readdirSync(production), hashes = names.map(name => hash(path.join(production, name)));
   const version: AssetVersion = { id: 'fbx', objectId: 'o', role: 'model', slot: 'main', label: 'FBX', createdAt: '', sourceVersionIds: [], provenance: { type: 'import' }, warnings: [], preview: 'production/source.glb',
-    files: [fbx, glb, texture].map(file => ({ path: path.relative(root, file).replaceAll('\\', '/'), bytes: fs.statSync(file).size, sha256: hash(file), kind: 'source' })) };
+    files: [fbx, glb, texture].map(file => ({ path: path.relative(root, file).replaceAll('\\', '/'), bytes: fs.statSync(file).size, sha256: hash(file), kind: file === glb ? 'preview' : 'source' })) };
   const manager = new NativeTopologyManager({ projectRoot: () => root, version: () => version, blenderPath: () => blender, resources: () => resources });
   const result = await manager.inspect('project', 'fbx');
   assert.equal(result.status, 'ready', JSON.stringify(result));

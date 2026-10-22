@@ -5,8 +5,12 @@ import json
 import math
 import pathlib
 import sys
+import unicodedata
 from mathutils import Vector
 from bpy_extras.object_utils import world_to_camera_view
+
+def image_name(value):
+    return unicodedata.normalize('NFC', str(value).replace('\\','/').rsplit('/',1)[-1]).casefold()
 
 q = json.loads(pathlib.Path(sys.argv[sys.argv.index('--') + 1]).read_text(encoding='utf8'))
 source = pathlib.Path(q['source']).resolve()
@@ -54,10 +58,12 @@ for image in bpy.data.images:
         continue
     if image.source != 'FILE':
         raise RuntimeError('Unsupported animated or external texture: ' + image.name)
+    basename = image_name(image.filepath)
+    matches = [item for item in q['files'] if image_name(item['original']) == basename]
+    if len(matches) > 1:
+        raise RuntimeError('Ambiguous registered texture filename: ' + image.name)
     current = pathlib.Path(bpy.path.abspath(image.filepath)).resolve()
     if not current.is_file() or not current.is_relative_to(input_root):
-        basename = pathlib.Path(image.filepath.replace('\\', '/')).name
-        matches = [item for item in q['files'] if pathlib.Path(item['original']).name == basename]
         if len(matches) != 1:
             missing.append(image.name)
             continue

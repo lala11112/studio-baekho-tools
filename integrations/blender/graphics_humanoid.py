@@ -4,7 +4,58 @@ import math
 from mathutils import Quaternion, Vector
 
 
-def inspect_humanoid(contract, test_pose=False):
+def external_humanoid_parents(contract):
+    mapping = contract.get('humanBones', [])
+    names = [item.get('boneName') for item in mapping]
+    humans = [item.get('humanName') for item in mapping]
+    parents = {'Spine': 'Hips', 'Chest': 'Spine', 'UpperChest': 'Chest', 'Neck': 'UpperChest' if 'UpperChest' in humans else 'Chest', 'Head': 'Neck', 'LeftEye': 'Head', 'RightEye': 'Head', 'Jaw': 'Head'}
+    required = {'Hips', 'Spine', 'Chest', 'Neck', 'Head'}
+    for side in ('Left', 'Right'):
+        torso = 'UpperChest' if 'UpperChest' in humans else 'Chest'
+        parents.update({side+'Shoulder': torso, side+'UpperArm': side+'Shoulder' if side+'Shoulder' in humans else torso, side+'LowerArm': side+'UpperArm', side+'Hand': side+'LowerArm', side+'UpperLeg': 'Hips', side+'LowerLeg': side+'UpperLeg', side+'Foot': side+'LowerLeg', side+'Toes': side+'Foot'})
+        required.update(side+part for part in ('UpperArm', 'LowerArm', 'Hand', 'UpperLeg', 'LowerLeg', 'Foot'))
+        for finger in ('Thumb', 'Index', 'Middle', 'Ring', 'Little'):
+            previous = side+'Hand'
+            for joint in ('Proximal', 'Intermediate', 'Distal'):
+                human = side+finger+joint
+                parents[human] = previous
+                previous = human
+                if contract.get('fingers'):
+                    required.add(human)
+    if contract.get('rigType') != 'humanoid' or len(names) != len(set(names)) or len(humans) != len(set(humans)) or any(not isinstance(n, str) or not n.strip() for n in names) or not required.issubset(humans) or any(h not in parents and h != 'Hips' for h in humans):
+        raise RuntimeError('Invalid explicit external Humanoid mapping')
+    by_human = dict(zip(humans, names))
+    if any(human != 'Hips' and parents[human] not in by_human for human in humans):
+        raise RuntimeError('External Humanoid optional mapping lacks its anatomical parent')
+    return {by_human[human]: by_human[parent] for human, parent in parents.items() if human in by_human and parent in by_human}
+
+
+def imported_bind_roundoff(rig, meshes):
+    """Bound FBX pre/postrotation roundoff without changing the imported pose."""
+    basis_error = max((abs(bone.matrix_basis[row][column] - (1 if row == column else 0)) for bone in rig.pose.bones for row in range(4) for column in range(4)), default=0)
+    if not math.isfinite(basis_error) or basis_error > 2e-4:
+        raise RuntimeError('Imported ARP FBX exceeds the declared bind matrix tolerance')
+    def positions():
+        deps = bpy.context.evaluated_depsgraph_get()
+        return {mesh.name: [mesh.matrix_world @ vertex.co for vertex in mesh.evaluated_get(deps).data.vertices] for mesh in meshes}
+    original = rig.data.pose_position
+    before = positions()
+    try:
+        rig.data.pose_position = 'REST'
+        bpy.context.view_layer.update()
+        after = positions()
+        if any(len(before[name]) != len(after[name]) for name in before):
+            raise RuntimeError('Imported ARP FBX changes evaluated vertex count at rest')
+        delta = max(((a-b).length for name in before for a,b in zip(before[name],after[name])), default=0)
+        if not math.isfinite(delta) or delta > 1e-5:
+            raise RuntimeError('Imported ARP FBX exceeds the declared bind vertex tolerance')
+    finally:
+        rig.data.pose_position = original
+        bpy.context.view_layer.update()
+    return {'maximumBasisError': basis_error, 'basisTolerance': 2e-4, 'maximumWorldVertexDelta': delta, 'worldVertexTolerance': 1e-5, 'posePreserved': True}
+
+
+def inspect_humanoid(contract, test_pose=False, imported_auto_rig_fbx=False):
     rigs = [obj for obj in bpy.context.scene.objects if obj.type == 'ARMATURE']
     meshes = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH']
     if len(rigs) != 1 or not meshes:
@@ -24,6 +75,17 @@ def inspect_humanoid(contract, test_pose=False):
             for finger in ('thumb', 'index', 'middle', 'ring', 'little'):
                 for index in range(1, 4):
                     parents[f'{finger}.0{index}.{side}'] = f'hand.{side}' if index == 1 else f'{finger}.0{index-1}.{side}'
+    bind_roundoff = None
+    if contract.get('schemaVersion') == 2:
+        parents = external_humanoid_parents(contract)
+        if any(not math.isfinite(value) for bone in rig.data.bones for row in bone.matrix_local for value in row):
+            raise RuntimeError('External Humanoid rest matrices must be finite')
+        if imported_auto_rig_fbx and contract.get('exportPolicy') == 'auto-rig-fbx':
+            bind_roundoff = imported_bind_roundoff(rig, meshes)
+        elif any(abs(bone.matrix_basis[row][column] - (1 if row == column else 0)) > 1e-5 for bone in rig.pose.bones for row in range(4) for column in range(4)):
+            raise RuntimeError('External Humanoid must be saved in its bind/rest pose')
+    head_name = next((item['boneName'] for item in mapping if item['humanName'] == 'Head'), 'head')
+    hips_name = next((item['boneName'] for item in mapping if item['humanName'] == 'Hips'), 'pelvis')
     for name in required:
         bone = rig.data.bones[name]
         if not bone.use_deform or bone.length < 1e-7:
@@ -31,6 +93,8 @@ def inspect_humanoid(contract, test_pose=False):
         if name in parents:
             ancestor = bone.parent
             while ancestor and ancestor.name != parents[name]:
+                if contract.get('schemaVersion') == 2 and ancestor.name in required:
+                    raise RuntimeError('External Humanoid has an unexpected mapped anatomical ancestor: ' + name)
                 ancestor = ancestor.parent
             if not ancestor:
                 raise RuntimeError('Humanoid bone hierarchy is incompatible: ' + name)
@@ -45,11 +109,17 @@ def inspect_humanoid(contract, test_pose=False):
             weights = [(deform[g.group], float(g.weight)) for g in vertex.groups if g.group in deform]
             if not weights or any(not math.isfinite(weight) or weight < 0 or weight > 1.00001 for _, weight in weights) or abs(sum(weight for _, weight in weights) - 1) > .001:
                 raise RuntimeError('Humanoid vertex has missing/invalid/non-normalized deform weights: ' + mesh.name)
-            if part_id == 'hair' and contract.get('hairBinding') == 'head' and (abs(sum(weight for name, weight in weights if name == 'head')-1) > .001 or any(name != 'head' and weight > 1e-6 for name, weight in weights)):
+            if part_id == 'hair' and contract.get('hairBinding') == 'head' and (abs(sum(weight for name, weight in weights if name == head_name)-1) > .001 or any(name != head_name and weight > 1e-6 for name, weight in weights)):
                 raise RuntimeError('Hair must follow Head with weight 1; independent hair controls were not requested')
             for name, weight in weights:
                 if name in direct and weight > 1e-6:
                     direct[name].append((mesh, vertex.index))
+                if contract.get('schemaVersion') == 2 and weight > 1e-6:
+                    ancestor = rig.data.bones[name].parent
+                    while ancestor:
+                        if ancestor.name in direct:
+                            direct[ancestor.name].append((mesh, vertex.index))
+                        ancestor = ancestor.parent
         parts.append({'meshName': mesh.name, 'meshId': mesh.get('partsmith_id', ''), 'partId': part_id,
                       'vertices': len(mesh.data.vertices), 'armatureName': rig.name, 'normalizedWeights': True})
     if not set(contract.get('requiredParts', [])).issubset({part['partId'] for part in parts}):
@@ -69,7 +139,7 @@ def inspect_humanoid(contract, test_pose=False):
                 bone.matrix_basis.identity()
             bpy.context.view_layer.update()
             baseline = coordinates()
-            for name in sorted(required - {'pelvis'}):
+            for name in sorted(required - {hips_name}):
                 if not direct[name]:
                     raise RuntimeError('Mapped joint has no direct vertex influence: ' + name)
                 bone = rig.pose.bones[name]
@@ -97,4 +167,5 @@ def inspect_humanoid(contract, test_pose=False):
                     rig.animation_data.action_slot = slot
             bpy.context.view_layer.update()
     return {'schemaVersion': 1, 'contract': contract, 'armatureName': rig.name, 'armatureCount': 1,
-            'bones': sorted(required), 'parts': sorted(parts, key=lambda part: part['meshName']), 'jointEvidence': evidence}
+            'bones': sorted(required), 'parts': sorted(parts, key=lambda part: part['meshName']), 'jointEvidence': evidence,
+            **({'importBindRoundoff': bind_roundoff} if bind_roundoff is not None else {})}

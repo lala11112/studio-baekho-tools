@@ -313,6 +313,7 @@ test("new API result registration rejects altered provenance or bytes and recove
       // Exercise the app-restart boundary: successful backend work has not yet
       // been registered as a Graphics version and must retain its original proof.
       const restarted = new GraphicsEngine(f.store, f.engine, { resources: path.resolve("integrations") });
+      t.after(() => restarted.shutdown());
       restarted.sync();
       let state = restarted.get(project.id);
       assert.equal(state.tasks[0].status, "failed"); assert.match(state.tasks[0].message, /등록 보류/);
@@ -346,7 +347,9 @@ test("valid FBX and its hash-bound local preview register together after restart
   const f = await fixture(t, true), task = await f.prepare("T01");
   await f.graphics.action(f.project.id, { kind: "approve", taskId: task.id });
   const [job] = await settled(f.store, f.project.id); f.complete(); await f.engine.poll(f.project.id, job.id);
-  const restarted = new GraphicsEngine(f.store, f.engine, { resources: path.resolve("integrations") }); restarted.sync();
+  const restarted = new GraphicsEngine(f.store, f.engine, { resources: path.resolve("integrations") });
+  t.after(() => restarted.shutdown());
+  restarted.sync();
   const state = restarted.get(f.project.id), version = state.versions.find(item => item.provenance.jobId === job.id)!;
   assert.equal(state.tasks[0].status, "review"); assert.equal(version.files.length, 3);
   assert.deepEqual(version.files.map(file => path.extname(file.path)), [".fbx", ".glb", ".json"]);

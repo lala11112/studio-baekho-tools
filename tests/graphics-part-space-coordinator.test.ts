@@ -23,6 +23,9 @@ test('part restoration is a local, repeat-safe derivative; interrupted and faile
   };
   const source: AssetVersion = { id: 'source', objectId: 'human', role: 'model', slot: 'part-head', label: 'Head', files: [makeFile('source.fbx')], createdAt: '', sourceVersionIds: [], provenance: { type: 'local' }, warnings: [] };
   const raw: AssetVersion = { ...source, id: 'provider', label: 'Head UV', files: [makeFile('provider.fbx')], sourceVersionIds: ['source'], provenance: { type: 'tripo', jobId: 'paid-job', remoteId: 'paid-remote' } };
+  // Viewport-only GLBs must not replace either side of the exact FBX restoration.
+  source.files.push({ ...makeFile('source-viewport.glb'), kind: 'preview' });
+  raw.files.push({ ...makeFile('provider-viewport.glb'), kind: 'preview' });
   const initial: GraphicsWorkspace = { schemaVersion: 1, id: project.id, projectId: project.id, revision: 0,
     objects: [{ id: 'human', name: 'Human', kind: 'character', createdAt: '', selectedTasks: [], settings: { partId: 'head' }, instruction: '', references: [], accepted: { 'model:part-head': 'source' } }],
     versions: [source, raw], tasks: [{ id: 'uv', objectId: 'human', taskId: 'T01', status: 'review', settings: { partId: 'head' }, instruction: '', createdAt: '', updatedAt: '', inputVersionIds: ['source'], outputVersionIds: ['provider'], backendJobIds: ['paid-job'], quoteId: 'old-quote', requestHash: 'unchanged', localOnly: false, message: '' }], deliveries: [] };

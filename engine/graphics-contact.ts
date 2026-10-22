@@ -1,3 +1,4 @@
+import { isGraphicsProductionFile } from '../shared/graphics';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -52,7 +53,7 @@ function select(args: GraphicsNativeArgs, root: string) {
   const analysis = phase !== 'analyze' ? args.inputs.find(v => v.id === settings.contactAnalysisVersionId) : undefined;
   if (phase === 'repair' && (settings.contactRegionsConfirmed !== true || !analysis || analysis.contact?.phase !== 'analyze' || analysis.contact.status !== 'ready' || analysis.contact.sourceVersionId !== source.id || JSON.stringify(analysis.contact.partVersionIds) !== JSON.stringify(ids) || !analysis.contact.regionsPath)) throw Error('같은 조립의 사용자가 확인한 수정 영역 분석 결과가 필요합니다.');
   if (phase === 'reconstruct' && (settings.contactTopologyReconstructionConfirmed !== true || settings['lock.topology'] !== false || settings.contactRegionsConfirmed !== undefined || !analysis || analysis.contact?.phase !== 'analyze' || analysis.contact.status !== 'blocked' || analysis.contact.sourceVersionId !== source.id || JSON.stringify(analysis.contact.partVersionIds) !== JSON.stringify(ids) || settings.contactAnalysisTaskId !== analysis.provenance.jobId)) throw Error('같은 조립의 기존 분석과 명시적인 구조 보정 요청이 필요합니다.');
-  const files: FrozenFile[] = args.inputs.flatMap(v => v.files.map(f => ({ ...f, localPath: fileAt(root, f.path), sourcePath: f.path, versionId: v.id })));
+  const files: FrozenFile[] = args.inputs.flatMap(v => v.files.filter(isGraphicsProductionFile).map(f => ({ ...f, localPath: fileAt(root, f.path), sourcePath: f.path, versionId: v.id })));
   unchanged(files);
   const native = (v: AssetVersion) => {
     const nativeFiles = files.filter(f => f.versionId === v.id && /\.blend$/i.test(f.sourcePath));

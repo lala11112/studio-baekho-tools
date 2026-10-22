@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyPropBoundsCatalog, assertWholeProps, parsePropDefinition, parsePropInstance, placeProps, propDataErrors, propPosition, propValidationIssues, propWorldSize, replacePropInstance, snapshotPropCatalog, suggestPropDefinition } from '../src/shared/props';
+import { applyImportedPropBounds, applyPropBoundsCatalog, assertWholeProps, parsePropDefinition, parsePropInstance, placeProps, preparePropBoundsImport, propDataErrors, propPosition, propValidationIssues, propWorldSize, replacePropInstance, snapshotPropCatalog, suggestPropDefinition } from '../src/shared/props';
 import { handlePropField, renderPropLibraryFields } from '../src/prop-library';
 import type { AssetBinding, GenerationSettings, GridMap, PropInstance } from '../src/shared/types';
 
@@ -33,6 +33,69 @@ test('Unity bounds import updates matching props only and preserves all other da
   assert.equal(result.updated,1);assert.deepEqual(result.bindings[0].prop?.size,{x:4,y:2,z:3});assert.deepEqual(result.bindings[1],other);assert.equal(original.prop?.size?.x,3);
   assert.throws(()=>applyPropBoundsCatalog([original],{version:1,assets:[{guid:'bad',size:{x:1,y:1,z:1}}]}));
   assert.throws(()=>applyPropBoundsCatalog([original],{version:1,assets:[{guid:'1'.repeat(32),size:{x:1,y:1,z:1}},{guid:'1'.repeat(32),size:{x:2,y:1,z:1}}]}));
+});
+
+test('bounds imported before prop registration are retained and applied when matching props are added',()=>{
+  const source={version:1,assets:[{guid:'1'.repeat(32),size:{x:4,y:2,z:3}}]};
+  const prepared=preparePropBoundsImport([],source,[{guid:'1'.repeat(32),path:'Assets/crate.prefab',name:'crate'}]);
+  assert.deepEqual(prepared.bindings,[]);assert.equal(prepared.updated,0);assert.equal(prepared.available,1);assert.equal(prepared.missing,0);
+  const original=binding();delete original.prop;
+  const added=applyImportedPropBounds(original,prepared.catalog);
+  assert.deepEqual(added.prop,{...suggestPropDefinition(original),size:{x:4,y:2,z:3}});
+  assert.equal(original.prop,undefined);
+  const decoration={...original,role:'decoration' as const};
+  assert.equal(applyImportedPropBounds(decoration,prepared.catalog).prop?.blocksMovement,false);
+  source.assets[0].size.x=99;assert.equal(prepared.catalog.assets[0].size.x,4);
+  added.prop!.size!.x=88;assert.equal(prepared.catalog.assets[0].size.x,4);
+});
+
+test('bounds preparation filters measurements by the connected project and reports missing registered props',()=>{
+  const original=binding(),unmatched={...binding('other'),prefabGuid:'2'.repeat(32)},wall={...binding('wall'),role:'wall' as const};
+  const source={version:1,assets:[{guid:'1'.repeat(32),size:{x:4,y:2,z:3}},{guid:'2'.repeat(32),size:{x:9,y:9,z:9}}]};
+  const prepared=preparePropBoundsImport([original,unmatched,wall],source,[{guid:'1'.repeat(32),path:'Assets/crate.prefab',name:'crate'}]);
+  assert.equal(prepared.updated,1);assert.equal(prepared.available,1);assert.equal(prepared.missing,1);
+  assert.deepEqual(prepared.catalog.assets,[source.assets[0]]);
+  assert.deepEqual(prepared.bindings[0].prop?.size,{x:4,y:2,z:3});
+  assert.deepEqual(prepared.bindings[1],unmatched);assert.deepEqual(prepared.bindings[2],wall);
+  assert.equal(source.assets.length,2);assert.equal(original.prop?.size?.x,3);
+  const noRegisteredMatch=preparePropBoundsImport([unmatched],source,[{guid:'1'.repeat(32),path:'Assets/crate.prefab',name:'crate'}]);
+  assert.equal(noRegisteredMatch.updated,0);assert.equal(noRegisteredMatch.available,1);assert.equal(noRegisteredMatch.missing,1);
+  assert.deepEqual(noRegisteredMatch.bindings,[unmatched]);
+});
+
+test('bounds preparation distinguishes an unscanned project from a scan with no matching prefabs',()=>{
+  const source={version:1,assets:[{guid:'1'.repeat(32),size:{x:4,y:2,z:3}}]};
+  assert.equal(preparePropBoundsImport([],source,null).available,1);
+  assert.throws(()=>preparePropBoundsImport([],source,[]),/Unity 프로젝트.*일치/);
+  assert.throws(()=>preparePropBoundsImport([],source,[{guid:'2'.repeat(32),path:'Assets/other.prefab',name:'other'}]),/같은 프로젝트/);
+  assert.throws(()=>preparePropBoundsImport([],{version:1,assets:[]},null),/측정된 프리팹이 없습니다/);
+  const original=binding(),before=structuredClone(original);
+  assert.throws(()=>preparePropBoundsImport([original],{version:1,assets:[...source.assets,{guid:'bad',size:{x:1,y:1,z:1}}]},null),/GUID/);
+  assert.deepEqual(original,before);
+});
+
+test('retained bounds match case-insensitive GUIDs and detach metadata without changing manual settings',()=>{
+  const original=binding();original.prefabGuid='A'.repeat(32);original.prop!.tags=['공장'];original.scale={x:2,y:3,z:4};original.offset={x:1,y:2,z:3};original.rotationY=90;
+  const source={version:1,assets:[{guid:'a'.repeat(32),size:{x:4,y:2,z:3}}]};
+  const prepared=preparePropBoundsImport([original],source,[{guid:'A'.repeat(32),path:original.prefabPath,name:original.label}]);
+  assert.equal(prepared.updated,1);assert.equal(prepared.missing,0);assert.equal(prepared.available,1);
+  assert.deepEqual(prepared.bindings[0],{...original,prop:{...original.prop,size:{x:4,y:2,z:3}}});
+  const added=applyImportedPropBounds(original,prepared.catalog);
+  assert.deepEqual(added,prepared.bindings[0]);
+  added.prop!.tags.push('추가');added.prop!.roomTypes.push('shop');added.scale.x=90;
+  assert.deepEqual(original.prop!.tags,['공장']);assert.deepEqual(original.prop!.roomTypes,['battle']);assert.equal(original.scale.x,2);
+  prepared.bindings[0].prop!.tags.push('준비');assert.deepEqual(original.prop!.tags,['공장']);
+  const legacy=applyPropBoundsCatalog([original],source);legacy.bindings[0].prop!.tags.push('이전');assert.deepEqual(original.prop!.tags,['공장']);
+});
+
+test('retained bounds leave other roles and missing measurements unchanged as detached bindings',()=>{
+  const original=binding(),catalog=preparePropBoundsImport([],{version:1,assets:[{guid:'1'.repeat(32),size:{x:4,y:2,z:3}}]},null).catalog;
+  const wall={...original,role:'wall' as const},unmatched={...original,prefabGuid:'2'.repeat(32)};
+  for(const candidate of [wall,unmatched]){
+    const added=applyImportedPropBounds(candidate,catalog);assert.deepEqual(added,candidate);assert.notEqual(added,candidate);
+    added.prop!.tags.push('추가');assert.deepEqual(candidate.prop!.tags,[]);
+  }
+  const withoutCatalog=applyImportedPropBounds(original,null);assert.deepEqual(withoutCatalog,original);assert.notEqual(withoutCatalog,original);
 });
 
 test('measured props occupy multiple cells without shrinking and retain a stable prefab ID',()=>{

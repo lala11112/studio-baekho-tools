@@ -24,7 +24,12 @@ test('selected projects become independent reopenable files with public light fi
     scale: { x: 2, y: 3, z: 4 }, offset: { x: .5, y: -.2, z: 1 }, rotationY: 90,
   }));
   input.generationDraft = { imageDataUrl: PNG, settings: structuredClone(DEFAULT_SETTINGS), region: { x: 1, row: 2, width: 3, height: 4 } };
+  input.concept = { source: 'ai', text: '붉은 사막 아래 묻힌 제단. 낮은 벽과 거대한 기둥이 교전 공간을 나눈다.' };
+  input.generationDraft.concept = { source: 'ai', text: '푸른 결정이 자라는 지하 제련소. 중앙 용광로 주위로 우회 공간을 둔다.' };
+  input.generationDraft.settings.prompt = `${input.generationDraft.concept.text}\n후보 배치 지시: 외곽 우회 동선을 배치한다.`;
+  input.generationDraft.preferences = { ...structuredClone(DEFAULT_SETTINGS), conceptMode: 'ai', prompt: '' };
   const second = project();
+  second.concept = { source: 'manual', text: '구름 위의 검술 훈련장' };
   second.map.elevations[2][2] = 2;
   const snapshot = structuredClone([input, second]);
   const entries = unzipSync(createProjectCollection([input, second]));
@@ -44,6 +49,11 @@ test('selected projects become independent reopenable files with public light fi
   const reopened = JSON.parse(strFromU8(entries['01-후보 맵.baekho.json'])) as ProjectFile;
   assert.deepEqual(reopened.bindings.map(binding => binding.lightAnchor), ['ceiling', 'wall']);
   assert.equal(reopened.generationDraft?.imageDataUrl, PNG);
+  assert.deepEqual(reopened.concept, input.concept);
+  assert.deepEqual(reopened.generationDraft?.concept, input.generationDraft.concept);
+  assert.equal(reopened.generationDraft?.settings.prompt, input.generationDraft.settings.prompt);
+  assert.equal(reopened.generationDraft?.preferences?.prompt, '');
+  assert.equal(reopened.generationDraft?.preferences?.conceptMode, 'ai');
   assert.equal(reopened.blueprintDataUrl, PNG);
   assert.match(strFromU8(entries['README.txt']), /열기.*\.baekho\.json/);
   assert.match(strFromU8(entries['README.txt']), /다시 스캔/);

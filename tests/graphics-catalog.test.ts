@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { revealGraphicsControl, graphicsPreparationControl } from './graphics-ui-disclosures';
 import { test } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
@@ -315,8 +316,8 @@ test(
     import {createRoot} from 'react-dom/client';
     import {GraphicsStudio} from ${JSON.stringify(path.resolve("src/GraphicsStudio.tsx"))};
     const createdAt='2026-10-12T00:00:00Z';
-    const version=(id,objectId,role,label)=>({id,objectId,role,slot:'main',label,files:[{path:id+'.fbx',sha256:'a'.repeat(64),bytes:123,kind:'model'}],createdAt,sourceVersionIds:[],provenance:{type:'import'},warnings:[]});
-    const initial={schemaVersion:1,id:'ws',projectId:'p',revision:0,objects:[{id:'sword',name:'Greatsword',kind:'weapon',createdAt,selectedTasks:[],instruction:'keep markings',settings:{model:'P2-20260801',textureSize:4096},references:[],accepted:{'model:main':'old'}},{id:'knight',name:'Knight',kind:'character',createdAt,selectedTasks:[],instruction:'',settings:{},references:[],accepted:{}}],versions:[version('old','sword','model','Original sword'),version('new','sword','model','Revised sword'),version('ref','knight','design','Knight reference')],tasks:[],deliveries:[]};
+    const version=(id,objectId,role,label)=>({id,objectId,role,slot:'main',label,files:[{path:id+(role==='design'?'.png':'.fbx'),sha256:'a'.repeat(64),bytes:123,kind:role==='design'?'image':'model'}],createdAt,sourceVersionIds:[],provenance:{type:'import'},warnings:[]});
+    const initial={schemaVersion:1,id:'ws',projectId:'p',revision:0,objects:[{id:'sword',name:'Greatsword',kind:'weapon',createdAt,selectedTasks:[],instruction:'keep markings',settings:{model:'P2-20260801',textureSize:4096},references:[],accepted:{'model:main':'old','design:main':'source-design'}},{id:'knight',name:'Knight',kind:'character',createdAt,selectedTasks:[],instruction:'',settings:{},references:[],accepted:{}}],versions:[version('old','sword','model','Original sword'),version('new','sword','model','Revised sword'),version('ref','knight','design','Knight reference'),version('source-design','sword','design','Sword source image')],tasks:[],deliveries:[]};
     const project={schemaVersion:1,id:'p',name:'UI fixture',style:'',height:1,unityPath:'',unityFolder:'',createdAt,updatedAt:createdAt,revision:0,assets:[],parts:[],jobs:[],assemblies:[],builds:[],demo:false};
     window.desktop={assetUrl:()=>''}; window.graphicsActions=[];
     function Harness(){
@@ -385,7 +386,7 @@ test(
       await page.getByRole("textbox", { name: "작업 검색" }).fill("I04");
       await page.locator('[data-task-id="I04"] button').click();
       assert.match(
-        await page.getByRole("status").innerText(),
+        await page.locator(".gs-notice").innerText(),
         /특정 영역만 수정/,
       );
       assert.equal(
@@ -417,6 +418,7 @@ test(
         .click();
       await page.getByLabel("가져올 자료의 역할").selectOption("rig");
       await page.getByTestId("graphics-import").click();
+      await revealGraphicsControl(page.getByTestId("graphics-reference-version"));
       await page.getByTestId("graphics-reference-version").selectOption("ref");
       await page.getByLabel("참고 역할", { exact: true }).selectOption("style");
       await page
@@ -428,7 +430,9 @@ test(
           exact: true,
         })
         .waitFor();
+      await revealGraphicsControl(page.getByTestId("graphics-version-new"));
       await page.getByTestId("graphics-version-new").click();
+      await revealGraphicsControl(page.getByTestId("graphics-accept-version"));
       await page.getByTestId("graphics-accept-version").click();
       await page
         .getByTestId("graphics-accept-version")
@@ -438,11 +442,11 @@ test(
         .getByRole("navigation", { name: "제작 단계" })
         .getByRole("button", { name: "2 모델", exact: true })
         .click();
-      await page.getByTestId("graphics-prepare").click();
+      await (await graphicsPreparationControl(page)).click();
       await page.getByRole("alert").waitFor();
       assert.match(
         await page.getByRole("alert").innerText(),
-        /기존 원본과 채택 결과는 유지/,
+        /기존 원본과 사용하는 결과는 유지/,
       );
       assert.equal(await page.getByTestId("graphics-version-old").count(), 1);
       await page
@@ -452,7 +456,7 @@ test(
       await page
         .getByRole("button", { name: "FBX · GLB 파일 내보내기", exact: true })
         .click();
-      await page.getByTestId("graphics-prepare").click();
+      await (await graphicsPreparationControl(page)).click();
       await page.getByTestId("graphics-cost-quote").waitFor();
       await page
         .getByLabel("이 단계 추가 지시 · 선택지에 없는 내용")
@@ -490,6 +494,7 @@ test(
         .getByLabel("현재 작업 상태", { exact: true })
         .getByRole("button", { name: "추적 중지", exact: true })
         .click();
+      await revealGraphicsControl(page.getByRole("button", { name: "프로젝트 검사", exact: true, includeHidden: true }));
       await page
         .getByRole("button", { name: "프로젝트 검사", exact: true })
         .click();
@@ -549,7 +554,7 @@ test(
         4096,
       );
       assert.equal(sword.accepted["model:main"], "new");
-      assert.equal(result.workspace.versions.length, 3);
+      assert.equal(result.workspace.versions.length, 4);
       assert.equal(sword.references.length, 1);
       await page.getByTestId("graphics-new-object").click();
       await page.getByLabel("이름", { exact: true }).fill("Shield");
@@ -592,8 +597,8 @@ test(
     const prior={id:'prior-paid',objectId:'reference',taskId:'M01',createdAt,updatedAt:createdAt,status:'submission_unknown',inputVersionIds:[],settings:{},instruction:'',requestHash:'prior',outputVersionIds:[],backendJobIds:[],message:'Prior uncertain submission',localOnly:false,paidApproval:{requestHash:'prior',provider:'Tripo API',credits:70,approvedAt:createdAt}};
     let current={schemaVersion:1,id:'ws',projectId:'p',revision:0,tripoBudget:{limit:100,configuredAt:createdAt},objects:[
       {id:'reference',name:'Character reference',kind:'character',createdAt,selectedTasks:[],instruction:'',settings:{},references:[],accepted:{'design:main':'foreign'}},
-      {id:'target',name:'Target object',kind:'weapon',createdAt,selectedTasks:[],instruction:'Preserve markings',settings:{},references:[{versionId:'foreign',role:'appearance'}],accepted:{'design:main':'accepted-design','design:motion-source':'accepted-sides'}}
-    ],versions:[version('foreign','reference','main',[png('foreign.png','f')]),version('accepted-design','target','main',[png('design.png','a')]),version('accepted-sides','target','motion-source',[png('sides/left.png','b'),png('sides/right.png','c'),{path:'sides/render.json',kind:'report',sha256:'d'.repeat(64),bytes:500}]),version('unaccepted','target','other',[png('unaccepted.png','e')]),version('jpeg-only','target','extra',[png('only.jpg','a')])],tasks:[prior],deliveries:[]};
+      {id:'target',name:'Target object',kind:'weapon',createdAt,selectedTasks:[],instruction:'Preserve markings',settings:{},references:[{versionId:'foreign',role:'appearance'}],accepted:{'design:main':'accepted-design','design:motion-source':'accepted-sides','model:main':'accepted-model'}}
+    ],versions:[version('foreign','reference','main',[png('foreign.png','f')]),version('accepted-design','target','main',[png('design.png','a')]),version('accepted-sides','target','motion-source',[png('sides/left.png','b'),png('sides/right.png','c'),{path:'sides/render.json',kind:'report',sha256:'d'.repeat(64),bytes:500}]),version('unaccepted','target','other',[png('unaccepted.png','e')]),version('jpeg-only','target','extra',[png('only.jpg','a')]),version('owned-front','target','main',[png('front.png','1')]),version('owned-left','target','main',[png('left.png','2')]),version('owned-right','target','main',[png('right.png','3')]),{...version('accepted-model','target','main',[{path:'accepted.glb',kind:'model',sha256:'a'.repeat(64),bytes:123}]),role:'model'}],tasks:[prior],deliveries:[]};
     const project={schemaVersion:1,id:'p',name:'Settings fixture',style:'',height:1,unityPath:'',unityFolder:'',createdAt,updatedAt:createdAt,revision:0,assets:[],parts:[],jobs:[],assemblies:[],builds:[],demo:false};
     const transparent='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
     window.desktop={assetUrl:(_id,file)=>transparent+'#'+file};window.graphicsActions=[];window.graphicsPrepared=[];
@@ -653,14 +658,19 @@ test(
           M15: ["2 모델", "Blender + Astra"],
         };
         const [stage, mode] = choices[id];
+        if (id === "N02" || id === "R01") {
+          const movement = page.getByRole("button", { name: "움직임 추가 · 선택 사항", exact: true });
+          if (await movement.count()) await movement.click();
+        }
         await page
           .getByRole("navigation", { name: "제작 단계" })
           .getByRole("button", { name: stage, exact: true })
           .click();
+        if (id === "R01") await page.getByRole("button", { name: "기타 도구 · Blender + Astra", exact: true }).click();
         await page.getByRole("button", { name: mode, exact: true }).click();
       };
       const prepare = async (index: number) => {
-        await page.getByTestId("graphics-prepare").click();
+        await (await graphicsPreparationControl(page)).click();
         const card = page.getByTestId(`graphics-cost-prepared-${index}`);
         await card.waitFor();
         return card;
@@ -689,7 +699,7 @@ test(
         .getByRole("button", { name: "네 방향 원본", exact: true })
         .click();
       assert.equal(
-        await page.getByTestId("graphics-prepare").isDisabled(),
+        await (await graphicsPreparationControl(page)).isDisabled(),
         true,
       );
       await page
@@ -705,16 +715,23 @@ test(
         .getByLabel("오른쪽 원본", { exact: true })
         .selectOption("unaccepted");
       assert.equal(
-        await page.getByTestId("graphics-prepare").isDisabled(),
+        await (await graphicsPreparationControl(page)).isDisabled(),
         true,
         "Astra multiview also rejects duplicate directions",
       );
       await page
         .getByLabel("후면 원본", { exact: true })
         .selectOption("accepted-design");
+      await page.getByLabel("정면 원본", { exact: true }).selectOption("owned-front");
+      await page.getByLabel("왼쪽 원본", { exact: true }).selectOption("owned-left");
+      await page.getByLabel("오른쪽 원본", { exact: true }).selectOption("owned-right");
+      await page.getByLabel("후면 원본", { exact: true }).selectOption("owned-front");
+      assert.equal(await (await graphicsPreparationControl(page)).isDisabled(), true, "Duplicate own-object directions remain blocked");
+      await page.getByLabel("후면 원본", { exact: true }).selectOption("accepted-design");
       assert.equal(
-        await page.getByTestId("graphics-prepare").isEnabled(),
+        await (await graphicsPreparationControl(page)).isEnabled(),
         true,
+        await page.locator(".gs-guide").innerText(),
       );
       assert.equal(
         await page.evaluate(() => (window as any).graphicsActions.length),
@@ -967,7 +984,7 @@ test(
       const final = await page.evaluate(
         () => (window as any).graphicsWorkspace,
       );
-      assert.equal(final.versions.length, 5);
+      assert.equal(final.versions.length, 9);
       assert.equal(
         final.objects.find((object: any) => object.id === "target").accepted[
           "design:main"

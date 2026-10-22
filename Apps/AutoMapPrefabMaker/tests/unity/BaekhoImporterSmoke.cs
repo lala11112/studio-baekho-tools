@@ -1,6 +1,7 @@
 // Copy alongside BaekhoMapImporter.cs in an ISOLATED validation project's Assets/Editor.
 // Run with -batchmode -nographics -executeMethod BaekhoImporterSmoke.Run -quit.
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using StudioBaekho;
@@ -13,6 +14,9 @@ public static class BaekhoImporterSmoke
 {
     private const string Folder = "Assets/BaekhoValidation";
     private static int assertions;
+
+    [Serializable] private sealed class BoundsCatalog { public int version; public BoundsCatalogEntry[] assets; }
+    [Serializable] private sealed class BoundsCatalogEntry { public string guid; public Vector3 size; }
 
     [Serializable] private sealed class AppManifest
     {
@@ -362,10 +366,11 @@ public static class BaekhoImporterSmoke
             TestV4Placement(input, surfaceGuids, stairGuid, lightGuid, baseline, rootCount, previewCount);
             TestWideDoors(input, surfaceGuids, baseline, rootCount, previewCount);
             TestV5Structures(input, surfaceGuids, stairGuid, baseline, rootCount, previewCount);
+            TestSelectedPropCatalog(surfaceGuids[1], baseline, rootCount, previewCount);
             Assert(!baseline.isDirty && baseline.rootCount == rootCount && EditorSceneManager.previewSceneCount == previewCount,
                 "all failures leave scene and preview state unchanged");
             Write(input, valid);
-            string report = "PASS Unity " + Application.unityVersion + " — " + assertions + " assertions; schema1/2 exact-transform compatibility, schema3 surface alignment, schema4 ceiling/bridge/cliff/wall fit/slope/light/fixtures/markers/wide-door fitting, nested prefabs, strict validation, no overwrite and clean active scene.";
+            string report = "PASS Unity " + Application.unityVersion + " — " + assertions + " assertions; schema1/2 exact-transform compatibility, schema3 surface alignment, schema4 ceiling/bridge/cliff/wall fit/slope/light/fixtures/markers/wide-door fitting, nested prefabs, exact selected prefab catalog export, strict validation, no overwrite and clean active scene.";
             File.WriteAllText(Path.GetFullPath("../unity-validation-result.txt"), report, new UTF8Encoding(false));
             Debug.Log("BAEKHO_SMOKE_PASS " + report);
         }
@@ -626,7 +631,7 @@ public static class BaekhoImporterSmoke
         Scene baseline, int rootCount, int previewCount)
     {
         string[] fixtures = { "railing", "column", "arch", "water", "hazard", "trap", "gate", "switch",
-            "secretDoor", "rest", "merchant", "altar", "decoration" };
+            "secretDoor", "rest", "merchant", "altar", "decoration", "vegetation" };
         var entries = new System.Collections.Generic.List<string>
         {
             V4Placement("floor", "floor", guids[0], 2, "top", scaleY: 0.5f),
@@ -818,7 +823,9 @@ public static class BaekhoImporterSmoke
         };
         string prop = Placement("measured", "prop", measuredGuid, "{\"x\":10,\"y\":2,\"z\":7}", "{\"x\":0,\"y\":90,\"z\":0}", "{\"x\":2,\"y\":1.5,\"z\":0.5}");
         prop = prop.Substring(0, prop.Length - 1) + ",\"surface\":\"bottom\",\"centerXZ\":true}";
-        string valid = FeatureManifest(entry("solid", "wall", guids[3], 90) + "," + entry("trigger", "deadzone", zoneGuid, 0) + "," + prop).Replace("\"schemaVersion\":4", "\"schemaVersion\":5");
+        string decoration = prop.Replace("\"id\":\"measured\"", "\"id\":\"measured-decoration\"").Replace("\"role\":\"prop\"", "\"role\":\"decoration\"");
+        string vegetation = prop.Replace("\"id\":\"measured\"", "\"id\":\"measured-vegetation\"").Replace("\"role\":\"prop\"", "\"role\":\"vegetation\"");
+        string valid = FeatureManifest(entry("solid", "wall", guids[3], 90) + "," + entry("trigger", "deadzone", zoneGuid, 0) + "," + prop + "," + decoration + "," + vegetation).Replace("\"schemaVersion\":4", "\"schemaVersion\":5");
         Write(input, valid);
         string output = BaekhoMapImporter.BuildFromPath(input, false);
         GameObject loaded = PrefabUtility.LoadPrefabContents(output);
@@ -837,13 +844,16 @@ public static class BaekhoImporterSmoke
                 "deadzone preserves authored components and gameplay behavior without adding components");
             Assert(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(trigger.gameObject) == zonePath,
                 "deadzone keeps original nested prefab reference");
-            Transform placedProp = loaded.transform.Find("prop_measured"); Bounds propBounds = GeometryBounds(placedProp, true);
             Vector3 expectedSize = new Vector3(nativePropSize.z * .5f, nativePropSize.y * 1.5f, nativePropSize.x * 2);
-            Assert((propBounds.size - expectedSize).magnitude < .001f && Mathf.Abs(propBounds.center.x - 10) < .001f && Mathf.Abs(propBounds.center.z - 7) < .001f && Mathf.Abs(propBounds.min.y - 2) < .001f,
-                "v5 measured prop centers renderer+trigger union and aligns envelope bottom with off-center pivots");
-            Assert(placedProp.localScale == new Vector3(2, 1.5f, .5f) && placedProp.GetComponent<BoxCollider>().isTrigger &&
-                PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(placedProp.gameObject) == measuredPath,
-                "measured props retain original size, trigger and prefab references");
+            foreach (string name in new[] { "prop_measured", "decoration_measured-decoration", "vegetation_measured-vegetation" })
+            {
+                Transform placedProp = loaded.transform.Find(name); Bounds propBounds = GeometryBounds(placedProp, true);
+                Assert((propBounds.size - expectedSize).magnitude < .001f && Mathf.Abs(propBounds.center.x - 10) < .001f && Mathf.Abs(propBounds.center.z - 7) < .001f && Mathf.Abs(propBounds.min.y - 2) < .001f,
+                    "v5 measured placement centers renderer+trigger union and aligns envelope bottom with off-center pivots: " + name);
+                Assert(placedProp.localScale == new Vector3(2, 1.5f, .5f) && placedProp.GetComponent<BoxCollider>().isTrigger &&
+                    PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(placedProp.gameObject) == measuredPath,
+                    "measured placement retains original size, trigger and prefab references: " + name);
+            }
         }
         finally { PrefabUtility.UnloadPrefabContents(loaded); }
         Reject(input, valid.Replace("\"schemaVersion\":5", "\"schemaVersion\":4"), "v4 rejects fitSize");
@@ -855,7 +865,7 @@ public static class BaekhoImporterSmoke
         Reject(input, valid.Replace(guids[3], guids[5]), "flat source cannot be fit to solid XYZ extent");
         Reject(input, valid.Replace("\"centerXZ\":true", "\"centerXZ\":false"), "centerXZ cannot be explicitly false");
         Reject(input, valid.Replace("\"centerXZ\":true", "\"centerXZ\":1"), "centerXZ must be boolean");
-        Reject(input, valid.Replace("\"role\":\"prop\"", "\"role\":\"wall\""), "centerXZ is restricted to measured props and decorations");
+        Reject(input, valid.Replace("\"role\":\"prop\"", "\"role\":\"wall\""), "centerXZ is restricted to measured props, decorations and vegetation");
         Reject(input, valid.Replace("\"surface\":\"bottom\"", "\"surface\":\"pivot\""), "centerXZ requires bottom surface");
         Reject(input, valid.Replace("\"centerXZ\":true", "\"centerXZ\":true,\"fitHeight\":2"), "centerXZ cannot resize measured props");
         string bottomStair = Placement("bottom-stair", "stair", centeredStairGuid, "{\"x\":4,\"y\":3,\"z\":5}", "{\"x\":0,\"y\":90,\"z\":0}", "{\"x\":2,\"y\":2,\"z\":2}");
@@ -885,6 +895,92 @@ public static class BaekhoImporterSmoke
             "bounds export includes collider-only triggers, deduplicates ids and skips unmeasurable prefabs");
         Assert(!baseline.isDirty && baseline.rootCount == rootCount && EditorSceneManager.previewSceneCount == previewCount,
             "v5 and catalog export preserve active scene and close isolated previews");
+    }
+
+    private static void TestSelectedPropCatalog(string sourceGuid, Scene baseline, int rootCount, int previewCount)
+    {
+        string folder = AssetDatabase.GenerateUniqueAssetPath(Folder + "/SelectedCatalog");
+        AssetDatabase.CreateFolder(Folder, Path.GetFileName(folder));
+        AssetDatabase.CreateFolder(folder, "UnselectedNested");
+        string nestedFolder = folder + "/UnselectedNested";
+        var selected = new UnityEngine.Object[11];
+        var expected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unselected = new List<string>();
+        UnityEngine.Object[] previousSelection = Selection.objects;
+        Scene preview = EditorSceneManager.NewPreviewScene();
+        try
+        {
+            for (int index = 0; index < 14; index++)
+            {
+                string path = (index < 11 ? folder : nestedFolder) + "/Prop" + index + ".prefab";
+                Assert(AssetDatabase.CopyAsset(AssetDatabase.GUIDToAssetPath(sourceGuid), path), "creates isolated catalog fixture: " + path);
+                GameObject asset = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+                string guid = AssetDatabase.AssetPathToGUID(path);
+                if (index < 11) { selected[index] = asset; expected.Add(guid); }
+                else unselected.Add(guid);
+            }
+            Assert(AssetDatabase.FindAssets("t:Prefab", new[] { Folder }).Length > 11,
+                "catalog regression has additional project and nested folder prefabs beyond eleven selected assets");
+            Selection.objects = selected;
+            string[] resolved = BaekhoPropCatalog.ResolveSelectedPrefabGuids(Selection.objects);
+            Assert(resolved.Length == 11 && expected.SetEquals(resolved),
+                "Project selection resolves exactly the eleven selected prefab assets");
+            string[] sorted = (string[])resolved.Clone(); Array.Sort(sorted, StringComparer.Ordinal);
+            Assert(string.Join(",", resolved) == string.Join(",", sorted), "selected catalog GUID order is deterministic");
+            var reversedWithDuplicates = new List<UnityEngine.Object>(selected); reversedWithDuplicates.Reverse();
+            reversedWithDuplicates.Add(selected[0]); reversedWithDuplicates.Add(selected[10]);
+            Assert(string.Join(",", BaekhoPropCatalog.ResolveSelectedPrefabGuids(reversedWithDuplicates.ToArray())) == string.Join(",", resolved),
+                "reordered and duplicate prefab selections keep the same exact catalog");
+            string output = Path.GetFullPath("../prop-catalog-selected-validation.json");
+            int count = BaekhoPropCatalog.ExportToPath(output, resolved);
+            var catalog = JsonUtility.FromJson<BoundsCatalog>(File.ReadAllText(output));
+            var actual = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (BoundsCatalogEntry entry in catalog.assets)
+            {
+                actual.Add(entry.guid);
+                Assert(entry.size == Vector3.one,
+                    "selected catalog preserves each measured prefab size: " + entry.guid);
+            }
+            Assert(count == 11 && catalog.version == 2 && catalog.assets.Length == 11 && expected.SetEquals(actual),
+                "exported JSON contains exactly eleven selected GUIDs with no other project prefabs");
+            foreach (string guid in unselected) Assert(!actual.Contains(guid), "nested unselected prefab is absent from catalog: " + guid);
+
+            UnityEngine.Object folderAsset = AssetDatabase.LoadMainAssetAtPath(folder);
+            UnityEngine.Object nestedFolderAsset = AssetDatabase.LoadMainAssetAtPath(nestedFolder);
+            var sceneInstance = (GameObject)PrefabUtility.InstantiatePrefab((GameObject)selected[0], preview);
+            string unrelatedPath = folder + "/Unrelated.txt";
+            Write(unrelatedPath, "not a prefab");
+            AssetDatabase.ImportAsset(unrelatedPath);
+            UnityEngine.Object unrelated = AssetDatabase.LoadAssetAtPath<TextAsset>(unrelatedPath);
+            Assert(unrelated != null, "non-prefab catalog selection fixture is an actual imported text asset");
+            RejectPropSelection(null, "null selection");
+            RejectPropSelection(new UnityEngine.Object[0], "empty selection");
+            RejectPropSelection(new UnityEngine.Object[] { null }, "missing selected object");
+            RejectPropSelection(new[] { folderAsset }, "folder selection does not recursively export");
+            RejectPropSelection(new[] { nestedFolderAsset }, "nested folder selection does not recursively export");
+            RejectPropSelection(new UnityEngine.Object[] { sceneInstance }, "scene prefab instance does not export its source or all project assets");
+            RejectPropSelection(new[] { unrelated }, "unrelated asset does not trigger project export");
+            RejectPropSelection(new[] { selected[0], folderAsset }, "mixed prefab and folder selection is rejected explicitly");
+            RejectPropSelection(new[] { selected[0], unrelated }, "mixed prefab and unrelated asset selection is rejected explicitly");
+            RejectPropSelection(new UnityEngine.Object[] { ((GameObject)selected[0]).transform.GetChild(0).gameObject },
+                "nested prefab child cannot stand in for an explicitly selected root prefab asset");
+            UnityEngine.Object.DestroyImmediate(sceneInstance);
+        }
+        finally
+        {
+            Selection.objects = previousSelection;
+            EditorSceneManager.ClosePreviewScene(preview);
+        }
+        Assert(!baseline.isDirty && baseline.rootCount == rootCount && SceneManager.GetActiveScene() == baseline &&
+            EditorSceneManager.previewSceneCount == previewCount, "selected catalog resolution and export preserve scene and close preview");
+    }
+
+    private static void RejectPropSelection(UnityEngine.Object[] selection, string label)
+    {
+        bool rejected = false;
+        try { BaekhoPropCatalog.ResolveSelectedPrefabGuids(selection); }
+        catch (InvalidOperationException exception) { rejected = exception.Message.Contains("Project") && exception.Message.Contains(".prefab"); }
+        Assert(rejected, label + " gives instructions to select prefab assets in Project");
     }
 
     private static string Marker(string id, string kind, string contentKey)

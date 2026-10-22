@@ -4,6 +4,8 @@ import type { WorkbenchRuntimeApproval, WorkbenchRuntimeAnswer } from './workben
 export type GraphicsKind = "character" | "weapon" | "prop" | "environment" | "sprite" | "ui" | "vfx";
 export type GraphicsRole = "design" | "model" | "material" | "rig" | "motion-reference" | "animation" | "unity";
 export type GraphicsFile = { path: string; sha256: string; bytes: number; kind: string };
+/** Viewport derivatives never substitute for a native production input. */
+export function isGraphicsProductionFile(file: { kind: string }) { return file.kind !== 'preview'; }
 export type AssetVersion = {
   id: string; objectId: string; role: GraphicsRole; slot: string; label: string;
   files: GraphicsFile[]; createdAt: string; sourceVersionIds: string[];
@@ -15,18 +17,36 @@ export type AssetVersion = {
   partSource?: { schemaVersion: 1; providerVersionId: string; reportPath: string };
   /** Explicit local recovery reuses existing material pixels; it does not generate texture detail. */
   surfaceRepair?: { schemaVersion: 1; providerVersionId: string; repairVersionId: string; originalVersionId: string; reportPath: string };
+  externalRig?: import('./graphics-rig').ExternalRigMetadata;
+  autoRig?: import('./graphics-auto-rig').AutoRigMetadata;
+  planarRepair?: import('./graphics-planar').PlanarRepairProvenance;
   /** Analysis is review-only; repaired main and placed parts are adopted atomically. */
   contact?: import('./graphics-contact').GraphicsContactReview;
 };
+/** Imported formats are independent originals, never presumed equivalent exports. */
+export function importedModelSourceFiles(version: AssetVersion): GraphicsFile[] {
+  return version.files.filter(file => isGraphicsProductionFile(file) && /\.(blend|fbx|glb|obj|stl)$/i.test(file.path));
+}
+export function importedModelSourceProblem(version: AssetVersion): string | undefined {
+  if (version.provenance.type === 'import' && importedModelSourceFiles(version).length > 1)
+    return '여러 3D 원본이 한 가져오기 버전에 묶여 있습니다. 사용할 3D 원본 하나와 필요한 동반 이미지만 다시 가져오세요.';
+}
 export type UnityTargetProfile = {
   id: string; projectPath: string; unityVersion: string;
   pipeline: "urp" | "hdrp" | "builtin" | "unknown"; platform: "pc";
   packages: Record<string, string>; inspectedAt: string; fingerprint: string; warnings: string[];
+  fingerprintVersion?: 2;
+  /** Only for exact legacy reads; never a canonicalized legacy fallback. */
+  legacyRawFingerprint?: string;
+  activeColorSpace?: 'gamma'|'linear';
+  profilePolicy?: import('./graphics-unity-profile').UnityTargetProfilePolicy;
 };
 /** Frozen settings from the exact accepted animation's producing task, never current object controls. */
 export type UnityClipSettings = { versionId: string; name: string; loop: boolean; rootMotion: boolean; fps: number };
 export type UnityDelivery = {
   id: string; objectId: string; versionIds: string[]; profileFingerprint: string;
+  /** Content identity stays stable; a cancelled request may have an explicitly approved new attempt. */
+  contentId?: string; approvedTaskId?: string; retryOf?: string;
   converterVersion: string; createdAt: string; destination: string;
   status: "queued" | "imported" | "failed" | "conflict";
   files: GraphicsFile[]; guid?: string; prefabPath?: string; userPrefabPath?: string;
@@ -62,6 +82,9 @@ export type GraphicsTask = {
   partSpaceRecoveryVersionId?: string;
   partSourceRecoveryVersionId?: string;
   surfaceRecoveryVersionId?: string;
+  planarSelection?: import('./graphics-planar').PlanarSelection;
+  /** Exact saved inspection used by this one local repair attempt, independent of later inspections. */
+  planarInspection?: import('./graphics-planar').PlanarInspection;
   objectSnapshot?: Pick<GraphicsObject, "name" | "kind" | "references" | "accepted" | "creation">;
   targetProfile?: UnityTargetProfile;
   deliveryId?: string;
@@ -88,6 +111,11 @@ export type GraphicsWorkspace = {
   legacyPreview?: { versions: AssetVersion[]; fingerprint: string; objectName: string };
   /** Transient, read-only storage inspection; never persisted with production state. */
   storageReport?: import('./graphics-storage').GraphicsStorageReport;
+  externalRigHandoffs?: import('./graphics-external-rig').ExternalRigWorkspaceHandoff[];
+  autoRigRuns?: import('./graphics-auto-rig').AutoRigRun[];
+  /** Transient, read-only installation readiness; does not authorize generation. */
+  autoRigReadiness?: import('./graphics-auto-rig').AutoRigReadiness;
+  planarInspections?: Record<string, import('./graphics-planar').PlanarInspection>;
 };
 
 /** Unlink only an unused legacy collection. Never remove production objects or their history. */
@@ -143,15 +171,21 @@ export function surfaceRepairSources(workspace: GraphicsWorkspace, provider: Ass
 }
 
 export type GraphicsAction =
+  | import('./graphics-auto-rig').AutoRigAction
+  | import('./graphics-external-rig').ExternalRigAction
   | { kind: 'prepare-contact'; versionId: string; phase: 'analyze' | 'repair' | 'reconstruct' }
   | { kind: 'recover-contact-procedure'; taskId: string }
   | { kind: "create-object"; name: string; objectKind: GraphicsKind; creation?: CreationSpec }
   | { kind: "update-object"; objectId: string; patch: Partial<Pick<GraphicsObject, "name" | "selectedTasks" | "instruction" | "settings" | "references" | "creation">> }
   | { kind: "import"; objectId: string; role: GraphicsRole; clipName?: string }
+  | { kind: 'prepare-import-preview'; objectId: string; versionId: string }
+  | { kind: 'set-unity-target'; projectPath: string }
   | { kind: "accept"; objectId: string; versionId: string }
   | { kind: 'restore-part-space'; versionId: string }
   | { kind: 'prepare-part-source'; versionId: string }
   | { kind: 'repair-surface-uv'; versionId: string }
+  | { kind: 'inspect-planar'; versionId: string }
+  | ({ kind: 'repair-planar' } & import('./graphics-planar').PlanarSelection)
   | { kind: "prepare"; objectId: string; taskId: string }
   | { kind: "approve" | "cancel" | "recover" | "refresh-parts"; taskId: string }
   | { kind: "runtime-approval"; taskId: string; approvalId: string; answer: WorkbenchRuntimeAnswer }
