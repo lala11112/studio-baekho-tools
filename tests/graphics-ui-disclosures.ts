@@ -12,6 +12,8 @@ export async function revealGraphicsControl(control: Locator) {
   while (await control.locator('xpath=ancestor::details[not(@open)]').count()) {
     await control.locator('xpath=ancestor::details[not(@open)]').first().locator(':scope > summary').click();
   }
+  // Keep native pointer actions above the fixed action bar on small Windows displays.
+  await control.evaluate(element => element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }));
 }
 
 export async function openGraphicsInspection(page: Page) {

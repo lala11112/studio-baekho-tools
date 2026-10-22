@@ -87,6 +87,8 @@ test('contact review uses exact assembly and analysis IDs, forbids analysis adop
     assert.equal(await page.getByTestId('graphics-current-task-reconstruct').count(), 1, 'directly derived completion stays visible while its original diagnosis remains selected');
     assert.equal(await page.getByTestId('graphics-current-task-reconstruct-blocked').count(), 0, 'unrelated contact results stay out of current diagnosis');
     assert.equal(await page.getByTestId('graphics-current-task-assembly').count(), 0);
+    await page.getByTestId('graphics-task-result-reconstruct').filter({ hasText: '새 보정 결과 보기' }).waitFor({ state: 'attached' });
+    await revealGraphicsControl(page.getByTestId('graphics-task-result-reconstruct'));
     assert.equal(await page.getByTestId('graphics-task-result-reconstruct').innerText(), '새 보정 결과 보기');
     await page.getByTestId('graphics-task-result-reconstruct').click();
     assert.equal(await page.getByTestId('graphics-version-reconstructed').getAttribute('aria-pressed'), 'true');

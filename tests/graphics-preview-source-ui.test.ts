@@ -56,6 +56,7 @@ test('version preview loads its GLB despite an FBX production asset with the sam
     page.on('pageerror', error => errors.push(error.message));
     await page.context().route(/^https?:/, async route => { serviceRequests.push(route.request().url()); await route.abort(); });
     page.setDefaultTimeout(12000);
+    await page.setViewportSize({ width: 1024, height: 768 });
     for (const [id, vertices, triangles] of [['head', 3, 1], ['head-uv', 4, 2], ['head', 3, 1]] as const) {
       await revealGraphicsControl(page.getByTestId(`graphics-version-${id}`));
       await page.getByTestId(`graphics-version-${id}`).click();
