@@ -25,6 +25,14 @@ const packagedIndex = process.argv.indexOf('--packaged');
 const packaged = packagedIndex >= 0 ? path.resolve(process.argv[packagedIndex + 1]) : null;
 const app = await electron.launch({ executablePath: packaged || electronPath, args: packaged ? [] : ['.'], env, timeout: 45000 });
 const errors = [], network = [], checks = [];
+function checked(message) { checks.push(message); console.log(`PASS: ${message}`); }
+async function until(check) {
+  const deadline = Date.now() + 10000;
+  while (!await check()) {
+    assert.ok(Date.now() < deadline, 'map close confirmation did not arrive');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+}
 let unityMock;
 const unityRequests = [];
 async function startUnityMock(projectRoot) {
@@ -62,7 +70,7 @@ try {
   });
   const shell = await app.firstWindow();
   for (const tool of ['map', 'modeling', 'four-tiger-items', 'bgm', 'combat', 'hit-timing']) await shell.getByTestId(`tool-${tool}`).waitFor();
-  checks.push('all six tools remain reachable');
+  checked('all six tools remain reachable');
   await shell.getByTestId('tool-map').click();
   const map = await app.waitForEvent('window', { predicate: p => p !== shell, timeout: 10000 }).catch(() => app.context().pages().find(p => p !== shell && p.url().includes('AutoMapPrefabMaker')));
   assert.ok(map);
@@ -73,13 +81,13 @@ try {
   assert.equal((await map.evaluate(() => window.baekho.getUnityStatus())).state, 'no-project');
   assert.equal((await map.evaluate(() => window.baekho.prepareUnityIntegration())).state, 'no-project');
   assert.equal(fs.existsSync(path.join(profile, 'unity')), false, 'map Unity storage never escapes the map profile');
-  checks.push('latest map Unity IPC is available and requires an explicit project before preparation');
+  checked('latest map Unity IPC is available and requires an explicit project before preparation');
   await map.locator('#mapName').fill('Unsent map draft');
   await map.locator('#mapName').press('Tab');
   await shell.getByTestId('tool-map').click();
   assert.equal(await map.locator('#mapName').inputValue(), 'Unsent map draft');
   assert.equal(app.context().pages().filter(p => p.url().includes('AutoMapPrefabMaker')).length, 1);
-  checks.push('map window reused with unsaved draft and isolated bridges');
+  checked('map window reused with unsaved draft and isolated bridges');
 
   const projectFile = path.join(runtime, 'saved-map.json');
   const bundleFile = path.join(runtime, 'map-export.zip');
@@ -117,7 +125,7 @@ try {
   await map.evaluate(value => window.baekho.exportBundle(value), fixture);
   const zip = unzipSync(fs.readFileSync(bundleFile));
   for (const name of ['Map.baekhomap.json', 'Unity/Editor/BaekhoMapImporter.cs', 'Unity/Editor/BaekhoPropCatalog.cs', 'Unity/Runtime/BaekhoMapConnection.cs', 'Unity/Runtime/BaekhoGameplayMarker.cs', 'Unity/Runtime/BaekhoMapFixture.cs', 'Unity/Runtime/BaekhoWallModule.cs', 'Unity/Runtime/BaekhoMapAsset.cs', 'Unity/Editor/BaekhoMapAssetEditor.cs', 'Unity/Editor/BaekhoAssetCatalog.cs']) assert.ok(zip[name]?.length, name);
-  checks.push('map save/open/recovery/export retain wall and asset catalog scripts');
+  checked('map save/open/recovery/export retain wall and asset catalog scripts');
   const endpoint = await startUnityMock(path.resolve(unity));
   const assetsBefore = fs.readdirSync(path.join(unity, 'Assets'));
   const unityStatus = await map.evaluate(address => window.baekho.getUnityStatus(address), endpoint);
@@ -128,14 +136,23 @@ try {
   assert.deepEqual(fs.readdirSync(path.join(unity, 'Assets')), assetsBefore, 'connection status never installs scripts or generates a prefab');
   assert.ok(fs.existsSync(path.join(profile, 'map-forge/unity/unity-settings.json')));
   assert.ok(unityRequests.every(request => request.method !== 'tools/call' || ['set_active_instance', 'read_console'].includes(request.params.name)));
-  checks.push('bundled MCP client completes loopback HTTP handshake and project routing without Unity writes');
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(w => w.webContents.getURL().includes('AutoMapPrefabMaker'))?.close());
-  await new Promise(r => setTimeout(r, 200));
+  checked('bundled MCP client completes loopback HTTP handshake and project routing without Unity writes');
+  await app.evaluate(({ dialog, BrowserWindow }) => {
+    globalThis.__mapCloseDecisions = [];
+    dialog.showMessageBoxSync = () => { globalThis.__mapCloseDecisions.push(0); return 0; };
+    BrowserWindow.getAllWindows().find(w => w.webContents.getURL().includes('AutoMapPrefabMaker'))?.close();
+  });
+  await until(() => app.evaluate(() => globalThis.__mapCloseDecisions.length === 1));
   assert.equal(map.isClosed(), false, 'cancel closing preserves dirty map');
-  await app.evaluate(({ dialog, BrowserWindow }) => { dialog.showMessageBoxSync = () => 1; BrowserWindow.getAllWindows().find(w => w.webContents.getURL().includes('AutoMapPrefabMaker'))?.close(); });
-  await new Promise(r => setTimeout(r, 200));
+  const mapClosed = map.waitForEvent('close', { timeout: 10000 });
+  await app.evaluate(({ dialog, BrowserWindow }) => {
+    dialog.showMessageBoxSync = () => { globalThis.__mapCloseDecisions.push(1); return 1; };
+    BrowserWindow.getAllWindows().find(w => w.webContents.getURL().includes('AutoMapPrefabMaker'))?.close();
+  });
+  await mapClosed;
   assert.equal(map.isClosed(), true);
-  checks.push('dirty map close can be cancelled before an explicit discard');
+  assert.deepEqual(await app.evaluate(() => globalThis.__mapCloseDecisions), [0, 1]);
+  checked('dirty map close can be cancelled before an explicit discard');
   const requestsBeforeReopen = unityRequests.length;
   await shell.getByTestId('tool-map').click();
   const reopenedMap = await app.waitForEvent('window', { predicate: p => p !== shell, timeout: 10000 }).catch(() => app.context().pages().find(p => p !== shell && p.url().includes('AutoMapPrefabMaker')));
@@ -144,7 +161,7 @@ try {
   assert.equal((await reopenedMap.evaluate(() => window.baekho.getUnityStatus())).state, 'no-project');
   assert.equal(await reopenedMap.evaluate(async () => (await window.baekho.loadRecovery()).map.name), fixture.map.name);
   assert.equal(unityRequests.length, requestsBeforeReopen, 'reopening never automatically reconnects or replays Unity requests');
-  checks.push('closing and reopening recreates the map Unity service and retains recovery without replay');
+  checked('closing and reopening recreates the map Unity service and retains recovery without replay');
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(w => w.webContents.getURL().includes('AutoMapPrefabMaker'))?.close());
 
   await shell.getByTestId('tool-bgm').click();
@@ -158,7 +175,7 @@ try {
   await shell.getByTestId('nav-home').click(); await shell.getByTestId('tool-bgm').click();
   assert.equal(await shell.getByTestId('bgm-description').inputValue(), 'Preserved BGM draft');
   assert.equal((await shell.evaluate(() => window.bgm.state())).totalReservedUsd, .04);
-  checks.push('BGM selection/export preserve fixture bytes and ledger without generation');
+  checked('BGM selection/export preserve fixture bytes and ledger without generation');
   await shell.getByTestId('nav-home').click();
   await shell.getByTestId('tool-hit-timing').click();
   let hit;
@@ -168,7 +185,7 @@ try {
   }
   assert.ok(hit); await hit.locator('#search-mode').waitFor();
   assert.ok(await hit.locator('#search-mode option[value="semantic"]').count());
-  checks.push('integrated animation search exposes semantic mode');
+  checked('integrated animation search exposes semantic mode');
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ ok: true, checks, runtime, generatedCount: 0, audio: 'synthetic export fixture; playback not certified' }, null, 2));
   fs.writeFileSync(path.join(runtime, 'result.json'), JSON.stringify({ ok: true, checks, errors, generatedCount: 0 }, null, 2));
