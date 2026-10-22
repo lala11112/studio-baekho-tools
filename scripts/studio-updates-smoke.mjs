@@ -24,7 +24,7 @@ delete env.ELECTRON_RUN_AS_NODE; delete env.BAEKHO_DEV_URL;
 const packagedIndex = process.argv.indexOf('--packaged');
 const packaged = packagedIndex >= 0 ? path.resolve(process.argv[packagedIndex + 1]) : null;
 const app = await electron.launch({ executablePath: packaged || electronPath, args: packaged ? [] : ['.'], env, timeout: 45000 });
-const errors = [], network = [], checks = [];
+const errors = [], network = [], consoleErrors = [], checks = [];
 function checked(message) { checks.push(message); console.log(`PASS: ${message}`); }
 async function until(check, message = 'map close confirmation did not arrive') {
   const deadline = Date.now() + 15000;
@@ -67,7 +67,11 @@ async function startUnityMock(projectRoot) {
   unityMock = server;
   return `http://127.0.0.1:${server.address().port}/mcp`;
 }
-app.context().on('page', p => p.on('pageerror', e => errors.push(e.message)));
+app.context().on('requestfailed', request => network.push({ url: request.url(), error: request.failure()?.errorText }));
+app.context().on('page', page => {
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
+});
 try {
   await app.evaluate(({ session }) => {
     for (const s of [session.defaultSession, session.fromPartition('map-forge')]) {
@@ -80,6 +84,7 @@ try {
   await shell.getByTestId('tool-map').click();
   const map = await mapWindow();
   assert.ok(map);
+  await map.setViewportSize({ width: 1024, height: 768 });
   await map.locator('#mapName').waitFor();
   assert.deepEqual(await map.evaluate(() => [typeof window.require, typeof window.studio, typeof window.desktop, typeof window.baekho?.saveProject]), ['undefined', 'undefined', 'undefined', 'function']);
   assert.equal(await shell.evaluate(() => typeof window.baekho), 'undefined');
@@ -198,7 +203,18 @@ try {
   console.log(JSON.stringify({ ok: true, checks, runtime, generatedCount: 0, audio: 'synthetic export fixture; playback not certified' }, null, 2));
   fs.writeFileSync(path.join(runtime, 'result.json'), JSON.stringify({ ok: true, checks, errors, generatedCount: 0 }, null, 2));
 } catch (error) {
-  console.error(JSON.stringify({ checks, errors, pages: app.context().pages().map(page => ({ url: page.url(), closed: page.isClosed() })) }, null, 2));
+  const debug = path.resolve('artifacts/integration-debug');
+  fs.mkdirSync(debug, { recursive: true });
+  const pages = [];
+  for (const [index, page] of app.context().pages().entries()) {
+    const info = { url: page.url(), closed: page.isClosed() };
+    try { info.body = (await page.locator('body').innerText({ timeout: 3000 })).slice(0, 4000); } catch (failure) { info.bodyError = String(failure); }
+    try { await page.screenshot({ path: path.join(debug, `page-${index}.png`), timeout: 3000 }); } catch (failure) { info.screenshotError = String(failure); }
+    pages.push(info);
+  }
+  const diagnostic = { checks, errors, consoleErrors, network, pages };
+  fs.writeFileSync(path.join(debug, 'failure.json'), JSON.stringify(diagnostic, null, 2));
+  console.error(JSON.stringify(diagnostic, null, 2));
   throw error;
 } finally {
   const mapClosures = app.context().pages().filter(page => !page.isClosed() && page.url().includes('AutoMapPrefabMaker')).map(page => page.waitForEvent('close', { timeout: 15000 }));
