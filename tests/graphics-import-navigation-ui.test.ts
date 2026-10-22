@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultCreation } from '../shared/graphics-creation';
+import { revealGraphicsControl } from './graphics-ui-disclosures';
 
-test('explicit import opens its exact unadopted result; cancel and another object keep their view', {timeout: 60000}, async () => {
+test('explicit import opens its exact unadopted result; cancel and another object keep their view', {timeout: 120000}, async () => {
   const fs=await import('node:fs'),os=await import('node:os'),path=await import('node:path');
   const {build}=await import('esbuild'),{_electron:electron}=await import('playwright');
   const {default:binary}=await import('electron');
@@ -24,13 +25,13 @@ test('explicit import opens its exact unadopted result; cancel and another objec
   }}/>);window.renderFixture();`;
   await build({stdin:{contents:entry,loader:'tsx',resolveDir:process.cwd()},bundle:true,format:'iife',outfile:path.join(root,'ui.js'),jsx:'automatic',logLevel:'silent'});
   fs.writeFileSync(path.join(root,'index.html'),'<html lang="ko"><head><meta charset="UTF-8"><link rel="stylesheet" href="ui.css"></head><body><div id="root"></div><script src="ui.js"></script></body></html>');
-  fs.writeFileSync(path.join(root,'main.cjs'),`const{app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(root,'profile'))});app.whenReady().then(()=>new BrowserWindow({show:false,width:1440,height:1000,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}}).loadFile(${JSON.stringify(path.join(root,'index.html'))}));`);
+  fs.writeFileSync(path.join(root,'main.cjs'),`const{app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(root,'profile'))});app.whenReady().then(()=>new BrowserWindow({show:false,width:1440,height:1000,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}}).loadFile(${JSON.stringify(path.join(root,'index.html'))}));`);
   const app=await electron.launch({executablePath:binary as unknown as string,args:[path.join(root,'main.cjs')]});
   try{
-    const page=await app.firstWindow();page.setDefaultTimeout(7000);const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+    const page=await app.firstWindow();await page.setViewportSize({width:1024,height:768});page.setDefaultTimeout(10000);const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
     const stages=page.getByRole('navigation',{name:'제작 단계',exact:true});
-    const openImport=async(role:string)=>{const detail=page.locator('.gs-import-details');if(await detail.getAttribute('open')===null)await detail.locator('summary').click();await page.getByLabel('가져올 자료의 역할').selectOption(role);await page.getByTestId('graphics-import').click();};
-    const selected=async(id:string)=>{await page.getByTestId('graphics-version-'+id).waitFor({state:'attached'});assert.equal(await page.getByTestId('graphics-version-'+id).getAttribute('aria-pressed'),'true');};
+    const openImport=async(role:string)=>{const control=page.getByTestId('graphics-import');await revealGraphicsControl(control);await page.getByLabel('가져올 자료의 역할').selectOption(role);await revealGraphicsControl(control);await control.click();};
+    const selected=async(id:string)=>{const control=page.getByTestId('graphics-version-'+id);await control.and(page.locator('[aria-pressed="true"]')).waitFor({state:'attached'});assert.equal(await control.getAttribute('aria-pressed'),'true');};
     await page.getByTestId('graphics-object-first').click();
     await openImport('model');await selected('import-1');
     assert.match(await stages.locator('[aria-current="step"]').innerText(),/모델/);

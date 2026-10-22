@@ -134,7 +134,9 @@ test('exact repaired texture offers one explicit local UV recovery and leaves ac
     assert.deepEqual(await page.evaluate(() => (window as any).actions), [{ kind: 'repair-surface-uv', versionId: 'texture' }]);
     assert.deepEqual(await page.evaluate(() => (window as any).workspace.objects[0].accepted), object.accepted);
     await page.evaluate(() => (window as any).setRecoveryStatus('cancelled'));
-    await status.filter({ hasText: '로컬 빈 면 UV 복구 중지' }).waitFor({ state: 'attached' });
+    // The running task's stop button has the same words; await the cancelled
+    // task itself before opening the newly mounted recent-status disclosure.
+    await status.and(page.locator('.gs-job-cancelled')).waitFor({ state: 'attached' });
     await revealGraphicsControl(status);
     assert.equal(await status.isVisible(), true);
     assert.match(await status.innerText(), /로컬 빈 면 UV 복구 중지/);
