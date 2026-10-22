@@ -26,12 +26,18 @@ const packaged = packagedIndex >= 0 ? path.resolve(process.argv[packagedIndex + 
 const app = await electron.launch({ executablePath: packaged || electronPath, args: packaged ? [] : ['.'], env, timeout: 45000 });
 const errors = [], network = [], checks = [];
 function checked(message) { checks.push(message); console.log(`PASS: ${message}`); }
-async function until(check) {
-  const deadline = Date.now() + 10000;
-  while (!await check()) {
-    assert.ok(Date.now() < deadline, 'map close confirmation did not arrive');
+async function until(check, message = 'map close confirmation did not arrive') {
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    const result = await check();
+    if (result) return result;
+    assert.ok(Date.now() < deadline, message);
     await new Promise(resolve => setTimeout(resolve, 50));
   }
+}
+async function mapWindow() {
+  // Native tool views can emit window events while the separate map window opens.
+  return until(() => app.context().pages().find(page => !page.isClosed() && page.url().includes('AutoMapPrefabMaker')), 'Map Forge window did not load');
 }
 let unityMock;
 const unityRequests = [];
@@ -72,7 +78,7 @@ try {
   for (const tool of ['map', 'modeling', 'four-tiger-items', 'bgm', 'combat', 'hit-timing']) await shell.getByTestId(`tool-${tool}`).waitFor();
   checked('all six tools remain reachable');
   await shell.getByTestId('tool-map').click();
-  const map = await app.waitForEvent('window', { predicate: p => p !== shell, timeout: 10000 }).catch(() => app.context().pages().find(p => p !== shell && p.url().includes('AutoMapPrefabMaker')));
+  const map = await mapWindow();
   assert.ok(map);
   await map.locator('#mapName').waitFor();
   assert.deepEqual(await map.evaluate(() => [typeof window.require, typeof window.studio, typeof window.desktop, typeof window.baekho?.saveProject]), ['undefined', 'undefined', 'undefined', 'function']);
@@ -155,14 +161,16 @@ try {
   checked('dirty map close can be cancelled before an explicit discard');
   const requestsBeforeReopen = unityRequests.length;
   await shell.getByTestId('tool-map').click();
-  const reopenedMap = await app.waitForEvent('window', { predicate: p => p !== shell, timeout: 10000 }).catch(() => app.context().pages().find(p => p !== shell && p.url().includes('AutoMapPrefabMaker')));
+  const reopenedMap = await mapWindow();
   assert.ok(reopenedMap);
   await reopenedMap.locator('#mapName').waitFor();
   assert.equal((await reopenedMap.evaluate(() => window.baekho.getUnityStatus())).state, 'no-project');
   assert.equal(await reopenedMap.evaluate(async () => (await window.baekho.loadRecovery()).map.name), fixture.map.name);
   assert.equal(unityRequests.length, requestsBeforeReopen, 'reopening never automatically reconnects or replays Unity requests');
   checked('closing and reopening recreates the map Unity service and retains recovery without replay');
+  const reopenedMapClosed = reopenedMap.waitForEvent('close', { timeout: 15000 });
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(w => w.webContents.getURL().includes('AutoMapPrefabMaker'))?.close());
+  await reopenedMapClosed;
 
   await shell.getByTestId('tool-bgm').click();
   await shell.getByTestId('bgm-description').fill('Preserved BGM draft');
@@ -189,11 +197,16 @@ try {
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ ok: true, checks, runtime, generatedCount: 0, audio: 'synthetic export fixture; playback not certified' }, null, 2));
   fs.writeFileSync(path.join(runtime, 'result.json'), JSON.stringify({ ok: true, checks, errors, generatedCount: 0 }, null, 2));
+} catch (error) {
+  console.error(JSON.stringify({ checks, errors, pages: app.context().pages().map(page => ({ url: page.url(), closed: page.isClosed() })) }, null, 2));
+  throw error;
 } finally {
+  const mapClosures = app.context().pages().filter(page => !page.isClosed() && page.url().includes('AutoMapPrefabMaker')).map(page => page.waitForEvent('close', { timeout: 15000 }));
   await app.evaluate(({ dialog, BrowserWindow }) => {
     dialog.showMessageBoxSync = () => 1;
     for (const win of BrowserWindow.getAllWindows()) if (win.webContents.getURL().includes('AutoMapPrefabMaker')) win.close();
   }).catch(() => {});
+  await Promise.allSettled(mapClosures);
   await app.close();
   if (unityMock) {
     unityMock.closeAllConnections();
