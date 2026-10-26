@@ -1,4 +1,4 @@
-name: Verify Baekho Tools
+name: Verify Enemy Forge
 on: [push, pull_request]
 permissions:
   contents: read
@@ -9,28 +9,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24.14.0
+          node-version: 24
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: npm test
-      - run: npm run test:map
-      - run: npm run test:combat
-      - run: npm run test:hit-timer
-  integration:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.14.0
-          cache: npm
-      - run: npm ci --no-audit --no-fund
       - run: npm run build
-      - run: npm run test:updates -- --no-gpu
-      - run: npm run test:integration
+      - run: npm run test:desktop
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: integration-debug-${{ github.event_name }}
-          path: artifacts/integration-debug
+          name: desktop-debug-${{ github.event_name }}
+          path: artifacts/
           if-no-files-found: ignore

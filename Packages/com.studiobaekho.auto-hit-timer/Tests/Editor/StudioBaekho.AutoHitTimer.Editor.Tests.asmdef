@@ -1,9 +1,0 @@
-{
-  "name": "StudioBaekho.AutoHitTimer.Editor.Tests",
-  "references": ["StudioBaekho.AutoHitTimer.Editor"],
-  "overrideReferences": true,
-  "precompiledReferences": ["nunit.framework.dll", "Newtonsoft.Json.dll"],
-  "includePlatforms": ["Editor"],
-  "optionalUnityReferences": ["TestAssemblies"],
-  "autoReferenced": false
-}

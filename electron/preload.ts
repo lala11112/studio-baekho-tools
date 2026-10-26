@@ -1,41 +1,12 @@
-import { contextBridge, ipcRenderer } from "electron";
-import type { Command } from "../shared/types";
-import type { StudioBounds, StudioTarget, StudioNativeTool } from "../shared/studio";
-import type { BgmInput } from "../shared/bgm";
-import type { FourTigerItemsApi } from "../shared/four-tiger-items";
-async function bgmCall(name: string, argument?: unknown) {
-  const result = await ipcRenderer.invoke(`bgm:${name}`, argument);
-  if (!result.ok) throw new Error(result.error);
-  return result.value;
-}
-contextBridge.exposeInMainWorld("bgm", Object.freeze({
-  state: () => bgmCall("state"),
-  generate: (input: BgmInput) => bgmCall("generate", input),
-  refresh: (id: string) => bgmCall("refresh", id),
-  retry: (id: string) => bgmCall("retry", id),
-  select: (id: string) => bgmCall("select", id),
-  export: (id: string) => bgmCall("export", id),
-}));
-const itemMethods: (keyof FourTigerItemsApi)[] = ['list','create','read','patchItem','reviewItems','updatePolicies','adoptPolicies','acknowledgeDescription','repairReferenceIds','updateIconStyle','generateIcons','cancelPending','reconcile','abandonUnknown','selectIcon','readIcon','validate','exportPackage','probe','restorePrevious'];
-contextBridge.exposeInMainWorld('fourTigerItems',Object.freeze(Object.fromEntries(itemMethods.map(method=>[method,async(input:unknown)=>{const result=await ipcRenderer.invoke(`four-tiger-items:${method}`,input);if(!result.ok)throw Object.assign(new Error(result.error),{code:result.code});return result.value;}]))));
-contextBridge.exposeInMainWorld("studio", Object.freeze({
-  openMap: () => ipcRenderer.invoke("studio:open-map"),
-  summary: () => ipcRenderer.invoke("studio:summary"),
-  showCombat: (bounds: StudioBounds, target?: StudioTarget) => ipcRenderer.invoke("studio:show-combat", bounds, target),
-  hideCombat: () => ipcRenderer.invoke("studio:hide-combat"),
-  resizeCombat: (bounds: StudioBounds) => ipcRenderer.invoke("studio:resize-combat", bounds),
-  chooseCombatProject: () => ipcRenderer.invoke("studio:choose-combat-project"),
-  showTool: (tool: StudioNativeTool, bounds: StudioBounds, target?: StudioTarget) => ipcRenderer.invoke("studio:show-tool", tool, bounds, target),
-  hideTools: () => ipcRenderer.invoke("studio:hide-tools"),
-  resizeTool: (tool: StudioNativeTool, bounds: StudioBounds) => ipcRenderer.invoke("studio:resize-tool", tool, bounds),
-  chooseHitTimerProject: () => ipcRenderer.invoke("studio:choose-hit-timer-project"),
-}));
-contextBridge.exposeInMainWorld("desktop", {
-  call: async (command: Command) => {
-    const r = await ipcRenderer.invoke("partsmith:command", command);
-    if (!r.ok) throw new Error(r.error);
-    return r.value;
-  },
-  assetUrl: (projectId: string, file: string) =>
-    `asset://project/${encodeURIComponent(projectId)}/${file.split(/[\\/]/).map(encodeURIComponent).join("/")}`,
-});
+import {contextBridge,ipcRenderer} from 'electron';
+import type {DesktopApi} from '../src/shared/types';
+const invoke=(name:string,...args:unknown[])=>ipcRenderer.invoke(`forge:${name}`,...args);
+const api:DesktopApi={
+  connect:()=>invoke('connect'),chooseProject:()=>invoke('choose-project'),installBridge:p=>invoke('install',p),catalog:()=>invoke('catalog'),
+  validate:b=>invoke('validate',b),build:b=>invoke('build',b),save:b=>invoke('save',b),open:()=>invoke('open'),searchAssets:(query,kinds)=>invoke('assets-search',query,kinds),
+  animationInfo:controller=>invoke('animation-info',controller),analyzeModel:blueprint=>invoke('analyze-model',blueprint),
+  previewOpen:b=>invoke('preview-open',b),previewFrame:r=>invoke('preview-frame',r),previewClose:s=>invoke('preview-close',s),
+  aiStatus:()=>invoke('ai-status'),aiLogin:()=>invoke('ai-login'),aiSelectExecutable:()=>invoke('ai-select'),aiGenerate:r=>invoke('ai-generate',r),aiGenerateConcept:r=>invoke('ai-concept',r),aiCancel:()=>invoke('ai-cancel'),
+  onProgress:callback=>{const listener=(_event:unknown,p:any)=>callback(p);ipcRenderer.on('forge:progress',listener);return()=>ipcRenderer.removeListener('forge:progress',listener);},
+  reveal:p=>invoke('reveal',p)
+};contextBridge.exposeInMainWorld('forge',api);
