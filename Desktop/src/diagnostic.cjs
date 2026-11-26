@@ -74,7 +74,7 @@ module.exports = async function runDiagnostic({ window, app, diagnosticPath, dia
 
     if (generateWithAi) {
       phase('ai-generation', `Generating ${requestedCount} candidates through the actual UI.`);
-      if (!result.state.ai?.available || !result.state.ai?.authenticated) throw new Error(`Codex is unavailable: ${result.state.ai?.error || result.state.ai?.label || 'unknown connection state'}`);
+      if (!result.state.ai?.available || !result.state.ai?.authenticated) throw new Error(`AI provider (Codex/Claude Code) is unavailable: ${result.state.ai?.error || result.state.ai?.label || 'unknown connection state'}`);
       await evaluate(`(() => {
         const goal = document.getElementById('goal'), count = document.getElementById('candidateTotal');
         goal.value = '선택한 공격·스킬의 반응을 유지하면서 묵직한 명중감을 비교하고 싶습니다. 화면 흔들림은 절제하고, 각 후보가 서로 구분되게 제안하세요.';

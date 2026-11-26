@@ -1,11 +1,12 @@
-const { app, BrowserWindow, protocol, net, ipcMain, dialog, shell, session } = require('electron');
+const { app, BrowserWindow, nativeTheme, protocol, net, ipcMain, dialog, shell, session } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const { ProjectClient } = require('./project-client.cjs');
 const { createMediaResponse } = require('./media-response.cjs');
-const { CodexCandidateGenerator } = require('./ai-candidates.cjs');
+const { CodexCandidateGenerator, ClaudeCodeCandidateGenerator } = require('./ai-candidates.cjs');
+const tuning = require('../renderer/tuning-contract.js');
 
 app.setName('Baekho Studio');
 protocol.registerSchemesAsPrivileged([
@@ -22,17 +23,91 @@ let generation = 0;
 const media = new Map();
 const rendererRoot = path.join(__dirname, '../renderer');
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
-const candidateGenerator = new CodexCandidateGenerator();
+const windowBackground = { light: '#f4f6f8', dark: '#10151d' };
+let settings = {};
+const candidateGenerators = { codex: new CodexCandidateGenerator(), claude: new ClaudeCodeCandidateGenerator() };
+const AI_PROVIDER_PREFERENCES = ['auto', 'codex', 'claude'];
 let aiJob = null, aiStatusPromise = null, aiStatusCheckedAt = 0;
-let aiConnection = { available: false, authenticated: false, provider: 'codex', label: 'Codex 연결 확인 중', error: '' };
+let aiConnection = { available: false, authenticated: false, provider: 'codex', label: 'AI 연결 확인 중', error: '' };
+function loadKnowledge(recipeId = '') {
+  const guide = fs.readFileSync(path.join(__dirname, '../knowledge/combat-feel-guide.md'), 'utf8');
+  const recipeSnapshot = fs.readFileSync(path.join(__dirname, '../knowledge/recipe-library.json'), 'utf8');
+  const library = JSON.parse(recipeSnapshot);
+  if (library.schemaVersion !== 1 || !Array.isArray(library.recipes)) throw new Error('타격감 지식 파일 형식이 올바르지 않습니다.');
+  const selected = recipeId ? library.recipes.find(recipe => recipe.id === recipeId) : null;
+  if (recipeId && !selected) throw new Error('선택한 타격감 레시피를 찾을 수 없습니다.');
+  return { version: library.version, guide, recipes: library.recipes, selectedRecipe: selected, recipeSnapshot,
+    hash: createHash('sha256').update(guide).update(recipeSnapshot).digest('hex') };
+}
+function loadObservations(target, observationRef, identity, referenceCandidate) {
+  if (!observationRef) return null;
+  if (typeof observationRef.runId !== 'string' || typeof observationRef.candidateId !== 'string') throw new Error('참고할 측정 기록을 다시 선택하세요.');
+  const { report } = target.loadReport(observationRef.runId);
+  if (report.adapterId !== identity.adapterId || report.sourceGuid !== identity.sourceGuid || (report.actionId || 'normal-combo') !== identity.actionId ||
+      identity.sourceHash && report.sourceDependencyHash !== identity.sourceHash) throw new Error('측정 기록의 동작 또는 원본 버전이 현재 후보와 다릅니다.');
+  const rows = [...report.results, report.controlResult].filter(row => row?.candidate?.id === observationRef.candidateId);
+  if (!rows.length) throw new Error('참고할 후보의 측정 기록이 없습니다.');
+  const configuration = candidate => JSON.stringify({ values: (identity.parameters ? tuning.effectiveValues(candidate || { values: [] }, identity.parameters, identity.curves || []) : [...(candidate?.values || [])]).map(value => ({ id: value.id, value: Math.fround(value.value) })).sort((a, b) => a.id.localeCompare(b.id)),
+    curves: tuning.activePatch(candidate || { values: [] }).curves.map(curve => ({ id: curve.id, keys: curve.keys.map(key => ({ time: Math.fround(key.time), value: Math.fround(key.value) })) })).sort((a, b) => a.id.localeCompare(b.id)) });
+  const referenceValues = identity.parameters ? tuning.effectiveValues(referenceCandidate || { values: [] }, identity.parameters, identity.curves || []) : [];
+  const measuredValues = rows.map(row => new Map((row.metrics?.appliedValues || []).map(value => [value.id, value.value])));
+  const inheritedValuesVerified = referenceValues.length > 0 && measuredValues.every(values => referenceValues.every(value => Number.isFinite(values.get(value.id))));
+  const authoredMatch = configuration(referenceCandidate) === configuration(rows[0].candidate);
+  const measuredMatch = inheritedValuesVerified && measuredValues.every(values => referenceValues.every(value => Math.fround(value.value) === Math.fround(values.get(value.id))));
+  const observations = { schemaVersion: 1, runId: report.runId, sourceHash: report.sourceDependencyHash,
+    sourceContextHash: report.sourceContextHash || '',
+    measuredCandidateId: rows[0].candidate.id, measuredRevision: rows[0].candidate.revision || 1,
+    referenceCandidateId: referenceCandidate?.id || '', referenceRevision: referenceCandidate?.revision || 1,
+    referenceMatchesMeasuredConfiguration: !authoredMatch ? false : inheritedValuesVerified ? measuredMatch : null,
+    referenceValuesVerifiedFromAppliedValues: inheritedValuesVerified,
+    note: 'These observations measure only the named candidate at the recorded revision. Edited or descendant candidates remain untested.',
+    repeats: rows.map(row => ({ repeatIndex: row.repeatIndex || 1, status: row.status,
+      metrics: Object.fromEntries(['attackRequests', 'hits', 'damageDealt', 'damageTaken', 'firstHitSeconds', 'elapsedSeconds'].map(key => [key, row.metrics?.[key]])),
+      appliedValues: row.metrics?.appliedValues || [], notes: row.metrics?.notes || [],
+      events: (row.metrics?.events || []).filter(event => /^(confirmed-impact|hitstop-|camera-begin|camera-end|camera-return-|value-limited)/.test(event.kind)),
+      capture: row.capture ? Object.fromEntries(['precisionStatus', 'capturedFrameCount', 'medianIntervalUs', 'maxIntervalUs', 'gapsOver33333Us'].map(key => [key, row.capture[key]])) : null,
+      fixtureValidation: row.fixtureValidation || null })) };
+  if (Buffer.byteLength(JSON.stringify(observations)) > 128 * 1024) throw new Error('참고 측정 기록이 128KiB를 넘습니다. 단일 동작·타격으로 시험 범위를 나눠 다시 생성하세요.');
+  return observations;
+}
+const aiProviderPreference = () => AI_PROVIDER_PREFERENCES.includes(settings.aiProvider) ? settings.aiProvider : 'auto';
+async function providerStatus(provider) {
+  try { return { ...await candidateGenerators[provider].status(), provider }; }
+  catch {
+    const name = provider === 'claude' ? 'Claude Code' : 'Codex';
+    return { available: false, authenticated: false, provider, label: `${name} 연결 확인 필요`, error: `${name} 설치와 로그인을 확인하세요.` };
+  }
+}
+// Explicit choice uses only that CLI. Auto prefers Codex and falls back to a logged-in Claude Code.
+async function resolveAiConnection(preference) {
+  if (preference !== 'auto') return providerStatus(preference);
+  const codex = await providerStatus('codex');
+  if (codex.available && codex.authenticated) return codex;
+  const claude = await providerStatus('claude');
+  if (claude.available && claude.authenticated) return claude;
+  if (codex.available) return codex;
+  if (claude.available) return claude;
+  return { available: false, authenticated: false, provider: 'codex', label: 'AI 연결 필요',
+    error: 'Codex 또는 Claude Code CLI를 설치하고 로그인한 뒤 연결 정보를 새로고침하세요.' };
+}
 async function aiStatus(force = false) {
   if (!aiStatusPromise && (force || !aiStatusCheckedAt || Date.now() - aiStatusCheckedAt > 30000)) {
-    aiStatusPromise = candidateGenerator.status().then(value => { aiConnection = value; })
-      .catch(() => { aiConnection = { available: false, authenticated: false, provider: 'codex', label: 'Codex 연결 확인 필요', error: 'Codex 설치와 로그인을 확인하세요.' }; })
-      .finally(() => { aiStatusCheckedAt = Date.now(); aiStatusPromise = null; });
+    const preference = aiProviderPreference();
+    const pending = resolveAiConnection(preference).then(value => { if (aiProviderPreference() === preference) aiConnection = value; })
+      .finally(() => { aiStatusCheckedAt = Date.now(); if (aiStatusPromise === pending) aiStatusPromise = null; });
+    aiStatusPromise = pending;
   }
   if (aiStatusPromise) await aiStatusPromise;
-  return { ...aiConnection, generating: !!aiJob };
+  return { ...aiConnection, preference: aiProviderPreference(), generating: !!aiJob };
+}
+
+function saveSettings(changes) {
+  const next = { ...settings, ...changes };
+  const file = settingsPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file + '.tmp', JSON.stringify(next, null, 2), 'utf8');
+  fs.renameSync(file + '.tmp', file);
+  settings = next;
 }
 
 function selectProject(projectPath) {
@@ -41,9 +116,9 @@ function selectProject(projectPath) {
   if (aiJob) throw new Error('AI 후보 생성을 마치거나 취소한 뒤 프로젝트를 바꾸세요.');
   const previousStatus = client?.getStatus();
   if (previousStatus?.connected && previousStatus.running) throw new Error('현재 프로젝트의 실험을 마치거나 취소한 뒤 프로젝트를 바꾸세요.');
-  client = new ProjectClient(canonical); catalog = { adapters: [] }; catalogPromise = null; catalogNeedsRefresh = true; media.clear(); generation++;
-  fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
-  fs.writeFileSync(settingsPath(), JSON.stringify({ projectPath: canonical }, null, 2));
+  const nextClient = new ProjectClient(canonical);
+  saveSettings({ projectPath: canonical });
+  client = nextClient; catalog = { adapters: [] }; catalogPromise = null; catalogNeedsRefresh = true; media.clear(); generation++;
 }
 function requireProject() { if (!client) throw new Error('먼저 Unity 프로젝트 폴더를 선택하세요.'); return client; }
 async function describe() {
@@ -72,10 +147,10 @@ async function snapshot() {
   // The native project chooser can complete while describe is waiting on Unity.
   if (generation !== currentGeneration) return snapshot();
   return { projectPath: target?.projectPath ?? '', projectName: target ? path.basename(target.projectPath) : '',
-    connection, catalog, ai, runs: target ? target.listRuns() : [] };
+    connection, catalog, ai, knowledge: loadKnowledge(), runs: target ? target.listRuns() : [] };
 }
 function boundedRequest(request) {
-  if (!request || typeof request !== 'object' || request.schemaVersion !== 1 || !Array.isArray(request.candidates))
+  if (!request || typeof request !== 'object' || ![1, 2].includes(request.schemaVersion) || !Array.isArray(request.candidates))
     throw new Error('올바른 실험 JSON을 선택하세요.');
   if (request.actionId != null && (typeof request.actionId !== 'string' || (request.actionId !== '' && !/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/.test(request.actionId))))
     throw new Error('실험의 공격·스킬 ID가 올바르지 않습니다.');
@@ -103,7 +178,7 @@ function boundedCombinedRequest(request) {
     const candidates = new Set();
     for (const candidate of action.candidates) {
       if (!candidate || typeof candidate.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(candidate.id) || candidates.has(candidate.id) ||
-          !Array.isArray(candidate.values) || !candidate.values.length)
+          !Array.isArray(candidate.values) || (!candidate.values.length && action.schemaVersion === 1))
         throw new Error('각 동작의 후보 ID와 수치가 올바르지 않습니다.');
       candidates.add(candidate.id);
       const parameters = new Set();
@@ -130,13 +205,16 @@ function validateCombinedCatalog(request, description) {
       : id === 'normal-combo' ? { ...source, id, available: !source.error, unavailableReason: source.error } : null;
     if (!action || action.available === false || !Array.isArray(action.parameters) || !action.parameters.length)
       throw new Error(action?.unavailableReason || '선택한 동작을 지금 사용할 수 없습니다. 동작 목록을 새로고침하세요.');
+    if (!(action.supportedRequestVersions || [action.defaultRequest?.schemaVersion || 1]).includes(selection.request.schemaVersion)) throw new Error('이 동작이 실험 JSON 버전을 지원하지 않습니다.');
+    const parameters = selection.request.schemaVersion === 1 && action.legacyParameters?.length ? action.legacyParameters : action.parameters;
     for (const candidate of selection.request.candidates) {
-      if (candidate.values.length !== action.parameters.length) throw new Error('공격 수치 구조가 변경되었습니다. 후보를 다시 생성하세요.');
-      for (const spec of action.parameters) {
-        const parameter = candidate.values.find(value => value.id === spec.id);
-        if (!parameter || parameter.value < spec.minimum || parameter.value > spec.maximum)
-          throw new Error(`${action.label || id}: ${spec.label || spec.id} 허용 범위를 확인하고 후보를 다시 생성하세요.`);
+      if (selection.request.schemaVersion === 1 && candidate.values.length !== parameters.length) throw new Error('공격 수치 구조가 변경되었습니다. 후보를 다시 생성하세요.');
+      for (const parameter of candidate.values) {
+        const spec = parameters.find(item => item.id === parameter.id);
+        if (!spec || !tuning.validValue(parameter.value, spec)) throw new Error(`${action.label || id}: ${parameter.id} 허용 범위를 확인하고 후보를 다시 생성하세요.`);
       }
+      const curveIds = new Set();
+      for (const curve of candidate.curves || []) { const spec = (action.curves || []).find(item => item.id === curve?.id); if (!spec || curveIds.has(curve.id)) throw new Error('곡선 ID를 확인하세요.'); curveIds.add(curve.id); tuning.validateKeys(curve.keys, spec); }
     }
   }
 }
@@ -170,28 +248,49 @@ async function chooseAssetPath(target, title, name) {
 async function loadReport(runId) {
   const target = requireProject();
   const result = target.loadReport(runId);
-  for (const row of result.report.results || []) {
+  const grantFile = (filename, kind) => {
+    kind === 'image' ? target.resolveImage(runId, filename, result.report) : target.resolveVideo(runId, filename, result.report);
+    const previous = [...media].find(([, grant]) => grant.generation === generation && grant.runId === runId && grant.filename === filename && (grant.kind || 'video') === kind);
+    const token = previous?.[0] || randomUUID();
+    media.delete(token); media.set(token, { generation, runId, filename, kind });
+    return `baekho-media://${kind}/${token}`;
+  };
+  for (const row of [...(result.report.results || []), result.report.controlResult].filter(Boolean)) {
     row.videoUrl = '';
-    if (!row.videoPath) continue;
-    const filename = String(row.videoPath).replace(/\\/g, '/').split('/').pop();
-    try {
-      target.resolveVideo(runId, filename);
-      const previous = [...media].find(([, grant]) => grant.generation === generation && grant.runId === runId && grant.filename === filename);
-      const token = previous?.[0] || randomUUID();
-      // Stable URLs keep report polling from restarting video playback. Refresh LRU position.
-      media.delete(token); media.set(token, { generation, runId, filename });
-      row.videoUrl = `baekho-media://video/${token}`;
-    } catch { row.videoUnavailable = true; }
+    if (row.videoPath) {
+      const filename = String(row.videoPath).replace(/\\/g, '/').split('/').pop();
+      try { row.videoUrl = grantFile(filename, 'video'); } catch { row.videoUnavailable = true; }
+    }
+    for (const frame of (row.capture?.frames || []).slice(0, 48)) if (frame.imagePath) {
+      try { frame.imageUrl = grantFile(frame.imagePath, 'image'); } catch { frame.imageUnavailable = true; }
+    }
+    if (row.capture?.framesPath) {
+      try { row.capture.timelineFrames = target.loadCaptureTimeline(runId, row.capture); }
+      catch { row.capture.timelineUnavailable = true; }
+    }
   }
   // A report refresh should not retain media grants for every historical refresh forever.
-  while (media.size > 120) media.delete(media.keys().next().value);
+  while (media.size > 2048) media.delete(media.keys().next().value);
   return result;
 }
 const handlers = {
   bootstrap: snapshot, refresh: snapshot, describe,
+  setTheme: theme => {
+    if (theme !== 'light' && theme !== 'dark') throw new Error('화면 모드를 다시 선택하세요.');
+    saveSettings({ theme });
+    nativeTheme.themeSource = theme;
+    window?.setBackgroundColor(windowBackground[theme]);
+  },
   aiStatus: () => aiStatus(true),
+  setAiProvider: async provider => {
+    if (!AI_PROVIDER_PREFERENCES.includes(provider)) throw new Error('AI 엔진을 다시 선택하세요.');
+    if (aiJob) throw new Error('AI 후보 생성을 마치거나 취소한 뒤 AI 엔진을 바꾸세요.');
+    saveSettings({ aiProvider: provider });
+    aiStatusPromise = null;
+    return aiStatus(true);
+  },
   cancelGeneration: () => { if (aiJob) aiJob.controller.abort(); return { cancelled: !!aiJob }; },
-  generateCandidates: async ({ adapterId, sourceGuid, actionId, goal, count } = {}) => {
+  generateCandidates: async ({ adapterId, sourceGuid, actionId, goal, count, schemaVersion, mode, strategy, referenceCandidate, feedback, lockedIds, recipeId, observationRef } = {}) => {
     const target = requireProject(), currentGeneration = generation;
     if (aiJob) throw new Error('이미 AI 후보를 생성하고 있습니다.');
     if (typeof goal !== 'string' || !goal.trim() || goal.length > 4000 || !Number.isInteger(count) || count < 2 || count > 12)
@@ -199,6 +298,10 @@ const handlers = {
     const status = target.getStatus();
     if (!status.connected || status.running || status.isPlaying || status.isCompiling)
       throw new Error('Unity가 연결된 편집 모드에서 후보를 생성하세요.');
+    const ai = await aiStatus();
+    const candidateGenerator = candidateGenerators[ai.provider];
+    if (!candidateGenerator || !ai.available || !ai.authenticated) throw new Error(ai.error || 'AI 연결과 로그인을 확인하세요.');
+    if (aiJob) throw new Error('이미 AI 후보를 생성하고 있습니다.');
     const job = { controller: new AbortController() }; aiJob = job;
     try {
       const description = await describe();
@@ -212,12 +315,22 @@ const handlers = {
         : selectedId === 'normal-combo' ? { ...source, id: selectedId, label: '일반 공격 전체 콤보', available: true } : null;
       if (!action) throw new Error('선택한 공격 또는 스킬을 현재 프로젝트에서 찾을 수 없습니다.');
       if (action.available === false || !action.defaultRequest) throw new Error(action.unavailableReason || '아직 테스트할 수 없는 동작입니다.');
-      const generated = await candidateGenerator.generate({ goal: goal.trim(), count, parameters: action.parameters,
+      const version = schemaVersion || action.defaultRequest.schemaVersion;
+      if (!(action.supportedRequestVersions || [action.defaultRequest.schemaVersion]).includes(version)) throw new Error('이 어댑터가 지원하지 않는 실험 버전입니다.');
+      const knowledge = version === 2 ? loadKnowledge(recipeId) : null;
+      const observations = version === 2 ? loadObservations(target, observationRef, { adapterId, sourceGuid, actionId: selectedId, sourceHash: action.defaultRequest.sourceHash, parameters: action.parameters, curves: action.curves }, referenceCandidate) : null;
+      const generated = await candidateGenerator.generate({ goal: goal.trim(), count, parameters: version === 1 && action.legacyParameters?.length ? action.legacyParameters : action.parameters,
+        schemaVersion: version, curves: version === 2 ? action.curves || [] : [], context: typeof action.context === 'string' ? { description: action.context } : action.context || {},
+        mode, strategy, referenceCandidate, feedback, lockedIds, recipeId, knowledge, observations,
         adapterLabel: adapter.displayName, sourceLabel: path.basename(source.label), actionLabel: action.label }, { signal: job.controller.signal });
       if (job.controller.signal.aborted) throw new Error('AI 후보 생성을 취소했습니다.');
       if (generation !== currentGeneration || client !== target) throw new Error('프로젝트가 변경되었습니다. 다시 생성하세요.');
-      return { ...structuredClone(action.defaultRequest), actionId: selectedId, candidates: generated.candidates,
-        generation: { provider: generated.provider, model: generated.model || '', goal: goal.trim(), count, createdUtc: generated.createdUtc } };
+      return { ...structuredClone(action.defaultRequest), schemaVersion: version, actionId: selectedId, candidates: generated.candidates,
+        generation: { provider: generated.provider, model: generated.model || '', goal: goal.trim(), count, createdUtc: generated.createdUtc,
+          ...(version === 2 ? { mode: mode || 'explore', strategy: strategy || 'coherent', referenceCandidate,
+            referenceCandidateId: referenceCandidate?.id || '', feedback: feedback || '', lockedIds: lockedIds || [], recipeId: recipeId || '',
+            guideVersion: knowledge.version, guideHash: knowledge.hash, guideSnapshot: knowledge.guide, recipesSnapshot: knowledge.recipeSnapshot,
+            observationsJson: observations ? JSON.stringify(observations) : '' } : {}) } };
     } finally { if (aiJob === job) aiJob = null; }
   },
   chooseProject: async () => {
@@ -289,24 +402,24 @@ function installIpc() {
 function installProtocols() {
   protocol.handle('baekho', request => {
     const url = new URL(request.url);
-    if (url.hostname !== 'app' || !['/index.html', '/styles.css', '/app.js'].includes(url.pathname))
+    if (url.hostname !== 'app' || !['/index.html', '/styles.css', '/app.js', '/tuning-contract.js'].includes(url.pathname))
       return new Response('Not found', { status: 404 });
     return net.fetch(pathToFileURL(path.join(rendererRoot, url.pathname.slice(1))).href);
   });
   protocol.handle('baekho-media', async request => {
     try {
       const url = new URL(request.url), grant = media.get(url.pathname.slice(1));
-      if (url.hostname !== 'video' || !grant || grant.generation !== generation) return new Response('Not found', { status: 404 });
-      const video = requireProject().resolveVideo(grant.runId, grant.filename);
+      if (!['video', 'image'].includes(url.hostname) || !grant || (grant.kind || 'video') !== url.hostname || grant.generation !== generation) return new Response('Not found', { status: 404 });
+      const video = url.hostname === 'image' ? requireProject().resolveImage(grant.runId, grant.filename) : requireProject().resolveVideo(grant.runId, grant.filename);
       return await createMediaResponse(video, request);
     } catch { return new Response('Video unavailable', { status: 404 }); }
   });
 }
 function createWindow() {
   window = new BrowserWindow({ title: 'Baekho Studio', width: 1440, height: 980, minWidth: 1024, minHeight: 720,
-    backgroundColor: '#10161d', show: !testMode, autoHideMenuBar: true,
+    backgroundColor: windowBackground[nativeTheme.themeSource], show: !testMode, autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true,
-      nodeIntegration: false, webSecurity: true, backgroundThrottling: false }
+      nodeIntegration: false, webSecurity: true, backgroundThrottling: false, offscreen: process.argv.includes('--diagnostic-v2') }
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event, url) => { if (!url.startsWith('baekho://app/')) event.preventDefault(); });
@@ -323,6 +436,10 @@ function createWindow() {
 
 // Explicit developer-only diagnostic mode; never runs for a normal app launch.
 async function runDiagnostic() {
+  if (process.argv.includes('--diagnostic-v2')) {
+    await require('./v2-diagnostic.cjs')({ window, app, diagnosticPath, diagnosticConsoleErrors, loadKnowledge });
+    return;
+  }
   if (process.argv.includes('--diagnostic-multi')) {
     await require('./multi-action-diagnostic.cjs')({ window, app, dialog, diagnosticPath, diagnosticConsoleErrors });
     return;
@@ -336,9 +453,12 @@ else {
     session.defaultSession.setPermissionRequestHandler((_web, _permission, callback) => callback(false));
     session.defaultSession.setPermissionCheckHandler(() => false);
     try {
-      const provided = argument('--project');
-      const saved = fs.existsSync(settingsPath()) ? JSON.parse(fs.readFileSync(settingsPath(), 'utf8')) : {};
-      if (provided || saved.projectPath) selectProject(provided || saved.projectPath);
+      if (fs.existsSync(settingsPath())) settings = JSON.parse(fs.readFileSync(settingsPath(), 'utf8')) || {};
+    } catch (error) { console.error(error.message); }
+    nativeTheme.themeSource = settings.theme === 'dark' ? 'dark' : 'light';
+    try {
+      const project = argument('--project') || settings.projectPath;
+      if (project) selectProject(project);
     } catch (error) { console.error(error.message); }
     installProtocols(); installIpc(); createWindow();
   }).catch(error => { console.error(error); app.exit(1); });

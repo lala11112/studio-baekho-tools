@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420">
+<title>사람이 선택하는 실험 반복</title>
+<rect width="100%" height="100%" rx="16" fill="#F5F8FA"/>
+<text x="32.0" y="51.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="27" font-weight="700" fill="#142B3A">사람이 선택하는 실험 반복</text>
+<rect x="30" y="90" width="350" height="110" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="49.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">1 대상 선택</text>
+<text x="49.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">프로젝트 · 폼 · 동작</text>
+<polyline points="380,145 425,145" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="425.0,145.0 414.5,150.8 414.5,139.2" fill="#486272"/>
+<rect x="425" y="90" width="350" height="110" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="444.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">2 후보 작성</text>
+<text x="444.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">AI 생성 / 직접 편집</text>
+<polyline points="775,145 820,145" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="820.0,145.0 809.5,150.8 809.5,139.2" fill="#486272"/>
+<rect x="820" y="90" width="350" height="110" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="839.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">3 실제 실행</text>
+<text x="839.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">원본 + 후보별 실행</text>
+<rect x="820" y="270" width="350" height="110" rx="10" fill="white" stroke="#365CBC" stroke-width="1.5"/>
+<text x="839.0" y="309.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#365CBC">4 결과 비교</text>
+<text x="839.0" y="343.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">영상 · 명중 PNG · 적용값</text>
+<rect x="425" y="270" width="350" height="110" rx="10" fill="white" stroke="#365CBC" stroke-width="1.5"/>
+<text x="444.0" y="309.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#365CBC">5 선택과 이유</text>
+<text x="444.0" y="343.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">선호 후보 기록 · 재확인</text>
+<rect x="30" y="270" width="350" height="110" rx="10" fill="white" stroke="#AC641D" stroke-width="1.5"/>
+<text x="49.0" y="309.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#AC641D">6 새 SO 저장</text>
+<text x="49.0" y="343.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">단일 프리셋 / 통합 폼</text>
+<polyline points="995,200 995,270" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="995.0,270.0 989.2,259.5 1000.8,259.5" fill="#486272"/>
+<polyline points="820,325 775,325" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="775.0,325.0 785.5,319.2 785.5,330.8" fill="#486272"/>
+<polyline points="425,325 380,325" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="380.0,325.0 390.5,319.2 390.5,330.8" fill="#486272"/>
+<polyline points="600,270 600,200" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="600.0,200.0 605.8,210.5 594.2,210.5" fill="#486272"/>
+<text x="315.0" y="242.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="18" font-weight="400" fill="#486272">평가를 반영해 다시 생성·편집</text>
+</svg>

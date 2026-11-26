@@ -68,6 +68,7 @@ namespace StudioBaekho.CombatLab
             public string id;
             public string displayName;
             public bool supportsCombinedExport;
+            public int[] supportedRequestVersions;
             public string error = "";
             public List<SourceDescription> sources = new List<SourceDescription>();
         }
@@ -87,6 +88,10 @@ namespace StudioBaekho.CombatLab
             public bool available;
             public string unavailableReason = "";
             public List<ParameterSpec> parameters = new List<ParameterSpec>();
+            public List<CurveSpec> curves = new List<CurveSpec>();
+            public List<ParameterSpec> legacyParameters = new List<ParameterSpec>();
+            public int[] supportedRequestVersions = new[] { 1 };
+            public string context;
             public ExperimentRequest defaultRequest;
         }
         [Serializable] private sealed class StartResult { public string directory; }
@@ -241,7 +246,8 @@ namespace StudioBaekho.CombatLab
             foreach (var adapter in CombatLab.Adapters())
             {
                 var entry = new AdapterDescription { id = adapter.Id, displayName = adapter.DisplayName,
-                    supportsCombinedExport = adapter is ICombatLabMultiActionAdapter };
+                    supportsCombinedExport = adapter is ICombatLabMultiActionAdapter,
+                    supportedRequestVersions = adapter is ICombatLabFeedbackAdapter ? new[] { 1, 2 } : new[] { 1 } };
                 description.adapters.Add(entry);
                 try
                 {
@@ -261,8 +267,20 @@ namespace StudioBaekho.CombatLab
                                     if (!action.available) continue;
                                     try
                                     {
-                                        actionEntry.parameters = actions.Describe(source.guid, action.id);
-                                        actionEntry.defaultRequest = CombatLab.CreateComparison(adapter.Id, source.guid, action.id);
+                                        if (adapter is ICombatLabFeedbackAdapter feedback)
+                                        {
+                                            actionEntry.parameters = feedback.DescribeFeedback(source.guid, action.id);
+                                            actionEntry.legacyParameters = actions.Describe(source.guid, action.id);
+                                            actionEntry.curves = feedback.DescribeCurves(source.guid, action.id);
+                                            actionEntry.context = feedback.DescribeContext(source.guid, action.id);
+                                            actionEntry.supportedRequestVersions = new[] { 1, 2 };
+                                            actionEntry.defaultRequest = CombatLab.CreateFeedbackRequest(adapter.Id, source.guid, action.id);
+                                        }
+                                        else
+                                        {
+                                            actionEntry.parameters = actions.Describe(source.guid, action.id);
+                                            actionEntry.defaultRequest = CombatLab.CreateComparison(adapter.Id, source.guid, action.id);
+                                        }
                                     }
                                     catch (Exception error)
                                     { actionEntry.available = false; actionEntry.unavailableReason = error.Message; }
@@ -307,7 +325,7 @@ namespace StudioBaekho.CombatLab
         {
             using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                if (stream.Length > MaximumRequestBytes) throw new ArgumentException("요청 파일은 1MB 이하여야 합니다.");
+                if (stream.Length > MaximumRequestBytes) throw new ArgumentException("요청 파일은 1MB 이하여야 합니다. 타격·동작 대상을 나누어 생성하세요. 항목은 자동 생략되지 않습니다.");
                 var bytes = new byte[(int)stream.Length];
                 int read = 0;
                 while (read < bytes.Length)

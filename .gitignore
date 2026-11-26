@@ -3,3 +3,6 @@ CombatLabResults/
 Desktop/node_modules/
 Desktop/dist/
 Desktop/test-artifacts/
+test-artifacts/
+.test-unity/
+.codex-ppt-build/

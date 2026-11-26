@@ -38,16 +38,22 @@ function fixture(t) {
   }
   const electron = {
     app: { setName() {}, getPath: () => path.join(temporary, 'settings'), requestSingleInstanceLock: () => false, quit() {} },
+    nativeTheme: { themeSource: 'system' },
     protocol: { registerSchemesAsPrivileged() {} },
     dialog: { showSaveDialog: (...args) => options.save(...args) },
     ipcMain: { handle: (name, callback) => ipc.set(name, callback) }
   };
-  class FakeGenerator {
-    async status() { return { available: true, authenticated: true, provider: 'codex', label: 'Codex 연결됨', error: '' }; }
-    generate(input, optionsValue) { return options.generate(input, optionsValue); }
-  }
+  const providerStatus = {
+    codex: { available: true, authenticated: true, provider: 'codex', label: 'Codex 연결됨', error: '' },
+    claude: { available: true, authenticated: true, provider: 'claude', label: 'Claude Code 연결됨', error: '' }
+  };
+  const generatorCalls = [];
+  const fakeGenerator = provider => class {
+    async status() { return { ...providerStatus[provider] }; }
+    generate(input, optionsValue) { generatorCalls.push(provider); return options.generate(input, optionsValue, provider); }
+  };
   const context = vm.createContext({
-    require: name => name === 'electron' ? electron : name === './project-client.cjs' ? { ProjectClient: FakeClient } : name === './ai-candidates.cjs' ? { CodexCandidateGenerator: FakeGenerator } : localRequire(name),
+    require: name => name === 'electron' ? electron : name === './project-client.cjs' ? { ProjectClient: FakeClient } : name === './ai-candidates.cjs' ? { CodexCandidateGenerator: fakeGenerator('codex'), ClaudeCodeCandidateGenerator: fakeGenerator('claude') } : localRequire(name),
     process: { argv: [], platform: process.platform }, __dirname: path.dirname(mainPath),
     Buffer, URL, Response, console, setTimeout, structuredClone, AbortController
   });
@@ -55,8 +61,66 @@ function fixture(t) {
   const api = context.testApi;
   api.selectProject(root);
   const request = { schemaVersion: 1, candidates: [{ id: 'baseline', values: [] }] };
-  return { temporary, root, project, api, options, calls, statuses, request, ipc };
+  return { temporary, root, project, api, options, calls, statuses, request, ipc, nativeTheme: electron.nativeTheme, providerStatus, generatorCalls };
 }
+
+test('AI provider auto-selects Codex first, falls back to a logged-in Claude Code, and persists explicit choices', async t => {
+  const { temporary, api, providerStatus } = fixture(t);
+  const settingsFile = path.join(temporary, 'settings', 'settings.json');
+  let status = await api.handlers.aiStatus();
+  assert.equal(status.preference, 'auto');
+  assert.equal(status.provider, 'codex');
+
+  providerStatus.codex = { available: true, authenticated: false, provider: 'codex', label: 'Codex 로그인 필요', error: '로그인' };
+  status = await api.handlers.aiStatus();
+  assert.equal(status.provider, 'claude');
+  assert.equal(status.authenticated, true);
+
+  providerStatus.claude = { available: false, authenticated: false, provider: 'claude', label: 'Claude Code 연결 필요', error: '없음' };
+  status = await api.handlers.aiStatus();
+  assert.equal(status.provider, 'codex', 'an installed but logged-out CLI is reported before a missing one');
+  assert.equal(status.authenticated, false);
+
+  providerStatus.claude = { available: true, authenticated: true, provider: 'claude', label: 'Claude Code 연결됨', error: '' };
+  status = await api.handlers.setAiProvider('codex');
+  assert.equal(status.preference, 'codex');
+  assert.equal(status.provider, 'codex', 'an explicit choice never falls back to another CLI');
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).aiProvider, 'codex');
+  status = await api.handlers.setAiProvider('claude');
+  assert.equal(status.provider, 'claude');
+  assert.equal(status.authenticated, true);
+  for (const invalid of ['openai', '', null, {}]) await assert.rejects(api.handlers.setAiProvider(invalid));
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).aiProvider, 'claude');
+});
+
+test('theme preferences update native controls and persist across project changes', t => {
+  const { temporary, root, api, project, nativeTheme } = fixture(t);
+  const settingsFile = path.join(temporary, 'settings', 'settings.json');
+  api.handlers.setTheme('dark');
+  assert.equal(nativeTheme.themeSource, 'dark');
+  assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, 'utf8')), { projectPath: root, theme: 'dark' });
+
+  const other = project('projectB');
+  api.selectProject(other);
+  assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, 'utf8')), { projectPath: other, theme: 'dark' });
+  assert.equal(nativeTheme.themeSource, 'dark');
+
+  api.handlers.setTheme('light');
+  assert.equal(nativeTheme.themeSource, 'light');
+  assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, 'utf8')), { projectPath: other, theme: 'light' });
+});
+
+test('invalid theme requests preserve the saved preference and native appearance', t => {
+  const { temporary, api, nativeTheme } = fixture(t);
+  const settingsFile = path.join(temporary, 'settings', 'settings.json');
+  api.handlers.setTheme('dark');
+  const saved = fs.readFileSync(settingsFile, 'utf8');
+  for (const invalid of ['system', 'Dark', '', null, undefined, {}, ['light']]) {
+    assert.throws(() => api.handlers.setTheme(invalid));
+    assert.equal(nativeTheme.themeSource, 'dark');
+    assert.equal(fs.readFileSync(settingsFile, 'utf8'), saved);
+  }
+});
 
 test('report refresh preserves media grants and invalidates grants on project change', async t => {
   const { root, api, project } = fixture(t);
@@ -446,6 +510,53 @@ test('AI generation uses trusted source metadata and preserves actual generated 
   assert.equal(request.generation.provider, 'codex');
   assert.equal(request.generation.count, 4);
   assert.equal((await api.handlers.aiStatus()).generating, false);
+});
+
+test('AI generation runs through the selected Claude Code provider and records its provenance', async t => {
+  const { api, options, providerStatus, generatorCalls } = fixture(t);
+  options.describe = async () => generationCatalog();
+  options.generate = async (input, _options, provider) => ({ provider, model: 'claude-test-model', createdUtc: '2026-10-08T00:00:00Z',
+    candidates: Array.from({ length: input.count }, (_, index) => ({ id: `ai-${index + 1}`, label: `후보 ${index + 1}`, rationale: '예상 효과', values: [{ id: 'impact', value: 0.5 + index * 0.1 }] })) });
+  await api.handlers.setAiProvider('claude');
+  const request = await api.handlers.generateCandidates({ adapterId: 'combat', sourceGuid: 'source-guid', goal: '무게감', count: 2 });
+  assert.deepEqual(generatorCalls, ['claude']);
+  assert.equal(request.generation.provider, 'claude');
+  assert.equal(request.generation.model, 'claude-test-model');
+
+  providerStatus.claude = { available: true, authenticated: false, provider: 'claude', label: 'Claude Code 로그인 필요', error: 'Claude Code에서 로그인하세요.' };
+  await api.handlers.aiStatus();
+  await assert.rejects(api.handlers.generateCandidates({ adapterId: 'combat', sourceGuid: 'source-guid', goal: '무게감', count: 2 }), /Claude Code에서 로그인/);
+  assert.deepEqual(generatorCalls, ['claude'], 'a logged-out provider is never invoked');
+});
+
+test('v2 refinement reads trusted measured telemetry and snapshots its guide without claiming edited values were measured', async t => {
+  const { api, options, root } = fixture(t), catalog = generationCatalog(), source = catalog.adapters[0].sources[0];
+  source.defaultRequest.schemaVersion = 2; source.defaultRequest.sourceHash = 'source-hash'; source.supportedRequestVersions = [1, 2]; source.curves = [];
+  options.describe = async () => catalog;
+  const directory = path.join(root, 'CombatLabResults', 'observed'); fs.mkdirSync(directory, { recursive: true });
+  const candidate = { id: 'measured', label: '측정 후보', revision: 1, values: [{ id: 'impact', value: 0.5 }], curves: [] };
+  const report = { schemaVersion: 1, runId: 'observed', adapterId: 'combat', sourceGuid: 'source-guid', actionId: 'normal-combo', sourceDependencyHash: 'source-hash', startedUtc: '2026-10-23T00:00:00Z', results: [
+    { candidate, repeatIndex: 1, status: 'completed', metrics: { hits: 1, attackRequests: 1, appliedValues: [{ id: 'impact', value: 0.5 }], events: [{ kind: 'confirmed-impact', realTime: 0.3 }, { kind: 'camera-output', fov: 60 }, { kind: 'value-limited', detail: 'FOV requested=182 applied=179' }] }, capture: { precisionStatus: 'complete', maxIntervalUs: 24000 } }
+  ] };
+  fs.writeFileSync(path.join(directory, 'report.json'), JSON.stringify(report));
+  let supplied;
+  options.generate = async input => { supplied = input; return { provider: 'codex', candidates: [0.6, 0.7].map((value, i) => ({ id: `ai-${i}`, values: [{ id: 'impact', value }], curves: [] })) }; };
+  const input = { adapterId: 'combat', sourceGuid: 'source-guid', goal: '복귀를 빠르게', count: 2, schemaVersion: 2, mode: 'refine', recipeId: 'heavy', referenceCandidate: { ...candidate, revision: 2, values: [{ id: 'impact', value: 0.75 }] }, observationRef: { runId: 'observed', candidateId: 'measured' } };
+  const request = await api.handlers.generateCandidates(input);
+  assert.equal(supplied.observations.measuredRevision, 1); assert.equal(supplied.observations.referenceRevision, 2);
+  assert.equal(supplied.observations.referenceMatchesMeasuredConfiguration, false);
+  assert.deepEqual(Array.from(supplied.observations.repeats[0].events, event => event.kind), ['confirmed-impact', 'value-limited']);
+  assert.equal(JSON.parse(request.generation.observationsJson).repeats[0].capture.maxIntervalUs, 24000);
+  assert.equal(request.generation.guideHash.length, 64); assert.match(request.generation.guideSnapshot, /Combat feel guide/);
+  assert.equal(JSON.parse(request.generation.recipesSnapshot).version, '1.0.0');
+  source.parameters.push({ id: 'scene.inheritedStop', label: '상속 정지', minimum: 0, maximum: 1, baseline: 0.08 });
+  report.results[0].metrics.appliedValues.push({ id: 'scene.inheritedStop', value: 0.03 });
+  fs.writeFileSync(path.join(directory, 'report.json'), JSON.stringify(report));
+  await api.handlers.generateCandidates({ ...input, referenceCandidate: candidate });
+  assert.equal(supplied.observations.referenceValuesVerifiedFromAppliedValues, true);
+  assert.equal(supplied.observations.referenceMatchesMeasuredConfiguration, false, 'changed inherited scene values cannot make an old source measurement match the current reference');
+  report.sourceDependencyHash = 'different-source'; fs.writeFileSync(path.join(directory, 'report.json'), JSON.stringify(report));
+  await assert.rejects(api.handlers.generateCandidates(input), /원본 버전/);
 });
 
 test('AI generation rejects invalid count or missing source before invoking a model', async t => {

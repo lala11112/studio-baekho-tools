@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "version": "1.0.0",
+  "recipes": [
+    {
+      "id": "sharp",
+      "label": "짧고 날카롭게",
+      "description": "짧은 접촉 정지와 빠르게 사라지는 충격. 조작 흐름을 유지합니다.",
+      "principles": [
+        "타격별 정지 차이 보존",
+        "작은 방향성 킥",
+        "짧은 잔진동"
+      ],
+      "suggested": {
+        "hitStopSeconds": [
+          0.02,
+          0.045
+        ],
+        "shakeSeconds": [
+          0.06,
+          0.12
+        ],
+        "shakeRotationDegrees": [
+          0.1,
+          0.6
+        ],
+        "returnSeconds": [
+          0.12,
+          0.2
+        ]
+      },
+      "defaults": {
+        "hitStopScope": "Both",
+        "hitStopStacking": "Maximum"
+      }
+    },
+    {
+      "id": "heavy",
+      "label": "깊고 묵직하게",
+      "description": "접촉을 강조하고 피격 후 여운을 남깁니다. 긴 정지가 반응성을 해치지 않는지 비교합니다.",
+      "principles": [
+        "준비와 명중의 속도 대비",
+        "막타 또는 단발에 강조",
+        "빠른 충격과 느린 복귀"
+      ],
+      "suggested": {
+        "hitStopSeconds": [
+          0.05,
+          0.1
+        ],
+        "shakeSeconds": [
+          0.12,
+          0.22
+        ],
+        "shakeRotationDegrees": [
+          0.4,
+          1.2
+        ],
+        "impactFovDegrees": [
+          -3,
+          -1
+        ],
+        "returnSeconds": [
+          0.18,
+          0.35
+        ]
+      },
+      "defaults": {
+        "hitStopScope": "Both",
+        "hitStopStacking": "Maximum"
+      }
+    },
+    {
+      "id": "finisher",
+      "label": "연타는 절제하고 막타 강조",
+      "description": "앞선 타격은 짧게 유지하고 마지막 실제 타격을 강조합니다.",
+      "principles": [
+        "타격 순서 확인",
+        "앞타와 막타를 별도 설정",
+        "전체 콤보 재검증"
+      ],
+      "suggested": {
+        "earlyHitStopSeconds": [
+          0.015,
+          0.035
+        ],
+        "lastHitStopSeconds": [
+          0.055,
+          0.09
+        ],
+        "earlyShakeSeconds": [
+          0.05,
+          0.09
+        ],
+        "lastShakeSeconds": [
+          0.12,
+          0.2
+        ]
+      },
+      "defaults": {
+        "hitStopScope": "Both",
+        "hitStopStacking": "Maximum"
+      }
+    },
+    {
+      "id": "area",
+      "label": "광역 충격",
+      "description": "각 피격자는 반응하고 화면 충격은 한 번만 발생합니다.",
+      "principles": [
+        "피격자별 로컬 정지",
+        "같은 HitEvent의 화면 중복 억제",
+        "강한 충격 우선 중첩"
+      ],
+      "suggested": {
+        "hitStopSeconds": [
+          0.04,
+          0.08
+        ],
+        "shakeSeconds": [
+          0.15,
+          0.25
+        ],
+        "shakeRotationDegrees": [
+          0.3,
+          1
+        ],
+        "returnSeconds": [
+          0.2,
+          0.35
+        ]
+      },
+      "defaults": {
+        "hitStopScope": "Both",
+        "hitStopStacking": "Maximum"
+      }
+    },
+    {
+      "id": "restrained",
+      "label": "시야를 유지하는 타격감",
+      "description": "화면 이동을 줄이고 짧은 정지와 회전 충격으로 접촉을 전달합니다.",
+      "principles": [
+        "위치 흔들림 최소화",
+        "구도와 조작 시야 유지",
+        "소리 포함 및 음소거 비교"
+      ],
+      "suggested": {
+        "hitStopSeconds": [
+          0.025,
+          0.055
+        ],
+        "shakeTranslationMeters": [
+          0,
+          0.01
+        ],
+        "shakeRotationDegrees": [
+          0.1,
+          0.4
+        ],
+        "shakeSeconds": [
+          0.07,
+          0.13
+        ],
+        "returnSeconds": [
+          0.12,
+          0.22
+        ]
+      },
+      "defaults": {
+        "hitStopScope": "Both",
+        "hitStopStacking": "Maximum"
+      }
+    }
+  ]
+}

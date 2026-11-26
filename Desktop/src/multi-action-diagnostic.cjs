@@ -68,7 +68,7 @@ module.exports = async function ({ window, app, dialog, diagnosticPath, diagnost
       if (replay) {
         phase('import-' + id);
         const request = replay.request.selections.find(item => item.request.actionId === id)?.request;
-        if (request?.generation?.provider !== 'codex') throw new Error('Replay requires recorded Codex candidates');
+        if (!['codex', 'claude'].includes(request?.generation?.provider)) throw new Error('Replay requires recorded AI (Codex or Claude Code) candidates');
         const inputPath = outputBase + '-import-' + id + '.json';
         fs.writeFileSync(inputPath, JSON.stringify(request, null, 2));
         dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [inputPath] });

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="525" viewBox="0 0 1200 525">
+<title>공격 진행과 실제 명중을 구분하는 피드백</title>
+<rect width="100%" height="100%" rx="16" fill="#F5F8FA"/>
+<text x="32.0" y="51.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="27" font-weight="700" fill="#142B3A">공격 진행과 실제 명중을 구분하는 피드백</text>
+<rect x="30" y="90" width="350" height="120" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="49.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">공격 진행</text>
+<text x="49.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">캐릭터 액션 진행도 0~1</text>
+<rect x="450" y="90" width="720" height="120" rx="10" fill="white" stroke="#365CBC" stroke-width="1.5"/>
+<text x="469.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#365CBC">Motion</text>
+<text x="469.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">FOV · 위치 · 회전 곡선 / 추종과 복귀 시계</text>
+<polyline points="380,150 450,150" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="450.0,150.0 439.5,155.8 439.5,144.2" fill="#486272"/>
+<rect x="30" y="285" width="350" height="170" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="49.0" y="324.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">실제 명중</text>
+<text x="49.0" y="358.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">기본 중복 단위 : HitEvent</text>
+<text x="49.0" y="388.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">피해 적용된 대상 구분</text>
+<text x="49.0" y="418.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">실시간·게임시간 이벤트</text>
+<rect x="450" y="260" width="345" height="110" rx="10" fill="white" stroke="#365CBC" stroke-width="1.5"/>
+<text x="469.0" y="299.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#365CBC">Impact / Shake</text>
+<text x="469.0" y="333.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">지연 · 지속 · 독립 시계</text>
+<rect x="450" y="400" width="345" height="95" rx="10" fill="white" stroke="#AC641D" stroke-width="1.5"/>
+<text x="469.0" y="439.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#AC641D">Hitstop</text>
+<text x="469.0" y="473.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">지속 · 배율 · 대상 · 중첩</text>
+<rect x="850" y="275" width="320" height="190" rx="10" fill="white" stroke="#AC641D" stroke-width="1.5"/>
+<text x="869.0" y="314.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#AC641D">정지 대상</text>
+<text x="869.0" y="348.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">Global : 세계 시간</text>
+<text x="869.0" y="378.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">Attacker : 공격자</text>
+<text x="869.0" y="408.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">Victim : 피격자</text>
+<text x="869.0" y="438.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">Both : 양쪽</text>
+<polyline points="380,337 415,337 415,315 450,315" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="450.0,315.0 439.5,320.8 439.5,309.2" fill="#486272"/>
+<polyline points="380,390 415,390 415,445 450,445" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="450.0,445.0 439.5,450.8 439.5,439.2" fill="#486272"/>
+<polyline points="795,445 825,445 825,390 850,390" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="850.0,390.0 839.5,395.8 839.5,384.2" fill="#486272"/>
+</svg>

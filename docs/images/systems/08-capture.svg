@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="390" viewBox="0 0 1200 390">
+<title>명중 기준의 실제 렌더 샘플</title>
+<rect width="100%" height="100%" rx="16" fill="#F5F8FA"/>
+<text x="32.0" y="51.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="27" font-weight="700" fill="#142B3A">명중 기준의 실제 렌더 샘플</text>
+<text x="45.0" y="107.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="22" font-weight="400" fill="#486272">영상과 sidecar는 실시간으로 기록하며, 캡처 간격은 일정하지 않을 수 있습니다.</text>
+<polyline points="80,210 1130,210" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="1130.0,210.0 1119.5,215.8 1119.5,204.2" fill="#486272"/>
+<circle cx="120" cy="210" r="4" fill="#007D76"/>
+<circle cx="160" cy="210" r="4" fill="#007D76"/>
+<circle cx="215" cy="210" r="4" fill="#007D76"/>
+<circle cx="280" cy="210" r="4" fill="#007D76"/>
+<circle cx="320" cy="210" r="4" fill="#007D76"/>
+<circle cx="410" cy="210" r="4" fill="#007D76"/>
+<circle cx="485" cy="210" r="4" fill="#007D76"/>
+<circle cx="555" cy="210" r="4" fill="#007D76"/>
+<circle cx="610" cy="210" r="4" fill="#007D76"/>
+<circle cx="675" cy="210" r="4" fill="#007D76"/>
+<circle cx="755" cy="210" r="4" fill="#007D76"/>
+<circle cx="820" cy="210" r="4" fill="#007D76"/>
+<circle cx="910" cy="210" r="4" fill="#007D76"/>
+<circle cx="1010" cy="210" r="4" fill="#007D76"/>
+<circle cx="1080" cy="210" r="4" fill="#007D76"/>
+<polyline points="320,135 320,197" fill="none" stroke="#AC641D" stroke-width="2"/>
+<polygon points="320.0,197.0 314.2,186.5 325.8,186.5" fill="#AC641D"/>
+<text x="211.8" y="133.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="22" font-weight="700" fill="#AC641D">첫 confirmed-impact</text>
+<text x="86.5" y="262.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#486272">-150ms</text>
+<text x="300.5" y="262.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="700" fill="#AC641D">0ms</text>
+<text x="1043.5" y="262.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#486272">+600ms</text>
+<text x="287.8" y="327.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#142B3A">정밀 PNG 최대 48장 / 실제 캡처만 저장 / 종료 hold는 별도</text>
+<text x="337.8" y="367.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="19" font-weight="400" fill="#486272">개념도이며 점 간격은 실제 측정 데이터를 나타내지 않습니다.</text>
+</svg>

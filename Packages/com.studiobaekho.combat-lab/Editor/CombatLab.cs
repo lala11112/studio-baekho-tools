@@ -43,6 +43,15 @@ namespace StudioBaekho.CombatLab
             return request;
         }
 
+        public static ExperimentRequest CreateFeedbackRequest(string adapterId, string sourceGuid, string actionId)
+        {
+            if (!(Adapter(adapterId) is ICombatLabFeedbackAdapter))
+                throw new InvalidOperationException("이 어댑터는 연출 v2를 지원하지 않습니다.");
+            return new ExperimentRequest { schemaVersion = 2, adapterId = adapterId, sourceGuid = sourceGuid,
+                actionId = actionId, includeSourceControl = true, scenarioMode = "fixed", precisionCapture = true,
+                sourceHash = AssetDatabase.GetAssetDependencyHash(AssetDatabase.GUIDToAssetPath(sourceGuid)).ToString() };
+        }
+
         public static void Validate(ExperimentRequest request)
         {
             ValidateData(request);
@@ -51,12 +60,17 @@ namespace StudioBaekho.CombatLab
 
         public static void ValidateData(ExperimentRequest request)
         {
-            if (request == null || request.schemaVersion != 1) throw new ArgumentException("지원하지 않는 실험 형식입니다.");
+            if (request == null || (request.schemaVersion != 1 && request.schemaVersion != 2)) throw new ArgumentException("지원하지 않는 실험 형식입니다.");
             if (!Finite(request.durationSeconds) || request.durationSeconds < 3 || request.durationSeconds > 60)
                 throw new ArgumentException("실험 길이는 후보당 3~60초입니다.");
             if (request.candidates == null || request.candidates.Count < 1 || request.candidates.Count > 12)
                 throw new ArgumentException("후보는 1~12개여야 합니다.");
             var adapter = Adapter(request.adapterId);
+            if (request.schemaVersion == 2)
+            {
+                ValidateFeedbackData(request, adapter);
+                return;
+            }
             var specs = Describe(adapter, request.sourceGuid, request.actionId);
             if (specs == null || specs.Count == 0 || specs.Select(s => s.id).Distinct().Count() != specs.Count)
                 throw new ArgumentException("어댑터의 조절 항목 정의가 유효하지 않습니다.");
@@ -72,6 +86,51 @@ namespace StudioBaekho.CombatLab
                     var matches = candidate.values.Where(v => v.id == spec.id).ToArray();
                     if (matches.Length != 1 || !Finite(matches[0].value) || matches[0].value < spec.minimum || matches[0].value > spec.maximum)
                         throw new ArgumentException($"{candidate.label}: {spec.label} 허용 범위는 {spec.minimum}~{spec.maximum} {spec.unit}입니다.");
+                }
+            }
+        }
+
+        public static void ValidateFeedbackData(ExperimentRequest request, ICombatLabAdapter adapter)
+        {
+            if (!(adapter is ICombatLabFeedbackAdapter feedback))
+                throw new ArgumentException("현재 연결은 연출 v2를 지원하지 않습니다. 연결 패키지와 어댑터를 업데이트하세요.");
+            if (request.scenarioMode != "fixed" && request.scenarioMode != "live") throw new ArgumentException("지원하지 않는 실험 모드입니다.");
+            if (request.repeatCount != 1 && request.repeatCount != 3) throw new ArgumentException("반복은 1회 또는 3회입니다.");
+            if (!string.IsNullOrEmpty(request.sourceHash) && request.sourceHash != AssetDatabase.GetAssetDependencyHash(
+                AssetDatabase.GUIDToAssetPath(request.sourceGuid)).ToString())
+                throw new ArgumentException("원본이 변경되었습니다. 설정을 다시 불러오고 새 후보를 생성하세요.");
+            var specs = feedback.DescribeFeedback(request.sourceGuid, request.actionId).ToDictionary(s => s.id);
+            var curves = feedback.DescribeCurves(request.sourceGuid, request.actionId).ToDictionary(s => s.id);
+            var ids = new HashSet<string>();
+            foreach (var candidate in request.candidates)
+            {
+                if (candidate == null || candidate.isSourceControl || string.IsNullOrWhiteSpace(candidate.id)
+                    || !Regex.IsMatch(candidate.id, @"\A[a-zA-Z0-9_-]{1,64}\z") || !ids.Add(candidate.id))
+                    throw new ArgumentException("유효한 고유 후보 ID가 필요합니다. 원본 비교는 별도 실행됩니다.");
+                var seen = new HashSet<string>();
+                if (candidate.values == null) throw new ArgumentException("후보 값이 없습니다.");
+                foreach (var value in candidate.values)
+                {
+                    if (value == null || !seen.Add(value.id) || !specs.TryGetValue(value.id, out var spec)
+                        || !Finite(value.value) || value.value < spec.minimum || value.value > spec.maximum)
+                        throw new ArgumentException("지원하지 않거나 유효 범위를 벗어난 값: " + value?.id);
+                    if ((spec.kind == "enum" || spec.kind == "boolean") && value.value != Mathf.Floor(value.value))
+                        throw new ArgumentException("선택 항목에는 정수 값을 사용하세요: " + value.id);
+                }
+                seen.Clear();
+                foreach (var value in candidate.curves ?? new List<CurveValue>())
+                {
+                    if (value == null || !seen.Add(value.id) || !curves.TryGetValue(value.id, out var spec)
+                        || value.keys == null || value.keys.Count < 2 || value.keys.Count > spec.maximumKeys)
+                        throw new ArgumentException("유효한 곡선과 2~16개 키가 필요합니다: " + value?.id);
+                    float previous = -1f;
+                    foreach (var key in value.keys)
+                    {
+                        if (key == null || !Finite(key.time) || !Finite(key.value) || key.time <= previous || key.time < 0
+                            || key.time > spec.maximumTime || key.value < spec.minimum || key.value > spec.maximum)
+                            throw new ArgumentException("곡선 키는 유효한 범위에서 시간 오름차순이어야 합니다: " + value.id);
+                        previous = key.time;
+                    }
                 }
             }
         }

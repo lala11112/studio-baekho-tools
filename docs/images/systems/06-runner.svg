@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="590" viewBox="0 0 1200 590">
+<title>후보와 반복마다 새 Play Mode</title>
+<rect width="100%" height="100%" rx="16" fill="#F5F8FA"/>
+<text x="32.0" y="51.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="27" font-weight="700" fill="#142B3A">후보와 반복마다 새 Play Mode</text>
+<rect x="30" y="90" width="350" height="110" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="49.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">1 사전 검사</text>
+<text x="49.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">요청 · 저장 씬 · 재로드 설정</text>
+<polyline points="380,145 425,145" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="425.0,145.0 414.5,150.8 414.5,139.2" fill="#486272"/>
+<rect x="425" y="90" width="350" height="110" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="444.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">2 입력 고정</text>
+<text x="444.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">원본 · 씬 · 컨텍스트 저장</text>
+<polyline points="775,145 820,145" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="820.0,145.0 809.5,150.8 809.5,139.2" fill="#486272"/>
+<rect x="820" y="90" width="350" height="110" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="839.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">3 Play Mode 진입</text>
+<text x="839.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">조기 준비 · 씬 초기화</text>
+<rect x="820" y="280" width="350" height="135" rx="10" fill="white" stroke="#365CBC" stroke-width="1.5"/>
+<text x="839.0" y="319.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#365CBC">4 정착과 Arm</text>
+<text x="839.0" y="353.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">접지 · 표적 · 카메라 안정</text>
+<text x="839.0" y="383.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">조건 기록 → 녹화 → 입력</text>
+<rect x="425" y="280" width="350" height="135" rx="10" fill="white" stroke="#365CBC" stroke-width="1.5"/>
+<text x="444.0" y="319.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#365CBC">5 실제 실행</text>
+<text x="444.0" y="353.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">규칙 기반 입력 · 피해 관측</text>
+<text x="444.0" y="383.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">영상 · PNG · 실제 적용값</text>
+<rect x="30" y="280" width="350" height="135" rx="10" fill="white" stroke="#AC641D" stroke-width="1.5"/>
+<text x="49.0" y="319.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#AC641D">6 저장과 정리</text>
+<text x="49.0" y="353.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">보고서 · 상태 복원</text>
+<text x="49.0" y="383.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">Edit Mode 복귀</text>
+<polyline points="995,200 995,280" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="995.0,280.0 989.2,269.5 1000.8,269.5" fill="#486272"/>
+<polyline points="820,345 775,345" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="775.0,345.0 785.5,339.2 785.5,350.8" fill="#486272"/>
+<polyline points="425,345 380,345" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="380.0,345.0 390.5,339.2 390.5,350.8" fill="#486272"/>
+<polyline points="205,415 205,480 1185,480 1185,145 1170,145" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="1170.0,145.0 1180.5,139.2 1180.5,150.8" fill="#486272"/>
+<text x="365.0" y="461.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#486272">다음 실행은 새 Play Mode 진입 단계부터 반복</text>
+<text x="32.0" y="553.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="21" font-weight="400" fill="#486272">원본 1회 + 후보 2개 × 3회 = 총 7회 / 같은 시드가 완전한 결정성을 보장하지 않음</text>
+</svg>

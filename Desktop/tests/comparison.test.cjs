@@ -114,3 +114,16 @@ test('twelve requested candidates remain distinct when comparison count is reduc
   assert.equal(ui.run('new Set(selectedCandidateIds()).size'), 12);
   assert.deepEqual(ui.json('selectors.slice(0, 2).map(select => Number(select.value))'), [11, 1]);
 });
+
+test('comparison preserves a selected repeat across count changes without substituting repeat one', () => {
+  const ui = comparison(3);
+  ui.run(`results[0].repeatIndex=1;results[1].repeatIndex=2;results[1].candidate.id=results[0].candidate.id;drawComparisonCount();selectors[0].value='1';selectors[0].emit('change');drawVideoGrid(2,selectedCandidateIds());drawVideoGrid(3,selectedCandidateIds());`);
+  assert.deepEqual(ui.json('selectors.map(select => Number(select.value))'), [1, 0, 2]);
+  assert.equal(ui.run("selectedCandidateIds()[0]"), 'candidate_0:repeat:2');
+});
+
+test('precision aligns to nearest actual relative time with an earlier-sample tie break', () => {
+  const ui = comparison(1);
+  assert.equal(ui.run('nearestCaptureIndex([{relativeTimeSeconds:0},{relativeTimeSeconds:.05},{relativeTimeSeconds:.1}],.075)'), 1);
+  assert.equal(ui.run('nearestCaptureIndex([{relativeTimeSeconds:-.05},{relativeTimeSeconds:.04},{relativeTimeSeconds:.1}],.075)'), 2);
+});

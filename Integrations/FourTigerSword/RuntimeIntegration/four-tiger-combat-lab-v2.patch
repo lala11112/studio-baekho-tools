@@ -1,0 +1,3074 @@
+diff --git a/Assets/_Project/Scripts/AttackCameraProfile.cs b/Assets/_Project/Scripts/AttackCameraProfile.cs
+index aa7d48c..7e4bcca 100644
+--- a/Assets/_Project/Scripts/AttackCameraProfile.cs
++++ b/Assets/_Project/Scripts/AttackCameraProfile.cs
+@@ -30,4 +30,8 @@ public sealed class AttackCameraProfile : ScriptableObject
+     [Header("Optional Feel preset")]
+     [Tooltip("지정하면 Feel이 줌과 적중 효과를 재생합니다. 기존 구도와 복귀 설정은 유지됩니다.")]
+     public CombatFeelFeedback FeelFeedbackPrefab;
++
++    [Header("Optional absolute feedback (legacy profiles keep this disabled)")]
++    public bool EnableV2;
++    public CombatCameraV2Settings V2 = new CombatCameraV2Settings();
+ }
+diff --git a/Assets/_Project/Scripts/CombatCameraDirector.cs b/Assets/_Project/Scripts/CombatCameraDirector.cs
+index 223b58e..cff8f59 100644
+--- a/Assets/_Project/Scripts/CombatCameraDirector.cs
++++ b/Assets/_Project/Scripts/CombatCameraDirector.cs
+@@ -1,5 +1,7 @@
+ using UnityEngine;
+ using Unity.Cinemachine;
++using System.Collections.Generic;
++using System.Globalization;
+ 
+ /// <summary>
+ /// Offsets tracking targets BEFORE Cinemachine solves body/aim/obstacles. Lens offsets
+@@ -24,6 +26,17 @@ public sealed class CombatCameraDirector : CinemachineExtension
+     private bool _ownsTargets, _releasing, _hitPlayed;
+     private CombatFeelFeedback _feelFeedback, _feelPrefab;
+     private bool _feelActive;
++    private bool _feelZoom;
++    private CombatCameraV2Settings _v2;
++    private readonly CombatCameraV2Mixer _mixer = new CombatCameraV2Mixer();
++    private readonly CombatFeedbackHitGate _confirmedHits = new CombatFeedbackHitGate();
++    private Vector3 _motionEuler, _releaseEuler;
++    private Quaternion _motionRotation = Quaternion.identity;
++    private CombatFeedbackClock _returnClock;
++    private int _attackSequence;
++    private WeaponActionData _step;
++    private Quaternion _releaseWorldRotation = Quaternion.identity;
++    private readonly Dictionary<string, Vector2> _reportedLimits = new Dictionary<string, Vector2>();
+ 
+     public bool IsPlaying => _ownsTargets && !_releasing;
+     public float Progress => _progress;
+@@ -36,14 +49,19 @@ public sealed class CombatCameraDirector : CinemachineExtension
+ 
+     public bool BeginAttack(AttackCameraProfile profile, PlayerController owner,
+         Transform target, Vector3 direction, bool continuing = false,
+-        float duration = 1f, float playbackSpeed = 1f)
++        float duration = 1f, float playbackSpeed = 1f, CombatCameraV2Settings settings = null,
++        WeaponActionData step = null)
+     {
+         if (!isActiveAndEnabled || owner == null) return false;
+-        if (profile == null) { EndAttack(owner); return false; }
++        settings = CombatCameraV2Settings.Resolve(profile, settings);
++        bool hitOverrides = step?.HitEvents?.Exists(hit => hit?.Feedback?.CameraV2?.HasOverrides == true) == true;
++        if (profile == null && settings?.HasOverrides != true && !hitOverrides) { EndAttack(owner); return false; }
+         if (_camera == null) _camera = GetComponent<CinemachineCamera>();
++        bool preserve = settings?.Mode == CombatFeedbackChannelMode.Override
++            ? settings.Motion.PreserveChainViewDirection : profile == null || profile.PreserveChainViewDirection;
+         bool keepFrame = _ownsTargets && !_releasing && _owner == owner
+-            && continuing && profile.PreserveChainViewDirection;
+-        if (_ownsTargets && _owner != owner) ResetPlayback();
++            && continuing && preserve;
++        if (_ownsTargets && _owner != owner) ResetPlayback("owner-changed");
+         if (!_ownsTargets)
+         {
+             _follow = _camera.Follow;
+@@ -67,11 +85,20 @@ public sealed class CombatCameraDirector : CinemachineExtension
+         }
+         _owner = owner;
+         _profile = profile;
++        _v2 = settings;
++        _step = step;
+         _target = target;
+         _direction = Vector3.ProjectOnPlane(direction, Vector3.up).normalized;
+         _progress = 0;
+         _hitPlayed = _releasing = false;
+-        BeginFeel(profile.FeelFeedbackPrefab, duration, playbackSpeed);
++        _confirmedHits.Reset();
++        _reportedLimits.Clear();
++        _attackSequence++;
++        _feelZoom = settings?.Mode == CombatFeedbackChannelMode.Override ? settings.Motion.UseFeelZoom
++            : settings?.Mode != CombatFeedbackChannelMode.Off;
++        BeginFeel(profile != null ? profile.FeelFeedbackPrefab : null, duration, playbackSpeed, _feelZoom);
++        CombatFeedbackTelemetry.Emit("camera-begin", owner.gameObject, target != null ? target.gameObject : null,
++            detail: settings?.HasOverrides == true ? "v2" : "legacy", value: _attackSequence);
+         return true;
+     }
+ 
+@@ -79,19 +106,50 @@ public sealed class CombatCameraDirector : CinemachineExtension
+     {
+         if (owner != _owner || !IsPlaying) return;
+         _progress = Mathf.Clamp01(progress);
++        ReportLimit("AttackProgress", progress, _progress, "normalized progress is limited to 0..1");
+         if (_feelActive) _feelFeedback.SetPlaybackSpeed(playbackSpeed);
+     }
+ 
+     // Returns true when this profile owns hit feedback, including suppressed duplicate hits.
+-    public bool NotifyHit(PlayerController owner, Transform target, Vector3 direction)
++    public bool NotifyHit(PlayerController owner, Transform target, Vector3 direction,
++        CombatCameraV2Settings hitSettings = null, int hitEventIndex = -1)
+     {
+-        if (owner != _owner || !IsPlaying || _profile == null) return false;
+-        if (_hitPlayed) return true;
++        if (owner != _owner || !IsPlaying) return false;
++        bool v2 = _v2?.HasOverrides == true || hitSettings?.HasOverrides == true;
++        if (!v2 && _profile == null) return false;
++        if (!v2 && _hitPlayed) return true;
++        if (v2)
++        {
++            var policy = hitSettings?.HasOverrides == true ? hitSettings.TriggerPolicy
++                : _v2 != null ? _v2.TriggerPolicy : CombatFeedbackTriggerPolicy.FirstPerHitEvent;
++            if (!_confirmedHits.Accept(policy, hitEventIndex, target != null ? target.GetInstanceID() : 0)) return true;
++        }
++        bool firstLegacyHit = !_hitPlayed;
+         _hitPlayed = true;
+         _target = target;
++        var impact = hitSettings?.Impact != null && hitSettings.Impact.Mode != CombatFeedbackChannelMode.Inherit
++            ? hitSettings.Impact : _v2?.Impact;
++        var shake = hitSettings?.Shake != null && hitSettings.Shake.Mode != CombatFeedbackChannelMode.Inherit
++            ? hitSettings.Shake : _v2?.Shake;
++        Quaternion frame = owner.CameraTransform != null ? owner.CameraTransform.rotation : _camera.State.GetFinalOrientation();
++        if (impact?.Mode == CombatFeedbackChannelMode.Override)
++        {
++            _mixer.AddImpact(impact, frame, direction);
++            CombatFeedbackTelemetry.Emit("camera-impact-trigger", owner.gameObject,
++                target != null ? target.gameObject : null, hitEventIndex, "v2", impact.Duration);
++        }
++        if (shake?.Mode == CombatFeedbackChannelMode.Override)
++        {
++            _mixer.AddShake(shake, frame, direction);
++            CombatFeedbackTelemetry.Emit("camera-shake-trigger", owner.gameObject,
++                target != null ? target.gameObject : null, hitEventIndex, "v2-absolute", shake.Duration);
++        }
++        bool legacyImpulse = (shake == null || shake.Mode == CombatFeedbackChannelMode.Inherit)
++            && (_profile == null || firstLegacyHit);
++        if (legacyImpulse && _profile == null && _step != null) owner.PlayAttackCameraShake(_step);
+         var source = owner.ImpulseSource;
+         Vector3 velocity = Vector3.zero;
+-        if (source != null && _profile.HitImpulse > 0 && direction.sqrMagnitude > 0.001f)
++        if (legacyImpulse && source != null && _profile != null && _profile.HitImpulse > 0 && direction.sqrMagnitude > 0.001f)
+         {
+             velocity = direction.normalized;
+             var listener = GetComponent<CinemachineImpulseListener>();
+@@ -99,8 +157,11 @@ public sealed class CombatCameraDirector : CinemachineExtension
+                 velocity = Quaternion.Inverse(_camera.State.GetFinalOrientation()) * velocity;
+             velocity *= source.DefaultVelocity.magnitude * _profile.HitImpulse;
+         }
+-        if (_feelActive) _feelFeedback.PlayHit(source, velocity);
+-        else if (source != null && velocity.sqrMagnitude > 0f) source.GenerateImpulseWithVelocity(velocity);
++        bool preserveFlash = !v2 || (hitSettings?.HasOverrides == true ? hitSettings.PreserveFeelFlash : _v2 == null || _v2.PreserveFeelFlash);
++        if (_feelActive && preserveFlash) _feelFeedback.PlayHit(source, velocity, legacyImpulse, v2);
++        else if (legacyImpulse && source != null && velocity.sqrMagnitude > 0f) source.GenerateImpulseWithVelocity(velocity);
++        CombatFeedbackTelemetry.Emit("camera-hit", owner.gameObject, target != null ? target.gameObject : null,
++            hitEventIndex, v2 ? "v2" : "legacy", velocity.magnitude);
+         return true;
+     }
+ 
+@@ -110,18 +171,34 @@ public sealed class CombatCameraDirector : CinemachineExtension
+         _releasing = true;
+         _target = null;
+         _releaseElapsed = 0;
+-        _releaseDuration = _profile == null ? 0 : canceled ? _profile.CancelDuration : _profile.ReturnDuration;
++        bool motionOverride = _v2?.Mode == CombatFeedbackChannelMode.Override;
++        _releaseDuration = motionOverride ? canceled ? _v2.Motion.CancelDuration : _v2.Motion.ReturnDuration
++            : _profile == null ? 0 : canceled ? _profile.CancelDuration : _profile.ReturnDuration;
++        _returnClock = motionOverride ? _v2.Motion.ReturnClock : CombatFeedbackClock.World;
+         _releaseFraming = _framing;
+         _releasePosition = _positionOffset;
+         _releaseFov = _fov;
++        _releaseEuler = _motionEuler;
++        _releaseWorldRotation = _motionRotation;
++        if (canceled)
++        {
++            // Blend our in-flight feedback away; never clear other systems' impulses.
++            _releasePosition += _mixer.Position;
++            _releaseFov += _mixer.Fov;
++            _releaseWorldRotation *= _mixer.Rotation;
++            _mixer.Clear();
++        }
+         StopFeel();
+-        if (_releaseDuration <= 0) ResetPlayback();
++        CombatFeedbackTelemetry.Emit("camera-return-start", owner.gameObject,
++            detail: (canceled ? "cancel" : "normal") + ";clock=" + _returnClock + ";attack=" + _attackSequence,
++            value: _releaseDuration);
++        if (_releaseDuration <= 0 && !_mixer.Active) ResetPlayback("return-complete");
+     }
+ 
+     public void Cancel(PlayerController owner, bool immediate = false)
+     {
+         if (owner != _owner) return;
+-        if (immediate) ResetPlayback();
++        if (immediate) ResetPlayback("cancel-immediate");
+         else EndAttack(owner, true);
+     }
+ 
+@@ -132,43 +209,66 @@ public sealed class CombatCameraDirector : CinemachineExtension
+         if (!_ownsTargets) return;
+         if (_camera == null || !_camera.isActiveAndEnabled || _follow == null || _lookAt == null || _owner == null
+             || !_owner.isActiveAndEnabled || _owner.StatManager == null || _owner.StatManager.CurrentHp <= 0)
+-        { ResetPlayback(); return; }
++        { ResetPlayback("owner-or-camera-unavailable"); return; }
+         // Another camera system taking ownership must not have its targets overwritten on exit.
+         if (_camera.Follow != _followProxy || _camera.LookAt != _lookProxy)
+-        { ResetPlayback(); return; }
++        { ResetPlayback("camera-target-ownership-changed"); return; }
++        float actorDelta = _owner.ActionDeltaTime;
++        _mixer.Tick(dt, actorDelta, Time.unscaledDeltaTime);
+         // Scaled time: pause and hit stop also freeze attack framing.
+         if (_releasing)
+         {
+-            _releaseElapsed += dt;
+-            float t = Mathf.SmoothStep(0, 1, Mathf.Clamp01(_releaseElapsed / _releaseDuration));
++            _releaseElapsed += CombatCameraV2Mixer.Delta(_returnClock, dt, actorDelta, Time.unscaledDeltaTime);
++            float t = _releaseDuration <= 0 ? 1 : Mathf.SmoothStep(0, 1, Mathf.Clamp01(_releaseElapsed / _releaseDuration));
+             _framing = _releaseFraming * (1 - t);
+             _positionOffset = _releasePosition * (1 - t);
+             _fov = _releaseFov * (1 - t);
++            _motionEuler = _releaseEuler * (1 - t);
++            _motionRotation = Quaternion.Slerp(_releaseWorldRotation, Quaternion.identity, t);
+             _followProxy.rotation = Quaternion.Slerp(_followRotation, _follow.rotation, t);
+             _lookProxy.rotation = Quaternion.Slerp(_lookRotation, _lookAt.rotation, t);
+-            if (_releaseElapsed >= _releaseDuration) { ResetPlayback(); return; }
++            if (_releaseElapsed >= _releaseDuration && !_mixer.Active) { ResetPlayback("return-complete"); return; }
+         }
+         else
+         {
+-            if (_profile == null) { ResetPlayback(); return; }
+-            float blend = 1 - Mathf.Exp(-dt / Mathf.Max(0.01f, _profile.ResponseTime));
+-            float weight = Mathf.Clamp01(_profile.FramingWeight?.Evaluate(_progress) ?? 1);
+-            Vector3 desired = _direction * _profile.DirectionLookAhead;
++            bool overridden = _v2?.Mode == CombatFeedbackChannelMode.Override;
++            bool disabled = _v2?.Mode == CombatFeedbackChannelMode.Off;
++            var motion = overridden ? _v2.Motion : null;
++            float response = motion != null ? motion.ResponseTime : _profile != null ? _profile.ResponseTime : 0.01f;
++            float motionDelta = motion != null ? CombatCameraV2Mixer.Delta(motion.Clock, dt, actorDelta, Time.unscaledDeltaTime) : dt;
++            ReportLimit("ResponseTime", response, Mathf.Max(0.01f, response), "minimum camera response time is 0.01s");
++            float blend = 1 - Mathf.Exp(-motionDelta / Mathf.Max(0.01f, response));
++            float requestedWeight = motion != null ? motion.FramingWeight?.Evaluate(_progress) ?? 1
++                : _profile != null ? _profile.FramingWeight?.Evaluate(_progress) ?? 1 : 0;
++            float weight = disabled ? 0 : Mathf.Clamp01(requestedWeight);
++            if (!disabled) ReportLimit("FramingWeight", requestedWeight, weight, "framing blend weight is limited to 0..1");
++            float lookAhead = motion != null ? motion.DirectionLookAhead : _profile != null ? _profile.DirectionLookAhead : 0;
++            Vector3 desired = _direction * lookAhead;
+             if (IsTargetValid())
+             {
+                 // Match player focus height rather than aiming at the enemy's feet.
+                 Vector3 targetPosition = _target.position + Vector3.up * (_lookAt.position.y - _owner.transform.position.y);
+-                desired = (targetPosition - _lookAt.position) * _profile.TargetWeight;
++                desired = (targetPosition - _lookAt.position) * (motion != null ? motion.TargetWeight : _profile != null ? _profile.TargetWeight : 0);
+             }
+-            desired = Vector3.ClampMagnitude(desired, Mathf.Max(0, _profile.MaxFramingOffset));
++            float requestedFraming = desired.magnitude;
++            desired = Vector3.ClampMagnitude(desired, Mathf.Max(0, motion != null ? motion.MaxFramingOffset : _profile != null ? _profile.MaxFramingOffset : 0));
++            if (!disabled) ReportLimit("FramingOffsetMagnitude", requestedFraming, desired.magnitude, "authored MaxFramingOffset bounds target framing");
+             _framing = Vector3.Lerp(_framing, desired * weight, blend);
+-            Quaternion frame = _profile.PreserveChainViewDirection ? _viewFrame
++            bool preserve = motion != null ? motion.PreserveChainViewDirection : _profile == null || _profile.PreserveChainViewDirection;
++            Quaternion frame = preserve ? _viewFrame
+                 : (_owner.CameraTransform != null ? _owner.CameraTransform.rotation : _viewFrame);
+-            _positionOffset = Vector3.Lerp(_positionOffset, frame * _profile.CameraLocalOffset * weight, blend);
+-            float desiredFov = _feelActive ? _feelFeedback.ZoomOffset : _profile.FovOffset?.Evaluate(_progress) ?? 0;
++            if (motion != null) frame = CombatCameraV2Mixer.Frame(motion.Space, frame, _direction);
++            Vector3 position = motion != null ? CombatCameraV2Mixer.EvaluateVector(motion.PositionX, motion.PositionY, motion.PositionZ, _progress)
++                : _profile != null ? _profile.CameraLocalOffset : Vector3.zero;
++            _positionOffset = Vector3.Lerp(_positionOffset, disabled ? Vector3.zero : frame * position * (motion != null ? 1 : weight), blend);
++            float desiredFov = disabled ? 0 : _feelActive && _feelZoom ? _feelFeedback.ZoomOffset
++                : motion != null ? CombatCameraV2Mixer.Evaluate(motion.FovOffset, _progress) : _profile?.FovOffset?.Evaluate(_progress) ?? 0;
+             _fov = Mathf.Lerp(_fov, desiredFov, blend);
+-            _followProxy.rotation = _profile.PreserveChainViewDirection ? _followRotation : _follow.rotation;
+-            _lookProxy.rotation = _profile.PreserveChainViewDirection ? _lookRotation : _lookAt.rotation;
++            Vector3 desiredEuler = motion != null ? CombatCameraV2Mixer.EvaluateVector(motion.RotationX, motion.RotationY, motion.RotationZ, _progress) : Vector3.zero;
++            _motionEuler = Vector3.Lerp(_motionEuler, disabled ? Vector3.zero : desiredEuler, blend);
++            _motionRotation = CombatCameraV2Mixer.WorldRotation(frame, _motionEuler);
++            _followProxy.rotation = preserve ? _followRotation : _follow.rotation;
++            _lookProxy.rotation = preserve ? _lookRotation : _lookAt.rotation;
+         }
+         _followProxy.position = _follow.position + _framing + _positionOffset;
+         _lookProxy.position = _lookAt.position + _framing;
+@@ -180,7 +280,8 @@ public sealed class CombatCameraDirector : CinemachineExtension
+         var stats = _target.GetComponentInParent<EnemyStat>();
+         if (stats != null && stats.IsDead) return false;
+         return (_target.position - _owner.transform.position).sqrMagnitude
+-            <= _profile.MaxTargetDistance * _profile.MaxTargetDistance;
++            <= Mathf.Pow(_v2?.Mode == CombatFeedbackChannelMode.Override ? _v2.Motion.MaxTargetDistance
++                : _profile != null ? _profile.MaxTargetDistance : 0, 2);
+     }
+ 
+     private void EnsureProxies()
+@@ -197,8 +298,12 @@ public sealed class CombatCameraDirector : CinemachineExtension
+         return go.transform;
+     }
+ 
+-    private void ResetPlayback()
++    private void ResetPlayback(string reason = "reset")
+     {
++        if (_ownsTargets)
++            CombatFeedbackTelemetry.Emit(_releasing ? "camera-return-end" : "camera-end",
++                _owner != null ? _owner.gameObject : null, detail: reason + ";attack=" + _attackSequence,
++                value: _releaseElapsed);
+         StopFeel();
+         if (_ownsTargets && _camera != null)
+         {
+@@ -213,10 +318,18 @@ public sealed class CombatCameraDirector : CinemachineExtension
+         }
+         _ownsTargets = _releasing = _hitPlayed = false;
+         _profile = null;
++        _v2 = null;
++        _step = null;
++        _confirmedHits.Reset();
++        _mixer.Clear();
+         _owner = null;
+         _target = null;
+         _framing = _positionOffset = Vector3.zero;
+         _fov = _progress = 0;
++        _motionEuler = _releaseEuler = Vector3.zero;
++        _motionRotation = Quaternion.identity;
++        _releaseWorldRotation = Quaternion.identity;
++        _reportedLimits.Clear();
+     }
+ 
+     public override void PrePipelineMutateCameraStateCallback(CinemachineVirtualCameraBase vcam,
+@@ -224,13 +337,42 @@ public sealed class CombatCameraDirector : CinemachineExtension
+     {
+         if (!_ownsTargets) return;
+         var lens = state.Lens;
+-        lens.FieldOfView = Mathf.Clamp(lens.FieldOfView + _fov, 1, 179);
++        float requestedFov = lens.FieldOfView + _fov + _mixer.Fov;
++        lens.FieldOfView = Mathf.Clamp(requestedFov, 1, 179);
++        ReportLimit("FOV", requestedFov, lens.FieldOfView, "Cinemachine perspective FOV is limited to 1..179 degrees");
+         state.Lens = lens;
+     }
+ 
+-    private void OnDisable() => ResetPlayback();
++    protected override void PostPipelineStageCallback(CinemachineVirtualCameraBase vcam,
++        CinemachineCore.Stage stage, ref CameraState state, float deltaTime)
++    {
++        if (!_ownsTargets || stage != CinemachineCore.Stage.Finalize) return;
++        state.PositionCorrection += _mixer.Position;
++        Quaternion orientation = state.GetFinalOrientation();
++        Quaternion world = _motionRotation * _mixer.Rotation;
++        state.OrientationCorrection *= Quaternion.Inverse(orientation) * world * orientation;
++        if (CombatFeedbackTelemetry.HasListeners)
++            CombatFeedbackTelemetry.Emit("camera-output", _owner != null ? _owner.gameObject : null,
++                detail: _releasing ? "return-final-pipeline" : "attack-final-pipeline",
++                position: state.GetFinalPosition(), rotation: state.GetFinalOrientation().eulerAngles, fov: state.Lens.FieldOfView);
++    }
++
++    private void ReportLimit(string field, float requested, float applied, string reason)
++    {
++        if (!CombatFeedbackTelemetry.HasListeners || _owner == null) return;
++        if (Mathf.Approximately(requested, applied)) { _reportedLimits.Remove(field); return; }
++        if (_reportedLimits.TryGetValue(field, out var previous)
++            && Mathf.Approximately(previous.x, requested) && Mathf.Approximately(previous.y, applied)) return;
++        _reportedLimits[field] = new Vector2(requested, applied);
++        CombatFeedbackTelemetry.Emit("value-limited", _owner.gameObject,
++            detail: field + " requested=" + requested.ToString("R", CultureInfo.InvariantCulture)
++                + " applied=" + applied.ToString("R", CultureInfo.InvariantCulture) + " reason=" + reason,
++            value: applied);
++    }
++
++    private void OnDisable() => ResetPlayback("component-disabled");
+ 
+-    private void BeginFeel(CombatFeelFeedback prefab, float duration, float playbackSpeed)
++    private void BeginFeel(CombatFeelFeedback prefab, float duration, float playbackSpeed, bool playZoom = true)
+     {
+         StopFeel();
+         if (!Application.isPlaying || prefab == null) return;
+@@ -242,7 +384,7 @@ public sealed class CombatCameraDirector : CinemachineExtension
+             _feelPrefab = prefab;
+         }
+         _feelActive = _feelFeedback.IsConfigured;
+-        if (_feelActive) _feelFeedback.Begin(duration, playbackSpeed);
++        if (_feelActive) _feelFeedback.Begin(duration, playbackSpeed, playZoom);
+     }
+ 
+     private void StopFeel()
+@@ -253,7 +395,7 @@ public sealed class CombatCameraDirector : CinemachineExtension
+ 
+     protected override void OnDestroy()
+     {
+-        ResetPlayback();
++        ResetPlayback("destroyed");
+         if (_followProxy != null) DestroyProxy(_followProxy.gameObject);
+         if (_lookProxy != null) DestroyProxy(_lookProxy.gameObject);
+         if (_feelFeedback != null) DestroyProxy(_feelFeedback.gameObject);
+diff --git b/Assets/_Project/Scripts/CombatFeedbackTelemetry.cs b/Assets/_Project/Scripts/CombatFeedbackTelemetry.cs
+new file mode 100644
+index 0000000..f8b130a
+--- /dev/null
++++ b/Assets/_Project/Scripts/CombatFeedbackTelemetry.cs
+@@ -0,0 +1,36 @@
++using System;
++using UnityEngine;
++
++[Serializable]
++public sealed class CombatFeedbackTelemetryEvent
++{
++    public int sequence, unityFrameCount, ownerId, targetId, hitIndex;
++    public double realTime;
++    public float gameTime, value, fov;
++    public string kind, detail;
++    public Vector3 position, rotation;
++}
++
++/// <summary>Observations only; subscriptions cannot change combat execution.</summary>
++public static class CombatFeedbackTelemetry
++{
++    private static int _sequence;
++    public static event Action<CombatFeedbackTelemetryEvent> Recorded;
++    public static bool HasListeners => Recorded != null;
++
++    public static CombatFeedbackTelemetryEvent Emit(string kind, GameObject owner,
++        GameObject target = null, int hitIndex = -1, string detail = null, float value = 0,
++        Vector3 position = default, Vector3 rotation = default, float fov = 0)
++    {
++        var item = new CombatFeedbackTelemetryEvent { sequence = ++_sequence, unityFrameCount = Time.frameCount,
++            realTime = Time.realtimeSinceStartupAsDouble, gameTime = Time.time, kind = kind,
++            ownerId = owner != null ? owner.GetInstanceID() : 0, targetId = target != null ? target.GetInstanceID() : 0,
++            hitIndex = hitIndex, detail = detail ?? string.Empty, value = value, position = position, rotation = rotation, fov = fov };
++        // Report consumers must never interrupt a hit or prevent state cleanup.
++        var handlers = Recorded;
++        if (handlers != null)
++            foreach (Action<CombatFeedbackTelemetryEvent> handler in handlers.GetInvocationList())
++                try { handler(item); } catch (Exception exception) { Debug.LogException(exception); }
++        return item;
++    }
++}
+diff --git b/Assets/_Project/Scripts/CombatFeedbackTelemetry.cs.meta b/Assets/_Project/Scripts/CombatFeedbackTelemetry.cs.meta
+new file mode 100644
+index 0000000..5f80bc1
+--- /dev/null
++++ b/Assets/_Project/Scripts/CombatFeedbackTelemetry.cs.meta
+@@ -0,0 +1,2 @@
++fileFormatVersion: 2
++guid: 99eeae89813e94a4f95a6c2ba6a5e698
+\ No newline at end of file
+diff --git b/Assets/_Project/Scripts/CombatFeedbackV2.cs b/Assets/_Project/Scripts/CombatFeedbackV2.cs
+new file mode 100644
+index 0000000..a8fbb8f
+--- /dev/null
++++ b/Assets/_Project/Scripts/CombatFeedbackV2.cs
+@@ -0,0 +1,262 @@
++using System;
++using System.Collections.Generic;
++using UnityEngine;
++
++// The zero enum values preserve the existing authored route on deserialization.
++public enum CombatFeedbackChannelMode { Inherit = 0, Off = 1, Override = 2 }
++public enum CombatFeedbackClock { World = 0, Actor = 1, Unscaled = 2 }
++public enum CombatFeedbackSpace { Camera = 0, World = 1, Attack = 2 }
++public enum CombatFeedbackStackMode { Add = 0, Replace = 1, Strongest = 2 }
++public enum CombatFeedbackTriggerPolicy { FirstPerStep = 0, FirstPerHitEvent = 1, EveryTarget = 2 }
++
++public sealed class CombatFeedbackHitGate
++{
++    private readonly HashSet<string> _seen = new HashSet<string>();
++    public bool Accept(CombatFeedbackTriggerPolicy policy, int hitIndex, int targetId)
++    {
++        string key = policy == CombatFeedbackTriggerPolicy.FirstPerStep ? "step"
++            : hitIndex.ToString() + (policy == CombatFeedbackTriggerPolicy.EveryTarget ? ":" + targetId : string.Empty);
++        return _seen.Add(key);
++    }
++    public void Reset() => _seen.Clear();
++}
++
++[Serializable]
++public sealed class CombatCameraV2Settings
++{
++    // Distinguishes an explicit default-valued policy/flag from an untouched block.
++    public bool Authored;
++    public CombatFeedbackChannelMode Mode;
++    public CombatCameraMotionV2 Motion = new CombatCameraMotionV2();
++    public CombatCameraImpactV2 Impact = new CombatCameraImpactV2();
++    public CombatCameraShakeV2 Shake = new CombatCameraShakeV2();
++    public CombatFeedbackTriggerPolicy TriggerPolicy = CombatFeedbackTriggerPolicy.FirstPerHitEvent;
++    public bool PreserveFeelFlash = true;
++
++    public bool HasOverrides => Authored || Mode != CombatFeedbackChannelMode.Inherit
++        || (Impact != null && Impact.Mode != CombatFeedbackChannelMode.Inherit)
++        || (Shake != null && Shake.Mode != CombatFeedbackChannelMode.Inherit)
++        || !PreserveFeelFlash || TriggerPolicy != CombatFeedbackTriggerPolicy.FirstPerHitEvent;
++
++    public static CombatCameraV2Settings Resolve(AttackCameraProfile profile, CombatCameraV2Settings inline)
++    {
++        var inherited = profile != null && profile.EnableV2 ? profile.V2 : null;
++        if (inline?.HasOverrides != true) return inherited;
++        if (inherited == null || ReferenceEquals(inherited, inline)) return inline;
++        bool motion = inline.Mode != CombatFeedbackChannelMode.Inherit;
++        bool impact = inline.Impact != null && inline.Impact.Mode != CombatFeedbackChannelMode.Inherit;
++        bool shake = inline.Shake != null && inline.Shake.Mode != CombatFeedbackChannelMode.Inherit;
++        // Playback is read-only. Preserve every authored key/tangent and never
++        // mutate the source profile when an inline channel inherits from it.
++        return new CombatCameraV2Settings { Authored = true, Mode = motion ? inline.Mode : inherited.Mode,
++            Motion = motion ? inline.Motion : inherited.Motion,
++            Impact = impact ? inline.Impact : inherited.Impact,
++            Shake = shake ? inline.Shake : inherited.Shake,
++            TriggerPolicy = inline.TriggerPolicy, PreserveFeelFlash = inline.PreserveFeelFlash };
++    }
++}
++
++[Serializable]
++public sealed class CombatCameraMotionV2
++{
++    public AnimationCurve FovOffset = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve PositionX = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve PositionY = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve PositionZ = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve RotationX = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve RotationY = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve RotationZ = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve FramingWeight = AnimationCurve.Linear(0, 1, 1, 1);
++    public float TargetWeight = 0.35f;
++    public float MaxTargetDistance = 12f;
++    public float MaxFramingOffset = 2.5f;
++    public float DirectionLookAhead;
++    public float ResponseTime = 0.08f;
++    public float ReturnDuration = 0.3f;
++    public float CancelDuration = 0.12f;
++    public CombatFeedbackSpace Space = CombatFeedbackSpace.Camera;
++    public CombatFeedbackClock Clock = CombatFeedbackClock.Actor;
++    public CombatFeedbackClock ReturnClock = CombatFeedbackClock.Unscaled;
++    public bool PreserveChainViewDirection = true;
++    public bool UseFeelZoom;
++}
++
++[Serializable]
++public sealed class CombatCameraImpactV2
++{
++    public CombatFeedbackChannelMode Mode;
++    public float Delay;
++    public float Duration = 0.15f;
++    public CombatFeedbackClock Clock = CombatFeedbackClock.Unscaled;
++    public CombatFeedbackSpace Space = CombatFeedbackSpace.Camera;
++    public CombatFeedbackStackMode Stacking = CombatFeedbackStackMode.Replace;
++    // Time is normalized after Delay, independently of the attack's progress.
++    public AnimationCurve FovOffset = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve PositionX = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve PositionY = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve PositionZ = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve RotationX = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve RotationY = AnimationCurve.Linear(0, 0, 1, 0);
++    public AnimationCurve RotationZ = AnimationCurve.Linear(0, 0, 1, 0);
++}
++
++[Serializable]
++public sealed class CombatCameraShakeV2
++{
++    public CombatFeedbackChannelMode Mode;
++    // Absolute camera displacement (metres) and angular displacement (degrees).
++    // Neither depends on a scene ImpulseSource, its DefaultVelocity or listener gain.
++    public Vector3 Translation;
++    public Vector3 Rotation;
++    public float Frequency = 25f;
++    public float Delay;
++    public float Duration = 0.15f;
++    public AnimationCurve Envelope = AnimationCurve.Linear(0, 1, 1, 0);
++    public CombatFeedbackClock Clock = CombatFeedbackClock.Unscaled;
++    public CombatFeedbackSpace Space = CombatFeedbackSpace.Camera;
++    public CombatFeedbackStackMode Stacking = CombatFeedbackStackMode.Replace;
++    public int Seed = 17;
++}
++
++/// <summary>Camera-owned mixer. No global time or Cinemachine impulse state is changed.</summary>
++public sealed class CombatCameraV2Mixer
++{
++    private sealed class Impact
++    {
++        public CombatCameraImpactV2 Settings;
++        public Quaternion Frame;
++        public float Elapsed;
++    }
++
++    private sealed class Shake
++    {
++        public CombatCameraShakeV2 Settings;
++        public Quaternion Frame;
++        public float Elapsed;
++    }
++
++    private readonly List<Impact> _impacts = new List<Impact>();
++    private readonly List<Shake> _shakes = new List<Shake>();
++    public Vector3 Position { get; private set; }
++    public Quaternion Rotation { get; private set; } = Quaternion.identity;
++    public float Fov { get; private set; }
++    public bool Active => _impacts.Count != 0 || _shakes.Count != 0;
++    public int ImpactCount => _impacts.Count;
++    public int ShakeCount => _shakes.Count;
++
++    public void AddImpact(CombatCameraImpactV2 settings, Quaternion cameraFrame, Vector3 attackDirection)
++    {
++        if (settings == null || settings.Mode != CombatFeedbackChannelMode.Override || settings.Duration <= 0) return;
++        if (settings.Stacking == CombatFeedbackStackMode.Replace) _impacts.Clear();
++        _impacts.Add(new Impact { Settings = settings, Frame = Frame(settings.Space, cameraFrame, attackDirection) });
++    }
++
++    public void AddShake(CombatCameraShakeV2 settings, Quaternion cameraFrame, Vector3 attackDirection)
++    {
++        if (settings == null || settings.Mode != CombatFeedbackChannelMode.Override || settings.Duration <= 0) return;
++        if (settings.Stacking == CombatFeedbackStackMode.Replace) _shakes.Clear();
++        _shakes.Add(new Shake { Settings = settings, Frame = Frame(settings.Space, cameraFrame, attackDirection) });
++    }
++
++    public void Tick(float worldDelta, float actorDelta, float unscaledDelta)
++    {
++        Position = Vector3.zero;
++        Rotation = Quaternion.identity;
++        Fov = 0;
++        EvaluateImpacts(worldDelta, actorDelta, unscaledDelta);
++        EvaluateShakes(worldDelta, actorDelta, unscaledDelta);
++    }
++
++    private void EvaluateImpacts(float worldDelta, float actorDelta, float unscaledDelta)
++    {
++        bool strongest = _impacts.Exists(item => item.Settings.Stacking == CombatFeedbackStackMode.Strongest);
++        Vector3 sumPosition = Vector3.zero;
++        Quaternion sumRotation = Quaternion.identity;
++        float sumFov = 0, best = -1;
++        for (int i = _impacts.Count - 1; i >= 0; i--)
++        {
++            var item = _impacts[i];
++            var settings = item.Settings;
++            item.Elapsed += Delta(settings.Clock, worldDelta, actorDelta, unscaledDelta);
++            float elapsed = item.Elapsed - Mathf.Max(0, settings.Delay);
++            if (elapsed < 0) continue;
++            if (elapsed > settings.Duration) { _impacts.RemoveAt(i); continue; }
++            float t = Mathf.Clamp01(elapsed / settings.Duration);
++            Vector3 position = item.Frame * EvaluateVector(settings.PositionX, settings.PositionY, settings.PositionZ, t);
++            Quaternion rotation = WorldRotation(item.Frame, EvaluateVector(settings.RotationX, settings.RotationY, settings.RotationZ, t));
++            float fov = Evaluate(settings.FovOffset, t);
++            float strength = position.sqrMagnitude + Quaternion.Angle(Quaternion.identity, rotation) * 0.0001f + Mathf.Abs(fov) * 0.001f;
++            if (strongest)
++            {
++                if (strength <= best) continue;
++                best = strength;
++                sumPosition = position; sumRotation = rotation; sumFov = fov;
++            }
++            else { sumPosition += position; sumRotation *= rotation; sumFov += fov; }
++        }
++        Position += sumPosition;
++        Rotation *= sumRotation;
++        Fov += sumFov;
++    }
++
++    private void EvaluateShakes(float worldDelta, float actorDelta, float unscaledDelta)
++    {
++        bool strongest = _shakes.Exists(item => item.Settings.Stacking == CombatFeedbackStackMode.Strongest);
++        Vector3 sumPosition = Vector3.zero;
++        Quaternion sumRotation = Quaternion.identity;
++        float best = -1;
++        for (int i = _shakes.Count - 1; i >= 0; i--)
++        {
++            var item = _shakes[i];
++            var settings = item.Settings;
++            item.Elapsed += Delta(settings.Clock, worldDelta, actorDelta, unscaledDelta);
++            float elapsed = item.Elapsed - Mathf.Max(0, settings.Delay);
++            if (elapsed < 0) continue;
++            if (elapsed > settings.Duration) { _shakes.RemoveAt(i); continue; }
++            float t = Mathf.Clamp01(elapsed / settings.Duration);
++            float envelope = Evaluate(settings.Envelope, t);
++            float phase = elapsed * Mathf.Max(0, settings.Frequency);
++            Vector3 linear = Vector3.Scale(settings.Translation, Noise(settings.Seed, phase, 0)) * envelope;
++            Vector3 angular = Vector3.Scale(settings.Rotation, Noise(settings.Seed, phase, 3)) * envelope;
++            Vector3 position = item.Frame * linear;
++            Quaternion rotation = WorldRotation(item.Frame, angular);
++            float strength = position.sqrMagnitude + angular.sqrMagnitude * 0.0001f;
++            if (strongest)
++            {
++                if (strength <= best) continue;
++                best = strength; sumPosition = position; sumRotation = rotation;
++            }
++            else { sumPosition += position; sumRotation *= rotation; }
++        }
++        Position += sumPosition;
++        Rotation *= sumRotation;
++    }
++
++    public void Clear()
++    {
++        _impacts.Clear(); _shakes.Clear();
++        Position = Vector3.zero; Rotation = Quaternion.identity; Fov = 0;
++    }
++
++    public static float Delta(CombatFeedbackClock clock, float world, float actor, float unscaled)
++        => Mathf.Max(0, clock == CombatFeedbackClock.Unscaled ? unscaled : clock == CombatFeedbackClock.Actor ? actor : world);
++
++    public static float Evaluate(AnimationCurve curve, float time) => curve == null || curve.length == 0 ? 0 : curve.Evaluate(time);
++    public static Vector3 EvaluateVector(AnimationCurve x, AnimationCurve y, AnimationCurve z, float time)
++        => new Vector3(Evaluate(x, time), Evaluate(y, time), Evaluate(z, time));
++    public static Quaternion Frame(CombatFeedbackSpace space, Quaternion camera, Vector3 attackDirection)
++    {
++        Vector3 horizontal = Vector3.ProjectOnPlane(attackDirection, Vector3.up);
++        return space == CombatFeedbackSpace.World ? Quaternion.identity : space == CombatFeedbackSpace.Attack
++            && horizontal.sqrMagnitude > 0.001f ? Quaternion.LookRotation(horizontal.normalized, Vector3.up) : camera;
++    }
++    public static Quaternion WorldRotation(Quaternion frame, Vector3 euler)
++        => frame * Quaternion.Euler(euler) * Quaternion.Inverse(frame);
++    private static Vector3 Noise(int seed, float phase, int channel)
++    {
++        float origin = (seed & 65535) * 0.0137f;
++        return new Vector3(Mathf.PerlinNoise(origin + channel * 17.13f, phase) * 2 - 1,
++            Mathf.PerlinNoise(origin + (channel + 1) * 17.13f, phase) * 2 - 1,
++            Mathf.PerlinNoise(origin + (channel + 2) * 17.13f, phase) * 2 - 1);
++    }
++}
+diff --git b/Assets/_Project/Scripts/CombatFeedbackV2.cs.meta b/Assets/_Project/Scripts/CombatFeedbackV2.cs.meta
+new file mode 100644
+index 0000000..cf855ac
+--- /dev/null
++++ b/Assets/_Project/Scripts/CombatFeedbackV2.cs.meta
+@@ -0,0 +1,2 @@
++fileFormatVersion: 2
++guid: 349581cc3f0abbe4aa51a1c0a7fa0dda
+\ No newline at end of file
+diff --git a/Assets/_Project/Scripts/Enemy/Boss/Boss.cs b/Assets/_Project/Scripts/Enemy/Boss/Boss.cs
+index 799ffab..ee935f2 100644
+--- a/Assets/_Project/Scripts/Enemy/Boss/Boss.cs
++++ b/Assets/_Project/Scripts/Enemy/Boss/Boss.cs
+@@ -69,7 +69,8 @@ public abstract class Boss : Enemy
+     protected override void Update()
+     {
+         base.Update();
+-        CurrentPhase?.OnUpdate(this);
++        if (ActionDeltaTime > 0f && EnemyStat != null && !EnemyStat.IsDead)
++            CurrentPhase?.OnUpdate(this);
+     }
+ 
+     // ── 페이즈 팩토리 (구체 보스가 반드시 구현) ──────────────────────────────
+diff --git a/Assets/_Project/Scripts/Enemy/DefaultEnemy/Enemy.cs b/Assets/_Project/Scripts/Enemy/DefaultEnemy/Enemy.cs
+index c533890..0192aea 100644
+--- a/Assets/_Project/Scripts/Enemy/DefaultEnemy/Enemy.cs
++++ b/Assets/_Project/Scripts/Enemy/DefaultEnemy/Enemy.cs
+@@ -34,6 +34,40 @@ public class Enemy : MonoBehaviour, IDamageable
+     public bool HasSelectedAttack { get; set; }
+ 
+     private StateMachine _stateMachine;
++    private IPlayerState _passiveState;
++    private bool _combatLabPassive;
++    /// <summary>Experiment policy only: retain hit reactions and motion while suppressing autonomous actions.</summary>
++    public bool CombatLabPassive
++    {
++        get => _combatLabPassive;
++        set
++        {
++            if (_combatLabPassive == value) return;
++            _combatLabPassive = value;
++            if (value)
++            {
++                var activeBodyColliders = new List<Collider>();
++                foreach (var collider in GetComponentsInChildren<Collider>(true))
++                    if (collider.enabled && collider.GetComponentInParent<Enemy>() == this)
++                        activeBodyColliders.Add(collider);
++                if (CurrentAction?.IsActive == true) CurrentAction.Exit();
++                CurrentAction = null;
++                HasSelectedAttack = false;
++                IsSelfDestructing = false;
++                if (_stateMachine != null && !_isDie && !IsHurt && !IsGroggy && !IsRoot)
++                    _stateMachine.ChangeState(_passiveState);
++                if (_navMeshAgent != null && _navMeshAgent.enabled && _navMeshAgent.isOnNavMesh)
++                { _navMeshAgent.ResetPath(); _navMeshAgent.velocity = Vector3.zero; }
++                // Action Exit restores its own earlier collider snapshot. Passive mode must
++                // retain body colliders that were live immediately before this transition.
++                if (!_isDie && EnemyStat?.IsDead != true)
++                    foreach (var collider in activeBodyColliders) if (collider != null) collider.enabled = true;
++            }
++            else if (_stateMachine != null && _passiveState != null && _stateMachine.CurrentState == _passiveState)
++                _stateMachine.ChangeState(new EnemyIdleState(this));
++            SyncMovementLock();
++        }
++    }
+     private EnemySelfDestructState _selfDestructState;
+     public bool IsSelfDestructing { get; private set; }
+     private IEnemySensor _sensor;
+@@ -44,6 +78,8 @@ public class Enemy : MonoBehaviour, IDamageable
+     private float _knockbackMoveDuration;
+     private bool _knockbackUpdateRotation;
+     private bool _knockbackRootMotion;
++    private GameObject _knockbackFeedbackOwner;
++    private float _knockbackRequestedDistance, _knockbackMovedDistance;
+     private int _moveLockCount = 0;
+ 
+     [Header("AI 기억 및 접근")]
+@@ -83,6 +119,19 @@ public class Enemy : MonoBehaviour, IDamageable
+     public bool IsAttackFinished => CurrentAction?.IsFinished ?? true;
+ 
+     public Animator Animator { get; private set; }
++    private RuntimeAnimatorController _directionController;
++    private bool _directionParametersCached, _hasDirectionX, _hasDirectionY;
++    private static readonly int DirectionX = UnityEngine.Animator.StringToHash("DirX");
++    private static readonly int DirectionY = UnityEngine.Animator.StringToHash("DirY");
++    public CombatActorClock ActorClock { get; private set; }
++    public float ActionDeltaTime => ActorClock != null ? ActorClock.DeltaTime : Time.deltaTime;
++    public float ActionTimeScale => ActorClock != null ? ActorClock.TimeScale : 1f;
++    public float ActionTime => ActorClock != null ? ActorClock.Time : Time.time;
++    public void SetAnimationSpeed(float speed)
++    {
++        if (ActorClock != null) ActorClock.SetAnimationSpeed(speed);
++        else if (Animator != null) Animator.speed = speed;
++    }
+ 
+     public float GroggyDuration = 5f;
+ 
+@@ -103,6 +152,7 @@ public class Enemy : MonoBehaviour, IDamageable
+     {
+         EnemyStat = GetComponent<EnemyStat>();
+         Animator = GetComponentInChildren<Animator>();
++        ActorClock = CombatActorClock.GetOrCreate(this);
+         if (Animator == null)
+         {
+             Debug.LogError("Animator is null");
+@@ -125,6 +175,7 @@ public class Enemy : MonoBehaviour, IDamageable
+         // 상태 머신 초기화
+         {
+             _stateMachine = new StateMachine();
++            _passiveState = new PassiveState();
+ 
+             var idleState = new EnemyIdleState(this);
+             var traceState = new EnemyTraceState(this);
+@@ -169,7 +220,12 @@ public class Enemy : MonoBehaviour, IDamageable
+             _stateMachine.AddAnyTransition(groggyState, () => IsGroggy);
+             _stateMachine.AddAnyTransition(rootState, () => IsRoot);
+ 
+-            _stateMachine.ChangeState(idleState);
++            _stateMachine.ChangeState(CombatLabPassive ? _passiveState : idleState);
++            if (CombatLabPassive)
++            {
++                if (_navMeshAgent.enabled && _navMeshAgent.isOnNavMesh) _navMeshAgent.ResetPath();
++                SyncMovementLock();
++            }
+         }
+ 
+         _rigs = GetComponentsInChildren<Rigidbody>();
+@@ -190,30 +246,64 @@ public class Enemy : MonoBehaviour, IDamageable
+             {
+                 _stateMachine.Update();
+                 stateName = _stateMachine.CurrentState.GetType().ToString();
+-                Animator.SetFloat("DirY", 0f);
+-                Animator.SetFloat("DirX", 0f);
++                SetDirectionAnimation(0f, 0f);
+             }
+             return;
+         }
+-        TryStartSelfDestruct();
+-        UpdateKnockback(Time.deltaTime);
+-        _sensor?.DetectTarget();
+-        if (DetectedTarget != null) RememberTargetPosition(DetectedTarget.position);
+-        _stateMachine.Update();
++        UpdateAttackCooldown(); // World clock: local impact stops never lengthen cooldowns.
++        bool canAct = ActionDeltaTime > 0f;
++        if (canAct)
++        {
++            UpdateKnockback(ActionDeltaTime);
++            if (!CombatLabPassive)
++            {
++                TryStartSelfDestruct();
++                _sensor?.DetectTarget();
++                if (DetectedTarget != null) RememberTargetPosition(DetectedTarget.position);
++            }
++        }
++        _stateMachine.Update(canAct && !CombatLabPassive, canAct && !CombatLabPassive);
++        if (CombatLabPassive && canAct)
++        {
++            if (_stateMachine.CurrentState is EnemyHurtState || _stateMachine.CurrentState is EnemyGroggyState
++                || _stateMachine.CurrentState is EnemyRootState)
++                _stateMachine.CurrentState.Update();
++            if (!IsHurt && !IsGroggy && !IsRoot && !_isDie && _stateMachine.CurrentState != _passiveState)
++                _stateMachine.ChangeState(_passiveState);
++        }
+         stateName = _stateMachine.CurrentState.GetType().ToString(); //디버그 전용
+ 
+         Vector3 worldVelocity = !IsKnockbacking && !IsHurt && !IsGroggy && _navMeshAgent.enabled && _navMeshAgent.isOnNavMesh
+             ? _navMeshAgent.velocity : Vector3.zero;
+         Vector3 localVelocity = transform.InverseTransformDirection(worldVelocity);
+-        Animator.SetFloat("DirY", localVelocity.z);
+-        Animator.SetFloat("DirX", localVelocity.x);
+-        UpdateAttackCooldown();
++        SetDirectionAnimation(localVelocity.x, localVelocity.z);
+ 
+         //Debug.Log(_stateMachine.CurrentState.GetType().ToString());
+ 
+ 
+     }
+ 
++    private void SetDirectionAnimation(float x, float y)
++    {
++        if (Animator == null) return;
++        if (!_directionParametersCached || _directionController != Animator.runtimeAnimatorController)
++        {
++            _directionParametersCached = true;
++            _directionController = Animator.runtimeAnimatorController;
++            _hasDirectionX = _hasDirectionY = false;
++            foreach (var parameter in Animator.parameters)
++            {
++                if (parameter.type != AnimatorControllerParameterType.Float) continue;
++                if (parameter.nameHash == DirectionX) _hasDirectionX = true;
++                if (parameter.nameHash == DirectionY) _hasDirectionY = true;
++            }
++            if (!_hasDirectionX || !_hasDirectionY)
++                Debug.LogWarning($"{name}: Animator has no float parameter(s) {(!_hasDirectionX ? "DirX " : "")}{(!_hasDirectionY ? "DirY" : "")}; unavailable direction channels are skipped.", Animator);
++        }
++        if (_hasDirectionX) Animator.SetFloat(DirectionX, x);
++        if (_hasDirectionY) Animator.SetFloat(DirectionY, y);
++    }
++
+     public virtual DamageResult TakeDamage(float damage, ElementType damageType = ElementType.ELEMENT_NONE, bool isCritical = false, Vector3 power = default, float poiseDamage = 100f, StaggerResistLevel staggerResistLevel = StaggerResistLevel.NONE, bool isParryable = true, object source = null)
+     {
+         if (EnemyStat == null) EnemyStat = GetComponent<EnemyStat>();
+@@ -241,7 +331,7 @@ public class Enemy : MonoBehaviour, IDamageable
+ 
+         // Preserve the enemy's existing equal-level reaction rule; super armor resists displacement.
+         if (power != Vector3.zero && CanReceiveKnockback(staggerResistLevel) && !IsSelfDestructing && EnemyStat.CurrentHp > 0f)
+-            ApplyKnockback(power);
++            ApplyKnockback(power, source);
+ 
+         if (EnemyStat.CurrentHp <= 0)
+         {
+@@ -253,7 +343,7 @@ public class Enemy : MonoBehaviour, IDamageable
+ 
+     private void TryStartSelfDestruct()
+     {
+-        if (_isDie || IsSelfDestructing || _stateMachine == null || _selfDestructState == null) return;
++        if (_isDie || CombatLabPassive || IsSelfDestructing || _stateMachine == null || _selfDestructState == null) return;
+         var data = EnemyStat.MonsterSkillData?.selfDestruct;
+         if (data == null || !data.ShouldTrigger(EnemyStat)) return;
+         IsSelfDestructing = true;
+@@ -278,8 +368,10 @@ public class Enemy : MonoBehaviour, IDamageable
+         => StaggerResistLevel != StaggerResistLevel.SUPER_ARMOR
+             && (IsGroggy || PendingGroggy || attackLevel >= StaggerResistLevel);
+ 
+-    private void ApplyKnockback(Vector3 power)
++    private void ApplyKnockback(Vector3 power, object source = null)
+     {
++        var feedbackOwner = source is Component component ? component.gameObject
++            : source is EnemyAction action && action.Owner != null ? action.Owner.gameObject : null;
+         Vector3 velocity = KnockbackMotion.Power(power, power.magnitude);
+         float duration = KnockbackMoveTime;
+         float maxDistance = KnockbackMaxDistance;
+@@ -292,6 +384,8 @@ public class Enemy : MonoBehaviour, IDamageable
+         if (_navMeshAgent == null || !_navMeshAgent.enabled || !_navMeshAgent.isOnNavMesh) return;
+         _navMeshAgent.ResetPath();
+         _navMeshAgent.velocity = Vector3.zero;
++        if (IsKnockbacking) RecordKnockback("interrupted");
++        _knockbackFeedbackOwner = feedbackOwner;
+         BeginKnockback(velocity, duration, maxDistance);
+     }
+ 
+@@ -317,6 +411,11 @@ public class Enemy : MonoBehaviour, IDamageable
+         float maxSpeed = _knockbackMoveDuration > 0f
+             ? maxDistance * 3f / _knockbackMoveDuration : 0f;
+         _knockbackVelocity = Vector3.ClampMagnitude(velocity, maxSpeed);
++        _knockbackRequestedDistance = velocity.magnitude * duration / 3f;
++        _knockbackMovedDistance = 0f;
++        float limitedDistance = _knockbackVelocity.magnitude * duration / 3f;
++        if (limitedDistance + .0001f < _knockbackRequestedDistance)
++            RecordKnockbackLimit(_knockbackRequestedDistance, limitedDistance, "enemy-knockback-max-distance");
+         _knockbackElapsed = 0f;
+     }
+ 
+@@ -333,14 +432,21 @@ public class Enemy : MonoBehaviour, IDamageable
+         }
+         Vector3 delta = KnockbackMotion.ImpactDisplacement(_knockbackVelocity, _knockbackElapsed, deltaTime, _knockbackMoveDuration);
+         _navMeshAgent.velocity = Vector3.zero;
++        Vector3 before = _navMeshAgent.nextPosition;
+         _navMeshAgent.Move(delta);
++        float actual = Vector3.ProjectOnPlane(_navMeshAgent.nextPosition - before, Vector3.up).magnitude;
++        _knockbackMovedDistance += actual;
++        if (delta.magnitude > .0001f && actual + .001f < Vector3.ProjectOnPlane(delta, Vector3.up).magnitude)
++            RecordKnockbackLimit(delta.magnitude, actual, "navmesh-boundary");
+         _knockbackElapsed += Mathf.Max(0f, deltaTime);
+-        if (_knockbackElapsed >= _knockbackMoveDuration) StopKnockback();
++        if (_knockbackElapsed >= _knockbackMoveDuration) StopKnockback("completed");
+     }
+ 
+     private void Die()
+     {
+         _isDie = true;
++        CombatHitStopService.ReleaseOwner(this);
++        ActorClock?.ClearStops();
+         StopKnockback();
+         // 다음 Update 전에도 패링 예고와 공격 판정의 생명주기를 종료합니다.
+         if (CurrentAction?.IsActive == true) CurrentAction.Exit();
+@@ -348,6 +454,8 @@ public class Enemy : MonoBehaviour, IDamageable
+ 
+     protected virtual void OnDisable()
+     {
++        CombatHitStopService.ReleaseOwner(this);
++        ActorClock?.ClearStops();
+         if (CurrentAction?.IsActive == true) CurrentAction.Exit();
+         CurrentAction = null;
+         HasSelectedAttack = false;
+@@ -355,9 +463,10 @@ public class Enemy : MonoBehaviour, IDamageable
+         OnTelegraphEnd(null);
+     }
+ 
+-    private void StopKnockback()
++    private void StopKnockback(string reason = "interrupted")
+     {
+         if (!IsKnockbacking) return;
++        RecordKnockback(reason);
+         IsKnockbacking = false;
+         _knockbackVelocity = Vector3.zero;
+         if (_navMeshAgent != null)
+@@ -370,6 +479,20 @@ public class Enemy : MonoBehaviour, IDamageable
+         UnlockMovement();
+     }
+ 
++    private void RecordKnockbackLimit(float requested, float applied, string reason)
++    {
++        CombatFeedbackTelemetry.Emit("value-limited", _knockbackFeedbackOwner, gameObject,
++            detail: FormattableString.Invariant($"channel=knockback.distance;requested={requested:R};applied={applied:R};reason={reason};unit=m"),
++            value: applied, position: transform.position);
++    }
++
++    private void RecordKnockback(string reason)
++    {
++        CombatFeedbackTelemetry.Emit("knockback-complete", _knockbackFeedbackOwner, gameObject,
++            detail: FormattableString.Invariant($"channel=knockback.distance;requested={_knockbackRequestedDistance:R};applied={_knockbackMovedDistance:R};reason={reason};unit=m"),
++            value: _knockbackMovedDistance, position: transform.position);
++    }
++
+     public void UpdateAttackCooldown()
+     {
+         if (_attackCooldownTimer > 0f)
+@@ -427,7 +550,7 @@ public class Enemy : MonoBehaviour, IDamageable
+     public void UnlockMovement()
+     {
+         _moveLockCount = Mathf.Max(0, _moveLockCount - 1);
+-        if (_moveLockCount == 0 && _navMeshAgent != null && _navMeshAgent.enabled && _navMeshAgent.isOnNavMesh)
++        if (_moveLockCount == 0 && !CombatLabPassive && _navMeshAgent != null && _navMeshAgent.enabled && _navMeshAgent.isOnNavMesh)
+             _navMeshAgent.isStopped = false;
+     }
+ 
+@@ -435,7 +558,7 @@ public class Enemy : MonoBehaviour, IDamageable
+     public void SyncMovementLock()
+     {
+         if (_navMeshAgent != null && _navMeshAgent.enabled && _navMeshAgent.isOnNavMesh)
+-            _navMeshAgent.isStopped = _moveLockCount > 0;
++            _navMeshAgent.isStopped = _moveLockCount > 0 || CombatLabPassive;
+     }
+ 
+     protected void ResetAttackCooldown()
+@@ -455,4 +578,11 @@ public class Enemy : MonoBehaviour, IDamageable
+         if (_telegraphInstance != null) Destroy(_telegraphInstance);
+         _telegraphInstance = null;
+     }
++
++    private sealed class PassiveState : IPlayerState
++    {
++        public void Enter() { }
++        public void Update() { }
++        public void Exit() { }
++    }
+ }
+diff --git a/Assets/_Project/Scripts/Enemy/EnemyActions/EnemyAction.cs b/Assets/_Project/Scripts/Enemy/EnemyActions/EnemyAction.cs
+index 73effee..47b0f7d 100644
+--- a/Assets/_Project/Scripts/Enemy/EnemyActions/EnemyAction.cs
++++ b/Assets/_Project/Scripts/Enemy/EnemyActions/EnemyAction.cs
+@@ -31,7 +31,7 @@ public abstract class EnemyAction
+         IsActive = true;
+         _telegraphActive = false;
+         if (_enemy.Animator != null)
+-            _enemy.Animator.speed = SkillData.attackSpeed;
++            _enemy.SetAnimationSpeed(SkillData.attackSpeed);
+ 
+         StartTelegraph();
+     }
+@@ -39,12 +39,12 @@ public abstract class EnemyAction
+     public virtual void Update()
+     {
+         // attackSpeed 배율만큼 타이머를 빠르게 진행 → 모든 판정 타이밍이 비례해서 당겨짐
+-        _timer += Time.deltaTime * SkillData.attackSpeed;
++        _timer += _enemy.ActionDeltaTime * SkillData.attackSpeed;
+ 
+         // 예고 타이밍 자동 관리: _telegraphTimer는 서브클래스의 _timer 리셋과 무관하게 증가
+         if (_telegraphActive && SkillData.isParryable)
+         {
+-            _telegraphTimer += Time.deltaTime * SkillData.attackSpeed;
++            _telegraphTimer += _enemy.ActionDeltaTime * SkillData.attackSpeed;
+             if (_telegraphTimer >= SkillData.telegraphDuration)
+                 EndTelegraph();
+         }
+@@ -56,7 +56,7 @@ public abstract class EnemyAction
+         IsFinished = true;
+         IsActive = false;
+         if (_enemy.Animator != null)
+-            _enemy.Animator.speed = 1f;
++            _enemy.SetAnimationSpeed(1f);
+ 
+         EndTelegraph();
+     }
+diff --git a/Assets/_Project/Scripts/Enemy/EnemyActions/EnemyDashAttack.cs b/Assets/_Project/Scripts/Enemy/EnemyActions/EnemyDashAttack.cs
+index bc99b97..8ed9430 100644
+--- a/Assets/_Project/Scripts/Enemy/EnemyActions/EnemyDashAttack.cs
++++ b/Assets/_Project/Scripts/Enemy/EnemyActions/EnemyDashAttack.cs
+@@ -98,7 +98,7 @@ public class EnemyDashAttack : EnemyAction
+     {
+         // 타이머가 attackSpeed 배율로 빠르게 진행되므로, 실제 이동 거리를 유지하려면
+         // 프레임당 이동량도 attackSpeed만큼 곱해야 한다.
+-        Vector3 delta = _dashDirection * _data.dashSpeed * _data.attackSpeed * Time.deltaTime;
++        Vector3 delta = _dashDirection * _data.dashSpeed * _data.attackSpeed * _enemy.ActionDeltaTime;
+         if (_nav.enabled && _nav.isOnNavMesh)
+             _nav.Move(delta);
+         else
+diff --git a/Assets/_Project/Scripts/Enemy/EnemyActions/EnemySelfDestruct.cs b/Assets/_Project/Scripts/Enemy/EnemyActions/EnemySelfDestruct.cs
+index b8908da..430e390 100644
+--- a/Assets/_Project/Scripts/Enemy/EnemyActions/EnemySelfDestruct.cs
++++ b/Assets/_Project/Scripts/Enemy/EnemyActions/EnemySelfDestruct.cs
+@@ -52,7 +52,7 @@ public class EnemySelfDestruct : EnemyAction
+     {
+         if (!IsActive || IsFinished || _exploded) return;
+         base.Update();
+-        _elapsed += Time.deltaTime;
++        _elapsed += _enemy.ActionDeltaTime;
+         if (_elapsed < Mathf.Max(0f, _data.explosionDelay)) return;
+ 
+         _exploded = true; // 프레임/콜라이더 수와 무관하게 한 번만 폭발합니다.
+diff --git a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyApproachState.cs b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyApproachState.cs
+index 8eca01f..ece3900 100644
+--- a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyApproachState.cs
++++ b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyApproachState.cs
+@@ -36,8 +36,8 @@ public class EnemyApproachState : IPlayerState
+     public void Update()
+     {
+         if (_enemy.DetectedTarget == null || _enemy.CurrentAction == null) return;
+-        _elapsed += Time.deltaTime;
+-        _stuckTime += Time.deltaTime;
++        _elapsed += _enemy.ActionDeltaTime;
++        _stuckTime += _enemy.ActionDeltaTime;
+         if ((_enemy.transform.position - _progressPosition).sqrMagnitude >= 0.01f)
+         {
+             _progressPosition = _enemy.transform.position;
+@@ -55,7 +55,7 @@ public class EnemyApproachState : IPlayerState
+             _enemy.CancelFailedApproach();
+             return;
+         }
+-        _repathTimer -= Time.deltaTime;
++        _repathTimer -= _enemy.ActionDeltaTime;
+         if (_repathTimer > 0f) return;
+         _repathTimer = 0.2f;
+         Vector3 destination = _enemy.DetectedTarget.position;
+diff --git a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyCombatIdleState.cs b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyCombatIdleState.cs
+index 74a1406..bd09fcd 100644
+--- a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyCombatIdleState.cs
++++ b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyCombatIdleState.cs
+@@ -103,7 +103,7 @@ public class EnemyCombatIdleState : IPlayerState
+ 
+         FaceTarget();
+ 
+-        _roamTimer += Time.deltaTime;
++        _roamTimer += _enemy.ActionDeltaTime;
+         if (_roamTimer < RoamInterval) return;
+ 
+         _roamTimer = 0f;
+@@ -133,6 +133,6 @@ public class EnemyCombatIdleState : IPlayerState
+             _enemy.transform.rotation = Quaternion.RotateTowards(
+                 _enemy.transform.rotation,
+                 Quaternion.LookRotation(dir),
+-                360f * Time.deltaTime);
++                360f * _enemy.ActionDeltaTime);
+     }
+ }
+diff --git a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyDieState.cs b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyDieState.cs
+index 5e3b5b8..6722add 100644
+--- a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyDieState.cs
++++ b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyDieState.cs
+@@ -19,7 +19,7 @@ public class EnemyDieState : IPlayerState
+         {
+             // Drone/Chang can fade from their current pose without a Die animation.
+             _enemy.Animator.applyRootMotion = false;
+-            _enemy.Animator.speed = 0f;
++            _enemy.SetAnimationSpeed(0f);
+         }
+         _enemy.LockMovement();
+         foreach (var collider in _enemy.GetComponentsInChildren<Collider>(true))
+diff --git a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyGroggyState.cs b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyGroggyState.cs
+index babb6b9..1ae5566 100644
+--- a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyGroggyState.cs
++++ b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyGroggyState.cs
+@@ -19,7 +19,7 @@ public class EnemyGroggyState : IPlayerState
+     }
+     public void Update()
+     {
+-        _remaining -= Time.deltaTime;
++        _remaining -= _enemy.ActionDeltaTime;
+         if (_remaining <= 0f) _enemy.IsGroggy = false;
+     }
+ 
+diff --git a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyHurtState.cs b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyHurtState.cs
+index 43a3185..06e08ce 100644
+--- a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyHurtState.cs
++++ b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyHurtState.cs
+@@ -13,7 +13,7 @@ public class EnemyHurtState : IPlayerState
+     public void Enter()
+     {
+         _enemy.LockMovement();
+-        _savedAnimatorSpeed = _enemy.Animator.speed;
++        _savedAnimatorSpeed = _enemy.ActorClock.AnimationSpeed;
+         RestartReaction();
+     }
+ 
+@@ -30,14 +30,14 @@ public class EnemyHurtState : IPlayerState
+         {
+             // Incomplete enemy controllers must not keep walking while being knocked back.
+             _freezeFallback = true;
+-            _enemy.Animator.speed = 0f;
++            _enemy.SetAnimationSpeed(0f);
+         }
+     }
+ 
+     public void Update()
+     {
+         if (_hurtVersion != _enemy.HurtVersion) RestartReaction();
+-        _remaining -= Time.deltaTime;
++        _remaining -= _enemy.ActionDeltaTime;
+         if (_remaining > 0f || _enemy.IsKnockbacking) return;
+         _enemy.IsHurt = false;
+         // 정상 종료 시에만 그로기로 이어집니다. 사망 등으로 중단되면 예약하지 않습니다.
+@@ -50,7 +50,7 @@ public class EnemyHurtState : IPlayerState
+ 
+     public void Exit()
+     {
+-        if (_freezeFallback) _enemy.Animator.speed = _savedAnimatorSpeed;
++        if (_freezeFallback) _enemy.SetAnimationSpeed(_savedAnimatorSpeed);
+         _freezeFallback = false;
+         _enemy.UnlockMovement();
+         _enemy.IsHurt = false;
+diff --git a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyIdleState.cs b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyIdleState.cs
+index 821d628..fa2e046 100644
+--- a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyIdleState.cs
++++ b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyIdleState.cs
+@@ -1,6 +1,7 @@
+ public class EnemyIdleState : IPlayerState
+ {
+     Enemy _enemy;
++    private bool _missingIdleReported;
+ 
+     public EnemyIdleState(Enemy enemy) {_enemy = enemy;}
+ 
+@@ -8,7 +9,14 @@ public class EnemyIdleState : IPlayerState
+     {
+         var nav = _enemy.GetComponent<UnityEngine.AI.NavMeshAgent>();
+         if (nav != null && nav.enabled && nav.isOnNavMesh) nav.ResetPath();
+-        _enemy.Animator.CrossFade("Idle", 0.1f);
++        var animator = _enemy.Animator;
++        if (animator != null && animator.layerCount > 0 && animator.HasState(0, UnityEngine.Animator.StringToHash("Idle")))
++            animator.CrossFade("Idle", 0.1f, 0);
++        else if (animator != null && !_missingIdleReported)
++        {
++            _missingIdleReported = true;
++            UnityEngine.Debug.LogWarning($"{_enemy.name}: Animator has no Idle state on layer 0; retaining its current animation.", animator);
++        }
+     }
+ 
+     public void Update()
+diff --git a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyRootState.cs b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyRootState.cs
+index 96abe4a..6bd5b20 100644
+--- a/Assets/_Project/Scripts/Enemy/EnemyState/EnemyRootState.cs
++++ b/Assets/_Project/Scripts/Enemy/EnemyState/EnemyRootState.cs
+@@ -14,7 +14,7 @@ public class EnemyRootState : IPlayerState
+     }
+     public void Update()
+     {
+-        _remaining -= Time.deltaTime;
++        _remaining -= _enemy.ActionDeltaTime;
+         if (_remaining <= 0f) _enemy.IsRoot = false;
+     }
+ 
+diff --git a/Assets/_Project/Scripts/Feedbacks/CombatFeelFeedback.cs b/Assets/_Project/Scripts/Feedbacks/CombatFeelFeedback.cs
+index 020b25b..ea7dbc0 100644
+--- a/Assets/_Project/Scripts/Feedbacks/CombatFeelFeedback.cs
++++ b/Assets/_Project/Scripts/Feedbacks/CombatFeelFeedback.cs
+@@ -19,12 +19,13 @@ public sealed class CombatFeelFeedback : MonoBehaviour
+     private MMF_Property _zoom;
+     private MMF_CinemachineImpulseSource _impulse;
+     private bool _initialized, _hitPlayed;
++    private bool _zoomEnabled;
+ 
+     public bool IsConfigured => ZoomFeedbacks != null && HitFeedbacks != null && FlashGroup != null
+         && ZoomFeedbacks.GetFeedbackOfType<MMF_Property>() != null
+         && HitFeedbacks.GetFeedbackOfType<MMF_CinemachineImpulseSource>() != null;
+ 
+-    public void Begin(float duration, float playbackSpeed)
++    public void Begin(float duration, float playbackSpeed, bool playZoom = true)
+     {
+         if (!IsConfigured) return;
+         if (!_initialized)
+@@ -37,9 +38,10 @@ public sealed class CombatFeelFeedback : MonoBehaviour
+         }
+         Stop();
+         _hitPlayed = false;
++        _zoomEnabled = playZoom;
+         _zoom.Duration = Mathf.Max(0.01f, duration);
+         SetPlaybackSpeed(playbackSpeed);
+-        ZoomFeedbacks.PlayFeedbacks();
++        if (_zoomEnabled) ZoomFeedbacks.PlayFeedbacks();
+     }
+ 
+     public void SetPlaybackSpeed(float playbackSpeed)
+@@ -54,15 +56,15 @@ public sealed class CombatFeelFeedback : MonoBehaviour
+         }
+     }
+ 
+-    public void PlayHit(CinemachineImpulseSource source, Vector3 velocity)
++    public void PlayHit(CinemachineImpulseSource source, Vector3 velocity, bool playImpulse = true, bool allowRepeat = false)
+     {
+-        if (!_initialized || _hitPlayed) return;
++        if (!_initialized || (_hitPlayed && !allowRepeat)) return;
+         _hitPlayed = true;
+         // Reuse the existing impulse source and listener, including their time policy.
+         // The native Feel source feedback does not change the global impulse clock.
+         _impulse.ImpulseSource = source;
+         _impulse.Velocity = velocity;
+-        _impulse.Active = source != null && velocity.sqrMagnitude > 0.000001f;
++        _impulse.Active = playImpulse && source != null && velocity.sqrMagnitude > 0.000001f;
+         HitFeedbacks.PlayFeedbacks(source != null ? source.transform.position : transform.position);
+     }
+ 
+@@ -77,6 +79,7 @@ public sealed class CombatFeelFeedback : MonoBehaviour
+             // including those belonging to other attacks or environmental effects.
+         }
+         ZoomOffset = 0f;
++        _zoomEnabled = false;
+         if (FlashGroup != null) FlashGroup.alpha = 0f;
+     }
+ 
+diff --git a/Assets/_Project/Scripts/Manager/RunManager.cs b/Assets/_Project/Scripts/Manager/RunManager.cs
+index 1fca1f7..e750637 100644
+--- a/Assets/_Project/Scripts/Manager/RunManager.cs
++++ b/Assets/_Project/Scripts/Manager/RunManager.cs
+@@ -149,13 +149,13 @@ public sealed class RunManager : MonoBehaviour
+     public void RestartRun()
+     {
+         if (State != RunState.Won && State != RunState.Lost) return;
+-        Time.timeScale = 1f;
++        CombatHitStopService.SetExternalWorldTimeScale(1f);
+         SceneManager.LoadScene(SceneManager.GetActiveScene().name);
+     }
+ 
+     public void ReturnToTitle()
+     {
+-        Time.timeScale = 1f;
++        CombatHitStopService.SetExternalWorldTimeScale(1f);
+         SceneManager.LoadScene("TitleScene");
+     }
+ 
+diff --git b/Assets/_Project/Scripts/NewPlayer/CombatActorClock.cs b/Assets/_Project/Scripts/NewPlayer/CombatActorClock.cs
+new file mode 100644
+index 0000000..f5eeeef
+--- /dev/null
++++ b/Assets/_Project/Scripts/NewPlayer/CombatActorClock.cs
+@@ -0,0 +1,220 @@
++using System.Collections.Generic;
++using UnityEngine;
++using UnityEngine.AI;
++
++/// <summary>Actor action time. Cooldowns, buffs and other world systems keep using Time.deltaTime.</summary>
++[DefaultExecutionOrder(-250)]
++[DisallowMultipleComponent]
++public sealed class CombatActorClock : MonoBehaviour
++{
++    private sealed class Stop
++    {
++        public Object Owner;
++        public double Expires;
++        public float Scale;
++        public double Started;
++        public HitStopScope Scope;
++    }
++
++    private static readonly HashSet<CombatActorClock> Clocks = new();
++    private readonly List<Stop> _stops = new();
++    private readonly Dictionary<object, float> _movementModifiers = new();
++    private Animator _animator;
++    private NavMeshAgent _navigation;
++    private float _animationSpeed = 1f;
++    private float _navigationSpeed, _navigationAcceleration, _navigationAngularSpeed;
++    private float _lastNavigationScale = 1f;
++    private float _time;
++
++    public float TimeScale
++    {
++        get
++        {
++            Prune();
++            float scale = 1f;
++            foreach (var stop in _stops) scale = Mathf.Min(scale, stop.Scale);
++            return scale;
++        }
++    }
++    public float DeltaTime => UnityEngine.Time.deltaTime * TimeScale;
++    public float Time => _time;
++    public float AnimationSpeed => _animationSpeed;
++    public bool IsStopped => TimeScale <= 0f;
++
++    public static CombatActorClock GetOrCreate(Component actor)
++    {
++        if (actor == null) return null;
++        var clock = actor.GetComponent<CombatActorClock>();
++        return clock != null ? clock : actor.gameObject.AddComponent<CombatActorClock>();
++    }
++
++    private void Awake()
++    {
++        _animator = GetComponentInChildren<Animator>();
++        _navigation = GetComponent<NavMeshAgent>();
++        if (_animator != null) _animationSpeed = _animator.speed;
++        if (_navigation != null)
++        {
++            _navigationSpeed = _navigation.speed;
++            _navigationAcceleration = _navigation.acceleration;
++            _navigationAngularSpeed = _navigation.angularSpeed;
++        }
++    }
++
++    private void OnEnable() => Clocks.Add(this);
++    private void Update()
++    {
++        _time += DeltaTime;
++        Apply();
++    }
++
++    public void SetAnimationSpeed(float speed)
++    {
++        if (!KnockbackMotion.IsFinite(speed)) return;
++        _animationSpeed = Mathf.Max(0f, speed);
++        Apply();
++    }
++
++    public void SetMovementModifier(object owner, float scale)
++    {
++        if (owner == null || !KnockbackMotion.IsFinite(scale)) return;
++        _movementModifiers[owner] = Mathf.Clamp01(scale);
++        Apply();
++    }
++
++    public void RemoveMovementModifier(object owner)
++    {
++        if (owner != null) _movementModifiers.Remove(owner);
++        Apply();
++    }
++
++    public void Request(Object owner, float duration, float scale, HitStopStacking stacking,
++        HitStopScope scope = HitStopScope.Attacker)
++    {
++        if (!isActiveAndEnabled || owner == null || !KnockbackMotion.IsFinite(duration) || duration <= 0f
++            || !KnockbackMotion.IsFinite(scale))
++        {
++            CombatHitStopService.EmitStop("hitstop-request", owner, gameObject, scope, duration, scale,
++                EffectiveScale(), stacking.ToString(), "rejected-invalid-or-disabled");
++            return;
++        }
++        Prune();
++        double now = UnityEngine.Time.realtimeSinceStartupAsDouble;
++        var existing = _stops.Find(stop => stop.Owner == owner);
++        bool created = existing == null;
++        CombatHitStopService.EmitStop("hitstop-request", owner, gameObject, scope, duration, scale,
++            EffectiveScale(), stacking.ToString(), "accepted");
++        if (existing == null)
++        {
++            existing = new Stop { Owner = owner, Expires = now + duration, Scale = Mathf.Clamp01(scale), Started = now, Scope = scope };
++            _stops.Add(existing);
++        }
++        else if (stacking == HitStopStacking.Extend)
++        {
++            existing.Expires = System.Math.Max(now, existing.Expires) + duration;
++            existing.Scale = Mathf.Min(existing.Scale, Mathf.Clamp01(scale));
++        }
++        else if (stacking == HitStopStacking.Maximum)
++        {
++            existing.Expires = System.Math.Max(existing.Expires, now + duration);
++            existing.Scale = Mathf.Min(existing.Scale, Mathf.Clamp01(scale));
++        }
++        else
++        {
++            existing.Expires = now + duration;
++            existing.Scale = Mathf.Clamp01(scale);
++        }
++        existing.Scope = scope;
++        Apply();
++        CombatHitStopService.EmitStop(created ? "hitstop-begin" : "hitstop-change", owner, gameObject,
++            scope, duration, scale, EffectiveScale(), stacking.ToString(), created ? "new-lease" : "merged-lease",
++            existing.Started, existing.Expires);
++    }
++
++    public void ClearStops(string reason = "actor-clear")
++    {
++        RemoveStops(_ => true, reason);
++        Apply();
++    }
++
++    internal static void ReleaseOwner(Object owner)
++    {
++        foreach (var clock in new List<CombatActorClock>(Clocks))
++        {
++            if (clock == null) continue;
++            clock.RemoveStops(stop => stop.Owner == null || stop.Owner == owner, "owner-release");
++            clock.Apply();
++        }
++    }
++
++    internal static void ClearAllStops(string reason = "clear-all")
++    {
++        foreach (var clock in new List<CombatActorClock>(Clocks))
++            if (clock != null) clock.ClearStops(reason);
++    }
++
++    private void Prune()
++    {
++        double now = UnityEngine.Time.realtimeSinceStartupAsDouble;
++        for (int i = _stops.Count - 1; i >= 0; i--)
++        {
++            var stop = _stops[i];
++            string reason = stop.Owner == null ? "owner-destroyed" : now >= stop.Expires ? "expired"
++                : stop.Owner is Behaviour behaviour && !behaviour.isActiveAndEnabled ? "owner-disabled" : null;
++            if (reason == null) continue;
++            _stops.RemoveAt(i);
++            EmitEnd(stop, reason);
++        }
++    }
++
++    private float EffectiveScale()
++    {
++        float scale = 1f;
++        foreach (var stop in _stops) scale = Mathf.Min(scale, stop.Scale);
++        return scale;
++    }
++
++    private void RemoveStops(System.Predicate<Stop> predicate, string reason)
++    {
++        for (int i = _stops.Count - 1; i >= 0; i--)
++        {
++            var stop = _stops[i];
++            if (!predicate(stop)) continue;
++            _stops.RemoveAt(i);
++            EmitEnd(stop, reason);
++        }
++    }
++
++    private void EmitEnd(Stop stop, string reason) => CombatHitStopService.EmitStop("hitstop-end",
++        stop.Owner, gameObject, stop.Scope, 0f, stop.Scale, EffectiveScale(), "", reason, stop.Started, stop.Expires);
++
++    private void Apply()
++    {
++        float scale = TimeScale;
++        if (_animator != null) _animator.speed = _animationSpeed * scale;
++        if (_navigation == null) return;
++        // Capture legitimate navigation edits only while our previous output was unscaled.
++        if (Mathf.Approximately(_lastNavigationScale, 1f))
++        {
++            _navigationSpeed = _navigation.speed;
++            _navigationAcceleration = _navigation.acceleration;
++            _navigationAngularSpeed = _navigation.angularSpeed;
++        }
++        foreach (float modifier in _movementModifiers.Values) scale *= modifier;
++        _navigation.speed = _navigationSpeed * scale;
++        _navigation.acceleration = _navigationAcceleration * scale;
++        _navigation.angularSpeed = _navigationAngularSpeed * scale;
++        if (_navigation.enabled && _navigation.isOnNavMesh && scale < _lastNavigationScale)
++            _navigation.velocity = _lastNavigationScale > 0f
++                ? _navigation.velocity * (scale / _lastNavigationScale) : Vector3.zero;
++        _lastNavigationScale = scale;
++    }
++
++    private void OnDisable()
++    {
++        Clocks.Remove(this);
++        ClearStops("actor-disabled");
++        _movementModifiers.Clear();
++        Apply();
++    }
++}
+diff --git b/Assets/_Project/Scripts/NewPlayer/CombatActorClock.cs.meta b/Assets/_Project/Scripts/NewPlayer/CombatActorClock.cs.meta
+new file mode 100644
+index 0000000..8e1793b
+--- /dev/null
++++ b/Assets/_Project/Scripts/NewPlayer/CombatActorClock.cs.meta
+@@ -0,0 +1,2 @@
++fileFormatVersion: 2
++guid: e3b31e6ca067491468ae4b37593c13ec
+\ No newline at end of file
+diff --git b/Assets/_Project/Scripts/NewPlayer/CombatHitStopService.cs b/Assets/_Project/Scripts/NewPlayer/CombatHitStopService.cs
+new file mode 100644
+index 0000000..2c29cd8
+--- /dev/null
++++ b/Assets/_Project/Scripts/NewPlayer/CombatHitStopService.cs
+@@ -0,0 +1,193 @@
++using System.Collections.Generic;
++using UnityEngine;
++using UnityEngine.SceneManagement;
++
++/// <summary>Owns global stops without letting an expired stop resume an external pause.</summary>
++[DefaultExecutionOrder(-300)]
++public sealed class CombatHitStopService : MonoBehaviour
++{
++    private sealed class Stop
++    {
++        public Object Owner;
++        public double Expires;
++        public float Scale;
++        public double Started;
++    }
++    private static CombatHitStopService _instance;
++    private readonly List<Stop> _stops = new();
++    private float _previousScale = 1f, _appliedScale = 1f;
++    private bool _ownsWorldTime;
++
++    private static CombatHitStopService Instance
++    {
++        get
++        {
++            if (_instance != null) return _instance;
++            var host = new GameObject("Combat Hit Stop Service") { hideFlags = HideFlags.HideAndDontSave };
++            if (Application.isPlaying) DontDestroyOnLoad(host);
++            return _instance = host.AddComponent<CombatHitStopService>();
++        }
++    }
++
++    public static void Apply(Object owner, Component attacker, Component victim, HitStopSettings settings,
++        bool includeAttacker = true)
++    {
++        if (settings == null || owner == null) return;
++        if (settings.Scope == HitStopScope.Global)
++        {
++            if (includeAttacker) Instance.Request(owner, settings.HitStopDuration, settings.HitStopTimeScale, settings.Stacking);
++            return;
++        }
++        if (includeAttacker && (settings.Scope == HitStopScope.Attacker || settings.Scope == HitStopScope.Both))
++            CombatActorClock.GetOrCreate(attacker)?.Request(owner, settings.HitStopDuration, settings.HitStopTimeScale, settings.Stacking, settings.Scope);
++        if (settings.Scope == HitStopScope.Victim || settings.Scope == HitStopScope.Both)
++            CombatActorClock.GetOrCreate(victim)?.Request(owner, settings.HitStopDuration, settings.HitStopTimeScale, settings.Stacking, settings.Scope);
++    }
++
++    public static void ReleaseOwner(Object owner)
++    {
++        CombatActorClock.ReleaseOwner(owner);
++        if (_instance == null) return;
++        _instance.ObserveExternalScale();
++        _instance.RemoveStops(stop => stop.Owner == null || stop.Owner == owner, "owner-release");
++    }
++
++    public static void ClearAll(string reason = "clear-all")
++    {
++        CombatActorClock.ClearAllStops(reason);
++        if (_instance == null) return;
++        _instance.ObserveExternalScale();
++        _instance.RemoveStops(_ => true, reason);
++    }
++
++    /// <summary>Pause/scene controllers use this ownership barrier, including writes equal to our current scale.</summary>
++    public static void SetExternalWorldTimeScale(float scale)
++    {
++        if (!KnockbackMotion.IsFinite(scale) || scale < 0f) return;
++        ClearAll("external-world-time");
++        Time.timeScale = scale;
++    }
++
++    private void OnEnable() => SceneManager.activeSceneChanged += OnSceneChanged;
++    private void OnSceneChanged(Scene previous, Scene current) => ClearAll("scene-change");
++    private void OnDisable()
++    {
++        SceneManager.activeSceneChanged -= OnSceneChanged;
++        ClearAll("service-disabled");
++        if (_instance == this) _instance = null;
++    }
++    private void Update()
++    {
++        ObserveExternalScale();
++        Prune();
++    }
++
++    private void ObserveExternalScale()
++    {
++        if (_stops.Count == 0 || Mathf.Approximately(Time.timeScale, _appliedScale)) return;
++        // An unrelated pause/scene controller now owns world time. Never restore over it.
++        _ownsWorldTime = false;
++        _previousScale = _appliedScale = Time.timeScale;
++        RemoveStops(_ => true, "external-world-time-observed");
++    }
++
++    private void Request(Object owner, float duration, float scale, HitStopStacking stacking)
++    {
++        if (!KnockbackMotion.IsFinite(duration) || duration <= 0f || !KnockbackMotion.IsFinite(scale))
++        {
++            EmitStop("hitstop-request", owner, null, HitStopScope.Global, duration, scale, Time.timeScale,
++                stacking.ToString(), "rejected-invalid");
++            return;
++        }
++        ObserveExternalScale();
++        double now = Time.realtimeSinceStartupAsDouble;
++        Prune();
++        if (_stops.Count == 0)
++        {
++            if (Time.timeScale <= 0f)
++            {
++                EmitStop("hitstop-request", owner, null, HitStopScope.Global, duration, scale, Time.timeScale,
++                    stacking.ToString(), "rejected-external-pause");
++                return;
++            }
++            _previousScale = Time.timeScale;
++            _ownsWorldTime = true;
++        }
++        var existing = _stops.Find(stop => stop.Owner == owner);
++        bool created = existing == null;
++        EmitStop("hitstop-request", owner, null, HitStopScope.Global, duration, scale, Time.timeScale,
++            stacking.ToString(), "accepted");
++        if (existing == null)
++        {
++            existing = new Stop { Owner = owner, Expires = now + duration, Scale = Mathf.Clamp01(scale), Started = now };
++            _stops.Add(existing);
++        }
++        else if (stacking == HitStopStacking.Extend)
++        {
++            existing.Expires = System.Math.Max(now, existing.Expires) + duration;
++            existing.Scale = Mathf.Min(existing.Scale, Mathf.Clamp01(scale));
++        }
++        else if (stacking == HitStopStacking.Maximum)
++        {
++            existing.Expires = System.Math.Max(existing.Expires, now + duration);
++            existing.Scale = Mathf.Min(existing.Scale, Mathf.Clamp01(scale));
++        }
++        else { existing.Expires = now + duration; existing.Scale = Mathf.Clamp01(scale); }
++        ApplyScale();
++        EmitStop(created ? "hitstop-begin" : "hitstop-change", owner, null, HitStopScope.Global, duration,
++            scale, Time.timeScale, stacking.ToString(), created ? "new-lease" : "merged-lease", existing.Started, existing.Expires);
++    }
++
++    private void Prune()
++    {
++        double now = Time.realtimeSinceStartupAsDouble;
++        RemoveStops(stop => stop.Owner == null || now >= stop.Expires
++            || stop.Owner is Behaviour behaviour && !behaviour.isActiveAndEnabled, "prune");
++    }
++
++    private void RemoveStops(System.Predicate<Stop> predicate, string reason)
++    {
++        var removed = new List<Stop>();
++        for (int i = _stops.Count - 1; i >= 0; i--)
++        {
++            var stop = _stops[i];
++            if (!predicate(stop)) continue;
++            _stops.RemoveAt(i); removed.Add(stop);
++        }
++        ApplyScale();
++        foreach (var stop in removed)
++        {
++            string actualReason = reason == "prune" ? stop.Owner == null ? "owner-destroyed"
++                : stop.Owner is Behaviour behaviour && !behaviour.isActiveAndEnabled ? "owner-disabled" : "expired" : reason;
++            EmitStop("hitstop-end", stop.Owner, null, HitStopScope.Global, 0, stop.Scale, Time.timeScale,
++                "", actualReason, stop.Started, stop.Expires);
++        }
++    }
++
++    internal static void EmitStop(string kind, Object owner, GameObject target, HitStopScope scope,
++        float duration, float requestedScale, float appliedScale, string stacking, string reason,
++        double started = 0, double expires = 0)
++    {
++        double now = Time.realtimeSinceStartupAsDouble;
++        var ownerObject = owner == null ? null : owner is Component component ? component.gameObject : owner as GameObject;
++        string detail = string.Format(System.Globalization.CultureInfo.InvariantCulture,
++            "channel=hitstop;scope={0};requested={1:R};applied={2:R};duration={3:R};stacking={4};reason={5};realTime={6:R};elapsedReal={7:R};remainingReal={8:R}",
++            scope, requestedScale, appliedScale, duration, stacking, reason, now,
++            started > 0 ? System.Math.Max(0, now - started) : 0, System.Math.Max(0, expires - now));
++        CombatFeedbackTelemetry.Emit(kind, ownerObject, target, detail: detail, value: appliedScale);
++    }
++
++    private void ApplyScale()
++    {
++        if (_stops.Count == 0)
++        {
++            if (_ownsWorldTime && Mathf.Approximately(Time.timeScale, _appliedScale)) Time.timeScale = _previousScale;
++            _ownsWorldTime = false;
++            _appliedScale = Time.timeScale;
++            return;
++        }
++        float scale = _previousScale;
++        foreach (var stop in _stops) scale = Mathf.Min(scale, stop.Scale);
++        Time.timeScale = _appliedScale = scale;
++    }
++}
+diff --git b/Assets/_Project/Scripts/NewPlayer/CombatHitStopService.cs.meta b/Assets/_Project/Scripts/NewPlayer/CombatHitStopService.cs.meta
+new file mode 100644
+index 0000000..6d739e1
+--- /dev/null
++++ b/Assets/_Project/Scripts/NewPlayer/CombatHitStopService.cs.meta
+@@ -0,0 +1,2 @@
++fileFormatVersion: 2
++guid: 1a978475dfe0a90429005f2d6af93b2c
+\ No newline at end of file
+diff --git a/Assets/_Project/Scripts/NewPlayer/PlayerController.StageTransition.cs b/Assets/_Project/Scripts/NewPlayer/PlayerController.StageTransition.cs
+index 15f5264..0f06207 100644
+--- a/Assets/_Project/Scripts/NewPlayer/PlayerController.StageTransition.cs
++++ b/Assets/_Project/Scripts/NewPlayer/PlayerController.StageTransition.cs
+@@ -34,12 +34,7 @@ public partial class PlayerController
+         ConsumeHitReaction();
+         VerticalVelocity = 0f;
+         _coyoteTimer = 0f;
+-        if (_hitStopCoroutine != null)
+-        {
+-            StopCoroutine(_hitStopCoroutine);
+-            Time.timeScale = _timeScaleBeforeHitStop;
+-            _hitStopCoroutine = null;
+-        }
++        CancelHitStops();
+ 
+         if (Input != null)
+         {
+@@ -56,7 +51,7 @@ public partial class PlayerController
+         if (Animator != null)
+         {
+             Animator.applyRootMotion = false;
+-            Animator.speed = 1f;
++            SetAnimationSpeed(1f);
+             int idle = UnityEngine.Animator.StringToHash("Idle");
+             if (Animator.HasState(0, idle)) Animator.Play(idle, 0, 0f);
+             Animator.enabled = false;
+diff --git a/Assets/_Project/Scripts/NewPlayer/PlayerController.cs b/Assets/_Project/Scripts/NewPlayer/PlayerController.cs
+index 68a146e..75ef371 100644
+--- a/Assets/_Project/Scripts/NewPlayer/PlayerController.cs
++++ b/Assets/_Project/Scripts/NewPlayer/PlayerController.cs
+@@ -13,6 +13,15 @@ public partial class PlayerController : MonoBehaviour, IDamageable
+     public FormManager FormManager { get; private set; }
+     public StateMachine StateMachine { get; private set; }
+     public PlayerStatManager StatManager { get; private set; }
++    public CombatActorClock ActorClock { get; private set; }
++    public float ActionDeltaTime => ActorClock != null ? ActorClock.DeltaTime : Time.deltaTime;
++    public float ActionTimeScale => ActorClock != null ? ActorClock.TimeScale : 1f;
++    public float ActionTime => ActorClock != null ? ActorClock.Time : Time.time;
++    public void SetAnimationSpeed(float speed)
++    {
++        if (ActorClock != null) ActorClock.SetAnimationSpeed(speed);
++        else if (Animator != null) Animator.speed = speed;
++    }
+     public Transform CameraTransform;
+     [Header("Combat Camera")]
+     [SerializeField] private CombatCameraDirector _combatCamera;
+@@ -116,8 +125,6 @@ public partial class PlayerController : MonoBehaviour, IDamageable
+     [Tooltip("넉백 지속 시간 (초)")]
+     [SerializeField] private float _knockbackDuration = 0.25f;
+     private Coroutine _knockbackCoroutine;
+-    private Coroutine _hitStopCoroutine;
+-    private float _timeScaleBeforeHitStop;
+ 
+     [Header("Default Hit Stop Settings")]
+     [Min(0f), Tooltip("패링 및 개별 히트스탑이 설정되지 않은 공격의 기본 지속 시간(실제 시간 기준 초)")]
+@@ -140,6 +147,7 @@ public partial class PlayerController : MonoBehaviour, IDamageable
+         StatManager = GetComponent<PlayerStatManager>();
+         ItemRuntime = GetComponent<PlayerItemRuntime>();
+         Animator = gameObject.GetComponentInChildren<Animator>();
++        ActorClock = CombatActorClock.GetOrCreate(this);
+         ImpulseSource = GetComponent<CinemachineImpulseSource>();
+         Controller = GetComponent<CharacterController>();
+         Input = GetComponent<PlayerInputHandler>();
+@@ -173,8 +181,10 @@ public partial class PlayerController : MonoBehaviour, IDamageable
+         UpdateFormChangeCooldown();
+         ItemRuntime?.Tick(Time.deltaTime);
+         StatManager.UpdateSpRegen(Time.deltaTime);
+-        TryDeactivateUltimate();
+-        StateMachine.Update();  
++        bool canAct = ActionDeltaTime > 0f;
++        if (canAct) TryDeactivateUltimate();
++        // Death and external hit reactions have priority even while actor time is stopped.
++        StateMachine.Update(canAct, canAct);
+         if (IsStageTransitioning) return;
+         FormManager.Update();
+     }
+@@ -195,7 +205,7 @@ public partial class PlayerController : MonoBehaviour, IDamageable
+         if (IsGround())
+             _coyoteTimer = CoyoteTime;
+         else
+-            _coyoteTimer -= Time.deltaTime;
++            _coyoteTimer -= ActionDeltaTime;
+     }
+ 
+     private void UpdateDashCooldown()
+@@ -327,7 +337,14 @@ public partial class PlayerController : MonoBehaviour, IDamageable
+     }
+ 
+     private Vector3 GetKnockbackVelocity(Vector3 power)
+-        => KnockbackMotion.Velocity(power, _knockbackResistance);
++    {
++        Vector3 velocity = KnockbackMotion.Velocity(power, _knockbackResistance);
++        if (KnockbackMotion.IsFinite(power.sqrMagnitude) && power.magnitude > velocity.magnitude + .0001f)
++            CombatFeedbackTelemetry.Emit("value-limited", gameObject, gameObject,
++                detail: System.FormattableString.Invariant($"channel=knockback.speed;requested={power.magnitude:R};applied={velocity.magnitude:R};reason=player-knockback-resistance;unit=m/s"),
++                value: velocity.magnitude, position: transform.position);
++        return velocity;
++    }
+ 
+     // 패링 성공 시에는 반격 상태를 유지한 채 밀림만 적용합니다.
+     private void ApplyKnockback(Vector3 power)
+@@ -354,32 +371,28 @@ public partial class PlayerController : MonoBehaviour, IDamageable
+         => StartHitStop(_hitStopDuration, _hitStopTimeScale);
+ 
+     /// <summary>히트별 설정, 타수별 설정, 플레이어 기본값 순서로 히트스탑을 적용합니다.</summary>
+-    public void StartHitStop(WeaponActionData step, HitEvent hitEvent = null)
++    public void StartHitStop(WeaponActionData step, HitEvent hitEvent = null, Component victim = null, bool includeAttacker = true)
+     {
+-        if (hitEvent != null && hitEvent.OverrideHitStop)
+-            StartHitStop(hitEvent.HitStopDuration, hitEvent.HitStopTimeScale);
+-        else if (step != null && step.OverrideHitStop)
+-            StartHitStop(step.HitStopDuration, step.HitStopTimeScale);
+-        else
+-            StartHitStop();
++        var settings = hitEvent?.Feedback?.HitStop;
++        if (settings == null || !settings.OverrideHitStop) settings = step?.Feedback?.HitStop;
++        if (settings == null || !settings.OverrideHitStop)
++            settings = new HitStopSettings { HitStopDuration = _hitStopDuration, HitStopTimeScale = _hitStopTimeScale };
++        if (!isActiveAndEnabled || IsStageTransitioning) return;
++        CombatHitStopService.Apply(this, this, victim, settings, includeAttacker);
+     }
+ 
+     /// <summary>히트스탑 지속시간과 타임스케일을 직접 지정합니다. 퍼펙트 패링 등 특수 연출에 사용합니다.</summary>
+     public void StartHitStop(float duration, float timeScale)
+     {
+-        if (!isActiveAndEnabled || IsStageTransitioning || !KnockbackMotion.IsFinite(duration) || duration <= 0f
+-            || !KnockbackMotion.IsFinite(timeScale)) return;
+-        if (_hitStopCoroutine != null) StopCoroutine(_hitStopCoroutine);
+-        else _timeScaleBeforeHitStop = Time.timeScale;
+-        _hitStopCoroutine = StartCoroutine(HitStopRoutine(duration, timeScale));
++        if (!isActiveAndEnabled || IsStageTransitioning) return;
++        CombatHitStopService.Apply(this, this, null,
++            new HitStopSettings { HitStopDuration = duration, HitStopTimeScale = timeScale });
+     }
+ 
+-    private IEnumerator HitStopRoutine(float duration, float timeScale)
++    public void CancelHitStops()
+     {
+-        Time.timeScale = Mathf.Clamp01(timeScale);
+-        yield return new WaitForSecondsRealtime(duration);
+-        Time.timeScale = _timeScaleBeforeHitStop;
+-        _hitStopCoroutine = null;
++        CombatHitStopService.ReleaseOwner(this);
++        ActorClock?.ClearStops();
+     }
+ 
+     private void OnDisable()
+@@ -390,12 +403,7 @@ public partial class PlayerController : MonoBehaviour, IDamageable
+         StopAttackTrails(true);
+         _combatCamera?.Cancel(this, true);
+         FormManager?.CleanupTransientEffects();
+-        if (_hitStopCoroutine != null)
+-        {
+-            StopCoroutine(_hitStopCoroutine);
+-            Time.timeScale = _timeScaleBeforeHitStop;
+-            _hitStopCoroutine = null;
+-        }
++        CancelHitStops();
+ 
+         StopParryKnockback();
+         ConsumeHitReaction();
+@@ -409,10 +417,10 @@ public partial class PlayerController : MonoBehaviour, IDamageable
+         while (elapsed < duration)
+         {
+             if (!Controller.enabled || StatManager.CurrentHp <= 0f) break;
+-            Vector3 delta = KnockbackMotion.Displacement(initialVelocity, elapsed, Time.deltaTime, duration);
++            Vector3 delta = KnockbackMotion.Displacement(initialVelocity, elapsed, ActionDeltaTime, duration);
+             Controller.Move(delta);
+ 
+-            elapsed += Time.deltaTime;
++            elapsed += ActionDeltaTime;
+             yield return null;
+         }
+ 
+diff --git a/Assets/_Project/Scripts/NewPlayer/PlayerMovement.cs b/Assets/_Project/Scripts/NewPlayer/PlayerMovement.cs
+index fd3a806..8c4dfaf 100644
+--- a/Assets/_Project/Scripts/NewPlayer/PlayerMovement.cs
++++ b/Assets/_Project/Scripts/NewPlayer/PlayerMovement.cs
+@@ -11,12 +11,13 @@ public class PlayerMovement : MonoBehaviour
+ 
+     public void ApplyGravity()
+     {
++        if (_playerController.ActionDeltaTime <= 0f) return;
+         if(_playerController.IsGround() && _playerController.VerticalVelocity < 0)
+         {
+             _playerController.VerticalVelocity = -2f;
+         }
+ 
+-        _playerController.VerticalVelocity += _playerController.Gravity * Time.deltaTime;
++        _playerController.VerticalVelocity += _playerController.Gravity * _playerController.ActionDeltaTime;
+     }
+ 
+     public Vector3 GetMoveDirection()
+@@ -60,7 +61,7 @@ public class PlayerMovement : MonoBehaviour
+         Vector3 velocity = moveDir * _playerController.RunSpeed;
+         velocity.y = _playerController.VerticalVelocity;
+ 
+-        CollisionFlags flags = _playerController.Controller.Move(velocity * Time.deltaTime);
++        CollisionFlags flags = _playerController.Controller.Move(velocity * _playerController.ActionDeltaTime);
+ 
+         if((flags & CollisionFlags.Above) != 0 && _playerController.VerticalVelocity > 0f)
+         {
+diff --git a/Assets/_Project/Scripts/NewPlayer/WeaponActionData.cs b/Assets/_Project/Scripts/NewPlayer/WeaponActionData.cs
+index eb0a486..cdfb232 100644
+--- a/Assets/_Project/Scripts/NewPlayer/WeaponActionData.cs
++++ b/Assets/_Project/Scripts/NewPlayer/WeaponActionData.cs
+@@ -118,6 +118,7 @@ public class WeaponActionData
+ [Serializable]
+ public class ActionBalanceSettings
+ {
++    public bool EnableV2;
+     [Tooltip("이 타수의 데미지")]
+     public float Damage = 10;
+ 
+@@ -134,6 +135,7 @@ public class ActionBalanceSettings
+ [Serializable]
+ public class HitBalanceSettings
+ {
++    public bool EnableV2;
+     [Tooltip("이 히트의 데미지 (0이면 WeaponActionData의 기본 Damage 사용)")]
+     public float Damage = 0;
+ 
+@@ -160,9 +162,14 @@ public class HitExecutionSettings
+     public float Duration = 0.05f;
+ }
+ 
++public enum HitStopScope { Global = 0, Attacker = 1, Victim = 2, Both = 3 }
++public enum HitStopStacking { Replace = 0, Extend = 1, Maximum = 2 }
++
+ [Serializable]
+ public class HitStopSettings
+ {
++    [Tooltip("기존에 이 채널을 사용하지 않던 특수 공격에서도 명시적으로 적용합니다.")]
++    public bool EnableV2;
+     [Tooltip("켜면 이 항목의 히트스탑을 적용합니다. 끄면 개별 히트는 공격 설정, 공격은 PlayerController 기본값을 사용합니다.")]
+     public bool OverrideHitStop;
+ 
+@@ -171,6 +178,9 @@ public class HitStopSettings
+ 
+     [Range(0f, 1f), Tooltip("히트스탑 중 시간 배율. 0이면 완전 정지, 1이면 정상 속도입니다.")]
+     public float HitStopTimeScale = 0.05f;
++
++    public HitStopScope Scope = HitStopScope.Global;
++    public HitStopStacking Stacking = HitStopStacking.Replace;
+ }
+ 
+ [Serializable]
+@@ -330,6 +340,7 @@ public class AttackSlashSettings
+ [Serializable]
+ public class AttackCameraSettings
+ {
++    public CombatCameraV2Settings V2 = new CombatCameraV2Settings();
+     public AttackCameraProfile CameraProfile;
+ 
+     [Min(0f), Tooltip("적중 시 화면 흔들림 배율. 0=끄기, 1=Impulse Source 기본 세기, 2=2배")]
+@@ -345,6 +356,8 @@ public class AttackCameraSettings
+ [Serializable]
+ public class AttackFeedbackSettings
+ {
++    [Tooltip("신규 피드백 실행 경로를 사용합니다. 기존 특수 공격의 연출은 기본값에서 유지됩니다.")]
++    public bool EnableV2;
+     [Tooltip("이 공격의 기본 피격 이펙트. HitEvents가 없어도 적용됩니다.")]
+     public HitVfxSettings HitEffect = new HitVfxSettings();
+ 
+@@ -373,6 +386,7 @@ public class AttackFeedbackSettings
+ [Serializable]
+ public class HitFeedbackSettings
+ {
++    public CombatCameraV2Settings CameraV2 = new CombatCameraV2Settings();
+     [Tooltip("켜면 이 타격의 검기 프리팹/시간/위치를 공격 기본값 대신 사용합니다.")]
+     public bool OverrideSlashVFX;
+ 
+diff --git a/Assets/_Project/Scripts/PlayerForms/BaseForm.Actions.cs b/Assets/_Project/Scripts/PlayerForms/BaseForm.Actions.cs
+index 81e4a02..9b62b89 100644
+--- a/Assets/_Project/Scripts/PlayerForms/BaseForm.Actions.cs
++++ b/Assets/_Project/Scripts/PlayerForms/BaseForm.Actions.cs
+@@ -9,7 +9,7 @@ public abstract partial class BaseForm
+         _timer = 0f;
+         ClearHitTargets();
+         if (!HasSteps(_weaponActionData?.ComboSteps)) return;
+-        _playerController.Animator.speed = AttackSpeed;
++        _playerController.SetAnimationSpeed(AttackSpeed);
+         PlayCombo();
+     }
+ 
+@@ -23,7 +23,7 @@ public abstract partial class BaseForm
+             return;
+         }
+ 
+-        _timer += Time.deltaTime * AttackSpeed;
++        _timer += _playerController.ActionDeltaTime * AttackSpeed;
+         WeaponActionData currentStep = _weaponActionData.ComboSteps[_comboStep];
+ 
+         _playerController.UpdateAttackTrails(currentStep, _timer);
+@@ -51,20 +51,20 @@ public abstract partial class BaseForm
+         _comboStep = 0;
+         _softTarget = null;
+         ClearHitTargets();
+-        _playerController.Animator.speed = 1f;
++        _playerController.SetAnimationSpeed(1f);
+     }
+ 
+     // ── 패링 ─────────────────────────────────────────────────────────────────
+ 
+     public virtual void BeginParry()
+     {
+-        _playerController.Animator.speed = 1f;
++        _playerController.SetAnimationSpeed(1f);
+         PlayActionAnimation(_weaponActionData?.ParryAnimationName, 0f);
+     }
+ 
+     public virtual void EndParry()
+     {
+-        _playerController.Animator.speed = 1f;
++        _playerController.SetAnimationSpeed(1f);
+     }
+ 
+     // ── 공중 공격: 시작 → 하강 반복 → 착지 마무리 ──────────────────────────
+@@ -76,14 +76,14 @@ public abstract partial class BaseForm
+         _timer = 0;
+         _softTarget = null;
+         ClearHitTargets();
+-        _playerController.Animator.speed = AttackSpeed;
++        _playerController.SetAnimationSpeed(AttackSpeed);
+         PlayActionAnimation(_weaponActionData?.AirAttackStartAnimationName, 0.05f);
+     }
+ 
+     public virtual void UpdateAirAttackStart(out bool isComplete)
+     {
+-        _playerController.Animator.speed = AttackSpeed;
+-        _timer += Time.deltaTime * AttackSpeed;
++        _playerController.SetAnimationSpeed(AttackSpeed);
++        _timer += _playerController.ActionDeltaTime * AttackSpeed;
+         isComplete = _weaponActionData == null
+             || string.IsNullOrWhiteSpace(_weaponActionData.AirAttackStartAnimationName)
+             || _timer >= _weaponActionData.AirAttackStartDuration;
+@@ -101,7 +101,7 @@ public abstract partial class BaseForm
+         FindSoftTarget();
+         BeginAttackCamera(_weaponActionData?.AirAttackStep);
+         ClearHitTargets();
+-        _playerController.Animator.speed = AttackSpeed;
++        _playerController.SetAnimationSpeed(AttackSpeed);
+         PlayActionAnimation(_weaponActionData?.AirAttackStep?.AnimationName, 0.05f);
+         _playerController.UpdateAttackTrails(_weaponActionData?.AirAttackStep, 0f);
+     }
+@@ -111,8 +111,8 @@ public abstract partial class BaseForm
+         isComplete = false;
+         if (_weaponActionData == null || _weaponActionData.AirAttackStep == null) { isComplete = true; return; }
+ 
+-        _playerController.Animator.speed = AttackSpeed;
+-        _timer += Time.deltaTime * AttackSpeed;
++        _playerController.SetAnimationSpeed(AttackSpeed);
++        _timer += _playerController.ActionDeltaTime * AttackSpeed;
+         RotateTowardSoftTarget();
+         _playerController.UpdateAttackTrails(_weaponActionData.AirAttackStep, _timer);
+         ProcessHit(_weaponActionData.AirAttackStep);
+@@ -124,7 +124,7 @@ public abstract partial class BaseForm
+         EndAttackCamera();
+         _softTarget = null;
+         ClearHitTargets();
+-        _playerController.Animator.speed = 1f;
++        _playerController.SetAnimationSpeed(1f);
+     }
+ 
+     // ── 스킬 ─────────────────────────────────────────────────────────────────
+@@ -135,7 +135,7 @@ public abstract partial class BaseForm
+         _playerController.StatManager.TryConsumeSp(SkillSpCost);
+         _skillStep = 0;
+         FindSoftTarget();
+-        _playerController.Animator.speed = AttackSpeed;
++        _playerController.SetAnimationSpeed(AttackSpeed);
+         PlaySkillStep();
+     }
+ 
+@@ -144,7 +144,7 @@ public abstract partial class BaseForm
+         isComplete = false;
+         if (_weaponActionData == null || _weaponActionData.SkillSteps == null || _weaponActionData.SkillSteps.Count == 0) { isComplete = true; return; }
+ 
+-        _timer += Time.deltaTime * AttackSpeed;
++        _timer += _playerController.ActionDeltaTime * AttackSpeed;
+         WeaponActionData step = _weaponActionData.SkillSteps[_skillStep];
+         _playerController.UpdateAttackTrails(step, _timer);
+         MoveForward(step);
+@@ -164,7 +164,7 @@ public abstract partial class BaseForm
+         _softTarget = null;
+         ClearHitTargets();
+         _skillCooldownTimer = SkillCooldown;
+-        _playerController.Animator.speed = 1f;
++        _playerController.SetAnimationSpeed(1f);
+     }
+ 
+     // Shares the authored skill attack, but never consumes E resources or starts its cooldown.
+@@ -174,7 +174,7 @@ public abstract partial class BaseForm
+         SnapshotAttackDamage();
+         _skillStep = 0;
+         FindSoftTarget();
+-        _playerController.Animator.speed = AttackSpeed;
++        _playerController.SetAnimationSpeed(AttackSpeed);
+         if (CanSwitchAttack) PlaySkillStep();
+     }
+ 
+@@ -190,7 +190,7 @@ public abstract partial class BaseForm
+         _skillStep = 0;
+         _softTarget = null;
+         ClearHitTargets();
+-        _playerController.Animator.speed = 1f;
++        _playerController.SetAnimationSpeed(1f);
+     }
+ 
+     // ── 궁극기 ───────────────────────────────────────────────────────────────
+@@ -201,7 +201,7 @@ public abstract partial class BaseForm
+         _currentAction = ActionType.Ultimate;
+         _ultimateStep = 0;
+         FindSoftTarget();
+-        _playerController.Animator.speed = AttackSpeed;
++        _playerController.SetAnimationSpeed(AttackSpeed);
+         PlayUltimateStep();
+     }
+ 
+@@ -216,7 +216,7 @@ public abstract partial class BaseForm
+         isComplete = false;
+         if (_weaponActionData == null || _weaponActionData.UltimateSteps == null || _weaponActionData.UltimateSteps.Count == 0) { isComplete = true; return; }
+ 
+-        _timer += Time.deltaTime * AttackSpeed;
++        _timer += _playerController.ActionDeltaTime * AttackSpeed;
+         WeaponActionData step = _weaponActionData.UltimateSteps[_ultimateStep];
+         _playerController.UpdateAttackTrails(step, _timer);
+         MoveForward(step);
+@@ -235,7 +235,7 @@ public abstract partial class BaseForm
+         _ultimateStep = 0;
+         _softTarget = null;
+         ClearHitTargets();
+-        _playerController.Animator.speed = 1f;
++        _playerController.SetAnimationSpeed(1f);
+     }
+ 
+     // ── 반격 (패링 반격 윈도우에서만 진입 가능) ───────────────────────────────
+@@ -249,7 +249,7 @@ public abstract partial class BaseForm
+         BeginAttackCamera(_weaponActionData?.CounterStep
+             ?? (_weaponActionData?.ComboSteps?.Count > 0 ? _weaponActionData.ComboSteps[0] : null));
+         ClearHitTargets();
+-        _playerController.Animator.speed = AttackSpeed;
++        _playerController.SetAnimationSpeed(AttackSpeed);
+         // CounterStep이 없으면 첫 번째 콤보 스텝을 폴백으로 사용
+         if (_weaponActionData?.CounterStep != null)
+             PlayActionAnimation(_weaponActionData.CounterStep.AnimationName, 0.05f);
+@@ -268,7 +268,7 @@ public abstract partial class BaseForm
+ 
+         if (step == null) { isComplete = true; return; }
+ 
+-        _timer += Time.deltaTime * AttackSpeed;
++        _timer += _playerController.ActionDeltaTime * AttackSpeed;
+         _playerController.UpdateAttackTrails(step, _timer);
+         MoveForward(step);
+         ProcessHit(step);
+@@ -282,7 +282,7 @@ public abstract partial class BaseForm
+         EndAttackCamera();
+         _softTarget = null;
+         ClearHitTargets();
+-        _playerController.Animator.speed = 1f;
++        _playerController.SetAnimationSpeed(1f);
+     }
+ 
+ }
+diff --git a/Assets/_Project/Scripts/PlayerForms/BaseForm.Camera.cs b/Assets/_Project/Scripts/PlayerForms/BaseForm.Camera.cs
+index 6aef784..5ac7795 100644
+--- a/Assets/_Project/Scripts/PlayerForms/BaseForm.Camera.cs
++++ b/Assets/_Project/Scripts/PlayerForms/BaseForm.Camera.cs
+@@ -10,19 +10,44 @@ public abstract partial class BaseForm
+         if (camera == null) return;
+         if (direction.sqrMagnitude < 0.001f) direction = _playerController.transform.forward;
+         camera.BeginAttack(step?.CameraProfile, _playerController, target != null ? target : _softTarget,
+-            direction, continuing, step?.Duration ?? 1f, AttackSpeed);
++            direction, continuing, step?.Duration ?? 1f, AttackSpeed, CameraV2(step), step);
+     }
+ 
+     protected void UpdateAttackCamera(WeaponActionData step)
+     {
+-        if (step?.CameraProfile == null) return;
++        if (step?.CameraProfile == null && CameraV2(step)?.HasOverrides != true) return;
+         _playerController.CombatCamera?.SetProgress(_playerController,
+             _timer / Mathf.Max(0.001f, step.Duration), AttackSpeed);
+     }
+ 
+-    protected bool NotifyCameraHit(WeaponActionData step, Transform target, Vector3 direction)
+-        => step?.CameraProfile != null && _playerController.CombatCamera != null
+-            && _playerController.CombatCamera.NotifyHit(_playerController, target, direction);
++    protected void UpdateAttackCamera(WeaponActionData step, float progress01)
++    {
++        if (step?.CameraProfile == null && CameraV2(step)?.HasOverrides != true) return;
++        _playerController.CombatCamera?.SetProgress(_playerController, progress01, AttackSpeed);
++    }
++
++    protected bool NotifyCameraHit(WeaponActionData step, Transform target, Vector3 direction,
++        HitEvent hitEvent = null, int hitEventIndex = -1)
++    {
++        var settings = CameraV2(step);
++        var hitSettings = hitEvent?.Feedback?.CameraV2;
++        if (step?.CameraProfile == null && settings?.HasOverrides != true && hitSettings?.HasOverrides != true) return false;
++        var camera = _playerController.CombatCamera;
++        if (camera == null) return false;
++        if (hitEventIndex < 0 && hitEvent != null && step?.HitEvents != null) hitEventIndex = step.HitEvents.IndexOf(hitEvent);
++        // A hit-only override can be authored without an attack motion profile.
++        if (!camera.IsPlaying && (settings?.HasOverrides == true || hitSettings?.HasOverrides == true))
++            camera.BeginAttack(step?.CameraProfile, _playerController,
++            target, direction, false, step?.Duration ?? 1f, AttackSpeed, settings, step);
++        return camera.NotifyHit(_playerController, target, direction, hitSettings, hitEventIndex);
++    }
++
++    private static CombatCameraV2Settings CameraV2(WeaponActionData step)
++    {
++        var authored = step?.Feedback?.Camera?.V2;
++        return authored?.HasOverrides == true ? authored
++            : step?.CameraProfile?.EnableV2 == true ? step.CameraProfile.V2 : null;
++    }
+ 
+     protected void EndAttackCamera(bool canceled = false)
+         => _playerController?.CombatCamera?.EndAttack(_playerController, canceled);
+diff --git a/Assets/_Project/Scripts/PlayerForms/BaseForm.HeavyAttack.cs b/Assets/_Project/Scripts/PlayerForms/BaseForm.HeavyAttack.cs
+index df75fed..04ad0b2 100644
+--- a/Assets/_Project/Scripts/PlayerForms/BaseForm.HeavyAttack.cs
++++ b/Assets/_Project/Scripts/PlayerForms/BaseForm.HeavyAttack.cs
+@@ -12,7 +12,7 @@ public abstract partial class BaseForm
+         ClearHitTargets();
+         ResetTargetApproach(HeavyAttackStep);
+         BeginAttackCamera(HeavyAttackStep, continuing, cameraTarget, cameraDirection);
+-        _playerController.Animator.speed = AttackSpeed;
++        _playerController.SetAnimationSpeed(AttackSpeed);
+         if (_playerController.Animator.HasState(0, Animator.StringToHash(HeavyAttackStep.AnimationName)))
+             _playerController.Animator.CrossFade(HeavyAttackStep.AnimationName, 0f, 0, 0f);
+         _playerController.UpdateAttackTrails(HeavyAttackStep, 0f);
+@@ -21,7 +21,7 @@ public abstract partial class BaseForm
+     public virtual void UpdateHeavyAttack(out bool isComplete)
+     {
+         if (HeavyAttackStep == null) { isComplete = true; return; }
+-        _timer += Time.deltaTime * AttackSpeed;
++        _timer += _playerController.ActionDeltaTime * AttackSpeed;
+         _playerController.UpdateAttackTrails(HeavyAttackStep, _timer);
+         MoveForward(HeavyAttackStep);
+         ProcessHit(HeavyAttackStep);
+diff --git a/Assets/_Project/Scripts/PlayerForms/BaseForm.Hit.cs b/Assets/_Project/Scripts/PlayerForms/BaseForm.Hit.cs
+index ea9a8b9..821cd38 100644
+--- a/Assets/_Project/Scripts/PlayerForms/BaseForm.Hit.cs
++++ b/Assets/_Project/Scripts/PlayerForms/BaseForm.Hit.cs
+@@ -4,6 +4,7 @@ using System.Collections.Generic;
+ public abstract partial class BaseForm
+ {
+     private readonly Dictionary<int, HashSet<IDamageable>> _hitEventTargets = new();
++    private readonly HashSet<(WeaponActionData step, int hitIndex)> _confirmedFeedbackEvents = new();
+     private float _previousHitTime;
+     protected Collider[] _overlapBuffer = new Collider[32];
+ 
+@@ -13,6 +14,7 @@ public abstract partial class BaseForm
+         ClearSlashEffects();
+         ResetAttackSounds();
+         foreach (var targets in _hitEventTargets.Values) targets.Clear();
++        _confirmedFeedbackEvents.Clear();
+         _previousHitTime = 0f;
+     }
+ 
+@@ -53,10 +55,8 @@ public abstract partial class BaseForm
+     {
+         Vector3 center = _playerController.transform.position
+                        + _playerController.transform.rotation * step.HitBoxOffset;
+-        float knockbackForce = hitEvent != null && hitEvent.OverrideKnockbackForce
+-            ? hitEvent.KnockbackForce : step.KnockbackForce;
++        float knockbackForce = ResolveKnockbackForce(step, hitEvent);
+ 
+-        bool firstHit = true;
+         int hitCount = GetOverlap(step, center);
+         for (int i = 0; i < hitCount; i++)
+         {
+@@ -81,17 +81,46 @@ public abstract partial class BaseForm
+                 damageable, target);
+ 
+             if (!result.Applied) continue;
+-            if (firstHit)
+-            {
+-                _playerController.StartHitStop(step, hitEvent);
+-                if (!NotifyCameraHit(step, target.transform, _playerController.transform.forward))
+-                    _playerController.PlayAttackCameraShake(step);
+-                firstHit = false;
+-            }
++            ConfirmHitFeedback(step, (Component)damageable, result, hitEvent);
+             OnDamageDealt(target, result, step, hitEvent);
+         }
+     }
+ 
++    /// <summary>Victim feedback runs per applied target; attacker/camera feedback runs once per hit event.</summary>
++    protected void ConfirmHitFeedback(WeaponActionData step, Component target, DamageResult result,
++        HitEvent hitEvent = null, int hitEventIndex = -1, Vector3 direction = default,
++        bool legacyCameraFallbackOnly = false, bool legacyFeedbackDisabled = false)
++    {
++        if (!result.Applied || target == null || _playerController == null) return;
++        if (hitEventIndex < 0 && hitEvent != null && step?.HitEvents != null)
++            hitEventIndex = step.HitEvents.IndexOf(hitEvent);
++        int stepIndex = _currentAction == ActionType.Attack ? _comboStep
++            : _currentAction == ActionType.Ultimate ? _ultimateStep : _skillStep;
++        CombatFeedbackTelemetry.Emit("confirmed-impact", _playerController.gameObject, target.gameObject,
++            hitEventIndex, $"action={_currentAction};step={stepIndex}", result.HealthDamage + result.ShieldDamage);
++        bool first = _confirmedFeedbackEvents.Add((step, hitEventIndex));
++        bool stopEnabled = !legacyFeedbackDisabled || step?.Feedback?.HitStop?.EnableV2 == true
++            || hitEvent?.Feedback?.HitStop?.EnableV2 == true;
++        if (stopEnabled)
++            _playerController.StartHitStop(step, ResolveStopHitEvent(step, hitEvent), result.Killed ? null : target, first);
++        if (direction.sqrMagnitude < 0.001f) direction = _playerController.transform.forward;
++        bool cameraEnabled = !legacyFeedbackDisabled || HasCameraV2(step, hitEvent);
++        bool cameraOwned = cameraEnabled && (!legacyCameraFallbackOnly || HasCameraV2(step, hitEvent))
++            && NotifyCameraHit(step, target.transform, direction, hitEvent, hitEventIndex);
++        if (first && cameraEnabled && !cameraOwned)
++            _playerController.PlayAttackCameraShake(step);
++    }
++
++    protected virtual float ResolveKnockbackForce(WeaponActionData step, HitEvent hitEvent)
++        => hitEvent != null && hitEvent.OverrideKnockbackForce ? hitEvent.KnockbackForce : step.KnockbackForce;
++
++    protected virtual HitEvent ResolveStopHitEvent(WeaponActionData step, HitEvent hitEvent) => hitEvent;
++
++    protected static bool HasCameraV2(WeaponActionData step, HitEvent hitEvent = null)
++        => step?.Feedback?.Camera?.V2?.HasOverrides == true
++            || step?.CameraProfile?.EnableV2 == true && step.CameraProfile.V2?.HasOverrides == true
++            || hitEvent?.Feedback?.CameraV2?.HasOverrides == true;
++
+     private int GetOverlap(WeaponActionData step, Vector3 center)
+     {
+         // 버퍼가 가득 차면 확장 후 재조회하여 많은 적이 겹쳐도 판정을 누락하지 않습니다.
+diff --git a/Assets/_Project/Scripts/PlayerForms/BaseForm.Motion.cs b/Assets/_Project/Scripts/PlayerForms/BaseForm.Motion.cs
+index d05dfac..8d54533 100644
+--- a/Assets/_Project/Scripts/PlayerForms/BaseForm.Motion.cs
++++ b/Assets/_Project/Scripts/PlayerForms/BaseForm.Motion.cs
+@@ -146,7 +146,7 @@ public abstract partial class BaseForm
+ 
+         Vector3 before = _playerController.transform.position;
+         Vector3 delta = direction * distance;
+-        delta.y = _playerController.VerticalVelocity * Time.deltaTime;
++        delta.y = _playerController.VerticalVelocity * _playerController.ActionDeltaTime;
+         _playerController.Controller.Move(delta);
+         _approachTravel += Vector3.ProjectOnPlane(_playerController.transform.position - before, Vector3.up).magnitude;
+         // Blocked movement is consumed, never accumulated into a later catch-up teleport.
+diff --git a/Assets/_Project/Scripts/PlayerForms/BaseForm.Slash.cs b/Assets/_Project/Scripts/PlayerForms/BaseForm.Slash.cs
+index a1af214..8665f3a 100644
+--- a/Assets/_Project/Scripts/PlayerForms/BaseForm.Slash.cs
++++ b/Assets/_Project/Scripts/PlayerForms/BaseForm.Slash.cs
+@@ -21,7 +21,7 @@ public abstract partial class BaseForm
+     protected void UpdateSlashEffects(WeaponActionData step)
+     {
+         if (step == null) return;
+-        if (_playerController?.Animator != null) _playerController.Animator.speed = AttackSpeed;
++        if (_playerController?.Animator != null) _playerController.SetAnimationSpeed(AttackSpeed);
+         AttackSlashSettings defaults = step.Feedback?.Slash;
+         if (step.HitEvents != null && step.HitEvents.Count > 0)
+         {
+diff --git a/Assets/_Project/Scripts/PlayerForms/BaseForm.SpecEffects.cs b/Assets/_Project/Scripts/PlayerForms/BaseForm.SpecEffects.cs
+index e28648f..2987f04 100644
+--- a/Assets/_Project/Scripts/PlayerForms/BaseForm.SpecEffects.cs
++++ b/Assets/_Project/Scripts/PlayerForms/BaseForm.SpecEffects.cs
+@@ -50,16 +50,27 @@ public abstract partial class BaseForm
+         ?? _playerController.gameObject.AddComponent<FormEffectRunner>();
+ 
+     protected HitInfo EffectHit(float multiplier, float extraDamage = 0f, bool trueDamage = false,
+-        WeaponActionData step = null, HitEvent hitEvent = null, bool secondary = false)
++        WeaponActionData step = null, HitEvent hitEvent = null, bool secondary = false, Vector3 power = default)
+         => new HitInfo(multiplier * (secondary ? _playerController.StatManager.GetStat(StatType.ST_ATK) : DamageAttackStat) + extraDamage,
+             Element, trueDamage ? 0f : secondary ? _playerController.StatManager.GetStat(StatType.ST_CRT) / 100f : DamageCriticalChance,
+             secondary ? _playerController.StatManager.GetStat(StatType.ST_CRTD) / 100f : DamageCriticalMultiplier, trueDamage: trueDamage,
+             source: _playerController, impactSound: secondary ? ResolveSecondaryHitSound() : ResolveHitSound(step, hitEvent),
++            power: power, staggerResistLevel: power.sqrMagnitude > 0f && step != null ? step.StaggerResistLevel : StaggerResistLevel.NONE,
+             category: secondary ? PlayerAttackCategory.Secondary : CurrentAttackCategory,
+             itemDamageMultiplier: secondary ? 1f : DamageItemMultiplier,
+             sourceDamageMultiplier: secondary ? CaptureSourceDamageMultiplier() : DamageSourceMultiplier,
+             hasSourceDamageSnapshot: true);
+ 
++    protected Vector3 CustomKnockbackPower(WeaponActionData step, HitEvent hitEvent, Transform target)
++    {
++        if (step?.Balance?.EnableV2 != true && hitEvent?.Balance?.EnableV2 != true) return Vector3.zero;
++        float force = hitEvent?.Balance?.EnableV2 == true && hitEvent.OverrideKnockbackForce
++            ? hitEvent.KnockbackForce : step.KnockbackForce;
++        Vector3 direction = target != null ? target.position - _playerController.transform.position : _playerController.transform.forward;
++        if (direction.sqrMagnitude < .001f) direction = _playerController.transform.forward;
++        return KnockbackMotion.Power(direction, force);
++    }
++
+     protected static FormTargetEffects TargetEffects(GameObject target)
+         => target.GetComponent<FormTargetEffects>() ?? target.AddComponent<FormTargetEffects>();
+ 
+diff --git a/Assets/_Project/Scripts/PlayerForms/BaseForm.Utils.cs b/Assets/_Project/Scripts/PlayerForms/BaseForm.Utils.cs
+index 5684f1b..9aed149 100644
+--- a/Assets/_Project/Scripts/PlayerForms/BaseForm.Utils.cs
++++ b/Assets/_Project/Scripts/PlayerForms/BaseForm.Utils.cs
+@@ -289,6 +289,6 @@ public abstract partial class BaseForm
+         _playerController.transform.rotation = Quaternion.RotateTowards(
+             _playerController.transform.rotation,
+             targetRot,
+-            SoftTargetRotationSpeed * (animationDelta >= 0f ? animationDelta : Time.deltaTime * AttackSpeed));
++            SoftTargetRotationSpeed * (animationDelta >= 0f ? animationDelta : _playerController.ActionDeltaTime * AttackSpeed));
+     }
+ }
+diff --git a/Assets/_Project/Scripts/PlayerForms/EarthForm.cs b/Assets/_Project/Scripts/PlayerForms/EarthForm.cs
+index dddbc90..25b90f9 100644
+--- a/Assets/_Project/Scripts/PlayerForms/EarthForm.cs
++++ b/Assets/_Project/Scripts/PlayerForms/EarthForm.cs
+@@ -89,9 +89,9 @@ public class EarthForm : BaseForm
+         _dashTargets.Clear();
+         _softTarget = null;
+         _dashDirection = Vector3.ProjectOnPlane(_playerController.transform.forward, Vector3.up).normalized;
+-        _playerController.Animator.speed = 1f;
++        _playerController.SetAnimationSpeed(1f);
+     }
+-    public override void UpdateSkill(out bool isComplete) => AdvanceSkill(Time.deltaTime, out isComplete);
++    public override void UpdateSkill(out bool isComplete) => AdvanceSkill(_playerController.ActionDeltaTime, out isComplete);
+     private void AdvanceSkill(float dt, out bool isComplete)
+     {
+         var step = _earthData.SkillSteps != null && _earthData.SkillSteps.Count > 0 ? _earthData.SkillSteps[0] : null;
+@@ -99,6 +99,9 @@ public class EarthForm : BaseForm
+         float duration = Mathf.Max(0.01f, _earthData.SkillDashDuration);
+         float previous = _dashElapsed;
+         _dashElapsed += Mathf.Max(0f, dt);
++        _timer = _dashElapsed;
++        if (HasCameraV2(step))
++            UpdateAttackCamera(step, _dashElapsed / Mathf.Max(0.01f, Mathf.Max(duration, step.Duration)));
+         Vector3 offset = _playerController.transform.rotation * _earthData.SkillDashHitOffset;
+         _sweepStart = _playerController.transform.position + offset;
+         float distance = Mathf.Max(0f, _earthData.SkillDashDistance)
+@@ -111,7 +114,7 @@ public class EarthForm : BaseForm
+         {
+             HitEvent hitEvent = FirstHitEvent(step, out int eventIndex);
+             PlaySwingSound(step, hitEvent, eventIndex);
+-            ExecuteHit(step, Mathf.Max(0f, _earthData.SkillDashDamageMultiplier), step.PoiseDamage, _dashTargets);
++            ExecuteHit(step, Mathf.Max(0f, _earthData.SkillDashDamageMultiplier), step.PoiseDamage, _dashTargets, hitEvent);
+         }
+         isComplete = _dashElapsed >= Mathf.Max(duration, step.Duration);
+     }
+@@ -119,6 +122,12 @@ public class EarthForm : BaseForm
+         => _currentAction == ActionType.Skill || _currentAction == ActionType.SwitchAttack
+             ? Physics.OverlapCapsuleNonAlloc(_sweepStart, _sweepEnd, Mathf.Max(0.1f, _earthData.SkillDashHitRadius), _overlapBuffer, _enemyLayer)
+             : base.QueryOverlap(step, center);
++    protected override float ResolveKnockbackForce(WeaponActionData step, HitEvent hitEvent)
++        => (_currentAction == ActionType.Skill || _currentAction == ActionType.SwitchAttack)
++            && hitEvent?.Balance?.EnableV2 != true ? step.KnockbackForce : base.ResolveKnockbackForce(step, hitEvent);
++    protected override HitEvent ResolveStopHitEvent(WeaponActionData step, HitEvent hitEvent)
++        => (_currentAction == ActionType.Skill || _currentAction == ActionType.SwitchAttack)
++            && hitEvent?.Feedback?.HitStop?.EnableV2 != true ? null : hitEvent;
+     protected override CombatSoundCue ResolveHitSound(WeaponActionData step = null, HitEvent hitEvent = null)
+         => base.ResolveHitSound(step, hitEvent ?? (_currentAction == ActionType.Skill || _currentAction == ActionType.SwitchAttack
+             ? FirstHitEvent(step, out _) : null));
+diff --git a/Assets/_Project/Scripts/PlayerForms/FireForm.cs b/Assets/_Project/Scripts/PlayerForms/FireForm.cs
+index 158feda..f842aad 100644
+--- a/Assets/_Project/Scripts/PlayerForms/FireForm.cs
++++ b/Assets/_Project/Scripts/PlayerForms/FireForm.cs
+@@ -108,7 +108,7 @@ public class FireForm : BaseForm, IToggleUltimateForm
+         var state = _playerController.StateMachine.CurrentState;
+         if (state is PlayerAttackState || state is PlayerSkillState || state is PlayerSwitchAttackState
+             || state is PlayerAirAttackState || state is PlayerCounterState)
+-            _playerController.Animator.speed = AttackSpeed;
++            _playerController.SetAnimationSpeed(AttackSpeed);
+     }
+     private void RemoveSkillBuff()
+     {
+diff --git a/Assets/_Project/Scripts/PlayerForms/FormManager.cs b/Assets/_Project/Scripts/PlayerForms/FormManager.cs
+index a192fc7..2ba6949 100644
+--- a/Assets/_Project/Scripts/PlayerForms/FormManager.cs
++++ b/Assets/_Project/Scripts/PlayerForms/FormManager.cs
+@@ -26,7 +26,7 @@ public class FormManager
+ 
+         (CurrentForm as BaseForm)?.UpdateSkillCooldownUI();
+ 
+-        if (!_playerController.CanChangeForm || (CanTransition != null && !CanTransition.Invoke()))
++        if (_playerController.ActionDeltaTime <= 0f || !_playerController.CanChangeForm || (CanTransition != null && !CanTransition.Invoke()))
+         {
+             return;
+         }
+diff --git a/Assets/_Project/Scripts/PlayerForms/WaterForm.cs b/Assets/_Project/Scripts/PlayerForms/WaterForm.cs
+index 46cebf7..f0737f4 100644
+--- a/Assets/_Project/Scripts/PlayerForms/WaterForm.cs
++++ b/Assets/_Project/Scripts/PlayerForms/WaterForm.cs
+@@ -176,13 +176,13 @@ public class WaterForm : BaseForm, IHeavyAttackForm
+     {
+         var step = HeavyAttackStep;
+         float previous = _timer;
+-        _timer = Mathf.Min(_heavyAttackDuration, _timer + Time.deltaTime * AttackSpeed);
++        _timer = Mathf.Min(_heavyAttackDuration, _timer + _playerController.ActionDeltaTime * AttackSpeed);
+         Vector3 offset = _playerController.transform.rotation * step.HitBoxOffset;
+         Vector3 from = _playerController.transform.position + offset;
+         float distance = _heavyDashDistance * (Mathf.Clamp01(_timer / _heavyDashDuration)
+             - Mathf.Clamp01(previous / _heavyDashDuration));
+         Vector3 movement = _heavyDashDirection * distance;
+-        movement.y = _playerController.VerticalVelocity * Time.deltaTime;
++        movement.y = _playerController.VerticalVelocity * _playerController.ActionDeltaTime;
+         _playerController.Controller.Move(movement);
+         Vector3 to = _playerController.transform.position + offset;
+         UpdateAttackCamera(step);
+@@ -224,13 +224,8 @@ public class WaterForm : BaseForm, IHeavyAttackForm
+                     _heavyChainTarget = component;
+                     _heavyChainTargetCollider = collider;
+                 }
+-                if (!_heavyFeedbackPlayed)
+-                {
+-                    _playerController.StartHitStop(step);
+-                    if (!NotifyCameraHit(step, component.transform, _heavyDashDirection))
+-                        _playerController.PlayAttackCameraShake(step);
+-                    _heavyFeedbackPlayed = true;
+-                }
++                ConfirmHitFeedback(step, component, result, direction: _heavyDashDirection);
++                _heavyFeedbackPlayed = true;
+                 OnHitEnemy(component.gameObject, step);
+             }
+         }
+@@ -285,15 +280,21 @@ public class WaterForm : BaseForm, IHeavyAttackForm
+     {
+         base.UpdateSkill(out isComplete);
+         var step = _weaponActionData.SkillSteps[_skillStep];
+-        if (_timer < FirstHitTime(step)) return;
++        if (_playerController.ActionDeltaTime <= 0f || _timer < FirstHitTime(step)) return;
+         Vector3 end = _playerController.Controller.bounds.center;
+         // 선딜 중 이미 통과한 구간도 첫 판정에 포함합니다. 매 적당 최초 돌진 1회만 적용.
+         foreach (var collider in Physics.OverlapCapsule(_trailStart, end, Mathf.Max(0.1f, step.HitBoxRadius), _enemyLayer))
+         {
+             var target = collider.GetComponentInParent<IDamageable>();
+             if (!(target is Component component) || !_dashHitTargets.Add(target)) continue;
+-            var result = DamageManager.Apply(EffectHit(step.Damage, step: step), target, component.gameObject);
+-            if (result.Applied) OnHitEnemy(component.gameObject, step);
++            HitEvent hitEvent = FirstHitEvent(step, out int hitIndex);
++            var result = DamageManager.Apply(EffectHit(step.Damage, step: step,
++                power: CustomKnockbackPower(step, hitEvent, component.transform)), target, component.gameObject);
++            if (result.Applied)
++            {
++                ConfirmHitFeedback(step, component, result, hitEvent, hitIndex, legacyFeedbackDisabled: true);
++                OnHitEnemy(component.gameObject, step);
++            }
+         }
+         _trailStart = end;
+     }
+@@ -333,7 +334,10 @@ public class WaterForm : BaseForm, IHeavyAttackForm
+     public override bool BlocksIncomingDamage(float damage, Vector3 power, object source = null) => _ultimateActive;
+     public override void UpdateUltimate(out bool isComplete)
+     {
+-        _ultimateElapsed += Time.deltaTime;
++        _ultimateElapsed += _playerController.ActionDeltaTime;
++        var cameraStep = _weaponActionData.UltimateSteps?.Count > 0 ? _weaponActionData.UltimateSteps[0] : null;
++        if (HasCameraV2(cameraStep))
++            UpdateAttackCamera(cameraStep, _ultimateElapsed / 2f);
+         if (_ultimateTarget != null) _ultimateCenter = _ultimateTarget.position;
+         while (_ultimateHits < 10 && _ultimateElapsed >= (_ultimateHits + 1) * 0.2f)
+         {
+@@ -342,24 +346,19 @@ public class WaterForm : BaseForm, IHeavyAttackForm
+             var hitEvent = step?.HitEvents != null && _ultimateHits < step.HitEvents.Count
+                 ? step.HitEvents[_ultimateHits] : null;
+             PlaySwingSound(step, hitEvent, _ultimateHits);
+-            var hit = EffectHit(1.2f, step: step, hitEvent: hitEvent);
+-            bool firstHit = true;
+             foreach (var target in FormEffectRunner.Targets(_ultimateCenter, _waterData.AreaRadius))
+             {
+                 if (target == null) continue;
++                var hit = EffectHit(1.2f, step: step, hitEvent: hitEvent,
++                    power: CustomKnockbackPower(step, hitEvent, target.transform));
+                 var result = DamageManager.Apply(hit, (IDamageable)target, target.gameObject);
+                 if (!result.Applied) continue;
+ 
+-                // 일반 공격과 동일하게 실제 적중 시에만 타격 피드백을 재생합니다.
+-                if (firstHit)
+-                {
+-                    // 고정 10연타의 순서에 맞춰 첫 단계의 Hit Events 피드백을 사용합니다.
+-                    _playerController.StartHitStop(step, hitEvent);
+-                    _playerController.PlayAttackCameraShake(step);
+-                    firstHit = false;
+-                }
++                ConfirmHitFeedback(step, target, result, hitEvent, _ultimateHits, legacyCameraFallbackOnly: true);
+             }
+             _ultimateHits++;
++            // A newly applied attacker stop postpones any remaining scheduled hits.
++            if (_playerController.ActionDeltaTime <= 0f) break;
+         }
+         isComplete = _ultimateHits >= 10;
+     }
+diff --git a/Assets/_Project/Scripts/PlayerForms/WoodForm.cs b/Assets/_Project/Scripts/PlayerForms/WoodForm.cs
+index f15ccc7..ff08100 100644
+--- a/Assets/_Project/Scripts/PlayerForms/WoodForm.cs
++++ b/Assets/_Project/Scripts/PlayerForms/WoodForm.cs
+@@ -46,12 +46,14 @@ public class WoodForm : BaseForm
+         _skillActive = true;
+         _softTarget = null;
+     }
+-    public override void UpdateSkill(out bool isComplete) => AdvanceSkill(Time.deltaTime, out isComplete);
++    public override void UpdateSkill(out bool isComplete) => AdvanceSkill(_playerController.ActionDeltaTime, out isComplete);
+     private void AdvanceSkill(float dt, out bool isComplete)
+     {
+         var step = _woodData.SkillSteps[0];
+         if (!_skillActive) { isComplete = true; return; }
+         _timer += Mathf.Max(0f, dt) * AttackSpeed;
++        if (HasCameraV2(step))
++            UpdateAttackCamera(step, _timer / Mathf.Max(0.01f, step.Duration));
+         if (!_skillApplied && _timer >= FirstHitTime(step))
+         {
+             _skillApplied = true;
+@@ -64,14 +66,17 @@ public class WoodForm : BaseForm
+     private void ApplyGather()
+     {
+         WeaponActionData step = _woodData.SkillSteps[0];
+-        HitEvent hitEvent = FirstHitEvent(step, out _);
++        HitEvent hitEvent = FirstHitEvent(step, out int hitIndex);
+         Vector3 center = _playerController.transform.position + _playerController.transform.rotation * _woodData.SkillCenterOffset;
+         foreach (var target in FormEffectRunner.Targets(center, Mathf.Max(0.1f, _woodData.SkillRadius)))
+         {
+             if (target.GetComponent<EnemyStat>()?.IsDead == true) continue;
+             var result = DamageManager.Apply(EffectHit(Mathf.Max(0f, _woodData.SkillDamageMultiplier),
+-                step: step, hitEvent: hitEvent), (IDamageable)target, target.gameObject);
+-            if (!result.Applied || result.Killed) continue;
++                step: step, hitEvent: hitEvent, power: CustomKnockbackPower(step, hitEvent, target.transform)),
++                (IDamageable)target, target.gameObject);
++            if (!result.Applied) continue;
++            ConfirmHitFeedback(step, target, result, hitEvent, hitIndex, legacyFeedbackDisabled: true);
++            if (result.Killed) continue;
+             base.OnHitEnemy(target.gameObject, _woodData.SkillSteps[0]);
+             var effects = WoodEffects(target.gameObject);
+             effects.AddStacks(_woodData, _currentAction == ActionType.Skill);
+diff --git a/Assets/_Project/Scripts/PlayerForms/WoodTargetEffects.cs b/Assets/_Project/Scripts/PlayerForms/WoodTargetEffects.cs
+index 2dcfe9e..88f0b13 100644
+--- a/Assets/_Project/Scripts/PlayerForms/WoodTargetEffects.cs
++++ b/Assets/_Project/Scripts/PlayerForms/WoodTargetEffects.cs
+@@ -43,8 +43,10 @@ public sealed class WoodTargetEffects : MonoBehaviour
+         StackRemaining = Mathf.Max(0f, StackRemaining - dt);
+         if (StackRemaining <= 0f) Stacks = 0;
+         if (_pullRemaining <= 0f) return;
+-        float interval = Mathf.Min(dt, _pullRemaining);
+-        _pullRemaining = Mathf.Max(0f, _pullRemaining - dt);
++        float actionDelta = _enemy != null ? dt * _enemy.ActionTimeScale : dt;
++        if (actionDelta <= 0f) return;
++        float interval = Mathf.Min(actionDelta, _pullRemaining);
++        _pullRemaining = Mathf.Max(0f, _pullRemaining - actionDelta);
+         Vector3 direction = Vector3.ProjectOnPlane(_pullCenter - transform.position, Vector3.up);
+         Vector3 motion = direction.normalized * Mathf.Min(_pullSpeed * interval, Mathf.Max(0f, direction.magnitude - _stopDistance));
+         var nav = GetComponent<NavMeshAgent>();
+diff --git a/Assets/_Project/Scripts/PlayerInput/PlayerInputHandler.cs b/Assets/_Project/Scripts/PlayerInput/PlayerInputHandler.cs
+index 30316c4..954108f 100644
+--- a/Assets/_Project/Scripts/PlayerInput/PlayerInputHandler.cs
++++ b/Assets/_Project/Scripts/PlayerInput/PlayerInputHandler.cs
+@@ -33,6 +33,9 @@ public class PlayerInputHandler : MonoBehaviour
+     public InputBuffer DashBuffer;
+     public InputBuffer SkillBuffer;
+     public InputBuffer UltimateBuffer;
++    private PlayerController _player;
++    private bool _wasActionStopped;
++    private void Awake() => _player = GetComponent<PlayerController>();
+ 
+     private void OnEnable()
+     {
+@@ -83,19 +86,22 @@ public class PlayerInputHandler : MonoBehaviour
+ 
+     private void Update()
+     {
++        float actionDelta = _player != null ? _player.ActionDeltaTime : Time.deltaTime;
++        bool retainFormInput = actionDelta <= 0f || _wasActionStopped;
++        if (!retainFormInput) ConsumeFormInput();
+         MoveInput = _moveAction?.action?.ReadValue<Vector2>() ?? Vector2.zero;
+-        IsForm1Pressed = _form1Action?.action?.WasPressedThisFrame() ?? false;
+-        IsForm2Pressed = _form2Action?.action?.WasPressedThisFrame() ?? false;
+-        IsForm3Pressed = (_form3Action?.action?.WasPressedThisFrame() ?? false);
+-        IsForm4Pressed = (_form4Action?.action?.WasPressedThisFrame() ?? false);
+-        IsForm5Pressed = (_form5Action?.action?.WasPressedThisFrame() ?? false);
+-        IsFastFormPressed = _fastFormAction?.action?.WasPressedThisFrame() ?? false;
++        IsForm1Pressed |= _form1Action?.action?.WasPressedThisFrame() ?? false;
++        IsForm2Pressed |= _form2Action?.action?.WasPressedThisFrame() ?? false;
++        IsForm3Pressed |= _form3Action?.action?.WasPressedThisFrame() ?? false;
++        IsForm4Pressed |= _form4Action?.action?.WasPressedThisFrame() ?? false;
++        IsForm5Pressed |= _form5Action?.action?.WasPressedThisFrame() ?? false;
++        IsFastFormPressed |= _fastFormAction?.action?.WasPressedThisFrame() ?? false;
+ 
+-        JumpBuffer.Update(Time.deltaTime);
+-        AttackBuffer.Update(Time.deltaTime);
+-        DashBuffer.Update(Time.deltaTime);
+-        SkillBuffer.Update(Time.deltaTime);
+-        UltimateBuffer.Update(Time.deltaTime);
++        JumpBuffer.Update(actionDelta);
++        AttackBuffer.Update(actionDelta);
++        DashBuffer.Update(actionDelta);
++        SkillBuffer.Update(actionDelta);
++        UltimateBuffer.Update(actionDelta);
+ 
+         if(_jumpAction?.action?.WasPressedThisFrame() ?? false)
+             JumpBuffer.Set();
+@@ -108,7 +114,7 @@ public class PlayerInputHandler : MonoBehaviour
+             AttackBuffer.Set(0.5f);
+         }
+         // Retain the duration on release for buffered taps/holds.
+-        if (IsAttackHeld) AttackHeldTime += Time.deltaTime;
++        if (IsAttackHeld) AttackHeldTime += actionDelta;
+ 
+         if(_dashAction?.action?.WasPressedThisFrame() ?? false)
+             DashBuffer.Set();
+@@ -118,6 +124,6 @@ public class PlayerInputHandler : MonoBehaviour
+ 
+         if(_ultimateAction?.action?.WasPressedThisFrame() ?? false)
+             UltimateBuffer.Set();
+-
++        _wasActionStopped = actionDelta <= 0f;
+     }
+ }
+diff --git a/Assets/_Project/Scripts/PlayerStates/PlayerAirAttackState.cs b/Assets/_Project/Scripts/PlayerStates/PlayerAirAttackState.cs
+index a904d57..4fa7e04 100644
+--- a/Assets/_Project/Scripts/PlayerStates/PlayerAirAttackState.cs
++++ b/Assets/_Project/Scripts/PlayerStates/PlayerAirAttackState.cs
+@@ -41,7 +41,7 @@ public class PlayerAirAttackState : IPlayerState
+ 
+         if (_phase == Phase.Loop)
+         {
+-            _playerController.Controller.Move(new Vector3(0f, _playerController.VerticalVelocity, 0f) * Time.deltaTime);
++            _playerController.Controller.Move(new Vector3(0f, _playerController.VerticalVelocity, 0f) * _playerController.ActionDeltaTime);
+ 
+             if (_playerController.IsGround())
+             {
+diff --git a/Assets/_Project/Scripts/PlayerStates/PlayerAttackState.cs b/Assets/_Project/Scripts/PlayerStates/PlayerAttackState.cs
+index 63afa02..395278e 100644
+--- a/Assets/_Project/Scripts/PlayerStates/PlayerAttackState.cs
++++ b/Assets/_Project/Scripts/PlayerStates/PlayerAttackState.cs
+@@ -106,7 +106,7 @@ public class PlayerAttackState : IPlayerState
+         if (_normalStarted && !_normalComplete)
+             _form.UpdateAttack(out _normalComplete);
+         else
+-            _playerController.Controller.Move(Vector3.up * _playerController.VerticalVelocity * Time.deltaTime);
++            _playerController.Controller.Move(Vector3.up * _playerController.VerticalVelocity * _playerController.ActionDeltaTime);
+ 
+         if (_normalStarted && !_pending && input.AttackBuffer.IsActive && _form.TryContinueAttack())
+         {
+@@ -143,6 +143,6 @@ public class PlayerAttackState : IPlayerState
+         if (!IsAttackComplete) _playerController.Input.AttackBuffer.Consume();
+         _pending = false;
+         _queuedHeavy = false;
+-        _playerController.Animator.speed = 1f;
++        _playerController.SetAnimationSpeed(1f);
+     }
+ }
+diff --git a/Assets/_Project/Scripts/PlayerStates/PlayerDashState.cs b/Assets/_Project/Scripts/PlayerStates/PlayerDashState.cs
+index 811ecd7..75eb387 100644
+--- a/Assets/_Project/Scripts/PlayerStates/PlayerDashState.cs
++++ b/Assets/_Project/Scripts/PlayerStates/PlayerDashState.cs
+@@ -36,19 +36,19 @@ public class PlayerDashState : IPlayerState
+     public void Update()
+     {
+         if (!_started) return;
+-        _dashTimer += Time.deltaTime;
++        _dashTimer += _playerController.ActionDeltaTime;
+         if(_dashTimer >= _dashDuration)
+         {
+             IsDashComplete = true;
+             _playerController.Movement.ApplyGravity();
+-            _playerController.Controller.Move(new Vector3(0, _playerController.VerticalVelocity, 0) * Time.deltaTime);
++            _playerController.Controller.Move(new Vector3(0, _playerController.VerticalVelocity, 0) * _playerController.ActionDeltaTime);
+         }
+         else
+         {
+             _playerController.Movement.ApplyGravity();
+             Vector3 dashVelocity = _dashDirection * _playerController.DashSpeed;
+             dashVelocity.y = _playerController.VerticalVelocity;
+-            _playerController.Controller.Move(dashVelocity * Time.deltaTime);
++            _playerController.Controller.Move(dashVelocity * _playerController.ActionDeltaTime);
+         }
+     }
+ 
+diff --git a/Assets/_Project/Scripts/PlayerStates/PlayerDieState.cs b/Assets/_Project/Scripts/PlayerStates/PlayerDieState.cs
+index 261cbf4..25c2136 100644
+--- a/Assets/_Project/Scripts/PlayerStates/PlayerDieState.cs
++++ b/Assets/_Project/Scripts/PlayerStates/PlayerDieState.cs
+@@ -11,6 +11,8 @@ public class PlayerDieState : IPlayerState
+ 
+     public void Enter()
+     {
++        _playerController.CancelHitStops();
++        _playerController.SetAnimationSpeed(1f);
+         _playerController.CancelPendingSwitchAttack();
+         _playerController.ItemRuntime?.ClearTimedEffects();
+         _playerController.Animator.applyRootMotion = true;
+diff --git a/Assets/_Project/Scripts/PlayerStates/PlayerHitState.cs b/Assets/_Project/Scripts/PlayerStates/PlayerHitState.cs
+index 2e25f76..cec1b48 100644
+--- a/Assets/_Project/Scripts/PlayerStates/PlayerHitState.cs
++++ b/Assets/_Project/Scripts/PlayerStates/PlayerHitState.cs
+@@ -31,7 +31,7 @@ public class PlayerHitState : IPlayerState
+         HitVelocity = Player.ConsumeHitReaction();
+         Elapsed = 0f;
+         IsComplete = false;
+-        Player.Animator.speed = 1f;
++        Player.SetAnimationSpeed(1f);
+         ClearActionBuffers();
+ 
+         // 전용 모션이 아직 없으면 Hit, Idle 순으로 폴백하여 이전 공격 모션을 끊습니다.
+@@ -56,8 +56,8 @@ public class PlayerHitState : IPlayerState
+ 
+         ClearActionBuffers();
+         Player.Movement.ApplyGravity();
+-        Vector3 displacement = GetKnockbackDisplacement(Time.deltaTime);
+-        displacement.y = Player.VerticalVelocity * Time.deltaTime;
++        Vector3 displacement = GetKnockbackDisplacement(Player.ActionDeltaTime);
++        displacement.y = Player.VerticalVelocity * Player.ActionDeltaTime;
+         if (Player.Controller.enabled)
+         {
+             CollisionFlags flags = Player.Controller.Move(displacement);
+@@ -65,7 +65,7 @@ public class PlayerHitState : IPlayerState
+                 Player.VerticalVelocity = 0f;
+         }
+ 
+-        Elapsed += Time.deltaTime;
++        Elapsed += Player.ActionDeltaTime;
+         IsComplete = Elapsed >= Mathf.Max(0f, Duration);
+     }
+ 
+@@ -83,7 +83,7 @@ public class PlayerHitState : IPlayerState
+     public void Exit()
+     {
+         Player.Animator.applyRootMotion = _previousRootMotion;
+-        Player.Animator.speed = 1f;
++        Player.SetAnimationSpeed(1f);
+         HitVelocity = Vector3.zero;
+     }
+ }
+diff --git a/Assets/_Project/Scripts/PlayerStates/PlayerIdleState.cs b/Assets/_Project/Scripts/PlayerStates/PlayerIdleState.cs
+index 5ce246a..1b38f1c 100644
+--- a/Assets/_Project/Scripts/PlayerStates/PlayerIdleState.cs
++++ b/Assets/_Project/Scripts/PlayerStates/PlayerIdleState.cs
+@@ -14,7 +14,7 @@ public class PlayerIdleState : IPlayerState
+     public void Update()
+     {
+         _playerController.Movement.ApplyGravity();
+-        _playerController.Controller.Move(Vector3.up * _playerController.VerticalVelocity * Time.deltaTime);
++        _playerController.Controller.Move(Vector3.up * _playerController.VerticalVelocity * _playerController.ActionDeltaTime);
+     }
+ 
+     public void Exit()
+diff --git a/Assets/_Project/Scripts/PlayerStates/PlayerParryState.cs b/Assets/_Project/Scripts/PlayerStates/PlayerParryState.cs
+index 3ffcdb9..a32c61f 100644
+--- a/Assets/_Project/Scripts/PlayerStates/PlayerParryState.cs
++++ b/Assets/_Project/Scripts/PlayerStates/PlayerParryState.cs
+@@ -63,7 +63,7 @@ public class PlayerParryState : IPlayerState
+             if (ParriedHitCount == 0)
+             {
+                 // 아직 아무것도 막지 않음: 첫 타 대기 타이머
+-                _timer += Time.deltaTime;
++                _timer += _playerController.ActionDeltaTime;
+                 if (_timer >= PreHitWindowDuration)
+                 {
+                     IsParryWindowActive = false;
+@@ -79,7 +79,7 @@ public class PlayerParryState : IPlayerState
+                 if (telegraphActive || actionNotDone)
+                     _timer = 0f;
+                 else
+-                    _timer += Time.deltaTime;
++                    _timer += _playerController.ActionDeltaTime;
+ 
+                 if (_timer >= PostActionWindowDuration)
+                 {
+@@ -92,7 +92,7 @@ public class PlayerParryState : IPlayerState
+         {
+             // IsParryWindowActive가 꺼진 후 반격 윈도우 시간을 별도로 카운트
+             // (IsParryWindowActive 블록 안에서 처리하면 다음 프레임부터 타이머가 멈춰버리는 버그 발생)
+-            _timer += Time.deltaTime;
++            _timer += _playerController.ActionDeltaTime;
+             if (_timer >= CounterWindowDuration)
+             {
+                 IsCounterWindowActive = false;
+diff --git a/Assets/_Project/Scripts/PlayerStates/PlayerRunState.cs b/Assets/_Project/Scripts/PlayerStates/PlayerRunState.cs
+index 2bce93f..b14238f 100644
+--- a/Assets/_Project/Scripts/PlayerStates/PlayerRunState.cs
++++ b/Assets/_Project/Scripts/PlayerStates/PlayerRunState.cs
+@@ -29,12 +29,12 @@ public class PlayerRunState : IPlayerState
+         Vector3 velocity = moveDir * _playerController.RunSpeed;
+         velocity.y += _playerController.VerticalVelocity;
+ 
+-        _playerController.Controller.Move(velocity * Time.deltaTime);
++        _playerController.Controller.Move(velocity * _playerController.ActionDeltaTime);
+ 
+         if(moveDir != Vector3.zero)
+         {
+             Quaternion targetRotation = Quaternion.LookRotation(new Vector3(moveDir.x, 0, moveDir.z));
+-            _playerController.transform.rotation = Quaternion.Slerp(_playerController.transform.rotation, targetRotation, _playerController.RotateSpeed * Time.deltaTime);
++            _playerController.transform.rotation = Quaternion.Slerp(_playerController.transform.rotation, targetRotation, _playerController.RotateSpeed * _playerController.ActionDeltaTime);
+         }
+     }
+ 
+diff --git a/Assets/_Project/Scripts/PlayerStates/StateMachine.cs b/Assets/_Project/Scripts/PlayerStates/StateMachine.cs
+index 047477c..7616fb1 100644
+--- a/Assets/_Project/Scripts/PlayerStates/StateMachine.cs
++++ b/Assets/_Project/Scripts/PlayerStates/StateMachine.cs
+@@ -7,15 +7,15 @@ public class StateMachine
+     private readonly Dictionary<Type, List<Transition>> _transitions = new Dictionary<Type, List<Transition>>();
+     private List<Transition> _anyTransitions = new List<Transition>();
+ 
+-    public void Update()
++    public void Update(bool allowActionTransitions = true, bool updateState = true)
+     {
+-        var transition = GetTransition();
++        var transition = GetTransition(allowActionTransitions);
+         if (transition != null)
+         {
+             ChangeState(transition.To);
+         }
+ 
+-        CurrentState?.Update();
++        if (updateState) CurrentState?.Update();
+     }
+ 
+     public void ChangeState(IPlayerState state)
+@@ -42,7 +42,7 @@ public class StateMachine
+         _anyTransitions.Add(new Transition(to, condition));
+     }
+ 
+-    private Transition GetTransition()
++    private Transition GetTransition(bool allowActionTransitions)
+     {
+         foreach (var transition in _anyTransitions)
+         {
+@@ -52,7 +52,7 @@ public class StateMachine
+             }
+         }
+ 
+-        if(CurrentState != null && _transitions.TryGetValue(CurrentState.GetType(), out var currentTransitions))
++        if(allowActionTransitions && CurrentState != null && _transitions.TryGetValue(CurrentState.GetType(), out var currentTransitions))
+         {
+             foreach(var transition in currentTransitions)
+             {
+@@ -65,4 +65,4 @@ public class StateMachine
+ 
+         return null;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/Assets/_Project/Scripts/StatusEffect/AirborneEffect.cs b/Assets/_Project/Scripts/StatusEffect/AirborneEffect.cs
+index 2e53286..585d973 100644
+--- a/Assets/_Project/Scripts/StatusEffect/AirborneEffect.cs
++++ b/Assets/_Project/Scripts/StatusEffect/AirborneEffect.cs
+@@ -12,6 +12,7 @@ public class AirborneEffect : IStatusEffect
+     private float _baseOffset;
+     private Transform _target;
+     private float _baseY;
++    private CombatActorClock _clock;
+     public bool IsExpired => _elapsed >= _duration;
+     public AirborneEffect(float duration, float launchForce = 8f)
+     {
+@@ -25,11 +26,13 @@ public class AirborneEffect : IStatusEffect
+         _agent = target.GetComponent<NavMeshAgent>();
+         if (_agent != null) _baseOffset = _agent.baseOffset;
+         _enemy = target.GetComponent<Enemy>();
++        if (_enemy != null) _clock = CombatActorClock.GetOrCreate(_enemy);
+         if (_enemy != null) { _enemy.RootDuration = _duration; _enemy.IsRoot = true; }
+     }
+     public void OnUpdate(float dt)
+     {
+-        _elapsed += dt;
++        // Airborne displacement and its root window share the victim's action clock.
++        _elapsed += dt * (_clock != null ? _clock.TimeScale : 1f);
+         float lift = Mathf.Sin(Mathf.Clamp01(_elapsed / _duration) * Mathf.PI) * _height;
+         if (_agent != null && _agent.enabled && _agent.isOnNavMesh)
+             _agent.baseOffset = _baseOffset + lift;
+diff --git a/Assets/_Project/Scripts/StatusEffect/SlowEffect.cs b/Assets/_Project/Scripts/StatusEffect/SlowEffect.cs
+index 49e7233..e73bf4b 100644
+--- a/Assets/_Project/Scripts/StatusEffect/SlowEffect.cs
++++ b/Assets/_Project/Scripts/StatusEffect/SlowEffect.cs
+@@ -10,6 +10,7 @@ public class SlowEffect : IStatusEffect
+ 
+     private NavMeshAgent _agent;
+     private float _originalSpeed;
++    private CombatActorClock _clock;
+ 
+     public bool IsExpired => _elapsed >= _duration;
+ 
+@@ -21,6 +22,13 @@ public class SlowEffect : IStatusEffect
+ 
+     public void OnApply(GameObject target)
+     {
++        var actor = target.GetComponent<Enemy>() as Component ?? target.GetComponent<PlayerController>();
++        if (actor != null)
++        {
++            _clock = CombatActorClock.GetOrCreate(actor);
++            _clock.SetMovementModifier(this, 1f - _slowRatio);
++            return;
++        }
+         _agent = target.GetComponent<NavMeshAgent>();
+         if (_agent == null) return;
+         _originalSpeed = _agent.speed;
+@@ -31,6 +39,7 @@ public class SlowEffect : IStatusEffect
+ 
+     public void OnRemove(GameObject target)
+     {
++        if (_clock != null) _clock.RemoveMovementModifier(this);
+         if (_agent != null)
+             _agent.speed = _originalSpeed;
+     }

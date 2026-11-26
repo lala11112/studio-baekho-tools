@@ -247,13 +247,17 @@ Unity가 게시하는 `status.json`의 전체 필드:
 - **기능 모듈:** 후보 작성·검증·실험 실행을 작업 단위로 노출합니다. 화면 버튼, 향후 AI 도구 호출, 자동화가 같은 명령 계약을 사용합니다.
 - **Unity 공통 실행부:** 게임 타입을 모르며 실험 진행, 녹화, 요청 검증과 보고서 형식을 담당합니다.
 - **게임 어댑터:** 기존 SO·컴포넌트·입력·이벤트를 연결합니다. 다른 프로젝트 지원은 `ICombatLabAdapter`와 `ICombatLabSession` 구현을 추가하는 경계입니다.
-- **AI 제공자:** 현재 Codex CLI가 허용된 `ParameterSpec`과 사용자 목표를 받아 실제 후보를 생성합니다. 향후 다른 제공자를 같은 계약으로 추가하거나 `judgment.json`과 실험 결과를 다음 제안의 입력으로 연결할 수 있습니다. 현재 영상·피드백을 자동으로 재평가하는 반복 루프는 없습니다.
+- **AI 제공자:** Codex CLI(`CodexCandidateGenerator`) 또는 Claude Code CLI(`ClaudeCodeCandidateGenerator`)가 허용된 `ParameterSpec`과 사용자 목표를 받아 실제 후보를 생성합니다. 두 제공자는 같은 `status()`/`generate()` 계약과 같은 프롬프트·스키마·응답 검증을 공유합니다. 사용자 선택(`settings.json`의 `aiProvider`: `auto`/`codex`/`claude`)에 따라 메인 프로세스가 제공자를 고르며, `auto`는 로그인된 Codex를 먼저, 없으면 로그인된 Claude Code를 사용합니다. 향후 다른 제공자를 같은 계약으로 추가하거나 `judgment.json`과 실험 결과를 다음 제안의 입력으로 연결할 수 있습니다. 현재 영상·피드백을 자동으로 재평가하는 반복 루프는 없습니다.
 
 ## AI 생성과 여러 후보 비교 (0.3)
 
 화면의 `generateCandidates({adapterId, sourceGuid, actionId, goal, count})`는 메인 프로세스에서 현재 Unity 카탈로그를 다시 읽습니다. 화면이 임의로 보낸 범위를 신뢰하지 않습니다. `count`는 2~12개의 AI 제안 전체 수이고, 기준 후보를 추가하지 않습니다. 목표·개수·소스·동작을 바꾸면 생성 결과를 다시 받아야 실행할 수 있습니다.
 
-Codex는 임시 작업 폴더에서 `exec --ephemeral --output-schema`로 호출합니다. shell/apps/multi-agent 도구와 웹 검색을 끄고 읽기 전용 실행을 사용합니다. 사용자·프로젝트 지침이 수치 생성에 섞이지 않도록 사용자 config를 불러오지 않으며, 인증은 Codex가 자체 처리합니다. 앱은 인증 파일을 읽거나 키를 보관하지 않습니다. 모델 이름을 강제하지 않고 Codex 기본 선택을 사용합니다. 응답은 후보 개수, 모든 항목의 정확한 1회 포함, 유한한 수치, 허용 범위, 서로 구분되는 값인지 검증합니다. 실패 시 가짜 제안으로 대체하지 않습니다.
+Codex는 임시 작업 폴더에서 `exec --ephemeral --output-schema`로 호출합니다. shell/apps/multi-agent 도구와 웹 검색을 끄고 읽기 전용 실행을 사용합니다. 사용자·프로젝트 지침이 수치 생성에 섞이지 않도록 사용자 config를 불러오지 않으며, 인증은 Codex가 자체 처리합니다. 앱은 인증 파일을 읽거나 키를 보관하지 않습니다. 모델 이름을 강제하지 않고 Codex 기본 선택을 사용합니다.
+
+Claude Code는 같은 임시 작업 폴더 방식으로 `claude -p --output-format json --json-schema <스키마>`를 호출하고 프롬프트를 stdin으로 전달합니다. `--tools ""`로 모든 내장 도구를, `--strict-mcp-config`로 MCP 서버를, `--safe-mode`로 CLAUDE.md·스킬·플러그인·훅 등 사용자 설정을, `--disable-slash-commands`로 명령을 끄고 `--no-session-persistence`로 세션 기록을 남기지 않습니다. 결과 JSON의 `structured_output`을 우선 사용하고, 없으면 `result` 문자열의 JSON을 읽습니다. 로그인 상태는 `claude auth status --json`의 `loggedIn` 값만 읽고 계정 정보는 전달하지 않습니다. 앱이 Claude Code 세션 안에서 실행되더라도 부모 세션 전용 환경 변수(`CLAUDECODE`, `CLAUDE_CODE_SIMPLE` 등)는 자식 프로세스에 넘기지 않습니다. 모델은 Claude Code 기본 선택을 사용하며, 응답에 기록된 모델 이름을 `generation.model`에 남깁니다. 실행 파일은 PATH의 `claude.exe`, `~/.local/bin/claude.exe`(네이티브 설치), npm 전역 설치(`node` + `cli.js`) 순으로 찾습니다.
+
+응답은 후보 개수, 모든 항목의 정확한 1회 포함, 유한한 수치, 허용 범위, 서로 구분되는 값인지 검증합니다. 실패 시 가짜 제안으로 대체하지 않습니다.
 
 생성은 180초 제한과 취소를 지원합니다. `request.json`의 `generation`에 provider/model(알려진 경우)/goal/count/createdUtc를, 각 후보의 `rationale`에 예상 효과와 절충점을 보관합니다. 설명은 실제 플레이 관측이 아닙니다. 후보마다 새 Play Mode로 실행하며 현재 최대 12개입니다.
 

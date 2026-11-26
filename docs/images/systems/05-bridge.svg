@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="490" viewBox="0 0 1200 490">
+<title>로컬 명령의 게시와 처리</title>
+<rect width="100%" height="100%" rx="16" fill="#F5F8FA"/>
+<text x="32.0" y="51.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="27" font-weight="700" fill="#142B3A">로컬 명령의 게시와 처리</text>
+<rect x="30" y="90" width="330" height="130" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="49.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">Desktop 요청 게시</text>
+<text x="49.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">임시 파일 완성 후 rename</text>
+<text x="49.0" y="193.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">requests/&lt;id&gt;.json</text>
+<rect x="435" y="90" width="330" height="130" rx="10" fill="white" stroke="#365CBC" stroke-width="1.5"/>
+<text x="454.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#365CBC">Unity 처리 선점</text>
+<text x="454.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">파일 이동으로 소유권 확보</text>
+<text x="454.0" y="193.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">processing/&lt;id&gt;.json</text>
+<rect x="840" y="90" width="330" height="130" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="859.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">검증 후 명령 실행</text>
+<text x="859.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">버전 · ID · 만료 · 크기</text>
+<text x="859.0" y="193.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">describe / start / export 등</text>
+<polyline points="360,155 435,155" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="435.0,155.0 424.5,160.8 424.5,149.2" fill="#486272"/>
+<polyline points="765,155 840,155" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="840.0,155.0 829.5,160.8 829.5,149.2" fill="#486272"/>
+<rect x="840" y="315" width="330" height="125" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="859.0" y="354.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">응답 게시</text>
+<text x="859.0" y="388.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">responses/&lt;id&gt;.json</text>
+<text x="859.0" y="418.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">같은 ID의 실행 영수증</text>
+<rect x="30" y="315" width="735" height="125" rx="10" fill="white" stroke="#AC641D" stroke-width="1.5"/>
+<text x="49.0" y="354.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#AC641D">Desktop 응답 확인</text>
+<text x="49.0" y="388.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">start 수락 후에는 status.json과 report.json에서 진행 확인</text>
+<text x="49.0" y="418.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">선점된 요청의 시간 초과는 자동 재전송하지 않음</text>
+<polyline points="1005,220 1005,315" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="1005.0,315.0 999.2,304.5 1010.8,304.5" fill="#486272"/>
+<polyline points="840,378 765,378" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="765.0,378.0 775.5,372.2 775.5,383.8" fill="#486272"/>
+</svg>

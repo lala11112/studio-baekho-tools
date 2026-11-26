@@ -1,7 +1,7 @@
 {
   "name": "baekho-studio",
   "productName": "Baekho Studio",
-  "version": "0.6.0",
+  "version": "0.7.1",
   "description": "Standalone game development workspace with Combat Lab and a local Unity execution bridge.",
   "private": true,
   "main": "src/main.cjs",

@@ -13,7 +13,7 @@ async function createMediaResponse(filename, request = {}) {
     return new Response(null, { status: 405, headers: { Allow: 'GET, HEAD', 'Content-Length': '0' } });
   }
   const extension = path.extname(filename).toLowerCase();
-  const type = extension === '.mp4' ? 'video/mp4' : extension === '.webm' ? 'video/webm' : null;
+  const type = extension === '.mp4' ? 'video/mp4' : extension === '.webm' ? 'video/webm' : extension === '.png' ? 'image/png' : null;
   if (!type) throw new Error('Unsupported video format.');
   let handle = await fs.open(filename, 'r');
   try {

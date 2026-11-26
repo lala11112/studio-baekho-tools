@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="490" viewBox="0 0 1200 490">
+<title>실험 요청과 선택 항목 패치</title>
+<rect width="100%" height="100%" rx="16" fill="#F5F8FA"/>
+<text x="32.0" y="51.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="27" font-weight="700" fill="#142B3A">실험 요청과 선택 항목 패치</text>
+<rect x="30" y="90" width="430" height="155" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="49.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">ExperimentRequest</text>
+<text x="49.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">어댑터 · 원본 GUID · 동작</text>
+<text x="49.0" y="193.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">시드 · 시간 · 반복 · 원본 비교</text>
+<text x="49.0" y="223.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">시나리오 · 영상 · 정밀 캡처</text>
+<rect x="540" y="90" width="630" height="155" rx="10" fill="white" stroke="#365CBC" stroke-width="1.5"/>
+<text x="559.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#365CBC">Candidate</text>
+<text x="559.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">id · label · origin · rationale</text>
+<text x="559.0" y="193.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">values : 항목 ID와 절대값</text>
+<text x="559.0" y="223.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">curves : 곡선 ID와 2~16개 키</text>
+<polyline points="460,168 540,168" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="540.0,168.0 529.5,173.8 529.5,162.2" fill="#486272"/>
+<text x="467.0" y="146.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="18" font-weight="400" fill="#486272">1~12</text>
+<rect x="30" y="325" width="430" height="125" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="49.0" y="364.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">실제 연결의 메타데이터</text>
+<text x="49.0" y="398.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">지원 ID · 유효 범위 · 추천 범위</text>
+<text x="49.0" y="428.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">현재값 · 곡선 · 동작 지원 사유</text>
+<rect x="540" y="325" width="630" height="125" rx="10" fill="white" stroke="#AC641D" stroke-width="1.5"/>
+<text x="559.0" y="364.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#AC641D">선택 단계 / HitEvent</text>
+<text x="559.0" y="398.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">넉백 · Motion · Impact · Shake · Hitstop</text>
+<text x="559.0" y="428.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">생략 항목과 편집하지 않은 곡선은 원본 유지</text>
+<polyline points="855,245 855,325" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="855.0,325.0 849.2,314.5 860.8,314.5" fill="#486272"/>
+<polyline points="460,387 540,387" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="540.0,387.0 529.5,392.8 529.5,381.2" fill="#486272"/>
+</svg>

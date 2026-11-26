@@ -13,7 +13,7 @@ function setup(overrides = {}, configure = () => {}) {
     constructor(tag) {
       this.tagName = tag; this.children = []; this.events = {}; this.value = '';
       this.textContent = ''; this.hidden = false; this.disabled = false; this.checked = false;
-      this.classList = { toggle() {} };
+      this.classList = { toggle() {}, add() {}, remove() {} };
     }
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this.children = children; }
@@ -48,7 +48,7 @@ function setup(overrides = {}, configure = () => {}) {
   const context = vm.createContext({
     window: { baekho: api, scrollTo() {} },
     document: { getElementById: get, createElement: tag => new Element(tag) },
-    console, snapshot, async openReport() {}, stop() {}, videos: [], results: [],
+    console, snapshot, CombatTuning: require('../renderer/tuning-contract.js'), async openReport() {}, stop() {}, videos: [], results: [],
   });
   const source = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
   const controller = source.slice(0, source.indexOf('// Report videos share'));
@@ -71,6 +71,49 @@ test('setup starts without fallback candidates and AI generation creates read-on
   assert.equal(ui.$('candidates').querySelectorAll('output').length, 4);
   assert.equal(ui.$('candidates').querySelectorAll('p').length, 4);
   assert.equal(ui.$('runExperiment').disabled, false);
+});
+
+test('v2 direct edits keep untouched fields absent, enable matching group Override, and validate linear curves', async () => {
+  const ui = setup({}, snapshot => {
+    const source = snapshot.catalog.adapters[0].sources[0];
+    source.parameters.splice(0, source.parameters.length,
+      { id: 'step.0.camera.shake.amplitude', label: '카메라 충격', group: 'camera', targetId: 'step.0', minimum: 0, maximum: 3, baseline: 0.4, kind: 'number' },
+      { id: 'step.0.camera.shake.mode', label: '모드', group: 'camera', targetId: 'step.0', minimum: 0, maximum: 2, baseline: 0, kind: 'enum', options: ['상속', '끔', '직접'] });
+    source.curves = [{ id: 'step.0.camera.shake.envelope', label: '감쇠 곡선', group: 'camera', targetId: 'step.0', minimum: 0, maximum: 1, maximumTime: 1, keys: [{ time: 0, value: 1 }, { time: 1, value: 0 }] }];
+    source.supportedRequestVersions = [1, 2];
+    Object.assign(source.defaultRequest, { schemaVersion: 2, includeSourceControl: true, scenarioMode: 'fixed', precisionCapture: true, precisionTargetId: '', repeatCount: 1 });
+  });
+  await ui.$('addManualCandidate').emit('click'); await ui.$('addManualCandidate').emit('click');
+  assert.deepEqual(ui.json('state.request.candidates[0].values'), []);
+  assert.deepEqual(ui.json('state.request.candidates[0].curves'), []);
+  assert.equal(ui.$('runExperiment').disabled, false);
+  const input = ui.$('candidates').querySelectorAll('input').find(element => element.type === 'number');
+  input.value = '1.25'; await input.emit('input');
+  assert.equal(ui.run("state.request.candidates[0].values.find(item => item.id === 'step.0.camera.shake.amplitude').value"), 1.25);
+  assert.equal(ui.run("state.request.candidates[0].values.find(item => item.id === 'step.0.camera.shake.mode').value"), 2);
+  assert.equal(ui.run('state.request.candidates[0].revision'), 2);
+  const editor = ui.$('candidates').querySelectorAll('textarea')[0];
+  editor.value = '0, 1\n0.3, 0.5\n1, 0'; await editor.emit('change');
+  assert.equal(ui.run('state.request.candidates[0].curves[0].keys.length'), 3);
+  editor.value = '0, 1\n0, 0'; await editor.emit('change');
+  assert.equal(ui.run('state.request.candidates[0].curves[0].keys.length'), 3, 'invalid editor text never replaces the last valid curve');
+  ui.run('validate(state.request)');
+});
+
+test('a v2 adapter imports legacy multiplier requests through its separate v1 parameter catalog', async () => {
+  const request = { schemaVersion: 1, adapterId: 'fixture', sourceGuid: 'source', durationSeconds: 10, seed: 1701, recordVideo: true,
+    candidates: [1, 1.2].map((value, index) => ({ id: `legacy-${index}`, values: [{ id: 'impact', value }] })) };
+  const ui = setup({ loadRequest: async () => request }, snapshot => {
+    const source = snapshot.catalog.adapters[0].sources[0];
+    source.legacyParameters = structuredClone(source.parameters);
+    source.parameters.splice(0, 1, { id: 'step.0.knockback', label: '절대 넉백', minimum: 0, maximum: 50, baseline: 3 });
+    source.supportedRequestVersions = [1, 2]; source.defaultRequest.schemaVersion = 2;
+  });
+  await ui.$('importRequest').emit('click');
+  assert.equal(ui.run('state.request.schemaVersion'), 1);
+  assert.equal(ui.run('currentParameters()[0].id'), 'impact');
+  assert.equal(ui.$('candidates').querySelectorAll('input').length, 0);
+  assert.equal(ui.run('requestReady()'), true);
 });
 
 test('editing the goal or candidate count invalidates generated values until regenerated', async () => {

@@ -24,6 +24,17 @@ namespace StudioBaekho.CombatLab
         double nextCaptureAt;
         long lastTimestamp = -1, audioFramesWritten;
         int audioChannels, sampleRate, receivedAudioBlocks;
+        const int PrecisionCapacity = 48;
+        const double PrecisionBeforeUs = 150000d, PrecisionAfterUs = 600000d;
+        sealed class RawCapture
+        {
+            public byte[] bytes;
+            public CaptureFrameMetadata frame;
+        }
+        readonly List<CaptureFrameMetadata> allFrames = new List<CaptureFrameMetadata>();
+        readonly List<RawCapture> rawFrames = new List<RawCapture>(PrecisionCapacity);
+        readonly Queue<RawCapture> freeFrames = new Queue<RawCapture>(PrecisionCapacity);
+        bool precisionEnabled, precisionOverflow, impactMarked, captureFinalized;
 
         public string OutputPath { get; private set; }
         public string Error { get; private set; }
@@ -32,8 +43,9 @@ namespace StudioBaekho.CombatLab
         public bool IsReady => IsRecording;
         public int CapturedFrameCount { get; private set; }
         public float TimelineSeconds => (float)clock.Elapsed.TotalSeconds;
+        public CaptureMetadata Capture { get; private set; } = new CaptureMetadata();
 
-        public void Start(string absoluteVideoPathWithoutExtension)
+        public void Start(string absoluteVideoPathWithoutExtension, bool precision = false)
         {
             if (encoder != null) throw new InvalidOperationException("This recorder already has an active session.");
             if (!Application.isPlaying) throw new InvalidOperationException("Video recording requires Play Mode.");
@@ -42,6 +54,9 @@ namespace StudioBaekho.CombatLab
             var extension = Application.platform == RuntimePlatform.LinuxEditor ? ".webm" : ".mp4";
             OutputPath = Path.GetFullPath(absoluteVideoPathWithoutExtension) + extension;
             if (File.Exists(OutputPath)) throw new IOException("The recording already exists: " + OutputPath);
+            string captureBase = Path.Combine(Path.GetDirectoryName(OutputPath), Path.GetFileNameWithoutExtension(OutputPath));
+            if (File.Exists(captureBase + ".frames.json") || Directory.Exists(captureBase + ".frames"))
+                throw new IOException("Capture metadata or images already exist: " + captureBase);
             Directory.CreateDirectory(Path.GetDirectoryName(OutputPath));
             warnings.Clear();
             Error = null;
@@ -50,10 +65,14 @@ namespace StudioBaekho.CombatLab
             lastTimestamp = -1;
             nextCaptureAt = 0;
             stopping = false;
+            precisionEnabled = precision;
+            precisionOverflow = impactMarked = captureFinalized = false;
+            allFrames.Clear(); rawFrames.Clear(); freeFrames.Clear();
+            Capture = new CaptureMetadata { precisionStatus = precision ? "missing-hit" : "disabled" };
             clock.Reset();
             savedBackground = Application.runInBackground;
             AddWarning("Video uses wall-clock timestamps, including global hitstop. Capture targets up to 60 fps at 1280x720; capture overhead can reduce rendered frame rate. This is not a performance benchmark.");
-            AddWarning("Keep Game View visible during capture. First-hit alignment estimates timing from adapter events, not a frame-accurate capture marker.");
+            AddWarning("Keep Game View visible during capture. Frame timestamps describe actual captured render samples; video seeking does not guarantee an exact encoded frame.");
             try
             {
                 var attributes = new VideoTrackAttributes
@@ -86,6 +105,13 @@ namespace StudioBaekho.CombatLab
                 target.Create();
                 pixels = new Texture2D(Width, Height, TextureFormat.RGBA32, false)
                 { name = "Combat Lab Readback", hideFlags = HideFlags.HideAndDontSave };
+                if (precisionEnabled)
+                {
+                    // Allocate once before the first attack, not in the hit/capture loop.
+                    for (int i = 0; i < PrecisionCapacity; i++)
+                        freeFrames.Enqueue(new RawCapture { bytes = new byte[Width * Height * 4] });
+                    AddWarning("Precision images retain up to 48 actual captures around the first confirmed hit (-150ms/+600ms). Missing render samples are not interpolated. PNG encoding happens after recording stops.");
+                }
                 Application.runInBackground = true;
                 clock.Restart();
                 if (audio != null) audio.Begin(clock, sampleRate, audioChannels);
@@ -116,6 +142,9 @@ namespace StudioBaekho.CombatLab
                     { name = "Combat Lab Game View", hideFlags = HideFlags.HideAndDontSave };
                     source.Create();
                 }
+                double capturedAt = clock.Elapsed.TotalSeconds;
+                double unityRealtimeUs = Time.realtimeSinceStartupAsDouble * 1000000d;
+                int unityFrame = Time.frameCount;
                 ScreenCapture.CaptureScreenshotIntoRenderTexture(source);
                 // Preserve aspect ratio without changing the user's Game View resolution.
                 RenderTexture.active = target;
@@ -133,10 +162,15 @@ namespace StudioBaekho.CombatLab
                 finally { GL.PopMatrix(); }
                 pixels.ReadPixels(new Rect(0, 0, Width, Height), 0, 0, false);
                 pixels.Apply(false, false);
-                long timestamp = CapturedFrameCount == 0 ? 0 : Math.Max(lastTimestamp + 1, ToTimestamp(now));
+                long timestamp = CapturedFrameCount == 0 ? 0 : Math.Max(lastTimestamp + 1, ToTimestamp(capturedAt));
                 if (!encoder.AddFrame(pixels, new MediaTime(timestamp, 1000000)))
                     throw new InvalidOperationException("Unity Media Encoder rejected a video frame.");
                 lastTimestamp = timestamp;
+                var frame = new CaptureFrameMetadata { captureIndex = CapturedFrameCount,
+                    unityFrameCount = unityFrame, unityRealtimeUs = unityRealtimeUs,
+                    captureElapsedUs = ToTimestamp(capturedAt), mediaPtsUs = timestamp, kind = "captured" };
+                allFrames.Add(frame);
+                RetainPrecisionFrame(frame);
                 CapturedFrameCount++;
             }
             catch (Exception ex) { Error = ex.Message; Dispose(); }
@@ -144,6 +178,131 @@ namespace StudioBaekho.CombatLab
         }
 
         static long ToTimestamp(double seconds) => (long)Math.Round(Math.Max(0d, seconds) * 1000000d);
+
+        public void MarkImpact(CombatEvent impact)
+        {
+            if (impact == null || impact.kind != "confirmed-impact" || impactMarked || captureFinalized) return;
+            if (double.IsNaN(impact.unityRealtimeUs) || double.IsInfinity(impact.unityRealtimeUs) || impact.unityRealtimeUs <= 0)
+            {
+                AddWarning("Confirmed hit has no valid Unity realtime timestamp; precise alignment is unavailable.");
+                return;
+            }
+            impactMarked = true;
+            Capture.hitEventId = string.IsNullOrWhiteSpace(impact.eventId)
+                ? "impact-frame-" + impact.unityFrameCount : impact.eventId;
+            Capture.hitRealtimeUs = impact.unityRealtimeUs;
+            if (!precisionEnabled) return;
+            // Retaining the full bounded rolling buffer until notification tolerates editor dispatch latency.
+            // Only the actual requested window is persisted.
+            for (int i = rawFrames.Count - 1; i >= 0; i--)
+            {
+                var item = rawFrames[i];
+                if (InPrecisionWindow(item.frame.unityRealtimeUs)) continue;
+                rawFrames.RemoveAt(i);
+                item.frame = null;
+                freeFrames.Enqueue(item);
+            }
+        }
+
+        bool InPrecisionWindow(double realtimeUs)
+            => realtimeUs >= Capture.hitRealtimeUs - PrecisionBeforeUs
+                && realtimeUs <= Capture.hitRealtimeUs + PrecisionAfterUs;
+
+        void RetainPrecisionFrame(CaptureFrameMetadata frame)
+        {
+            if (!precisionEnabled || (impactMarked && !InPrecisionWindow(frame.unityRealtimeUs))) return;
+            RawCapture item;
+            if (freeFrames.Count > 0) item = freeFrames.Dequeue();
+            else if (!impactMarked)
+            {
+                item = rawFrames[0];
+                rawFrames.RemoveAt(0);
+            }
+            else { precisionOverflow = true; return; }
+            item.frame = frame;
+            pixels.GetRawTextureData<byte>().CopyTo(item.bytes);
+            rawFrames.Add(item);
+        }
+
+        void FinalizeCaptureMetadata()
+        {
+            if (captureFinalized || string.IsNullOrEmpty(OutputPath)) return;
+            captureFinalized = true;
+            Capture.capturedFrameCount = CapturedFrameCount;
+            var intervals = new List<double>();
+            Capture.maxIntervalUs = 0; Capture.gapsOver33333Us = 0;
+            CaptureFrameMetadata previous = null;
+            foreach (var frame in allFrames)
+            {
+                if (impactMarked) frame.relativeTimeSeconds = (float)((frame.unityRealtimeUs - Capture.hitRealtimeUs) / 1000000d);
+                if (frame.kind != "captured") continue;
+                if (previous != null)
+                {
+                    double interval = frame.unityRealtimeUs - previous.unityRealtimeUs;
+                    intervals.Add(interval);
+                    Capture.maxIntervalUs = Math.Max(Capture.maxIntervalUs, interval);
+                    if (interval > 33333d) Capture.gapsOver33333Us++;
+                }
+                previous = frame;
+            }
+            intervals.Sort();
+            Capture.medianIntervalUs = intervals.Count == 0 ? 0 : intervals.Count % 2 == 0
+                ? (intervals[intervals.Count / 2 - 1] + intervals[intervals.Count / 2]) / 2d : intervals[intervals.Count / 2];
+            Capture.frames.Clear();
+            if (precisionEnabled && impactMarked)
+            {
+                bool startCovered = allFrames.Exists(frame => frame.kind == "captured"
+                    && frame.unityRealtimeUs <= Capture.hitRealtimeUs - PrecisionBeforeUs);
+                bool endCovered = allFrames.Exists(frame => frame.kind == "captured"
+                    && frame.unityRealtimeUs >= Capture.hitRealtimeUs + PrecisionAfterUs);
+                Capture.precisionStatus = !precisionOverflow && startCovered && endCovered && Error == null ? "complete" : "incomplete";
+                string imageDirectory = Path.GetFileNameWithoutExtension(OutputPath) + ".frames";
+                string absoluteImageDirectory = Path.Combine(Path.GetDirectoryName(OutputPath), imageDirectory);
+                try
+                {
+                    Directory.CreateDirectory(absoluteImageDirectory);
+                    rawFrames.Sort((a, b) => a.frame.captureIndex.CompareTo(b.frame.captureIndex));
+                    foreach (var item in rawFrames)
+                    {
+                        if (!InPrecisionWindow(item.frame.unityRealtimeUs)) continue;
+                        string imageName = item.frame.captureIndex.ToString("D6", System.Globalization.CultureInfo.InvariantCulture) + ".png";
+                        pixels.LoadRawTextureData(item.bytes);
+                        pixels.Apply(false, false);
+                        File.WriteAllBytes(Path.Combine(absoluteImageDirectory, imageName), pixels.EncodeToPNG());
+                        item.frame.imagePath = imageDirectory + "/" + imageName;
+                        Capture.frames.Add(item.frame);
+                    }
+                    int expectedImages = 0;
+                    foreach (var frame in allFrames)
+                        if (frame.kind == "captured" && InPrecisionWindow(frame.unityRealtimeUs)) expectedImages++;
+                    if (Capture.frames.Count == 0 || Capture.frames.Count != expectedImages)
+                    {
+                        Capture.precisionStatus = "incomplete";
+                        AddWarning("Some actual render samples in the hit window were not retained as precision images.");
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Capture.precisionStatus = "incomplete";
+                    AddWarning("Precision image export incomplete: " + exception.Message);
+                }
+                if (precisionOverflow) AddWarning("Precision image buffer exceeded 48 samples. The saved window is incomplete.");
+                if (!startCovered || !endCovered) AddWarning("Precision recording did not cover the complete -150ms/+600ms hit window.");
+            }
+            Capture.framesPath = Path.GetFileNameWithoutExtension(OutputPath) + ".frames.json";
+            var sidecar = new CaptureMetadata { framesPath = Capture.framesPath, precisionStatus = Capture.precisionStatus,
+                hitEventId = Capture.hitEventId, hitRealtimeUs = Capture.hitRealtimeUs, capturedFrameCount = Capture.capturedFrameCount,
+                medianIntervalUs = Capture.medianIntervalUs, maxIntervalUs = Capture.maxIntervalUs,
+                gapsOver33333Us = Capture.gapsOver33333Us, frames = allFrames };
+            try { File.WriteAllText(Path.Combine(Path.GetDirectoryName(OutputPath), Capture.framesPath), JsonUtility.ToJson(sidecar, true), new System.Text.UTF8Encoding(false)); }
+            catch (Exception exception)
+            {
+                AddWarning("Capture frame metadata could not be saved: " + exception.Message);
+                Capture.framesPath = null;
+                if (precisionEnabled) Capture.precisionStatus = "incomplete";
+            }
+            rawFrames.Clear(); freeFrames.Clear();
+        }
 
         void FlushAudio(long maximumFrame, bool final = false)
         {
@@ -196,8 +355,13 @@ namespace StudioBaekho.CombatLab
                         if (audioChannels > 0) WriteSilence((long)(elapsed * sampleRate));
                         long finalTimestamp = ToTimestamp(elapsed);
                         if (CapturedFrameCount > 0 && finalTimestamp > lastTimestamp)
+                        {
                             if (!encoder.AddFrame(pixels, new MediaTime(finalTimestamp, 1000000)))
                                 Error = "Unity Media Encoder rejected the final frame.";
+                            else allFrames.Add(new CaptureFrameMetadata { captureIndex = CapturedFrameCount,
+                                unityFrameCount = Time.frameCount, unityRealtimeUs = Time.realtimeSinceStartupAsDouble * 1000000d,
+                                captureElapsedUs = ToTimestamp(elapsed), mediaPtsUs = finalTimestamp, kind = "terminalHold" });
+                        }
                     }
                     encoder.Dispose();
                     encoder = null;
@@ -219,6 +383,7 @@ namespace StudioBaekho.CombatLab
                 }
                 if (audio != null && audio.DroppedBlocks > 0)
                     AddWarning("Audio capture dropped " + audio.DroppedBlocks + " blocks (queue overflow or channel changes); review audio quality.");
+                FinalizeCaptureMetadata();
             }
             catch (Exception ex) { Error = ex.Message; throw; }
             finally
@@ -228,6 +393,9 @@ namespace StudioBaekho.CombatLab
                     try { encoder.Dispose(); } catch (Exception ex) { Error = Error ?? ex.Message; }
                     encoder = null;
                 }
+                if (!captureFinalized)
+                    try { FinalizeCaptureMetadata(); }
+                    catch (Exception exception) { AddWarning("Capture metadata finalization failed: " + exception.Message); }
                 if (captureObject != null) UnityEngine.Object.DestroyImmediate(captureObject);
                 captureObject = null;
                 driver = null;
@@ -237,6 +405,7 @@ namespace StudioBaekho.CombatLab
                 ReleaseTexture(ref target);
                 if (pixels != null) UnityEngine.Object.DestroyImmediate(pixels);
                 pixels = null;
+                rawFrames.Clear(); freeFrames.Clear();
                 Application.runInBackground = savedBackground;
                 clock.Stop();
                 stopping = false;

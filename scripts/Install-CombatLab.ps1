@@ -74,6 +74,8 @@ Write-Output "Adapter: $Adapter; copied files: $($copies.Count). Existing .meta 
 Write-Output 'This installation does not depend on the tools checkout location and does not edit Packages/manifest.json.'
 if ($Adapter -eq 'Example') {
     Write-Output 'After Unity compiles, use Tools > Baekho > Combat Lab Example > Create Demo Scene. Select this Unity project in Baekho Studio and choose the Example adapter.'
+} elseif ($Adapter -eq 'FourTigerSword') {
+    Write-Output 'FourTigerSword v2 also requires the game runtime camera, actor clock, and confirmed-hit changes. This installer does not modify game combat sources. Review Integrations/FourTigerSword/RuntimeIntegration and docs/combat-lab-v2.md before using another checkout.'
 } elseif ($Adapter -eq 'None') {
     Write-Output 'Install or implement an ICombatLabAdapter for this game before running experiments. See docs/reusing-combat-lab.md.'
 }

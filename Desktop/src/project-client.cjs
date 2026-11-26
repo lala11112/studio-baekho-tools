@@ -8,7 +8,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 
 const MAX_JSON_BYTES = 10 * 1024 * 1024;
 const COMMANDS = new Set(['describe', 'start', 'cancel', 'export', 'export-combined']);
-const FINISHED = new Set(['completed', 'no-hits', 'failed', 'cancelled', 'interrupted']);
+const FINISHED = new Set(['completed', 'no-hits', 'failed', 'cancelled', 'interrupted', 'conditions-mismatch', 'conditions-unavailable']);
 const SEGMENT = /^[a-zA-Z0-9][a-zA-Z0-9_. -]{0,127}$/;
 const CANDIDATE_ID = /^[a-zA-Z0-9_-]{1,64}$/;
 
@@ -218,16 +218,18 @@ class ProjectClient {
 
   loadReport(runId) {
     const report = readJson(this._runFile(runId, 'report.json'));
-    if (!report || report.schemaVersion !== 1 || report.runId !== runId || !Array.isArray(report.results) ||
+    if (!report || ![1, 2].includes(report.schemaVersion) || report.runId !== runId || !Array.isArray(report.results) ||
         typeof report.startedUtc !== 'string' || !Number.isFinite(Date.parse(report.startedUtc)) ||
-        report.results.some(result => !result || !validCandidate(result.candidate) || typeof result.status !== 'string') ||
-        new Set(report.results.map(result => result.candidate.id)).size !== report.results.length) {
+        report.results.some(result => !result || !validCandidate(result.candidate) || typeof result.status !== 'string' ||
+          result.repeatIndex != null && (!Number.isInteger(result.repeatIndex) || result.repeatIndex < 1 || result.repeatIndex > 3)) ||
+        new Set(report.results.map(result => `${result.candidate.id}:${result.repeatIndex || 1}`)).size !== report.results.length ||
+        (report.controlResult && !validCandidate(report.controlResult.candidate))) {
       throw fault('실험 보고서 형식이 올바르지 않습니다.', 'INVALID_REPORT');
     }
     let request = null;
     try {
       const value = readJson(this._runFile(runId, 'request.json'));
-      if (value?.schemaVersion === 1 && Array.isArray(value.candidates) && value.candidates.every(validCandidate) &&
+      if ([1, 2].includes(value?.schemaVersion) && Array.isArray(value.candidates) && value.candidates.every(validCandidate) &&
           new Set(value.candidates.map(candidate => candidate.id)).size === value.candidates.length &&
           report.results.every(result => value.candidates.some(candidate => candidate.id === result.candidate.id))) request = value;
     } catch (error) {
@@ -260,15 +262,17 @@ class ProjectClient {
       if (!entry.isDirectory()) continue;
       try {
         const { report, request } = this.loadReport(entry.name);
-        const count = request?.candidates.length ?? report.results.length;
+        const count = request ? request.candidates.length * (request.repeatCount || 1) : report.results.length;
         const complete = report.results.filter(result => FINISHED.has(result.status)).length;
-        const statuses = new Set(report.results.map(result => result.status));
+        const statuses = new Set([...report.results, report.controlResult].filter(Boolean).map(result => result.status));
         const current = live.connected && live.running && live.directory &&
           samePath(path.resolve(live.directory), this._runDirectory(entry.name));
         let status = current ? 'running' : 'incomplete';
         if (!current) {
           if (statuses.has('failed')) status = 'failed';
           else if (statuses.has('cancelled') || statuses.has('interrupted')) status = 'cancelled';
+          else if (statuses.has('conditions-mismatch')) status = 'conditions-mismatch';
+          else if (statuses.has('conditions-unavailable')) status = 'conditions-unavailable';
           else if (count > 0 && complete === count) status = statuses.has('no-hits') ? 'no-hits' : 'completed';
         }
         runs.push({ id: entry.name, startedUtc: report.startedUtc, candidateCount: count, completedCount: complete, status,
@@ -279,16 +283,47 @@ class ProjectClient {
     return runs.sort((a, b) => Date.parse(b.startedUtc) - Date.parse(a.startedUtc) || b.id.localeCompare(a.id));
   }
 
-  resolveVideo(runId, filename) {
+  resolveVideo(runId, filename, knownReport = null) {
     assertSegment(filename, '영상 파일 이름');
     if (!/\.(mp4|webm)$/i.test(filename)) throw fault('지원하지 않는 영상 형식입니다.', 'INVALID_VIDEO');
-    const { report } = this.loadReport(runId);
-    if (!report.results.some(result => videoBasename(result.videoPath) === filename)) {
+    const report = knownReport || this.loadReport(runId).report;
+    if (report.runId !== runId) throw fault('다른 실험의 영상을 사용할 수 없습니다.', 'INVALID_VIDEO');
+    if (![...report.results, report.controlResult].filter(Boolean).some(result => videoBasename(result.videoPath) === filename)) {
       throw fault('이 실험 보고서에 등록된 영상이 아닙니다.', 'INVALID_VIDEO');
     }
     const target = fs.realpathSync(this._runFile(runId, filename));
     if (!fs.statSync(target).isFile()) throw fault('영상 파일이 아닙니다.', 'INVALID_VIDEO');
     return target;
+  }
+
+  resolveImage(runId, filename, knownReport = null) {
+    if (typeof filename !== 'string' || filename.includes('\\') || filename.split('/').length > 3) throw fault('캡처 이미지 경로가 올바르지 않습니다.', 'INVALID_IMAGE');
+    for (const segment of filename.split('/')) assertSegment(segment, '캡처 이미지 경로');
+    if (!/\.png$/i.test(filename)) throw fault('지원하지 않는 캡처 이미지입니다.', 'INVALID_IMAGE');
+    const report = knownReport || this.loadReport(runId).report;
+    if (report.runId !== runId) throw fault('다른 실험의 캡처 이미지를 사용할 수 없습니다.', 'INVALID_IMAGE');
+    const registered = [...report.results, report.controlResult].filter(Boolean).some(result =>
+      (result.capture?.frames || []).some(frame => frame?.imagePath === filename));
+    if (!registered) throw fault('이 실험에 등록된 캡처 이미지가 아닙니다.', 'INVALID_IMAGE');
+    const directory = this._runDirectory(runId), target = fs.realpathSync(path.join(directory, ...filename.split('/')));
+    if (!contained(directory, target)) throw fault('실험 폴더 밖의 이미지는 사용할 수 없습니다.', 'INVALID_PATH');
+    const stat = fs.statSync(target);
+    if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw fault('캡처 이미지 파일이 올바르지 않습니다.', 'INVALID_IMAGE');
+    return target;
+  }
+
+  loadCaptureTimeline(runId, capture) {
+    if (!capture?.framesPath) return [];
+    const data = readJson(this._runFile(runId, capture.framesPath));
+    if (data?.schemaVersion !== 1 || !Array.isArray(data.frames)) throw fault('캡처 시각 자료 형식이 올바르지 않습니다.', 'INVALID_CAPTURE');
+    let previous = -1;
+    return data.frames.map(frame => {
+      if (!frame || !Number.isSafeInteger(frame.captureIndex) || !Number.isSafeInteger(frame.mediaPtsUs) || frame.mediaPtsUs <= previous ||
+          !Number.isFinite(frame.unityRealtimeUs) || !['captured', 'terminalHold'].includes(frame.kind)) throw fault('캡처 시각 자료가 정렬되지 않았습니다.', 'INVALID_CAPTURE');
+      previous = frame.mediaPtsUs;
+      return { captureIndex: frame.captureIndex, unityFrameCount: frame.unityFrameCount, unityRealtimeUs: frame.unityRealtimeUs,
+        captureElapsedUs: frame.captureElapsedUs, mediaPtsUs: frame.mediaPtsUs, kind: frame.kind, relativeTimeSeconds: frame.relativeTimeSeconds };
+    });
   }
 
   saveJudgment(runId, value) {

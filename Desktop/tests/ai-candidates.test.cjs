@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
-const { CodexCandidateGenerator, validateGenerationInput, validateCandidates } = require('../src/ai-candidates.cjs');
+const { CodexCandidateGenerator, ClaudeCodeCandidateGenerator, validateGenerationInput, validateCandidates } = require('../src/ai-candidates.cjs');
 
 function input(count = 3) {
   return {
@@ -230,4 +230,91 @@ test('limits both process event output and final JSON file size', async () => {
     call.child.emit('close', 0);
   });
   await assert.rejects(new CodexCandidateGenerator({ spawn: large.spawn, executable: 'mock' }).generate(input()), { code: 'AI_RESPONSE_TOO_LARGE' });
+});
+
+function claudeEnvelope(fields) {
+  return JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '', modelUsage: { 'claude-test-model': {} }, session_id: 'private-session', ...fields });
+}
+
+test('Claude Code runs print mode with a strict JSON schema, no tools/MCP/customizations, and a clean host environment', async () => {
+  const mock = mockProcess(call => {
+    call.child.stdout.write(claudeEnvelope({ structured_output: response() }));
+    call.child.emit('close', 0);
+  });
+  const env = { PATH: 'test-path', CLAUDECODE: '1', CLAUDE_CODE_SIMPLE: '1', CLAUDE_CODE_ENTRYPOINT: 'sdk', CLAUDE_CODE_OAUTH_TOKEN: 'kept' };
+  const result = await new ClaudeCodeCandidateGenerator({ spawn: mock.spawn, executable: 'mock-claude.exe', env }).generate(input());
+  const call = mock.calls[0];
+  assert.equal(result.provider, 'claude');
+  assert.equal(result.model, 'claude-test-model');
+  assert.equal(result.candidates.length, 3);
+  assert.equal(call.executable, 'mock-claude.exe');
+  assert.equal(call.options.shell, false);
+  assert.equal(call.options.windowsHide, true);
+  assert.equal(path.basename(call.options.cwd).startsWith('baekho-ai-'), true);
+  assert.equal(fs.existsSync(call.options.cwd), false, 'temporary directory removed after success');
+  assert.deepEqual(call.options.env, { PATH: 'test-path', CLAUDE_CODE_OAUTH_TOKEN: 'kept' });
+  assert.equal(call.args[0], '-p');
+  assert.equal(call.args[call.args.indexOf('--output-format') + 1], 'json');
+  assert.equal(call.args[call.args.indexOf('--tools') + 1], '');
+  for (const flag of ['--strict-mcp-config', '--safe-mode', '--disable-slash-commands', '--no-session-persistence', '--system-prompt']) assert.ok(call.args.includes(flag), flag);
+  assert.equal(call.args.includes('--model'), false);
+  assert.equal(call.args.some(arg => /bypass|dangerously/.test(arg)), false);
+  const schema = JSON.parse(call.args[call.args.indexOf('--json-schema') + 1]);
+  assert.equal(schema.properties.candidates.minItems, 3);
+  assert.deepEqual(schema.properties.candidates.items.properties.values.items.properties.id.enum, input().parameters.map(parameter => parameter.id));
+  assert.ok(call.input.includes(input().goal));
+});
+
+test('Claude Code accepts a fenced JSON text answer but still validates it, and never fakes a fallback', async () => {
+  const fenced = mockProcess(call => { call.child.stdout.write(claudeEnvelope({ result: '```json\n' + JSON.stringify(response()) + '\n```' })); call.child.emit('close', 0); });
+  assert.equal((await new ClaudeCodeCandidateGenerator({ spawn: fenced.spawn, executable: 'mock' }).generate(input())).candidates.length, 3);
+  for (const body of ['not-json', '', claudeEnvelope({ result: 'no json here' }), claudeEnvelope({ structured_output: { candidates: [] } })]) {
+    const mock = mockProcess(call => { call.child.stdout.write(body); call.child.emit('close', 0); });
+    await assert.rejects(new ClaudeCodeCandidateGenerator({ spawn: mock.spawn, executable: 'mock' }).generate(input()), { code: 'AI_INVALID_OUTPUT' });
+    assert.equal(fs.existsSync(mock.calls[0].options.cwd), false);
+  }
+});
+
+test('Claude Code sanitizes login, quota, outdated-CLI, and error-result failures', async () => {
+  for (const [stdout, stderr, exitCode, code] of [
+    [claudeEnvelope({ is_error: true, result: 'Not logged in · Please run /login' }), '', 1, 'AI_AUTH_REQUIRED'],
+    [claudeEnvelope({ is_error: true, result: 'Credit balance is too low sk-private-secret' }), '', 1, 'AI_USAGE_LIMIT'],
+    ['', "error: unknown option '--safe-mode' sk-private-secret", 1, 'AI_UNAVAILABLE'],
+    [claudeEnvelope({ subtype: 'error_max_structured_output_retries', result: 'sk-private-secret' }), '', 0, 'AI_PROCESS_FAILED']
+  ]) {
+    const mock = mockProcess(call => { call.child.stdout.write(stdout); call.child.stderr.write(stderr); call.child.emit('close', exitCode); });
+    await assert.rejects(new ClaudeCodeCandidateGenerator({ spawn: mock.spawn, executable: 'mock' }).generate(input()), error => {
+      assert.equal(error.code, code, stdout + stderr);
+      assert.equal(error.message.includes('sk-private-secret'), false);
+      assert.match(error.message, /Claude Code|AI/);
+      return true;
+    });
+  }
+});
+
+test('Claude Code status reads only the loggedIn flag from auth status', async () => {
+  const mock = mockProcess(call => {
+    assert.deepEqual(call.args, ['auth', 'status', '--json']);
+    call.child.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'private-user@example.test' }));
+    call.child.emit('close', 0);
+  });
+  const result = await new ClaudeCodeCandidateGenerator({ spawn: mock.spawn, executable: 'mock' }).status();
+  assert.equal(result.provider, 'claude');
+  assert.equal(result.available, true);
+  assert.equal(result.authenticated, true);
+  assert.equal(JSON.stringify(result).includes('private-user'), false);
+  const loggedOut = mockProcess(call => { call.child.stdout.write('{"loggedIn": false, "authMethod": "none"}'); call.child.emit('close', 1); });
+  const status = await new ClaudeCodeCandidateGenerator({ spawn: loggedOut.spawn, executable: 'mock' }).status();
+  assert.equal(status.available, true);
+  assert.equal(status.authenticated, false);
+  const missing = await new ClaudeCodeCandidateGenerator({ executable: 'mock', spawn() { throw new Error('private-secret-path'); } }).status();
+  assert.equal(missing.available, false);
+  assert.equal(missing.error.includes('private-secret'), false);
+});
+
+test('Claude Code npm installs launch through node with the CLI script prepended', async () => {
+  const mock = mockProcess(call => { call.child.stdout.write(claudeEnvelope({ structured_output: response() })); call.child.emit('close', 0); });
+  await new ClaudeCodeCandidateGenerator({ spawn: mock.spawn, executable: { command: 'node.exe', args: ['cli.js'] } }).generate(input());
+  assert.equal(mock.calls[0].executable, 'node.exe');
+  assert.deepEqual(mock.calls[0].args.slice(0, 2), ['cli.js', '-p']);
 });

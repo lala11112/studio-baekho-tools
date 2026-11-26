@@ -262,6 +262,45 @@ test('duplicate or missing candidate IDs make a report invalid', t => {
   assert.throws(() => client.loadReport(sample.id), { code: 'INVALID_REPORT' });
 });
 
+test('v2 control media and repeated results remain separate and PNG paths are confined to their report', t => {
+  const { client, run, temporary } = fixture(t), sample = run('v2-repeat', 2);
+  sample.request.schemaVersion = 2; sample.request.repeatCount = 3;
+  sample.report.results = sample.report.results.flatMap(result => [1, 2, 3].map(repeatIndex => ({ ...result, repeatIndex })));
+  const imagePath = 'source-control.frames/000001.png';
+  sample.report.controlResult = { candidate: { id: 'source-control', isSourceControl: true, values: [] }, status: 'completed', videoPath: 'source-control.mp4', capture: { frames: [{ imagePath }] } };
+  json(path.join(sample.directory, 'report.json'), sample.report); json(path.join(sample.directory, 'request.json'), sample.request);
+  fs.mkdirSync(path.join(sample.directory, 'source-control.frames')); fs.writeFileSync(path.join(sample.directory, imagePath), 'image'); fs.writeFileSync(path.join(sample.directory, 'source-control.mp4'), 'video');
+  assert.equal(client.loadReport(sample.id).report.results.length, 6);
+  assert.equal(client.listRuns()[0].candidateCount, 6); assert.equal(client.listRuns()[0].status, 'completed');
+  assert.equal(client.resolveImage(sample.id, imagePath), fs.realpathSync(path.join(sample.directory, imagePath)));
+  assert.equal(client.resolveVideo(sample.id, 'source-control.mp4'), fs.realpathSync(path.join(sample.directory, 'source-control.mp4')));
+  assert.throws(() => client.resolveImage(sample.id, '../outside.png'));
+  assert.throws(() => client.resolveImage(sample.id, 'source-control.frames/unregistered.png'), { code: 'INVALID_IMAGE' });
+  const outside = path.join(temporary, 'outside-images'); fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, '000001.png'), 'outside');
+  fs.symlinkSync(outside, path.join(sample.directory, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+  sample.report.controlResult.capture.frames.push({ imagePath: 'escape/000001.png' }); json(path.join(sample.directory, 'report.json'), sample.report);
+  assert.throws(() => client.resolveImage(sample.id, 'escape/000001.png'), { code: 'INVALID_PATH' });
+});
+
+test('capture timeline reads explicit VFR PTS and rejects reversed times or unsafe sidecar paths', t => {
+  const { client, run } = fixture(t), sample = run('vfr');
+  const capture = { framesPath: 'candidate.frames.json' };
+  const frames = [0, 17000, 50000].map((mediaPtsUs, captureIndex) => ({ captureIndex, mediaPtsUs, unityRealtimeUs: 1000000 + mediaPtsUs, kind: 'captured' }));
+  json(path.join(sample.directory, capture.framesPath), { schemaVersion: 1, frames });
+  assert.deepEqual(client.loadCaptureTimeline(sample.id, capture).map(frame => frame.mediaPtsUs), [0, 17000, 50000]);
+  frames[2].mediaPtsUs = 1; json(path.join(sample.directory, capture.framesPath), { schemaVersion: 1, frames });
+  assert.throws(() => client.loadCaptureTimeline(sample.id, capture), { code: 'INVALID_CAPTURE' });
+  assert.throws(() => client.loadCaptureTimeline(sample.id, { framesPath: '../outside.json' }), { code: 'INVALID_PATH' });
+});
+
+test('completed runs with incomparable fixture conditions retain that outcome in history', t => {
+  const { client, run } = fixture(t), sample = run('conditions', 2);
+  for (const status of ['conditions-mismatch', 'conditions-unavailable']) {
+    sample.report.results[0].status = status; json(path.join(sample.directory, 'report.json'), sample.report);
+    const item = client.listRuns()[0]; assert.equal(item.status, status); assert.equal(item.completedCount, 2);
+  }
+});
+
 test('video resolution requires a report reference and confines the filename to its run', t => {
   const { client, run } = fixture(t);
   const sample = run();

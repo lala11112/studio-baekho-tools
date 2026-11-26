@@ -1,0 +1,518 @@
+{
+  "schemaVersion": 1,
+  "createdUtc": "2026-10-23T14:48:27.184Z",
+  "purpose": "Review-only integration patch for Four-Tiger-Sword Combat Lab v2; never automatically applied by the installer.",
+  "baseline": "Captured working files before this implementation, including pre-existing user edits. This is not an upstream Git revision.",
+  "gameProjectRoot": "Four-Tiger-Sword/Four-Tiger-Sword",
+  "patchFile": "four-tiger-combat-lab-v2.patch",
+  "patchSha256": "8351e39444aeb06f56e855a98c4651ff37fb3162d130a2b4a5dd3f42cf63684e",
+  "exclusions": [
+    "Existing game files without a captured before snapshot were not included.",
+    "Existing Unity .meta files were not changed or copied into this patch.",
+    "Scenes, prefabs, SO assets, project settings and Editor diagnostic helpers were not included.",
+    "Pre-existing user changes before the snapshots are baseline context, not new patch changes."
+  ],
+  "verification": {
+    "method": "git apply --check then apply in an isolated temporary copy of the captured selected baselines; compare every resulting file to the live integrated file.",
+    "checkedFiles": 54,
+    "normalizedTextMatches": true,
+    "exactBytesMatch": true,
+    "byteMismatches": []
+  },
+  "files": [
+    {
+      "path": "Assets/_Project/Scripts/AttackCameraProfile.cs",
+      "kind": "modified",
+      "beforeSha256": "63e2b78ecdb6cfdaccaeb2d91fca7dc7a7787f485cc41444f336dac922501b15",
+      "afterSha256": "dbabe31c3e90212f5213a7eafa8a5875a21db26c2de813f02a70796081224a83",
+      "beforeNormalizedTextSha256": "63e2b78ecdb6cfdaccaeb2d91fca7dc7a7787f485cc41444f336dac922501b15",
+      "afterNormalizedTextSha256": "dbabe31c3e90212f5213a7eafa8a5875a21db26c2de813f02a70796081224a83",
+      "baselineSource": "game/AttackCameraProfile.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/CombatCameraDirector.cs",
+      "kind": "modified",
+      "beforeSha256": "96a07667c94204c6c08ece10166a4ada0e7c15a9d18d15cf5ff93f9c1e25beee",
+      "afterSha256": "c54302e668bb56736c48e8f91f656b9d35090d285af4455df740fed269f57f0f",
+      "beforeNormalizedTextSha256": "96a07667c94204c6c08ece10166a4ada0e7c15a9d18d15cf5ff93f9c1e25beee",
+      "afterNormalizedTextSha256": "c54302e668bb56736c48e8f91f656b9d35090d285af4455df740fed269f57f0f",
+      "baselineSource": "game/CombatCameraDirector.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/CombatFeedbackTelemetry.cs",
+      "kind": "added",
+      "beforeSha256": null,
+      "afterSha256": "70861192d65e00c7140164da0d76641cec1ec3b669c839c5b852beab59fca87b",
+      "beforeNormalizedTextSha256": null,
+      "afterNormalizedTextSha256": "70861192d65e00c7140164da0d76641cec1ec3b669c839c5b852beab59fca87b",
+      "baselineSource": null,
+      "provenance": "camera-new-files.json records previouslyExisted=false; absent from Git index."
+    },
+    {
+      "path": "Assets/_Project/Scripts/CombatFeedbackTelemetry.cs.meta",
+      "kind": "added",
+      "beforeSha256": null,
+      "afterSha256": "78c7a4574bf940b7f31f424a0e2b6dbacfb80b5de099d83aa04b79704e26e3e4",
+      "beforeNormalizedTextSha256": null,
+      "afterNormalizedTextSha256": "78c7a4574bf940b7f31f424a0e2b6dbacfb80b5de099d83aa04b79704e26e3e4",
+      "baselineSource": null,
+      "provenance": "camera-new-files.json records previouslyExisted=false; absent from Git index."
+    },
+    {
+      "path": "Assets/_Project/Scripts/CombatFeedbackV2.cs",
+      "kind": "added",
+      "beforeSha256": null,
+      "afterSha256": "c80300b1f16417e297eca127fe47f325d6201b1c9ca427b9c4ccba0a722aa535",
+      "beforeNormalizedTextSha256": null,
+      "afterNormalizedTextSha256": "c80300b1f16417e297eca127fe47f325d6201b1c9ca427b9c4ccba0a722aa535",
+      "baselineSource": null,
+      "provenance": "camera-new-files.json records previouslyExisted=false; absent from Git index."
+    },
+    {
+      "path": "Assets/_Project/Scripts/CombatFeedbackV2.cs.meta",
+      "kind": "added",
+      "beforeSha256": null,
+      "afterSha256": "37071633644ccd0358e0a414397139883290922b3294eaa5f043c50d4eaabe84",
+      "beforeNormalizedTextSha256": null,
+      "afterNormalizedTextSha256": "37071633644ccd0358e0a414397139883290922b3294eaa5f043c50d4eaabe84",
+      "baselineSource": null,
+      "provenance": "camera-new-files.json records previouslyExisted=false; absent from Git index."
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/Boss/Boss.cs",
+      "kind": "modified",
+      "beforeSha256": "2624877b818dd23a88f8c69fcaa75137f0c2c7bb334f3b399f09569740fd006f",
+      "afterSha256": "216c37411c9d0d63c782b7f030d634f45f407b325ed701c77e22527d2d50aa44",
+      "beforeNormalizedTextSha256": "bdd4f884f5bdb638602c378929a745d3ee4d3dbf35e41b979fc366f295007c01",
+      "afterNormalizedTextSha256": "f51032f56fc734f1a49c5321dbf484e4310327db568a34cc2038505ef86fcd3d",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/Boss/Boss.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/DefaultEnemy/Enemy.cs",
+      "kind": "modified",
+      "beforeSha256": "1459746d53f412c79914559f5f6bc7e77e3c780faeaa26505395a0f80441a674",
+      "afterSha256": "0c1238ac9bc53cd7a6ea21d8063ac48089f84f238c3943d0b1195f0a0311f826",
+      "beforeNormalizedTextSha256": "7a39d087ee6a539a61858a7f1a2cadbbc2ca4496e39c2ab2d037fc606adbebe7",
+      "afterNormalizedTextSha256": "10cd9b9d9d477eded3f28d60742a1045836f184185749c48742fd14c5343f2e1",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/DefaultEnemy/Enemy.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/EnemyActions/EnemyAction.cs",
+      "kind": "modified",
+      "beforeSha256": "cb93cbfb2d6732bc2c72b214ce0deaa328ad51fa62f2242c2b91713fbdf55d71",
+      "afterSha256": "6dbf9fe9f8274244b4213e18965f33ce5e17193f07394f6013277975cd01cb81",
+      "beforeNormalizedTextSha256": "f17928c8dbf058f4b65b04777d2f643e43a68dc23758320f74b828cf48718d0a",
+      "afterNormalizedTextSha256": "d13e49bbcb45bd8a1c8eba5c39ebd77d3fe9426fe080157a5fd32b382b82d58b",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/EnemyActions/EnemyAction.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/EnemyActions/EnemyDashAttack.cs",
+      "kind": "modified",
+      "beforeSha256": "4b05b570f2cafa4dc1f6e9133df719733f45f160056bee1373907109a79fcb27",
+      "afterSha256": "a271e5d5ab054360d3a323e03f7558ee1ac90f186045ddcf289095b4f2ec600f",
+      "beforeNormalizedTextSha256": "4b05b570f2cafa4dc1f6e9133df719733f45f160056bee1373907109a79fcb27",
+      "afterNormalizedTextSha256": "a271e5d5ab054360d3a323e03f7558ee1ac90f186045ddcf289095b4f2ec600f",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/EnemyActions/EnemyDashAttack.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/EnemyActions/EnemySelfDestruct.cs",
+      "kind": "modified",
+      "beforeSha256": "f7bc40a037f3789267599f046c75065db626862b4664b005b4074f2d8808290e",
+      "afterSha256": "91c4398a523270b3881dec4327a7316bfadf368b9c50381eba7df76d67bdfbab",
+      "beforeNormalizedTextSha256": "f7bc40a037f3789267599f046c75065db626862b4664b005b4074f2d8808290e",
+      "afterNormalizedTextSha256": "91c4398a523270b3881dec4327a7316bfadf368b9c50381eba7df76d67bdfbab",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/EnemyActions/EnemySelfDestruct.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/EnemyState/EnemyApproachState.cs",
+      "kind": "modified",
+      "beforeSha256": "5a08ded2bc8962117955ed3f19a0b54c9d56e2f56008b2acc23e41bf878d3bbe",
+      "afterSha256": "aaa63a8e932878db96da8d2c480f2bdb49e9f45f53dc1f31e3ea43d092b4f409",
+      "beforeNormalizedTextSha256": "5a08ded2bc8962117955ed3f19a0b54c9d56e2f56008b2acc23e41bf878d3bbe",
+      "afterNormalizedTextSha256": "aaa63a8e932878db96da8d2c480f2bdb49e9f45f53dc1f31e3ea43d092b4f409",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/EnemyState/EnemyApproachState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/EnemyState/EnemyCombatIdleState.cs",
+      "kind": "modified",
+      "beforeSha256": "e169369bfd99026b169e1bd2ffc45bb79f84ce33c8fe7f62d5f83053e51d5047",
+      "afterSha256": "a2766afc357285b3936badb5622c26d5ff40093ee0f3d83322022d47b7c7365a",
+      "beforeNormalizedTextSha256": "e169369bfd99026b169e1bd2ffc45bb79f84ce33c8fe7f62d5f83053e51d5047",
+      "afterNormalizedTextSha256": "a2766afc357285b3936badb5622c26d5ff40093ee0f3d83322022d47b7c7365a",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/EnemyState/EnemyCombatIdleState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/EnemyState/EnemyDieState.cs",
+      "kind": "modified",
+      "beforeSha256": "386ffb154392834c3ff2eb4f9a1a6994fdd6c64f84e248895fefc6c4cee2db1d",
+      "afterSha256": "67723cc444bdccd61dbe0b7d26c28a0a29f99eda0de93f7a3b73ae81f6f017c5",
+      "beforeNormalizedTextSha256": "4a8c93be7dd037154be42fd6d35c5c3ba1e02cbc70a6ca1b78fb55b6a4bc4659",
+      "afterNormalizedTextSha256": "eefd054e5576839bc9be2bb7f050473b4ec5dae9ac8b64200e2085a4f11b368d",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/EnemyState/EnemyDieState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/EnemyState/EnemyGroggyState.cs",
+      "kind": "modified",
+      "beforeSha256": "202d1615b4dbd139dcd52527bf05eff195d373161d69fcc37d54e442d82c8375",
+      "afterSha256": "12f6e3c93d74933d8a7a64e2c228941bd03f0c804f5d222777ae428b68a4cde9",
+      "beforeNormalizedTextSha256": "6520f69e863d8edb596e033bffb52679b6293f7b5e5a5c5f0f354a7351e38e22",
+      "afterNormalizedTextSha256": "e1e60c62388e3454d90c7db35d8284e0a870b775c9498930c938f136258e6e16",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/EnemyState/EnemyGroggyState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/EnemyState/EnemyHurtState.cs",
+      "kind": "modified",
+      "beforeSha256": "5b5dd68c0b47186f75927f1b2dbd97acb1165203ac53a4fd534e19f2f7d8e70c",
+      "afterSha256": "ead1a61808ab52a6c1be7a32879388e9f14ae5279daf0b31fde3cb50dbbfecef",
+      "beforeNormalizedTextSha256": "c079c41c07c3750ed08c4699c9e4ab573e109442a9be9689cf47a48b9c0bfc35",
+      "afterNormalizedTextSha256": "7706362b1d7b7e4bd1614e9b5bbdada16c3f95b001eebb7efb2cc37b6291166f",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/EnemyState/EnemyHurtState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/EnemyState/EnemyIdleState.cs",
+      "kind": "modified",
+      "beforeSha256": "e911fbb5093bc32537b5318157f56906951adc3cbe8e212f1a133e9f32c5db6b",
+      "afterSha256": "a62c30c45505ea4d12861c9d0b27cb0cabe14336f04b0806592d97d0ed6798d3",
+      "beforeNormalizedTextSha256": "13fd7c253701c0ccf4d04d8d534dae98fafe495dac63566d6358f1df1ce30b93",
+      "afterNormalizedTextSha256": "5440fe39e3ed23331f79269f117c0d05c7f8b70902934a1afefa22abd4330cad",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/EnemyState/EnemyIdleState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Enemy/EnemyState/EnemyRootState.cs",
+      "kind": "modified",
+      "beforeSha256": "e96253c59fbaedecc1db4f73b6a7f827fbf708c9791a208add43b2b17ccbc6f8",
+      "afterSha256": "cb702ba7fa376681acbc7e013209e633c896a108cf9e6cff5e2aacc6b51bbedf",
+      "beforeNormalizedTextSha256": "033a6c314037b00b7c17b977ed30efe0fb4b56e70caa933a188b8385012aa68a",
+      "afterNormalizedTextSha256": "bcb19d094e4b451a75bbd94c17f75cfbc97e86298d3c8b61f5a2ec5b3e532773",
+      "baselineSource": "game/Assets/_Project/Scripts/Enemy/EnemyState/EnemyRootState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Feedbacks/CombatFeelFeedback.cs",
+      "kind": "modified",
+      "beforeSha256": "3ff484c128952902e6b86440ab73883105a959d2761f9ec449fd44efab6109c5",
+      "afterSha256": "c652f3faf54424d0750cf1e9af3fe2549f09a40cd36eb80ce7d07ac8691079ea",
+      "beforeNormalizedTextSha256": "3ff484c128952902e6b86440ab73883105a959d2761f9ec449fd44efab6109c5",
+      "afterNormalizedTextSha256": "c652f3faf54424d0750cf1e9af3fe2549f09a40cd36eb80ce7d07ac8691079ea",
+      "baselineSource": "game/Feedbacks/CombatFeelFeedback.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/Manager/RunManager.cs",
+      "kind": "modified",
+      "beforeSha256": "721ef09f5a5fa227f1d7ca799488bfa7f85a6403f7b3a7f2257aad31a3a8435e",
+      "afterSha256": "c19e6ebfd02b4675588b9ffb57c42b971a1abbc5e54faefff57bd3632b063ace",
+      "beforeNormalizedTextSha256": "721ef09f5a5fa227f1d7ca799488bfa7f85a6403f7b3a7f2257aad31a3a8435e",
+      "afterNormalizedTextSha256": "c19e6ebfd02b4675588b9ffb57c42b971a1abbc5e54faefff57bd3632b063ace",
+      "baselineSource": "game/Assets/_Project/Scripts/Manager/RunManager.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/NewPlayer/CombatActorClock.cs",
+      "kind": "added",
+      "beforeSha256": null,
+      "afterSha256": "0a189256e530505f66c2d4dc81d3bf3b57932248da7b49645adf71a40caf0ec3",
+      "beforeNormalizedTextSha256": null,
+      "afterNormalizedTextSha256": "0a189256e530505f66c2d4dc81d3bf3b57932248da7b49645adf71a40caf0ec3",
+      "baselineSource": null,
+      "provenance": "Created in this Combat Lab v2 implementation; root agent confirmed; absent from captured baseline and Git index."
+    },
+    {
+      "path": "Assets/_Project/Scripts/NewPlayer/CombatActorClock.cs.meta",
+      "kind": "added",
+      "beforeSha256": null,
+      "afterSha256": "f42fd8c78a3afdf1bab2810bde9be17d76726ce7e46ca02081c0890c59bfeef6",
+      "beforeNormalizedTextSha256": null,
+      "afterNormalizedTextSha256": "f42fd8c78a3afdf1bab2810bde9be17d76726ce7e46ca02081c0890c59bfeef6",
+      "baselineSource": null,
+      "provenance": "Created in this Combat Lab v2 implementation; root agent confirmed; absent from captured baseline and Git index."
+    },
+    {
+      "path": "Assets/_Project/Scripts/NewPlayer/CombatHitStopService.cs",
+      "kind": "added",
+      "beforeSha256": null,
+      "afterSha256": "b68be417bcc9d23b966a108dd92c8dc574ef535f522f2f9f5ef2fa4ad1e04af4",
+      "beforeNormalizedTextSha256": null,
+      "afterNormalizedTextSha256": "b68be417bcc9d23b966a108dd92c8dc574ef535f522f2f9f5ef2fa4ad1e04af4",
+      "baselineSource": null,
+      "provenance": "Created in this Combat Lab v2 implementation; root agent confirmed; absent from captured baseline and Git index."
+    },
+    {
+      "path": "Assets/_Project/Scripts/NewPlayer/CombatHitStopService.cs.meta",
+      "kind": "added",
+      "beforeSha256": null,
+      "afterSha256": "19609f534bcd1e826512311d5f72eaeff0749788645f2c26ae61251265b6f80c",
+      "beforeNormalizedTextSha256": null,
+      "afterNormalizedTextSha256": "19609f534bcd1e826512311d5f72eaeff0749788645f2c26ae61251265b6f80c",
+      "baselineSource": null,
+      "provenance": "Created in this Combat Lab v2 implementation; root agent confirmed; absent from captured baseline and Git index."
+    },
+    {
+      "path": "Assets/_Project/Scripts/NewPlayer/PlayerController.cs",
+      "kind": "modified",
+      "beforeSha256": "122a4c5d3ee07951bb9eeb789842e3d609955281b2220821820eb09e72724bbb",
+      "afterSha256": "d71cf59438de3d49d8cf3cae70ee067842b169dfd0316fc7bca352ecde19cf7f",
+      "beforeNormalizedTextSha256": "5bfef84c7b67678b252ca727cb0eeee5793b6811369a327d4c8f4623d40fe866",
+      "afterNormalizedTextSha256": "629e4123b8d14db1a19f6691cc4d0c0fc2f77d3db7001e216ac7de402b854428",
+      "baselineSource": "game/Assets/_Project/Scripts/NewPlayer/PlayerController.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/NewPlayer/PlayerController.StageTransition.cs",
+      "kind": "modified",
+      "beforeSha256": "5ba306af64912753e95ce01dc1919ddd74f8b04dcf5de004787070ff718251f5",
+      "afterSha256": "0ac454ca66e8347f3782edd36111d9b4999bd1113fa76b3ef88d3c8ff037c5a1",
+      "beforeNormalizedTextSha256": "5ba306af64912753e95ce01dc1919ddd74f8b04dcf5de004787070ff718251f5",
+      "afterNormalizedTextSha256": "0ac454ca66e8347f3782edd36111d9b4999bd1113fa76b3ef88d3c8ff037c5a1",
+      "baselineSource": "game/Assets/_Project/Scripts/NewPlayer/PlayerController.StageTransition.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/NewPlayer/PlayerMovement.cs",
+      "kind": "modified",
+      "beforeSha256": "8d96f9961f32277fd38c7a0ac1966aa9f58286c5cc0ce24d962c3e137045ff7f",
+      "afterSha256": "d760ff6589a92223e865dabf4501c1a471b132bb1f6db8f7361a6b7c6f496051",
+      "beforeNormalizedTextSha256": "150a99e6b408d987a7ceb3b9afe15283e6d295dbf1a4b968fb0e359728540c43",
+      "afterNormalizedTextSha256": "85efe5a1896ebaa29dabbbffa2c193e40440c13f285fa010ace18bb86e9036e6",
+      "baselineSource": "game/Assets/_Project/Scripts/NewPlayer/PlayerMovement.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/NewPlayer/WeaponActionData.cs",
+      "kind": "modified",
+      "beforeSha256": "5cf32f3b39ecf27580fe33dd6171ce284acb93d20ac59d6283f1ab657ff39fdb",
+      "afterSha256": "97449c60e7a0c2f2d452423540c888af8ac84a1bb24ff9fbe1946000c94ae3c0",
+      "beforeNormalizedTextSha256": "7c6123d1935c90a8550f557c64fb0320354f2cba94b9dc75fdcac51e1b57c3af",
+      "afterNormalizedTextSha256": "ca748f035c56923c363c6ab1293677abb9415d0a86b86cd405d6b3e367633165",
+      "baselineSource": "game/Assets/_Project/Scripts/NewPlayer/WeaponActionData.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/BaseForm.Actions.cs",
+      "kind": "modified",
+      "beforeSha256": "7904abd43184326d22f0564b67acc247b85f2f87590ad4c0ea67cd358d3f38c3",
+      "afterSha256": "25021a9dc81a5f0272ea207d59317820787d9e62017fde2ed49df837e8ade4d5",
+      "beforeNormalizedTextSha256": "6e7341aa3ba7bf972d6ab71e6ce321802804e8a82ba17800b96dd7f4fb02c219",
+      "afterNormalizedTextSha256": "078f2ef53f5db0b5e3e5c9527c19d4b5032c00b9931797ddfb21496cbc5f7051",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/BaseForm.Actions.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/BaseForm.Camera.cs",
+      "kind": "modified",
+      "beforeSha256": "b6b961af55a0ae18572a5ff456c67d09a90131d68355b65145f0148182277926",
+      "afterSha256": "09b6aace00f741db0cecbc254d6399c0311ba26195f91f85b84780c2f369aa39",
+      "beforeNormalizedTextSha256": "b6b961af55a0ae18572a5ff456c67d09a90131d68355b65145f0148182277926",
+      "afterNormalizedTextSha256": "09b6aace00f741db0cecbc254d6399c0311ba26195f91f85b84780c2f369aa39",
+      "baselineSource": "game/PlayerForms/BaseForm.Camera.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/BaseForm.HeavyAttack.cs",
+      "kind": "modified",
+      "beforeSha256": "7c1f877da3e0124e3b09e9e2d02ade3ea837de65f77a7dbef5502a7269ec03d6",
+      "afterSha256": "8944c54b072d72478de7c4c37132c52064636c9d2d57c00c932882214e38abdb",
+      "beforeNormalizedTextSha256": "7c1f877da3e0124e3b09e9e2d02ade3ea837de65f77a7dbef5502a7269ec03d6",
+      "afterNormalizedTextSha256": "8944c54b072d72478de7c4c37132c52064636c9d2d57c00c932882214e38abdb",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/BaseForm.HeavyAttack.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/BaseForm.Hit.cs",
+      "kind": "modified",
+      "beforeSha256": "f95148291fbf7f5aa0bc12755320128763e13b66f428f8acc16a8f0bd09fac02",
+      "afterSha256": "0f4f7665d33c8666c3b8f8181d996a201b73860de7d3f89bd87b5a40ac096b44",
+      "beforeNormalizedTextSha256": "1bfbe0edd2b869c173bd2a954cba11cb8771bea573a1334e9a6ed5dfe51d35f8",
+      "afterNormalizedTextSha256": "9050d42cd0a2bbb623e95b99662835e1131c8ccd2e39e7ef8bb492b51d045f28",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/BaseForm.Hit.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/BaseForm.Motion.cs",
+      "kind": "modified",
+      "beforeSha256": "5c7f50cc1d54958ef46d6f675572d5b56452073c7cb31b0b6f737aac482fce45",
+      "afterSha256": "eecf375f6ea43a88435d91cbc8fb5f5561e85d9bd8c06d5b6964d77f3b47c7f9",
+      "beforeNormalizedTextSha256": "5c7f50cc1d54958ef46d6f675572d5b56452073c7cb31b0b6f737aac482fce45",
+      "afterNormalizedTextSha256": "eecf375f6ea43a88435d91cbc8fb5f5561e85d9bd8c06d5b6964d77f3b47c7f9",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/BaseForm.Motion.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/BaseForm.Slash.cs",
+      "kind": "modified",
+      "beforeSha256": "581c50ed8461c2b9cec1af474cc3e1bd1f953a112e82517a446f4cb288ddee89",
+      "afterSha256": "6462570950a79a12e1ef5fefb295d07c1b64c2335c06b1d9c95eab250a809403",
+      "beforeNormalizedTextSha256": "581c50ed8461c2b9cec1af474cc3e1bd1f953a112e82517a446f4cb288ddee89",
+      "afterNormalizedTextSha256": "6462570950a79a12e1ef5fefb295d07c1b64c2335c06b1d9c95eab250a809403",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/BaseForm.Slash.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/BaseForm.SpecEffects.cs",
+      "kind": "modified",
+      "beforeSha256": "7209f560185749df146a3c2fbb7fec5bfd7bdc2b9bfbcf358bf363fc1b65a848",
+      "afterSha256": "fbdfd1d4cac6258ab1a2fa238d3912360c7639bfce1776d271108ba09b39a75e",
+      "beforeNormalizedTextSha256": "1af63c5744f1fa8e6431fa97e8019c6dc57964bff87686353d5b038db1a0a081",
+      "afterNormalizedTextSha256": "fe5fbd0586710c1e5dc12b35b4f8b9456cdbecffbf34af9764f56dc32519df5a",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/BaseForm.SpecEffects.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/BaseForm.Utils.cs",
+      "kind": "modified",
+      "beforeSha256": "6b3c0c82fb4f3de08bb68af82407a77812ed99527b3298fc29d2d39e22cc8cb9",
+      "afterSha256": "94d323737e80b66a04e71ed407bfb0e3f6fc249fe60b0dc8dc7e9f65114b31a4",
+      "beforeNormalizedTextSha256": "e6853751ba1bc94fdcb33c62a23c21164a6d657072ff4538eefe7d1f0ec09147",
+      "afterNormalizedTextSha256": "7eb905c200a2fcaa5fd88f3a39fa7f1f6c780fcb8ee25657f6e636c250edb056",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/BaseForm.Utils.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/EarthForm.cs",
+      "kind": "modified",
+      "beforeSha256": "edeb7583ec0aac020e30a6c6cf8ed7e583856980c8a7832d30baa70d9b21cffe",
+      "afterSha256": "50585937106b4099b991af3b000a6c6421e79af5cb81e9e63e423e5473fac33f",
+      "beforeNormalizedTextSha256": "d959e8fef66260f4c193258bda6d033e75f20f5b9edd5c0cd44ec6c34c00b064",
+      "afterNormalizedTextSha256": "d66d046faf8bb8e510adeaf147bad0dafc55d67aa77f93b6242d3f534a3c9b7f",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/EarthForm.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/FireForm.cs",
+      "kind": "modified",
+      "beforeSha256": "35cc798529aac28a6c1b98e15f57307b318a483b7b18cd43545d743cc73c048f",
+      "afterSha256": "9802232fa805cb85c014900fa485a19596e61fe0b9a705cc52c356f05e51e1bd",
+      "beforeNormalizedTextSha256": "d592b234c54b7bebee267a8532de0b4ae0b3b61127c4d2515f4a934ea9c7863d",
+      "afterNormalizedTextSha256": "0c5a4a09385d32abf54f48644c2d9c0377a3d33848fec5a98ea5c4844f4fe8f5",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/FireForm.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/FormManager.cs",
+      "kind": "modified",
+      "beforeSha256": "60da813c0c3d087c9eecd4e5e82dfdc31d0d41e356a11d59521149ba1135e893",
+      "afterSha256": "c0a54f4de8125bef0f96513f726107ef14f4000486a9321c7a33efe6936eb637",
+      "beforeNormalizedTextSha256": "b0816005e97a272d9bae9de304a74c3ee3a322a1b59f83c905c2148c609471f0",
+      "afterNormalizedTextSha256": "6da1c0f4c2d596adcb7ab5757de09ad831693b997ae5d514d0418f188894f708",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/FormManager.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/WaterForm.cs",
+      "kind": "modified",
+      "beforeSha256": "6c4edaf3d6841ff2368deccc716db8dc0731b53b1e390563bad964860c957c4a",
+      "afterSha256": "291566b2248a8bf6c15828cf5066d7f0bae7b67206fd628b9bbcafdaa90006b3",
+      "beforeNormalizedTextSha256": "0c54e2a311f524087ca59d058ff1ae13ce20711b889b24e834ac272b10c09e52",
+      "afterNormalizedTextSha256": "0a43ba7374cd0c61540de6651b5bf564eb2ea68d0f02c97cc3e58bdfec22c6fc",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/WaterForm.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/WoodForm.cs",
+      "kind": "modified",
+      "beforeSha256": "49564c09395eefcf0201c8a44359a158924b0f3714c5dcc08cec2f8f3218b5a9",
+      "afterSha256": "9adca0a9121e362b7b0c680c8af762d51bf26a3b4cce7b3941c1e7964a34cdab",
+      "beforeNormalizedTextSha256": "a5e65cccc87c95b78a90a843cd26d5971d75b7343df396cde2eb5fb3ddee9cc0",
+      "afterNormalizedTextSha256": "6bc50e5c569973a56da4d8871b394dac6ecc391913f4242fd56618acc60f5bc0",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/WoodForm.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerForms/WoodTargetEffects.cs",
+      "kind": "modified",
+      "beforeSha256": "2a0f5995098d3fcc9c4f2f74ba618efd302283257a33cf1ffda2d7d146a3c5d6",
+      "afterSha256": "45eab5acad611ca9d520d86270f49b8e32c78823b82494d037016aa10d026025",
+      "beforeNormalizedTextSha256": "53b57135313439ed8a60d74db25096118d8edaf466a11e91cd9a2cf9303ab396",
+      "afterNormalizedTextSha256": "375f4ce00773dd33452ead2d8474c59a433e7ab57a278c340c248070e05d6418",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerForms/WoodTargetEffects.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerInput/PlayerInputHandler.cs",
+      "kind": "modified",
+      "beforeSha256": "2c082a15c63e734bfdfb71cc3d430e1d7656aa6720ee941f1e950ba7dfa6b088",
+      "afterSha256": "ce0a5bf1f179089c147c7a7b2de905b64bf6d058a44c5d7d0904a047aac91686",
+      "beforeNormalizedTextSha256": "2c082a15c63e734bfdfb71cc3d430e1d7656aa6720ee941f1e950ba7dfa6b088",
+      "afterNormalizedTextSha256": "ce0a5bf1f179089c147c7a7b2de905b64bf6d058a44c5d7d0904a047aac91686",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerInput/PlayerInputHandler.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerStates/PlayerAirAttackState.cs",
+      "kind": "modified",
+      "beforeSha256": "fd49c723af39cbf05221668b36edd9b17271909e5949971f0f95a8380b05b826",
+      "afterSha256": "56d78b8ad3f6c618b03afd19ea1a042e8ab49bed73eedd2c4280f56397693f66",
+      "beforeNormalizedTextSha256": "8f2f3a442384020c3f42057c218614ccfa39d304604df3ded3b81091bdb07193",
+      "afterNormalizedTextSha256": "66bbd6eea0b3270f48543aa5bfbb42d2eb947f340a2785684c824bf7cd5a6a47",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerStates/PlayerAirAttackState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerStates/PlayerAttackState.cs",
+      "kind": "modified",
+      "beforeSha256": "19087877a508f8933847d3f12aeede76c755fd99933c72e815cf147e6d9214cd",
+      "afterSha256": "54065274c96f67709a1403e896957b8d8a4919ae7f8dd816c0b2a2f74eba6122",
+      "beforeNormalizedTextSha256": "de56bf762c3a6b695df171dab2f5cbdd1b2e70ebf3997c348e17a11493a4088a",
+      "afterNormalizedTextSha256": "9cce5ddce9246fdd27e6b61c76737ddb5506dcd8c796512dae937eee9de67479",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerStates/PlayerAttackState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerStates/PlayerDashState.cs",
+      "kind": "modified",
+      "beforeSha256": "06298206628f381fb9036a2f92558c1dbfe578247e1cc819e834132d5366af7c",
+      "afterSha256": "91f71d113a80e1be7448f3b81e5281ccbc1d361fe9b3b634dc45d122178b15ab",
+      "beforeNormalizedTextSha256": "c4544814a46c826737b7589514ddf8aa5bbc436e7dc49414344a1e1921cdbd5d",
+      "afterNormalizedTextSha256": "90bfafd895dc5837644da1f5fe1d1346d1083bc9479263efe2ec1aede6224a8c",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerStates/PlayerDashState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerStates/PlayerDieState.cs",
+      "kind": "modified",
+      "beforeSha256": "6cc99b45264ccdb1f1b5102e715054d7a749c6bb180b7598e8329a6185b38834",
+      "afterSha256": "2bfc41fa9ec8439f588f99e052459b31f60bb1ffad01fb483ee4760e1ed70520",
+      "beforeNormalizedTextSha256": "85197ff840747ce33b577b384417235eef222716322ca1906ed0e11dbd00d6b8",
+      "afterNormalizedTextSha256": "56b3d79ff7a3fbe9665ba6eb980fa1df7a73dddeefcd10c57412ddcd589683f8",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerStates/PlayerDieState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerStates/PlayerHitState.cs",
+      "kind": "modified",
+      "beforeSha256": "4e0ba6cd7b816b7e8d61c1ee133f65c043e72818c4fee57c6dab8160f9240736",
+      "afterSha256": "a548120b8a083c0bf12c3fe69f877bc7e003bc797538e5a4c937f78b35ac8c58",
+      "beforeNormalizedTextSha256": "4e0ba6cd7b816b7e8d61c1ee133f65c043e72818c4fee57c6dab8160f9240736",
+      "afterNormalizedTextSha256": "a548120b8a083c0bf12c3fe69f877bc7e003bc797538e5a4c937f78b35ac8c58",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerStates/PlayerHitState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerStates/PlayerIdleState.cs",
+      "kind": "modified",
+      "beforeSha256": "cddfc1a30578b0238d178f831d9c8bd253ce0102e2bc7f5e9c04ed1be7fe480a",
+      "afterSha256": "dfe56b8cde7d6647730bc84aeaeb753e91e3a4dd434b47786d9d8b961a11b719",
+      "beforeNormalizedTextSha256": "cc10bc646706010ea4949fdedc3e0d90d19a41657e59b1946af5a2117a66cd4c",
+      "afterNormalizedTextSha256": "1038525eb889b3de85f8dac2ad0aae9b9b58e62b901e75b0bd902739492abb9a",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerStates/PlayerIdleState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerStates/PlayerParryState.cs",
+      "kind": "modified",
+      "beforeSha256": "a7cb77d8cd196687d4aa921d9f06c67ae2a89676aa11bd1e30533357d4f61181",
+      "afterSha256": "1f82e6d97d5de96a5daaa8f66e5bd9fc5ef4a23bc5923da23ecd5b019cf22eff",
+      "beforeNormalizedTextSha256": "a7cb77d8cd196687d4aa921d9f06c67ae2a89676aa11bd1e30533357d4f61181",
+      "afterNormalizedTextSha256": "1f82e6d97d5de96a5daaa8f66e5bd9fc5ef4a23bc5923da23ecd5b019cf22eff",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerStates/PlayerParryState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerStates/PlayerRunState.cs",
+      "kind": "modified",
+      "beforeSha256": "e0a88b34a7e5d7c460ab5e35a886da2ccf48d45f83de800eb6848af466a2b59a",
+      "afterSha256": "0dd3b31a49d108541ee7d219a7c4d4c8c3b134588bd408f6ed94125d08dfee70",
+      "beforeNormalizedTextSha256": "4fe6b82c47119e91bd3c4a371a25c464c9ec9e6a7d82f5a223993120ca164a4f",
+      "afterNormalizedTextSha256": "a9ac36b44677fe3d26ba9583f3c8676a4c39233be3146c9ae85764891881caf2",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerStates/PlayerRunState.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/PlayerStates/StateMachine.cs",
+      "kind": "modified",
+      "beforeSha256": "4cfcfde19ece3b835b230eae9e149f0ccd5f5f38f12512fb443206197771198c",
+      "afterSha256": "ef03297be104bf8b6e06aa19e7431d5ead253edd27db0c397e96b7526adaa905",
+      "beforeNormalizedTextSha256": "783fed03bd62a4cc2232ae8a2221338426e29c601550581da0815860208f30d8",
+      "afterNormalizedTextSha256": "4b06af546b5854becabd08f694ae9ac16aaa71fe946824209aeecccbe0e11102",
+      "baselineSource": "game/Assets/_Project/Scripts/PlayerStates/StateMachine.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/StatusEffect/AirborneEffect.cs",
+      "kind": "modified",
+      "beforeSha256": "0aa005a7d4e7cef2be559374232893e94bc1533853b3eafbb2335c1d1953f501",
+      "afterSha256": "3c111a836090985ec3f44452132cac49315bea1e3b8628a865a227c4ba3cde24",
+      "beforeNormalizedTextSha256": "0aa005a7d4e7cef2be559374232893e94bc1533853b3eafbb2335c1d1953f501",
+      "afterNormalizedTextSha256": "3c111a836090985ec3f44452132cac49315bea1e3b8628a865a227c4ba3cde24",
+      "baselineSource": "game/Assets/_Project/Scripts/StatusEffect/AirborneEffect.cs"
+    },
+    {
+      "path": "Assets/_Project/Scripts/StatusEffect/SlowEffect.cs",
+      "kind": "modified",
+      "beforeSha256": "75b77cd1d43e3a8fd36e23d889526986f0908e4149e34312bfba5e01297bf7b0",
+      "afterSha256": "e6c4ace8c8da8185afacce08c6ea0e3014dc4ab5bf63e8565b8c8f8dd401c88f",
+      "beforeNormalizedTextSha256": "ba3cb43618e86c259f94d21c5606c8d647bc1d3b1a257c4713b4c99fb10cbc65",
+      "afterNormalizedTextSha256": "b6537a7d52b9ec74f9f514db98ec94301828934e1b4718d191a2832e6ec759aa",
+      "baselineSource": "game/Assets/_Project/Scripts/StatusEffect/SlowEffect.cs"
+    }
+  ]
+}

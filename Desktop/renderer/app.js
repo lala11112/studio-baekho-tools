@@ -5,6 +5,7 @@ const $ = id => document.getElementById(id);
 const list = value => Array.isArray(value) ? value.filter(Boolean) : [];
 const copy = value => JSON.parse(JSON.stringify(value));
 const finite = value => typeof value === 'number' && Number.isFinite(value);
+const tuning = globalThis.CombatTuning;
 const fmt = value => finite(value) ? Number(value.toFixed(4)).toString() : '—';
 // Unity serializes float32 values as doubles. Display meaningful precision
 // without changing the original AI-generated request values.
@@ -16,7 +17,10 @@ const node = (tag, value, className) => {
   return element;
 };
 const option = (select, label, value) => { const item = node('option', label); item.value = value; select.append(item); };
-const parameterName = spec => ({ 'Normal combo knockback': '일반 공격 넉백', 'Normal combo camera impulse': '타격 카메라 반응', 'Player hit stop': '플레이어 히트스톱', 'Hit stop': '히트스톱' })[spec.label] || spec.label || spec.id;
+const parameterName = spec => ({ 'Normal combo knockback': '일반 공격 넉백', 'Normal combo camera impulse': '타격 카메라 반응', 'Player hit stop': '플레이어 히트스톱', 'Hit stop': '히트스톱', Mode: '적용 방식', Duration: '지속 시간', Delay: '시작 지연', Frequency: '진동 주파수', Amplitude: '진동 크기', Clock: '시간 기준', Scope: '정지 대상', Stacking: '중첩 방식', TargetWeight: '피격 대상 비중', FovOffset: '시야각 변화', ReturnDuration: '복귀 시간', Position: '위치 이동', Rotation: '회전', Strength: '충격 세기', Attack: '가속', Release: '감쇠', Envelope: '세기 곡선' })[spec.label] || spec.label || spec.id;
+const targetName = id => String(id || '').replace(/^step\.(\d+)/, (_, n) => `${Number(n) + 1}단계`).replace(/\.hit\.(\d+)/, (_, n) => ` · ${Number(n) + 1}타격`);
+const enumName = value => ({ Inherit: '원본 유지', Off: '끄기', Override: '직접 설정', Global: '전체', Attacker: '공격자', Victim: '피격자', Both: '공격자와 피격자', Scaled: '게임 시간', Unscaled: '실시간', World: '월드 방향', Local: '로컬 방향', Screen: '화면 방향', Additive: '더하기', Max: '큰 값 우선', Replace: '교체' })[value] || value;
+const captureStatusName = value => ({ complete: '완전 캡처', incomplete: '불완전 캡처', truncated: '캡처 일부 누락', disabled: '캡처 해제', 'missing-hit': '대상 명중 없음' })[value] || value || '기록 없음';
 const unitName = spec => spec.unit === '× baseline' ? '기준 배율' : spec.unit === 'seconds' || spec.unit === 's' ? '초' : spec.unit || '';
 const candidateName = (candidate, index = 0) => candidate?.label || candidate?.id || `후보 ${index + 1}`;
 const actionIdOf = request => request?.actionId || 'normal-combo';
@@ -65,6 +69,8 @@ function dateLabel(date, withTime = true) {
 }
 function runStatus(run) {
   const status = String(run.status || '').toLowerCase();
+  if (status === 'conditions-mismatch') return '조건 불일치';
+  if (status === 'conditions-unavailable') return '조건 확인 불가';
   if (status === 'incomplete') return '미완료';
   if (status === 'no-hits') return '명중 없음';
   if (status.includes('cancel')) return '취소됨';
@@ -86,7 +92,38 @@ function locate(request) {
   return { adapter, source, action };
 }
 function currentAction() { return locate(state.selection).action; }
-function currentParameters() { return list(currentAction()?.parameters); }
+function parametersOf(action, version) { return list(version === 1 && action?.legacyParameters?.length ? action.legacyParameters : action?.parameters); }
+function currentParameters() { return parametersOf(currentAction(), state.request?.schemaVersion); }
+function currentCurves() { return list(currentAction()?.curves); }
+const conditionKeys = ['durationSeconds', 'seed', 'recordVideo', 'includeSourceControl', 'scenarioMode', 'precisionCapture', 'precisionTargetId', 'repeatCount'];
+function conditionsOf(request) { return Object.fromEntries(conditionKeys.filter(key => request?.[key] !== undefined).map(key => [key, request[key]])); }
+function designOptions() { return { mode: $('generationMode').value, strategy: $('generationStrategy').value,
+  recipeId: $('recipeId').value, referenceCandidateId: $('referenceCandidate').value, feedback: $('refineFeedback').value,
+  lockedIds: state.actionDrafts[state.selection?.actionId]?.options?.lockedIds || [] }; }
+function markEdited(candidate, spec, request = state.request) {
+  candidate.origin = 'manual'; candidate.revision = (candidate.revision || 0) + 1;
+  if (spec?.id.endsWith('.mode') && candidate.values.find(item => item.id === spec.id)?.value === 0) {
+    candidate.values = candidate.values.filter(item => item.id === spec.id || !tuning.channelContains(spec.id, item.id));
+    candidate.curves = (candidate.curves || []).filter(item => !tuning.channelContains(spec.id, item.id));
+  }
+  if (spec && !spec.id.endsWith('.mode')) {
+    const modeId = tuning.owningMode(spec.id, spec.targetId);
+    const mode = list(locate(request).action?.parameters).find(item => item.id === modeId);
+    const entry = mode && list(candidate.values).find(item => item.id === mode.id);
+    if (entry) entry.value = 2;
+    else if (mode) candidate.values.push({ id: mode.id, value: 2 });
+    if (spec.id.endsWith('.camera.motion.fovOffset')) {
+      const flagId = spec.id.slice(0, -'fovOffset'.length) + 'useFeelZoom';
+      if (list(locate(request).action?.parameters).some(item => item.id === flagId)) {
+        const flag = candidate.values.find(item => item.id === flagId);
+        if (flag) flag.value = 0; else candidate.values.push({ id: flagId, value: 0 });
+      }
+    }
+  }
+  const draft = state.actionDrafts[actionIdOf(request)];
+  if (draft) { draft.candidateId = ''; draft.observedRunId ||= draft.runId; draft.runId = null; }
+  updateControls();
+}
 function reportTarget(bundle) {
   const report = bundle.report || {}, identity = { ...report, ...bundle.request }, target = locate(identity);
   return { ...target,
@@ -100,7 +137,7 @@ function clearActionDrafts() { state.selectedActions = []; state.actionDrafts = 
 function draftSignature(draft) { return JSON.stringify([draft.request?.adapterId, draft.request?.sourceGuid, actionIdOf(draft.request), draft.goal.trim(), Number(draft.count)]); }
 function draftReady(draft) {
   const target = locate(draft?.request);
-  return Boolean(draft && list(draft.request?.candidates).length && draft.generatedSignature === draftSignature(draft)
+  return Boolean(draft && list(draft.request?.candidates).length > 0 && draft.generatedSignature === draftSignature(draft)
     && target.action?.available !== false && target.action?.defaultRequest && !sourceError(target.source));
 }
 function saveFocusedDraft() {
@@ -108,16 +145,21 @@ function saveFocusedDraft() {
   const id = actionIdOf(state.request), old = state.actionDrafts[id];
   state.actionDrafts[id] = Object.assign(old || {}, { request: state.request, requestOrigin: state.requestOrigin,
     generatedSignature: state.generatedSignature, goal: $('goal').value, count: Number($('candidateTotal').value),
-    schema: old?.schema ?? JSON.stringify(currentAction()), candidateId: old?.candidateId || '' });
+    schema: old?.schema ?? JSON.stringify(currentAction()), candidateId: old?.candidateId || '', options: designOptions() });
 }
 function focusAction(id) {
   saveFocusedDraft();
   const draft = state.actionDrafts[id];
   if (!draft) return;
   state.request = draft.request; state.selection = { adapterId: draft.request.adapterId, sourceGuid: draft.request.sourceGuid, actionId: id };
+  state.source = locate(state.selection).source || null;
   state.requestOrigin = draft.requestOrigin; state.generatedSignature = draft.generatedSignature;
   $('goal').value = draft.goal; $('candidateTotal').value = draft.count;
   $('duration').value = draft.request.durationSeconds; $('seed').value = draft.request.seed; $('recordVideo').checked = draft.request.recordVideo;
+  for (const key of ['includeSourceControl', 'precisionCapture']) $(key).checked = draft.request[key] ?? false;
+  $('scenarioMode').value = draft.request.scenarioMode || 'live'; $('repeatCount').value = draft.request.repeatCount || 1;
+  $('precisionTargetId').value = draft.request.precisionTargetId || '';
+  drawDesignOptions(draft);
   drawSelectors(); drawCandidates(); updateControls();
 }
 function actionConflict(ids) { return ids.includes('normal-combo') && ids.some(id => /^normal-\d+$/.test(id)); }
@@ -130,7 +172,7 @@ function toggleAction(id, selected) {
   const action = sourceActions(state.source).find(item => item.id === id);
   if (selected && (!action?.defaultRequest || action.available === false)) { message(action?.unavailableReason || '아직 테스트할 수 없는 동작입니다.', true); drawActionSelection(); return; }
   if (selected && !state.actionDrafts[id]) {
-    const conditions = state.request ? { durationSeconds: state.request.durationSeconds, seed: state.request.seed, recordVideo: state.request.recordVideo } : {};
+    const conditions = conditionsOf(state.request);
     const request = { ...copy(action.defaultRequest), ...conditions, ...state.selection, actionId: id, candidates: [] };
     state.actionDrafts[id] = { request, requestOrigin: 'draft', generatedSignature: '', goal: '묵직하지만 콤보 흐름은 끊기지 않는 타격감', count: 4, schema: JSON.stringify(action), candidateId: '' };
   }
@@ -189,13 +231,17 @@ function replaceRequest(request, origin = 'draft') {
     }
     const old = state.actionDrafts[id];
     state.actionDrafts[id] = { ...old, request: state.request, requestOrigin: origin, generatedSignature: state.generatedSignature,
-      goal: $('goal').value, count: Number($('candidateTotal').value), schema: JSON.stringify(currentAction()), candidateId: '', runId: null };
+      goal: $('goal').value, count: Number($('candidateTotal').value), schema: JSON.stringify(currentAction()), candidateId: '', runId: null, options: old?.options || {} };
   }
   drawSelectors();
   drawCandidates();
   $('duration').value = state.request?.durationSeconds ?? 10;
   $('seed').value = state.request?.seed ?? 1701;
   $('recordVideo').checked = state.request?.recordVideo ?? true;
+  for (const key of ['includeSourceControl', 'precisionCapture']) $(key).checked = state.request?.[key] ?? false;
+  $('scenarioMode').value = state.request?.scenarioMode || 'live'; $('repeatCount').value = state.request?.repeatCount || 1;
+  $('precisionTargetId').value = state.request?.precisionTargetId || '';
+  drawDesignOptions(state.actionDrafts[actionIdOf(request)]);
   drawActionPanels();
   updateControls();
 }
@@ -269,7 +315,7 @@ function drawSelectors() {
     : selectedAdapter?.error || (!all.length ? '등록된 프로젝트 어댑터가 없습니다. 연결 패키지와 프로젝트용 어댑터를 설치하세요. 처음 연결하는 프로젝트는 Example 어댑터로 동작을 확인할 수 있습니다.'
       : !state.source ? '이 어댑터의 실험 데이터가 없습니다. Unity에서 해당 어댑터가 사용하는 데이터를 만든 뒤 연결 정보를 새로고침하세요.'
         : !actionAvailable() ? selectedAction?.unavailableReason || state.source.error || '선택한 동작을 현재 프로젝트에서 찾을 수 없습니다. 연결 정보를 새로고침하세요.'
-          : `${selectedAction.label || actionName(selectedAction.id)} · ${currentParameters().length}개 항목의 수치를 AI가 작성 · 실험용 복사본에 적용`);
+          : `${selectedAction.label || actionName(selectedAction.id)} · ${currentParameters().length}개 항목 · 원본 해시 ${state.request?.sourceHash?.slice(0, 12) || 'v1'} · 실험용 복사본에 적용`);
   $('sourceHelp').classList.toggle('unavailable', Boolean(connected) && (!actionAvailable() || Boolean(selectedAdapter?.error)));
   $('adapterSetup').hidden = all.length > 0;
   drawActionSelection();
@@ -294,33 +340,136 @@ function drawCandidates() {
   });
   const selectedId = state.actionDrafts[state.selection?.actionId]?.candidateId;
   if (candidates.some(candidate => candidate.id === selectedId)) $('editorCandidate').value = selectedId;
+  drawDesignOptions(state.actionDrafts[state.selection?.actionId]);
 }
-function candidateCard(candidate, index, specs, origin) {
+function observationReference(draft, reference) {
+  const bundle = state.reportBundle, report = bundle?.report;
+  if (!draft?.request || !report || draft.request.schemaVersion !== 2 || report.adapterId !== draft.request.adapterId || report.sourceGuid !== draft.request.sourceGuid ||
+      actionIdOf(report) !== actionIdOf(draft.request) || draft.request.sourceHash && report.sourceDependencyHash !== draft.request.sourceHash) return null;
+  if (reference.id === 'source-reference') return report.controlResult ? { runId: report.runId, candidateId: report.controlResult.candidate.id } : null;
+  const measured = list(report.results).find(row => row.candidate.id === reference.id);
+  const linkedRun = draft.runId === report.runId || draft.observedRunId === report.runId;
+  const sameGeneration = Boolean(draft.request.generation?.createdUtc && draft.request.generation.createdUtc === bundle.request?.generation?.createdUtc);
+  if (measured && (linkedRun || sameGeneration || matchingCandidates([reference], [measured.candidate]))) return { runId: report.runId, candidateId: measured.candidate.id };
+  const ancestor = draft.request.generation?.referenceCandidateId;
+  return ancestor && list(report.results).some(row => row.candidate.id === ancestor) ? { runId: report.runId, candidateId: ancestor } : null;
+}
+function drawDesignOptions(draft) {
+  const options = draft?.options || {}, previous = options.referenceCandidateId || '';
+  for (const [id, fallback] of [['generationMode', 'explore'], ['generationStrategy', 'coherent'], ['refineFeedback', '']]) {
+    const key = { generationMode: 'mode', generationStrategy: 'strategy', refineFeedback: 'feedback' }[id];
+    $(id).value = options[key] || fallback;
+  }
+  $('referenceCandidate').replaceChildren(); option($('referenceCandidate'), '현재 원본값', '');
+  list(draft?.request?.candidates).forEach((candidate, index) => option($('referenceCandidate'), candidateName(candidate, index), candidate.id));
+  $('referenceCandidate').value = previous;
+  $('recipeId').replaceChildren(); option($('recipeId'), '가이드 전체', '');
+  list(state.snapshot?.knowledge?.recipes).forEach(recipe => option($('recipeId'), recipe.label || recipe.id, recipe.id));
+  $('recipeId').value = options.recipeId || '';
+  $('gameContext').textContent = typeof currentAction()?.context === 'string' ? currentAction().context : JSON.stringify(currentAction()?.context || {});
+  const reference = list(draft?.request?.candidates).find(candidate => candidate.id === previous) || { id: 'source-reference' };
+  const observation = observationReference(draft, reference);
+  $('observationHint').textContent = observation ? `참고 실험 ${observation.runId} · 측정 후보 ${observation.candidateId}. 수정된 후보는 미검증 상태로 AI에 전달합니다.` : '연결된 실측 기록이 없습니다. AI는 현재 설정과 가이드로 가설을 작성합니다.';
+  const locks = $('parameterLocks'); locks.replaceChildren();
+  for (const spec of [...currentParameters(), ...currentCurves()]) {
+    const label = node('label'), input = node('input'); input.type = 'checkbox'; input.checked = (options.lockedIds || []).includes(spec.id);
+    input.disabled = locked();
+    input.addEventListener('change', () => {
+      const selectedDraft = state.actionDrafts[state.selection?.actionId]; if (!selectedDraft) return;
+      const ids = new Set(selectedDraft.options?.lockedIds || []); input.checked ? ids.add(spec.id) : ids.delete(spec.id);
+      selectedDraft.options = { ...designOptions(), lockedIds: [...ids] }; selectedDraft.generatedSignature = ''; state.generatedSignature = ''; updateControls();
+    });
+    label.append(input, node('span', `${spec.targetId ? `${targetName(spec.targetId)} · ` : ''}${spec.group || ''} ${parameterName(spec)}`)); locks.append(label);
+  }
+}
+function candidateCard(candidate, index, specs, origin, request = state.request) {
     const card = node('article', undefined, 'candidate-card');
     const head = node('div', undefined, 'candidate-head');
     const title = node('h3', candidateName(candidate, index), 'candidate-title');
     head.append(node('span', index + 1, 'candidate-letter'), title);
-    head.append(node('span', origin === 'ai' ? 'AI 제안' : '불러온 후보', 'candidate-tag'));
+    const tag = node('span', `${candidate.origin || origin} · r${candidate.revision || 1}`, 'candidate-tag'); head.append(tag);
     card.append(head);
     if (candidate.rationale) card.append(node('p', candidate.rationale, 'candidate-rationale'));
     const body = node('div', undefined, 'candidate-body');
+    const inputs = new Map();
+    const deltas = new Map();
+    const curveEditors = new Map();
+    const refreshMode = spec => { const id = tuning.owningMode(spec.id, spec.targetId), input = inputs.get(id), descriptor = specs.find(item => item.id === id); if (input) {
+      const value = candidate.values.find(item => item.id === id)?.value ?? descriptor.baseline; input.value = String(value);
+      if (deltas.has(id)) deltas.get(id).textContent = value === descriptor.baseline ? '현재와 동일' : `변경 ${fmt(value - descriptor.baseline)}`;
+    } };
+    const groups = new Map();
+    const groupHost = spec => {
+      if (request?.schemaVersion !== 2) return body;
+      const key = `${spec.targetId || ''}/${spec.group || ''}`;
+      if (!groups.has(key)) {
+        const section = node('details', undefined, 'parameter-group');
+        section.open = [...list(candidate.values), ...list(candidate.curves)].some(item => [...specs, ...list(locate(request).action?.curves)].some(other => other.id === item.id && other.targetId === spec.targetId && other.group === spec.group));
+        section.append(node('summary', `${targetName(spec.targetId)} · ${spec.group || '설정'}`)); body.append(section); groups.set(key, section);
+      }
+      return groups.get(key);
+    };
     for (const spec of specs) {
       const parameter = list(candidate.values).find(value => value.id === spec.id);
       const label = node('div', undefined, 'parameter');
       label.title = `${spec.description || parameterName(spec)}\n허용 범위: ${spec.minimum}–${spec.maximum} ${unitName(spec)}`;
       const top = node('span', undefined, 'parameter-top');
-      top.append(node('span', parameterName(spec)), node('span', unitName(spec), 'parameter-unit'));
-      const value = node('output', inputNumber(parameter?.value) || '—', 'parameter-value');
+      top.append(node('span', `${spec.targetId ? `${targetName(spec.targetId)} · ` : ''}${spec.group ? `${spec.group} · ` : ''}${parameterName(spec)}`), node('span', unitName(spec), 'parameter-unit'));
+      const editable = request?.schemaVersion === 2;
+      const value = node(editable ? spec.kind === 'enum' ? 'select' : 'input' : 'output', editable ? undefined : inputNumber(parameter?.value) || '—', 'parameter-value');
+      if (editable) {
+        inputs.set(spec.id, value);
+        if (spec.kind === 'enum') { list(spec.options).forEach((label, i) => option(value, enumName(label), i)); value.value = parameter?.value ?? spec.baseline; }
+        else if (spec.kind === 'boolean') { value.type = 'checkbox'; value.checked = (parameter?.value ?? spec.baseline) === 1; }
+        else { value.type = 'number'; value.step = 'any'; value.min = spec.minimum; value.max = spec.maximum; value.value = inputNumber(parameter?.value ?? spec.baseline); }
+        value.disabled = locked();
+        value.addEventListener('input', () => {
+          let target = list(candidate.values).find(item => item.id === spec.id);
+          if (!target) { target = { id: spec.id, value: spec.baseline }; candidate.values.push(target); }
+          target.value = spec.kind === 'boolean' ? Number(value.checked) : value.value === '' ? NaN : Number(value.value);
+          value.classList.toggle('invalid', !tuning.validValue(target.value, spec)); markEdited(candidate, spec, request);
+          refreshMode(spec);
+          if (spec.id.endsWith('.mode') && target.value === 0) {
+            for (const other of specs) if (other.id !== spec.id && tuning.channelContains(spec.id, other.id)) { const input = inputs.get(other.id); if (input) { input.value = inputNumber(other.baseline); input.checked = other.baseline === 1; } }
+            for (const curve of list(locate(request).action?.curves)) if (tuning.channelContains(spec.id, curve.id) && curveEditors.has(curve.id)) curveEditors.get(curve.id).value = list(curve.keys).map(key => `${inputNumber(key.time)}, ${inputNumber(key.value)}`).join('\n');
+          }
+          tag.textContent = `${candidate.origin} · r${candidate.revision}`;
+          delta.textContent = finite(target.value) ? `변경 ${fmt(target.value - spec.baseline)}` : '값을 입력하세요';
+        });
+      }
       value.setAttribute('aria-label', `${candidateName(candidate, index)} ${parameterName(spec)}`);
       const range = node('span', undefined, 'parameter-range');
       const delta = node('span', '', 'delta');
-      range.append(node('span', `현재 ${fmt(spec.baseline)}`), delta);
+      deltas.set(spec.id, delta);
+      range.append(node('span', `현재 ${fmt(spec.baseline)}${spec.useSuggestedRange ? ` · 권장 ${fmt(spec.suggestedMinimum)}–${fmt(spec.suggestedMaximum)}` : ''}`), delta);
       const changed = finite(parameter?.value) && Math.abs(parameter.value - spec.baseline) > 0.000001;
       value.classList.toggle('changed', changed);
       delta.textContent = changed ? `${parameter.value > spec.baseline ? '+' : ''}${fmt(parameter.value - spec.baseline)}` : '현재와 동일';
-      label.append(top, value, range); body.append(label);
+      label.append(top, value, range); groupHost(spec).append(label);
     }
-    card.append(body, node('div', origin === 'ai' ? 'AI가 작성한 수치 · 읽기 전용' : '불러온 수치 · 읽기 전용', 'candidate-foot'));
+    if (request?.schemaVersion === 2) for (const spec of list(locate(request).action?.curves)) {
+      const details = node('details', undefined, 'curve-editor'), summary = node('summary', `${parameterName(spec)} · 선형 키`);
+      const editor = node('textarea'); editor.rows = 4; editor.setAttribute('aria-label', `${candidateName(candidate, index)} ${spec.label || spec.id} 곡선 키`);
+      curveEditors.set(spec.id, editor);
+      const curve = list(candidate.curves).find(item => item.id === spec.id);
+      editor.value = (curve?.keys || spec.keys || []).map(key => `${inputNumber(key.time)}, ${inputNumber(key.value)}`).join('\n');
+      const error = node('p', '한 줄에 시간, 값 · 2–16개 · 선형 보간', 'fine-print');
+      editor.disabled = locked();
+      editor.addEventListener('change', () => {
+        const keys = editor.value.trim().split(/\n/).map(line => { const pair = line.split(',').map(Number); return { time: pair[0], value: pair.length === 2 ? pair[1] : NaN }; });
+        try {
+          tuning.validateKeys(keys, spec); candidate.curves ||= []; let target = candidate.curves.find(item => item.id === spec.id);
+          if (target) target.keys = keys; else candidate.curves.push({ id: spec.id, keys });
+          error.textContent = '선형 곡선 변경됨'; error.classList.remove('error'); markEdited(candidate, spec, request); refreshMode(spec); tag.textContent = `${candidate.origin} · r${candidate.revision}`;
+          if (spec.id.endsWith('.camera.motion.fovOffset')) {
+            const flagId = spec.id.slice(0, -'fovOffset'.length) + 'useFeelZoom';
+            if (inputs.has(flagId)) { inputs.get(flagId).checked = false; error.textContent += ' · FOV 중복 연출을 막기 위해 Feel 줌을 해제했습니다.'; }
+          }
+        } catch (exception) { error.textContent = exception.message; error.classList.add('error'); }
+      });
+      details.append(summary, editor, error); groupHost(spec).append(details);
+    }
+    card.append(body, node('div', request?.schemaVersion === 2 ? '절대값 직접 편집 · 변경한 채널은 직접 설정으로 적용' : 'v1 원래 배율 의미 유지 · 읽기 전용', 'candidate-foot'));
     return card;
 }
 function drawActionPanels() {
@@ -345,7 +494,7 @@ function drawActionPanels() {
     const cancel = node('button', '생성 취소', 'danger-button small'), generate = node('button', 'AI 후보 생성', 'primary small'); buttons.append(cancel, generate); actions.append(status, buttons);
     generate.setAttribute('data-control', 'generate');
     const candidates = node('div', undefined, 'candidates'); candidates.classList.toggle('many-candidates', list(draft.request.candidates).length > 4);
-    list(draft.request.candidates).forEach((candidate, index) => candidates.append(candidateCard(candidate, index, list(action?.parameters), draft.requestOrigin)));
+    list(draft.request.candidates).forEach((candidate, index) => candidates.append(candidateCard(candidate, index, parametersOf(action, draft.request.schemaVersion), draft.requestOrigin, draft.request)));
     if (!list(draft.request.candidates).length) candidates.append(node('p', '이 동작의 목표와 후보 수를 정하고 AI 후보를 생성하세요.', 'fine-print'));
     const hint = node('p', '', 'fine-print');
     const footer = node('div', undefined, 'action-design-footer'), winnerLabel = node('label', '이 동작의 최종 후보', 'field'), winner = node('select');
@@ -387,7 +536,7 @@ function updateActionControls(disabled, connected, ai) {
     controls.generate.textContent = working ? 'AI가 후보를 작성 중…' : list(draft.request.candidates).length ? 'AI 후보 다시 생성' : 'AI 후보 생성';
     controls.cancel.hidden = !working; controls.cancel.disabled = !working || state.generationCancelled;
     controls.cancel.textContent = state.generationCancelled ? '취소 요청됨' : '생성 취소';
-    controls.status.textContent = working ? '이 동작의 후보를 작성하고 있습니다.' : !available ? action?.unavailableReason || '이 동작을 현재 테스트할 수 없습니다.' : ai.error || (ai.available && ai.authenticated ? `${ai.label || 'Codex 연결됨'} · 이 동작만의 목표를 입력하세요.` : 'AI 연결과 로그인을 확인하세요.');
+    controls.status.textContent = working ? '이 동작의 후보를 작성하고 있습니다.' : !available ? action?.unavailableReason || '이 동작을 현재 테스트할 수 없습니다.' : ai.error || (ai.available && ai.authenticated ? `${ai.label || 'AI 연결됨'} · 이 동작만의 목표를 입력하세요.` : 'AI 연결과 로그인을 확인하세요.');
     const stale = list(draft.request.candidates).length > 0 && !ready;
     controls.candidates.classList.toggle('stale', stale); controls.hint.classList.toggle('stale-hint', stale);
     controls.hint.textContent = stale ? '목표, 후보 수 또는 공격 데이터가 바뀌었습니다. 이 동작의 후보를 다시 생성하세요.' : ready ? '후보를 비교한 뒤 최종 후보 하나를 선택하세요. 모든 동작의 선택을 하나의 SO에 저장합니다.' : '';
@@ -418,12 +567,14 @@ function matchingCandidates(expected, recorded) {
     if (!actual || (candidate.label ?? '') !== (actual.label ?? '') || (candidate.rationale ?? '') !== (actual.rationale ?? '')) return false;
     const values = candidate.values, applied = actual.values;
     if (!Array.isArray(values) || !Array.isArray(applied) || values.length !== applied.length || !uniqueIds(values) || !uniqueIds(applied)) return false;
-    return values.every(value => {
+    const sameValues = values.every(value => {
       const result = applied.find(item => item.id === value.id);
       // Unity's request DTO stores float32 values and may reorder serialized
       // fields. Compare the actual runtime values rather than JSON spelling.
       return result && finite(value.value) && finite(result.value) && Math.fround(value.value) === Math.fround(result.value);
     });
+    const normalizeCurves = curves => list(curves).map(curve => ({ id: curve.id, keys: list(curve.keys).map(key => ({ time: Math.fround(key.time), value: Math.fround(key.value) })) })).sort((a, b) => a.id.localeCompare(b.id));
+    return sameValues && JSON.stringify(normalizeCurves(candidate.curves)) === JSON.stringify(normalizeCurves(actual.curves));
   });
 }
 function reportDraft() {
@@ -441,22 +592,34 @@ function validate(request) {
       || (action && (action.available === false || !action.defaultRequest) ? action.unavailableReason || '아직 테스트할 수 없는 동작입니다.' : '');
     if (reason) throw new Error(reason);
   }
-  if (!request || request.schemaVersion !== 1) throw new Error('지원하는 실험 JSON 형식(schemaVersion 1)이 아닙니다.');
+  if (!request || ![1, 2].includes(request.schemaVersion)) throw new Error('지원하는 실험 JSON 형식(schemaVersion 1 또는 2)이 아닙니다.');
   const { adapter, source, action } = locate(request);
   if (!adapter || !source) throw new Error('이 실험의 어댑터 또는 공격 데이터를 현재 프로젝트에서 찾을 수 없습니다. 해당 프로젝트에 연결한 뒤 불러오세요.');
   if (sourceError(source)) throw new Error(sourceError(source));
   if (!action) throw new Error('이 실험의 공격 또는 스킬을 현재 프로젝트에서 찾을 수 없습니다.');
   if (action.available === false || !action.defaultRequest) throw new Error(action.unavailableReason || '아직 테스트할 수 없는 동작입니다.');
+  if (!(action.supportedRequestVersions || [action.defaultRequest.schemaVersion]).includes(request.schemaVersion)) throw new Error('선택한 동작이 이 실험 JSON 버전을 지원하지 않습니다.');
   if (!finite(request.durationSeconds) || request.durationSeconds < 3 || request.durationSeconds > 60) throw new Error('후보당 실행 시간은 3–60초로 입력하세요.');
   if (!Number.isInteger(request.seed) || request.seed < -2147483648 || request.seed > 2147483647) throw new Error('난수 시드는 32비트 정수로 입력하세요.');
   if (typeof request.recordVideo !== 'boolean') throw new Error('영상 녹화 설정은 true 또는 false여야 합니다.');
+  if (request.schemaVersion === 2 && (!['fixed', 'live'].includes(request.scenarioMode) || ![1, 3].includes(request.repeatCount) ||
+      typeof request.includeSourceControl !== 'boolean' || typeof request.precisionCapture !== 'boolean' ||
+      typeof request.precisionTargetId !== 'string' || request.precisionTargetId.length > 128)) throw new Error('v2 실행 조건이 올바르지 않습니다.');
+  if (request.schemaVersion === 2 && request.precisionCapture && !request.recordVideo) throw new Error('명중 정밀 캡처에는 플레이 영상 녹화가 필요합니다.');
   if (!Array.isArray(request.candidates) || request.candidates.length < 1 || request.candidates.length > 12) throw new Error('실험에는 후보 1–12개가 필요합니다.');
   const ids = new Set();
-  const specs = list(action.parameters);
+  const specs = parametersOf(action, request.schemaVersion);
   if (!specs.length) throw new Error('이 공격의 조절 항목을 불러오지 못했습니다. 연결 정보를 새로고침하세요.');
   request.candidates.forEach((candidate, index) => {
     if (!candidate || typeof candidate.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(candidate.id) || ids.has(candidate.id)) throw new Error('후보 ID는 중복 없는 영문, 숫자, 밑줄, 하이픈 1–64자여야 합니다.');
     ids.add(candidate.id);
+    if (request.schemaVersion === 2) {
+      if (candidate.isSourceControl || !Array.isArray(candidate.values) || new Set(candidate.values.map(item => item.id)).size !== candidate.values.length) throw new Error('원본 기준은 사용자 후보로 추가할 수 없으며 수치 ID는 중복할 수 없습니다.');
+      for (const entry of candidate.values) { const spec = specs.find(item => item.id === entry?.id); if (!spec || !tuning.validValue(entry.value, spec)) throw new Error(`${entry?.id}: 수치 형식 또는 범위를 확인하세요.`); }
+      const curveIds = new Set();
+      for (const curve of candidate.curves || []) { const spec = list(action.curves).find(item => item.id === curve?.id); if (!spec || curveIds.has(curve.id)) throw new Error('곡선 ID가 없거나 중복됐습니다.'); curveIds.add(curve.id); tuning.validateKeys(curve.keys, spec); }
+      return;
+    }
     if (!Array.isArray(candidate.values) || candidate.values.length !== specs.length) throw new Error(`${candidateName(candidate, index)}: 모든 조절 항목이 정확히 한 번씩 필요합니다.`);
     for (const spec of specs) {
       const values = candidate.values.filter(value => value?.id === spec.id);
@@ -487,6 +650,7 @@ function updateControls() {
   $('exportEditorPreset').disabled = disabled || !connected || !ready;
   $('editorCandidate').disabled = disabled || !ready;
   $('exportReportPreset').disabled = disabled || !connected || !state.reportBundle?.request || !$('winner').value;
+  $('repeatSelected').disabled = disabled || !connected || state.reportBundle?.request?.schemaVersion !== 2 || !$('winner').value;
   $('saveJudgment').disabled = state.busy > 0 || !state.selectedRunId;
   $('exportRequest').disabled = disabled || !ready;
   $('refreshCatalog').disabled = disabled || !connected;
@@ -495,11 +659,13 @@ function updateControls() {
   $('cancelGeneration').hidden = !isGenerating;
   $('cancelGeneration').disabled = !isGenerating || state.generationCancelled;
   $('cancelGeneration').textContent = state.generationCancelled ? '취소 요청됨' : '생성 취소';
-  $('aiStatus').textContent = isGenerating ? 'AI가 현재 수치와 허용 범위를 읽고 후보를 작성하고 있습니다.' : ai.error || (ai.available && ai.authenticated ? `${ai.label || 'Codex 연결됨'} · 원하는 감각을 입력하세요.` : ai.available ? 'Codex 로그인이 필요합니다. 로그인 후 연결 정보를 새로고침하세요.' : 'AI 연결을 확인하세요. 연결 정보 새로고침으로 다시 확인할 수 있습니다.');
+  if (ai.preference && document.activeElement !== $('aiProvider')) $('aiProvider').value = ai.preference;
+  $('aiProvider').disabled ||= !api || state.changingProvider;
+  $('aiStatus').textContent = state.changingProvider ? 'AI 엔진 연결을 확인하고 있습니다.' : isGenerating ? 'AI가 현재 수치와 허용 범위를 읽고 후보를 작성하고 있습니다.' : ai.error || (ai.available && ai.authenticated ? `${ai.label || 'AI 연결됨'} · 원하는 감각을 입력하세요.` : ai.available ? `${ai.provider === 'claude' ? 'Claude Code' : 'Codex'} 로그인이 필요합니다. 로그인 후 연결 정보를 새로고침하세요.` : 'AI 연결을 확인하세요. 연결 정보 새로고침으로 다시 확인할 수 있습니다.');
   $('aiStatus').classList.toggle('unavailable', !isGenerating && (!ai.available || !ai.authenticated));
   const stale = list(state.request?.candidates).length > 0 && !ready;
   $('candidates').classList.toggle('stale', stale);
-  $('candidateHint').textContent = stale ? '실험 대상, 목표 또는 후보 수가 바뀌었습니다. 현재 표시된 후보는 이전 제안입니다. AI 후보를 다시 생성하세요.' : ready ? state.requestOrigin === 'ai' ? 'AI가 제안한 수치입니다. 같은 조건으로 플레이한 뒤 영상과 측정값으로 판단하세요.' : 'JSON에서 불러온 후보입니다. AI로 새 후보를 만들려면 목표와 개수를 정하고 다시 생성하세요.' : 'AI가 선택한 공격·스킬의 허용 범위 안에서 수치를 정합니다. 생성된 후보를 확인한 뒤 실험을 실행하세요.';
+  $('candidateHint').textContent = stale ? '실험 대상, 목표 또는 후보 수가 바뀌었습니다. 현재 표시된 후보는 이전 제안입니다. AI 후보를 다시 생성하세요.' : ready ? state.requestOrigin === 'ai' ? 'AI 제안은 가설입니다. 직접 편집한 뒤 같은 조건에서 비교할 수 있습니다.' : state.requestOrigin === 'manual' ? '직접 편집 후보입니다. 펼친 채널의 절대값과 선형 곡선을 조정하고 원본 기준과 비교하세요.' : 'JSON에서 불러온 후보입니다. v2 수치와 곡선은 직접 편집할 수 있습니다.' : 'AI가 선택한 공격·스킬의 허용 범위 안에서 수치를 정합니다. 생성된 후보를 확인한 뒤 실험을 실행하세요.';
   $('candidateHint').classList.toggle('stale-hint', stale);
   const status = connection.isCompiling ? 'Unity 컴파일 중' : isRunning ? '실험 실행 중' : connection.isPlaying ? 'Unity 플레이 모드' : connected ? 'Unity 연결됨' : 'Unity 연결 대기';
   $('connectionLabel').textContent = status;
@@ -508,10 +674,33 @@ function updateControls() {
   $('liveStatus').textContent = isGenerating ? 'AI 후보 생성 중' : isRunning ? connection.status || '실험 준비 중' : connection.error ? '연결 확인 필요' : connected ? '실험 준비' : '연결 대기';
   $('liveStatus').classList.toggle('running', isRunning || isGenerating);
   const candidates = list(state.request?.candidates);
+  $('addManualCandidate').disabled = disabled || state.request?.schemaVersion !== 2 || candidates.length >= 12;
+  for (const id of ['scenarioMode', 'repeatCount', 'includeSourceControl', 'precisionCapture', 'precisionTargetId']) $(id).disabled = disabled || state.request?.schemaVersion !== 2;
+  $('precisionCapture').disabled ||= !state.request?.recordVideo;
   $('runSummary').textContent = isGenerating ? `${count}개 후보의 수치를 AI가 작성 중` : isRunning ? connection.status || '실험 준비 중' : stale ? '새로운 목표로 AI 후보를 다시 생성하세요' : candidates.length ? `${candidates.length}개 후보 · 후보당 ${fmt(state.request.durationSeconds)}초` : state.source ? '원하는 감각을 입력하고 AI 후보를 생성하세요' : '프로젝트 연결을 기다리는 중';
-  $('runDetail').textContent = isGenerating ? '생성이 끝나면 후보별 수치와 제안 이유를 확인할 수 있습니다.' : isRunning ? 'Unity에서 같은 조건으로 순서대로 플레이하고 있습니다.' : connection.isCompiling ? 'Unity 컴파일이 끝나면 실행할 수 있습니다.' : connection.isPlaying ? 'Unity의 플레이 모드를 종료한 뒤 실행하세요.' : !connected ? 'Unity Editor에서 대상 프로젝트를 열고 연결 패키지를 확인하세요.' : !ready ? '수치 입력은 AI가 담당합니다. 비교할 후보 수는 직접 정할 수 있습니다.' : `${state.request?.recordVideo ? '영상 + 전투 이벤트' : '전투 이벤트'} 기록 · 규칙 기반 플레이 · 실행 사이에 씬을 초기화합니다.`;
+  $('runDetail').textContent = isGenerating ? '생성이 끝나면 후보별 수치와 제안 이유를 확인할 수 있습니다.' : isRunning ? 'Unity에서 같은 조건으로 순서대로 플레이하고 있습니다.' : connection.isCompiling ? 'Unity 컴파일이 끝나면 실행할 수 있습니다.' : connection.isPlaying ? 'Unity의 플레이 모드를 종료한 뒤 실행하세요.' : !connected ? 'Unity Editor에서 대상 프로젝트를 열고 연결 패키지를 확인하세요.' : !ready ? 'AI로 후보를 만들거나 원본값 후보를 추가해 직접 조정하세요.' : `${state.request?.recordVideo ? '영상 + 전투 이벤트' : '전투 이벤트'} · ${state.request?.scenarioMode === 'fixed' ? '고정 대상' : '자동 전투'} · ${state.request?.repeatCount || 1}회 반복 · ${state.request?.includeSourceControl ? '원본 기준 별도 실행' : '후보만 실행'}`;
   $('footerConnection').textContent = connection.unityVersion ? `Unity ${connection.unityVersion} · 로컬 연결` : 'Unity 실행 · 데스크톱 제어';
   updateActionControls(disabled, connected, ai);
+  persistDrafts();
+}
+function persistDrafts() {
+  if (!state.snapshot?.projectPath || !Object.values(state.actionDrafts).some(draft => draft.request?.candidates?.length)) return;
+  try { globalThis.localStorage?.setItem(`combat-lab-drafts:${state.snapshot.projectPath}`, JSON.stringify({ schemaVersion: 2, selectedActions: state.selectedActions, drafts: state.actionDrafts })); } catch { /* Quota or disabled local storage must not prevent editing. */ }
+}
+function restoreDrafts() {
+  try {
+    const value = JSON.parse(globalThis.localStorage?.getItem(`combat-lab-drafts:${state.snapshot.projectPath}`) || 'null');
+    if (value?.schemaVersion !== 2 || !Array.isArray(value.selectedActions) || !value.drafts) return;
+    const valid = value.selectedActions.filter(id => { const draft = value.drafts[id]; return draft?.request && locate(draft.request).action && JSON.stringify(locate(draft.request).action) === draft.schema; });
+    if (valid.length) clearActionDrafts();
+    for (const id of valid) {
+      const draft = value.drafts[id], target = locate(draft?.request);
+      if (!draft?.request || !target.action || JSON.stringify(target.action) !== draft.schema) continue;
+      state.actionDrafts[id] = draft; if (!state.selectedActions.includes(id)) state.selectedActions.push(id);
+    }
+    const restored = value.selectedActions.find(id => state.actionDrafts[id]);
+    if (restored) focusAction(restored);
+  } catch { /* Invalid saved drafts never prevent project connection. */ }
 }
 function drawHistory() {
   const runs = list(state.snapshot?.runs);
@@ -563,6 +752,7 @@ function applySnapshot(snapshot) {
   if (snapshot.catalog) state.catalog = snapshot.catalog;
   if (catalogChanged) state.lastHistoryKey = '';
   if (!state.selection || projectChanged || catalogChanged || connectionChanged) reconcileSelection(previousAction);
+  if (projectChanged) restoreDrafts();
   if (snapshot.connection?.running && !state.activeRunId) {
     const directory = String(snapshot.connection.directory || '').replaceAll('\\', '/').split('/').pop();
     state.activeRunId = directory || list(snapshot.runs).find(run => runStatus(run) === '실행 중')?.id || null;
@@ -601,8 +791,11 @@ async function refresh() {
 // for first-hit alignment; raw video comparison always begins at media time 0.
 const videos = [], selectors = [], videoSlots = [];
 let results = [], loaded = [], playing = false, playbackGeneration = 0, comparisonLimit = null;
+const resultName = (result, index = 0) => `${result?.candidate?.isSourceControl ? '원본 기준 · ' : ''}${candidateName(result?.candidate, index)}${result?.repeatIndex ? ` · ${result.repeatIndex}회` : ''}`;
+const resultKey = result => result?.repeatIndex ? `${result.candidate.id}:repeat:${result.repeatIndex}` : result?.candidate?.id;
+let precisionTime = 0, precisionReportId = '';
 function selected(index) { return selectors[index] ? results[Number(selectors[index].value)] : undefined; }
-function selectedCandidateIds() { return selectors.map((select, index) => selected(index)?.candidate?.id).filter(Boolean); }
+function selectedCandidateIds() { return selectors.map((select, index) => resultKey(selected(index))).filter(Boolean); }
 function updateAudioOptions() {
   const sound = $('sound'), previous = sound.value;
   sound.replaceChildren(); option(sound, '음소거', 'none');
@@ -628,8 +821,8 @@ function drawVideoGrid(count, preferredIds = []) {
     const select = node('select'), video = node('video'), stage = node('div', undefined, 'video-stage');
     const empty = node('span', '영상 없음', 'video-empty'), caption = node('p', '', 'video-caption');
     select.id = `selectCandidate${index + 1}`; select.setAttribute('aria-label', `${index + 1}번 비교 후보`);
-    results.forEach((result, resultIndex) => option(select, candidateName(result.candidate, resultIndex), resultIndex));
-    let selectedIndex = results.findIndex(result => result.candidate?.id === preferredIds[index]);
+    results.forEach((result, resultIndex) => option(select, resultName(result, resultIndex), resultIndex));
+    let selectedIndex = results.findIndex(result => resultKey(result) === preferredIds[index]);
     if (selectedIndex < 0 || chosen.has(selectedIndex)) selectedIndex = results.findIndex((result, resultIndex) => !chosen.has(resultIndex));
     chosen.add(selectedIndex); select.value = String(selectedIndex);
     heading.append(node('span', index + 1, 'side-badge' + (index % 2 ? ' alt' : '')), select);
@@ -694,7 +887,7 @@ function loadVideo(index) {
   video.removeAttribute('src'); video.load();
   slot.empty.hidden = false;
   slot.empty.textContent = result?.videoUrl ? '영상 불러오는 중' : '이 후보의 녹화 영상이 없습니다';
-  slot.caption.textContent = `${candidateName(result?.candidate, Number(selectors[index].value))} · ${result?.status || '결과 없음'}`;
+  slot.caption.textContent = `${resultName(result, Number(selectors[index].value))} · ${result?.status || '결과 없음'}`;
   if (typeof result?.videoUrl === 'string' && result.videoUrl.startsWith('baekho-media:')) { video.src = result.videoUrl; video.load(); }
   video.playbackRate = Number($('rate').value);
   paintPlayback();
@@ -722,7 +915,7 @@ function tick() {
 function drawTable(hostId, rows) {
   const table = node('table'), head = node('thead'), header = node('tr');
   header.append(node('th', '항목'));
-  results.forEach((result, index) => header.append(node('th', candidateName(result.candidate, index))));
+    results.forEach((result, index) => header.append(node('th', resultName(result, index))));
   head.append(header); table.append(head);
   const body = node('tbody');
   rows.forEach(row => { const tr = node('tr'); tr.append(node('td', row.label)); row.values.forEach((value, index) => tr.append(node('td', value, row.changed?.[index] ? 'changed' : ''))); body.append(tr); });
@@ -732,32 +925,39 @@ function drawReport(bundle, preserveSelections = false) {
   const report = bundle.report;
   const selectedIds = preserveSelections ? selectedCandidateIds() : [];
   if (!preserveSelections) comparisonLimit = null;
-  results = list(report.results);
+  results = [...(report.controlResult ? [{ ...report.controlResult, candidate: { ...report.controlResult.candidate, isSourceControl: true } }] : []), ...list(report.results)];
   $('reportContent').hidden = false; $('compareEmpty').hidden = true;
   $('reportTitle').textContent = `${dateLabel(report.startedUtc)} 실험`;
   const target = reportTarget(bundle);
   const { actionLabel, sourceLabel } = target;
-  $('reportMeta').textContent = `${report.runId || bundle.runId} · ${sourceLabel ? `${sourceLabel} · ` : ''}${actionLabel} · Seed ${report.seed ?? '—'} · ${results.length}개 후보`;
+  $('reportMeta').textContent = `${report.runId || bundle.runId} · ${sourceLabel ? `${sourceLabel} · ` : ''}${actionLabel} · Seed ${report.seed ?? '—'} · ${results.length}개 기록 · 원본 해시 ${report.sourceDependencyHash?.slice(0, 12) || '정보 없음'}`;
   const winner = $('winner').value;
   drawComparisonCount(selectedIds);
   $('winner').replaceChildren(); option($('winner'), '후보 선택', '');
-  results.forEach((result, index) => option($('winner'), candidateName(result.candidate, index), result.candidate?.id || ''));
+  const winnerIds = new Set();
+  results.filter(result => !result.candidate?.isSourceControl).forEach((result, index) => {
+    if (!winnerIds.has(result.candidate?.id)) { option($('winner'), candidateName(result.candidate, index), result.candidate?.id || ''); winnerIds.add(result.candidate?.id); }
+  });
   $('winner').value = results.some(result => result.candidate?.id === winner) ? winner : '';
-  const definitions = [['상태', result => result.status || '대기'], ['공격 요청', result => fmt(result.metrics?.attackRequests)], ['명중 이벤트', result => fmt(result.metrics?.hits)], ['가한 피해', result => fmt(result.metrics?.damageDealt)], ['받은 피해', result => fmt(result.metrics?.damageTaken)], ['첫 명중 · 초', result => finite(result.metrics?.firstHitSeconds) && result.metrics.firstHitSeconds >= 0 ? fmt(result.metrics.firstHitSeconds) : '없음'], ['실행 시간 · 초', result => fmt(result.metrics?.elapsedSeconds)]];
+  const definitions = [['상태', result => runStatus(result)], ['공격 요청', result => fmt(result.metrics?.attackRequests)], ['명중 이벤트', result => fmt(result.metrics?.hits)], ['가한 피해', result => fmt(result.metrics?.damageDealt)], ['받은 피해', result => fmt(result.metrics?.damageTaken)], ['첫 명중 · 초', result => finite(result.metrics?.firstHitSeconds) && result.metrics.firstHitSeconds >= 0 ? fmt(result.metrics.firstHitSeconds) : '없음'], ['실행 시간 · 초', result => fmt(result.metrics?.elapsedSeconds)]];
   drawTable('metrics', definitions.map(([label, get]) => ({ label, values: results.map(get) })));
-  const specs = target.action?.parameters || [];
+  const specs = parametersOf(target.action, bundle.request?.schemaVersion || 1);
   const ids = [...new Set(results.flatMap(result => [...list(result.candidate?.values), ...list(result.metrics?.appliedValues)].map(value => value.id).filter(Boolean)))];
   const tuningIds = new Set([...specs.map(spec => spec.id), ...results.flatMap(result => list(result.candidate?.values).map(value => value.id))]);
   const parameterRow = id => {
-    const values = results.map(result => { const applied = list(result.metrics?.appliedValues).find(value => value.id === id), requested = list(result.candidate?.values).find(value => value.id === id); return { value: applied?.value ?? requested?.value, applied: Boolean(applied) }; });
+    const values = results.map(result => { const applied = list(result.metrics?.appliedValues).find(value => value.id === id), requested = list(result.candidate?.values).find(value => value.id === id); return { value: applied?.value ?? requested?.value, applied: Boolean(applied), requested: requested?.value }; });
     const spec = specs.find(item => item.id === id);
-    return { label: spec ? parameterName(spec) : id, values: values.map(value => `${fmt(value.value)}${value.applied ? '' : ' (요청)'}`), changed: values.map(value => finite(value.value) && finite(values[0]?.value) && value.value !== values[0].value) };
+    return { label: spec ? parameterName(spec) : id, values: values.map(value => `${fmt(value.value)}${value.applied ? ' (실제)' : ' (요청)'}${value.applied && finite(value.requested) && Math.fround(value.requested) !== Math.fround(value.value) ? ` · 요청 ${fmt(value.requested)}` : ''}`), changed: values.map(value => finite(value.value) && finite(values[0]?.value) && value.value !== values[0].value) };
   };
   drawTable('parameters', ids.filter(id => tuningIds.has(id)).map(parameterRow));
   const runtimeIds = ids.filter(id => !tuningIds.has(id));
   $('runtimeDetails').hidden = !runtimeIds.length;
   drawTable('runtimeParameters', runtimeIds.map(parameterRow));
   $('runNotes').replaceChildren();
+  if (bundle.request?.generation?.guideVersion) $('runNotes').append(node('p', `참고 가이드 ${bundle.request.generation.guideVersion} · ${bundle.request.generation.guideHash?.slice(0, 12)} · ${bundle.request.generation.mode || 'explore'} · ${bundle.request.generation.recipeId || '전체 레시피'}`));
+  if (report.sourceContext) {
+    const context = node('details'); context.append(node('summary', `실행 전 원본 맥락 · ${report.sourceContextHash?.slice(0, 12) || '해시 없음'}`), node('p', report.sourceContextCapturedUtc || '', 'fine-print'), node('pre', typeof report.sourceContext === 'string' ? report.sourceContext : JSON.stringify(report.sourceContext, null, 2))); $('runNotes').append(context);
+  }
   list(report.notes).forEach(note => $('runNotes').append(node('p', note)));
   results.forEach((result, index) => {
     $('runNotes').append(node('strong', candidateName(result.candidate, index)));
@@ -766,9 +966,74 @@ function drawReport(bundle, preserveSelections = false) {
     if (result.error) $('runNotes').append(node('p', result.error, 'run-note-error'));
     list(result.metrics?.notes).forEach(note => $('runNotes').append(node('p', note)));
     const events = list(result.metrics?.events);
-    if (events.length) { const details = node('details'); details.append(node('summary', `전투 이벤트 ${events.length}개`), node('pre', events.map(event => `${fmt(event.realTime)}s real / ${fmt(event.gameTime)}s game · ${event.kind || ''} · ${event.detail || ''} · ${fmt(event.value)}`).join('\n'))); $('runNotes').append(details); }
+    const limits = [...new Set(events.filter(event => event.kind === 'value-limited').map(event => event.detail))];
+    limits.forEach(detail => {
+      const requested = /requested=([^; ]+)/.exec(detail)?.[1], applied = /applied=([^; ]+)/.exec(detail)?.[1];
+      $('runNotes').append(node('p', `실행 중 적용 제한 · 요청 ${requested || '—'} → 실제 ${applied || '—'} · ${detail}`, 'run-note-error'));
+    });
+    if (events.length) { const details = node('details'); details.append(node('summary', `전투 이벤트 ${events.length}개`), node('pre', events.map(event => `${fmt(event.realTime)}s real / ${fmt(event.gameTime)}s game · ${event.kind || ''} · ${event.detail || ''} · ${fmt(event.value)}${event.kind === 'camera-output' ? ` · 최종 위치 ${JSON.stringify(event.position)} · 회전 ${JSON.stringify(event.rotation)} · FOV ${fmt(event.fov)}` : ''}`).join('\n'))); $('runNotes').append(details); }
   });
+  drawPrecision(bundle);
   updateControls();
+}
+function drawPrecision(bundle) {
+  const control = bundle.report.controlResult, select = $('precisionCandidate'), previous = select.value;
+  if (precisionReportId !== bundle.report.runId) { precisionTime = 0; precisionReportId = bundle.report.runId; }
+  select.replaceChildren();
+  list(bundle.report.results).forEach((result, index) => option(select, resultName(result, index), index));
+  select.value = Array.from(select.options).some(option => option.value === previous) ? previous : '0';
+  $('precisionPanel').hidden = !control && !bundle.report.results.some(result => result.capture);
+  const draw = () => {
+    const host = $('precisionGrid'); host.replaceChildren();
+    const chosen = bundle.report.results[Number(select.value)], rows = [control, chosen];
+    const panels = [];
+    const paintAll = () => {
+      $('precisionStatus').textContent = `${control ? '원본 기준과 선택 후보' : '원본 기준 없음'} · 공통 명중 기준 ${precisionTime >= 0 ? '+' : ''}${(precisionTime * 1000).toFixed(1)}ms · 가장 가까운 실제 캡처`;
+      panels.forEach(panel => panel.paint());
+    };
+    rows.forEach((result, rowIndex) => {
+      const card = node('article', undefined, 'precision-card'); card.append(node('strong', rowIndex === 0 ? '원본 그대로' : resultName(result)));
+      const frames = list(result?.capture?.frames).filter(frame => frame.imageUrl && finite(frame.relativeTimeSeconds) && frame.kind !== 'terminalHold');
+      const image = node('img'); image.alt = rowIndex === 0 ? '원본 명중 캡처' : '후보 명중 캡처';
+      const output = node('p', '', 'fine-print'), controls = node('div', undefined, 'inline-actions');
+      let index = 0;
+      const paint = () => {
+        if (!frames.length) { image.hidden = true; output.textContent = `정밀 캡처 없음 · ${captureStatusName(result?.capture?.precisionStatus)}`; return; }
+        index = nearestCaptureIndex(frames, precisionTime);
+        const frame = frames[index];
+        if (image.src !== frame.imageUrl) { image.hidden = true; image.src = frame.imageUrl; }
+        else image.hidden = !image.complete || !image.naturalWidth;
+        const interval = index > 0 ? (frame.unityRealtimeUs - frames[index - 1].unityRealtimeUs) / 1000 : null;
+        const errorMs = (frame.relativeTimeSeconds - precisionTime) * 1000;
+        output.textContent = `캡처 ${index + 1}/${frames.length} · 명중 ${(frame.relativeTimeSeconds * 1000).toFixed(1)}ms · 정렬 오차 ${errorMs >= 0 ? '+' : ''}${errorMs.toFixed(1)}ms · 직전 간격 ${interval == null ? '—' : `${interval.toFixed(1)}ms`} · ${captureStatusName(result.capture.precisionStatus)}`;
+      };
+      for (const [label, delta] of [['이전 캡처', -1], ['다음 캡처', 1]]) { const button = node('button', label, 'subtle small'); button.disabled = !frames.length;
+        button.addEventListener('click', () => { const target = Math.min(frames.length - 1, Math.max(0, index + delta)); precisionTime = frames[target].relativeTimeSeconds; paintAll(); }); controls.append(button); }
+      const zero = node('button', '명중 시점', 'subtle small'); zero.disabled = !frames.length;
+      zero.addEventListener('click', () => { precisionTime = 0; paintAll(); }); controls.append(zero);
+      image.addEventListener('load', () => { image.hidden = false; });
+      image.addEventListener('error', () => { output.textContent = '캡처 이미지를 읽지 못했습니다.'; image.hidden = true; });
+      card.append(image, controls, output); host.append(card); panels.push({ paint });
+    });
+    paintAll();
+  };
+  select.onchange = draw; draw();
+}
+function nearestCaptureIndex(frames, time) {
+  let best = 0, distance = Infinity;
+  frames.forEach((frame, index) => { const current = Math.abs(frame.relativeTimeSeconds - time); if (current < distance - 1e-9) { best = index; distance = current; } });
+  return best;
+}
+function stepCaptured(direction) {
+  stop();
+  const first = activeVideos()[0]; if (!first) return;
+  const frames = list(selected(first.index)?.capture?.timelineFrames || selected(first.index)?.capture?.frames).filter(frame => frame.kind !== 'terminalHold' && finite(frame.mediaPtsUs));
+  const current = first.video.currentTime;
+  const next = direction > 0 ? frames.find(frame => frame.mediaPtsUs / 1000000 > current + 0.00001)
+    : [...frames].reverse().find(frame => frame.mediaPtsUs / 1000000 < current - 0.00001);
+  if (next) { seekTo(next.mediaPtsUs / 1000000 - offset(first.index)); $('playbackStatus').textContent = '기록된 캡처 시각으로 이동했습니다. 영상 디코더의 표시 프레임은 PNG 정밀 캡처와 다를 수 있습니다.'; }
+  else if (frames.length) $('playbackStatus').textContent = '이 방향에 기록된 캡처가 없습니다.';
+  else { seekTo(logicalTime() + direction / 60); $('playbackStatus').textContent = '캡처 시각 자료 없음 · 1/60초만 이동했습니다. 정확한 프레임 이동이 아닙니다.'; }
 }
 async function openReport(runId, options = {}) {
   if (state.reportLoading) return;
@@ -809,7 +1074,7 @@ for (const id of ['setupTab', 'compareTab']) $(id).addEventListener('keydown', e
 $('chooseProject').addEventListener('click', () => operation(async () => { const snapshot = await api.chooseProject(); if (snapshot) { applySnapshot(snapshot); message(''); } }));
 $('adapter').addEventListener('change', () => chooseSource($('adapter').value));
 $('source').addEventListener('change', () => chooseSource($('adapter').value, $('source').value));
-$('action').addEventListener('change', () => chooseSource($('adapter').value, $('source').value, $('action').value));
+$('action').addEventListener('change', () => state.selectedActions.includes($('action').value) ? focusAction($('action').value) : chooseSource($('adapter').value, $('source').value, $('action').value));
 $('goal').addEventListener('input', updateControls);
 $('candidateTotal').addEventListener('input', updateControls);
 $('refreshCatalog').addEventListener('click', () => operation(async () => {
@@ -821,6 +1086,18 @@ $('refreshCatalog').addEventListener('click', () => operation(async () => {
   message('프로젝트와 AI 연결 정보를 새로 불러왔습니다.');
 }));
 $('generateCandidates').addEventListener('click', () => generateAction(state.selection?.actionId));
+$('aiProvider').addEventListener('change', async () => {
+  const provider = $('aiProvider').value;
+  state.changingProvider = true; updateControls();
+  try {
+    const ai = await api.setAiProvider(provider);
+    if (state.snapshot) state.snapshot.ai = ai;
+    message(ai.available && ai.authenticated ? `AI 엔진: ${ai.label}` : ai.error || 'AI 연결과 로그인을 확인하세요.', !(ai.available && ai.authenticated));
+  } catch (error) {
+    if (state.snapshot?.ai?.preference) $('aiProvider').value = state.snapshot.ai.preference;
+    message(error?.message || String(error), true);
+  } finally { state.changingProvider = false; updateControls(); }
+});
 async function generateAction(id) {
   if (locked() || !state.actionDrafts[id]) return;
   focusAction(id);
@@ -830,10 +1107,13 @@ async function generateAction(id) {
   if (!goal || !Number.isInteger(count) || count < 2 || count > 12) { message('원하는 감각과 2–12개 사이의 후보 수를 입력하세요.', true); return; }
   const projectGeneration = state.projectGeneration;
   const signature = draftSignature(draft);
-  const conditions = { durationSeconds: draft.request.durationSeconds, seed: draft.request.seed, recordVideo: draft.request.recordVideo };
+  const conditions = conditionsOf(draft.request), options = draft.options || designOptions();
+  const referenceCandidate = list(draft.request.candidates).find(candidate => candidate.id === options.referenceCandidateId)
+    || (draft.request.schemaVersion === 2 ? tuning.sourceCandidate(currentParameters(), currentCurves(), 'source-reference') : undefined);
   state.generating = true; state.generatingActionId = id; state.generationCancelled = false; updateControls(); message('');
   try {
-    const generated = await api.generateCandidates({ adapterId: draft.request.adapterId, sourceGuid: draft.request.sourceGuid, actionId: id, goal, count });
+    const generated = await api.generateCandidates({ adapterId: draft.request.adapterId, sourceGuid: draft.request.sourceGuid, actionId: id, goal, count,
+      schemaVersion: draft.request.schemaVersion, ...options, referenceCandidate, observationRef: observationReference(draft, referenceCandidate) });
     if (projectGeneration !== state.projectGeneration || state.generationCancelled || state.actionDrafts[id] !== draft) return;
     if (signature !== draftSignature(draft) || schema !== draft.schema) throw new Error('생성 중에 목표 또는 공격 데이터가 변경되었습니다. 새 목표로 다시 생성하세요.');
     if (generated?.candidates?.length !== count) throw new Error('AI가 요청한 개수의 후보를 반환하지 않았습니다. 다시 생성하세요.');
@@ -866,18 +1146,38 @@ function updateConditions(key, value) {
 }
 $('duration').addEventListener('input', () => updateConditions('durationSeconds', $('duration').value === '' ? NaN : Number($('duration').value)));
 $('seed').addEventListener('input', () => updateConditions('seed', $('seed').value === '' ? NaN : Number($('seed').value)));
-$('recordVideo').addEventListener('change', () => updateConditions('recordVideo', $('recordVideo').checked));
+$('recordVideo').addEventListener('change', () => {
+  if (!$('recordVideo').checked && state.request?.schemaVersion === 2) { $('precisionCapture').checked = false; updateConditions('precisionCapture', false); message('영상 녹화를 끄면서 명중 정밀 캡처도 해제했습니다.'); }
+  updateConditions('recordVideo', $('recordVideo').checked);
+});
+$('includeSourceControl').addEventListener('change', () => updateConditions('includeSourceControl', $('includeSourceControl').checked));
+$('precisionCapture').addEventListener('change', () => {
+  if ($('precisionCapture').checked && !$('recordVideo').checked) { $('recordVideo').checked = true; updateConditions('recordVideo', true); }
+  updateConditions('precisionCapture', $('precisionCapture').checked);
+});
+for (const id of ['scenarioMode', 'precisionTargetId']) $(id).addEventListener('change', () => updateConditions(id, $(id).value));
+$('repeatCount').addEventListener('change', () => updateConditions('repeatCount', Number($('repeatCount').value)));
+for (const id of ['generationMode', 'generationStrategy', 'recipeId', 'referenceCandidate', 'refineFeedback']) $(id).addEventListener('change', () => { saveFocusedDraft(); if (id === 'referenceCandidate') drawDesignOptions(state.actionDrafts[state.selection?.actionId]); updateControls(); });
+$('addManualCandidate').addEventListener('click', () => {
+  if (locked() || state.request?.schemaVersion !== 2 || state.request.candidates.length >= 12) return;
+  let index = 1; while (state.request.candidates.some(candidate => candidate.id === `manual-${index}`)) index++;
+  const candidate = tuning.sourceCandidate(currentParameters(), currentCurves(), `manual-${index}`);
+  candidate.values = []; candidate.curves = [];
+  candidate.label = `직접 편집 ${index}`; state.request.candidates.push(candidate); state.requestOrigin = 'manual';
+  $('candidateTotal').value = Math.max(2, state.request.candidates.length);
+  state.generatedSignature = generationSignature(); saveFocusedDraft(); drawCandidates(); drawActionPanels(); updateControls();
+});
 $('importRequest').addEventListener('click', () => operation(async () => {
   const request = await api.loadRequest();
   if (request) {
     validate(request);
-    if (request.candidates.length < 2) throw new Error('비교 실험에는 후보가 2개 이상 필요합니다.');
+    if (request.schemaVersion === 1 && request.candidates.length < 2) throw new Error('v1 비교 실험에는 후보가 2개 이상 필요합니다.');
     saveFocusedDraft();
     if (request.adapterId === state.selection?.adapterId && request.sourceGuid === state.selection?.sourceGuid && actionConflict([...state.selectedActions, actionIdOf(request)])) throw new Error('전체 콤보와 개별 일반 공격은 함께 선택할 수 없습니다. 충돌하는 동작을 해제한 뒤 불러오세요.');
     $('candidateTotal').value = request.candidates.length;
     if (typeof request.generation?.goal === 'string' && request.generation.goal.trim()) $('goal').value = request.generation.goal;
-    replaceRequest(request, 'import'); message('실험 JSON의 후보를 불러왔습니다. 수치는 읽기 전용으로 표시합니다.');
-    for (const key of ['durationSeconds', 'seed', 'recordVideo']) updateConditions(key, request[key]);
+    replaceRequest(request, 'import'); message('실험 JSON의 후보를 불러왔습니다. v2 후보의 절대값과 곡선을 직접 편집할 수 있습니다.');
+    for (const key of conditionKeys) if (request[key] !== undefined) updateConditions(key, request[key]);
   }
 }));
 $('exportRequest').addEventListener('click', () => operation(async () => { const result = await api.saveRequest(validate(state.request)); if (result && !result.cancelled) message(`실험 JSON을 저장했습니다: ${result.path}`); }));
@@ -922,13 +1222,24 @@ $('useReportCandidate').addEventListener('click', () => {
   message(`${locate(draft.request).action?.label || actionName(actionIdOf(draft.request))}의 최종 후보를 선택했습니다. 나머지 동작도 선택한 뒤 실험 설계에서 SO 하나로 저장하세요.`);
 });
 $('winner').addEventListener('change', updateControls);
+$('repeatSelected').addEventListener('click', () => operation(async () => {
+  const request = copy(state.reportBundle?.request), candidate = list(request?.candidates).find(item => item.id === $('winner').value);
+  if (request?.schemaVersion !== 2 || !candidate) throw new Error('v2 결과의 재확인할 후보를 선택하세요.');
+  request.candidates = [candidate]; request.repeatCount = 3; request.includeSourceControl = true;
+  validate(request); state.starting = true; state.cancelRequested = false; updateControls();
+  try {
+    const result = await api.run(request); state.activeRunId = result.runId; state.wasRunning = true;
+    if (state.snapshot) state.snapshot.connection = { ...state.snapshot.connection, running: true, status: '선택 후보 3회 재확인 중' };
+    message('원본 기준과 선택 후보 3회의 새 실험을 시작했습니다.');
+  } finally { state.starting = false; }
+}, { refresh: true }));
 $('saveJudgment').addEventListener('click', () => operation(async () => { const result = await api.saveJudgment({ runId: state.selectedRunId, candidateId: $('winner').value || null, feedback: $('feedback').value }); message(`판단 기록을 저장했습니다: ${result.path}`); }));
 $('revealRun').addEventListener('click', () => operation(() => api.revealRun(state.selectedRunId)));
 $('compareCount').addEventListener('change', () => { comparisonLimit = Number($('compareCount').value); drawVideoGrid(comparisonLimit, selectedCandidateIds()); });
 $('play').addEventListener('click', play);
 $('restart').addEventListener('click', () => { stop(); seekTo(bounds().min); });
-$('previous').addEventListener('click', () => { stop(); seekTo(logicalTime() - 1 / 60); });
-$('next').addEventListener('click', () => { stop(); seekTo(logicalTime() + 1 / 60); });
+$('previous').addEventListener('click', () => stepCaptured(-1));
+$('next').addEventListener('click', () => stepCaptured(1));
 $('seek').addEventListener('input', () => { stop(); seekTo(Number($('seek').value)); });
 $('rate').addEventListener('change', () => videos.forEach(video => { video.playbackRate = Number($('rate').value); }));
 $('sound').addEventListener('change', () => videos.forEach((video, index) => { video.muted = $('sound').value !== String(index); }));
@@ -936,6 +1247,24 @@ $('align').addEventListener('change', () => {
   stop(); seekTo(bounds().min);
   paintAlignment();
 });
+
+const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
+function syncThemeSelection() {
+  $(darkMode.matches ? 'themeDark' : 'themeLight').checked = true;
+}
+syncThemeSelection();
+darkMode.addEventListener('change', syncThemeSelection);
+for (const input of [$('themeLight'), $('themeDark')]) {
+  input.disabled = !api;
+  input.addEventListener('change', async () => {
+    try {
+      await api.setTheme(input.value);
+    } catch {
+      syncThemeSelection();
+      message('화면 모드를 저장할 수 없습니다. 다시 시도하세요.', true);
+    }
+  });
+}
 
 paintPlayback();
 requestAnimationFrame(tick);

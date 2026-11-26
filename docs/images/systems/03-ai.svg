@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500">
+<title>AI 제안과 실행 관측의 연결</title>
+<rect width="100%" height="100%" rx="16" fill="#F5F8FA"/>
+<text x="32.0" y="51.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="27" font-weight="700" fill="#142B3A">AI 제안과 실행 관측의 연결</text>
+<rect x="30" y="90" width="345" height="220" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="49.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">AI에 전달할 입력</text>
+<text x="49.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">사용자 목표 · 후보 수</text>
+<text x="49.0" y="193.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">실제 지원 항목 · 현재값</text>
+<text x="49.0" y="223.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">가이드 · 레시피 본문</text>
+<text x="49.0" y="253.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">개선 기준 · 잠금 · 평가</text>
+<rect x="430" y="115" width="330" height="170" rx="10" fill="white" stroke="#365CBC" stroke-width="1.5"/>
+<text x="449.0" y="154.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#365CBC">Codex CLI</text>
+<text x="449.0" y="188.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">구조화된 JSON 출력</text>
+<text x="449.0" y="218.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">기본 180초 · 취소 가능</text>
+<text x="449.0" y="248.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">기존 로그인 사용</text>
+<rect x="815" y="90" width="355" height="220" rx="10" fill="white" stroke="#007D76" stroke-width="1.5"/>
+<text x="834.0" y="129.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#007D76">앱의 출력 검증</text>
+<text x="834.0" y="163.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">개수 · ID · 유한 수치 · 범위</text>
+<text x="834.0" y="193.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">곡선 · 잠금 · 후보 차이</text>
+<text x="834.0" y="223.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">통과하면 편집과 실행</text>
+<text x="834.0" y="253.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">실패하면 오류 표시</text>
+<polyline points="375,195 430,195" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="430.0,195.0 419.5,200.8 419.5,189.2" fill="#486272"/>
+<polyline points="760,195 815,195" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="815.0,195.0 804.5,200.8 804.5,189.2" fill="#486272"/>
+<rect x="200" y="370" width="800" height="95" rx="10" fill="white" stroke="#AC641D" stroke-width="1.5"/>
+<text x="219.0" y="409.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="23" font-weight="700" fill="#AC641D">사람이 비교하고 개선을 요청</text>
+<text x="219.0" y="443.0" font-family="Malgun Gothic, Noto Sans KR, sans-serif" font-size="20" font-weight="400" fill="#142B3A">저장 측정값과 사용자 평가를 참고하며, 영상 자동 평가 루프는 없음</text>
+<polyline points="990,310 990,350 800,350 800,370" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="800.0,370.0 794.2,359.5 805.8,359.5" fill="#486272"/>
+<polyline points="200,417 90,417 90,310" fill="none" stroke="#486272" stroke-width="2"/>
+<polygon points="90.0,310.0 95.8,320.5 84.2,320.5" fill="#486272"/>
+</svg>
