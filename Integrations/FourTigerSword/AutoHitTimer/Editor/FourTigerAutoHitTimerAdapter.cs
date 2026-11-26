@@ -50,17 +50,19 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                     if (slot.Action == null) continue;
                     string reason = FourTigerHitMapping.UnsupportedReason(source, slot.Group);
                     var stateIssue = StateIssue(animator, slot, out var state);
+                    var currentClip = state?.State.motion as AnimationClip;
                     if (reason == null) reason = stateIssue;
                     targets.Add(new JObject { ["sourceGuid"] = guid, ["actionPath"] = slot.Path, ["group"] = slot.Group,
                         ["label"] = source.name + " / " + slot.Label, ["animationName"] = slot.Action.AnimationName,
                         ["duration"] = slot.Action.Duration, ["supported"] = reason == null, ["reason"] = reason,
                         ["needsClipAssignment"] = state != null && state.State.motion == null,
-                        ["currentClip"] = state?.State.motion is AnimationClip currentClip ? AutoHitTimerAssets.ClipRef(currentClip) : null,
-                        ["timeSettings"] = FourTigerHitMapping.TimeSettings(slot.Action, slot.Action.Duration),
+                        ["currentClip"] = currentClip != null ? AutoHitTimerAssets.ClipRef(currentClip) : null,
+                        ["timeSettings"] = FourTigerHitMapping.TimeSettings(slot.Action, currentClip != null ? currentClip.length : slot.Action.Duration, slot.Group),
                         ["windows"] = FourTigerHitMapping.Windows(slot.Action), ["snapshot"] = snapshot });
                 }
             }
-            return new JObject { ["sources"] = sources, ["targets"] = targets, ["groups"] = groups };
+            return new JObject { ["sources"] = sources, ["targets"] = targets, ["groups"] = groups,
+                ["capabilities"] = new JObject { ["attackTiming"] = true } };
         }
 
         public JObject PreviewChange(JObject request)
@@ -76,10 +78,11 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 ["changeId"] = id, ["snapshot"] = prepared.Snapshot, ["summary"] = summary,
                 ["before"] = Describe(prepared.Before), ["after"] = Describe(prepared.After),
                 ["canApply"] = prepared.Issues.Count == 0, ["issues"] = prepared.Issues,
+                ["warnings"] = FourTigerHitMapping.TimeWarnings(prepared.After, prepared.Group),
                 ["hitCountBefore"] = FourTigerHitMapping.Windows(prepared.Before).Count,
                 ["hitCountAfter"] = FourTigerHitMapping.Windows(prepared.After).Count,
                 ["proposedStateName"] = prepared.Register ? prepared.StateName : null, ["requiredTimeOverrides"] = prepared.InvalidTimes,
-                ["editableTimeSettings"] = FourTigerHitMapping.TimeSettings(prepared.After, prepared.Clip.length),
+                ["editableTimeSettings"] = FourTigerHitMapping.TimeSettings(prepared.After, prepared.Clip.length, prepared.Group),
                 ["clipAssignment"] = prepared.AssignClip ? new JObject { ["stateName"] = prepared.StatePath,
                     ["clipName"] = prepared.Clip.name, ["clipPath"] = AssetDatabase.GetAssetPath(prepared.Clip),
                     ["previousClipName"] = prepared.PreviousClip != null ? prepared.PreviousClip.name : null,
@@ -370,11 +373,11 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 if (result.Before == null) throw new ArgumentException("비어 있는 공격은 새 공격 등록을 사용하세요.");
                 result.StateName = result.Before.AnimationName;
                 result.After = FourTigerHitMapping.Map(result.Before, request["windows"] as JArray, result.Clip.length);
-                result.After.Duration = result.Clip.length;
+                result.After.Duration = result.PreviousClip == result.Clip ? result.Before.Duration : result.Clip.length;
             }
             FourTigerHitMapping.ApplyTimeOverrides(result.After, request["timeOverrides"] as JArray);
-            result.InvalidTimes = FourTigerHitMapping.InvalidTimes(result.After, result.Clip.length);
-            if (result.InvalidTimes.Count > 0) result.Issues.Add("공격의 시간 설정을 선택한 클립 길이에 맞게 수정하세요.");
+            result.InvalidTimes = FourTigerHitMapping.InvalidTimes(result.After, result.Clip.length, result.Group);
+            if (result.InvalidTimes.Count > 0) result.Issues.Add("공격 종료는 모든 히트 이후이며 클립 길이 이내여야 합니다. 사용 중인 콤보·이동·이펙트 시간도 공격 종료 이내로 수정하세요.");
             if (result.ChangesController && result.Controller != null)
             {
                 if (!AssetDatabase.GetAssetPath(result.Controller).StartsWith("Assets/", StringComparison.Ordinal))
@@ -487,6 +490,7 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
         {
             if (action == null) return new JObject();
             return new JObject { ["animationName"] = action.AnimationName, ["duration"] = action.Duration,
+                ["comboTransitionTime"] = action.ComboTransitionTime,
                 ["windows"] = FourTigerHitMapping.Windows(action), ["baseDamage"] = action.Damage,
                 ["damageSum"] = FourTigerHitMapping.DamageSum(action),
                 ["serialized"] = JObject.Parse(JsonUtility.ToJson(action)) };

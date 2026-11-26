@@ -1,8 +1,8 @@
 {
   "name": "baekho-auto-hit-timer",
   "productName": "AutoHitTimer",
-  "version": "0.2.0",
-  "description": "AI-assisted attack hit-window authoring for Unity",
+  "version": "0.3.0",
+  "description": "AI-assisted hit, combo transition and attack-end timing authoring for Unity",
   "private": true,
   "main": "src/main.cjs",
   "scripts": {

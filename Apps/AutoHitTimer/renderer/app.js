@@ -7,6 +7,7 @@
   const number = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
   const seconds = value => number(value).toFixed(3);
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  const AI_ENGINES = { codex: 'Codex', claude: 'Claude Code' };
   const statusLabels = { draft: '분석 대기', capturing: '동작 촬영 중', analyzing: 'AI 분석 중', review: '검토 필요', failed: '작업 실패', cancelled: '취소됨', saved: '저장 완료' };
   let state = { projectPath: '', connection: {}, ai: {}, actors: [], sources: [], targets: [], groups: [], jobs: [], settings: {} };
   let searchResults = [];
@@ -48,8 +49,48 @@
   const searchContext = () => JSON.stringify([state.projectPath, state.actorId || state.settings?.actorId || '']);
   const canAnalyze = () => connectionReady() && Boolean(state.ai?.available) && state.ai?.authenticated !== false && !analysisActive() && !searchActive();
   const targetFor = item => (state.targets || []).find(target => target.sourceGuid === item?.sourceGuid && target.actionPath === (item?.mode === 'register' ? item?.templatePath : item?.actionPath));
-  const targetIdentity = item => JSON.stringify([item?.sourceGuid, item?.mode === 'register' ? item?.templatePath : item?.actionPath]);
+  const targetIdentity = item => JSON.stringify([item?.sourceGuid, item?.mode, item?.group, item?.mode === 'register' ? item?.templatePath : item?.actionPath]);
   const sameClip = (left, right) => left && right && left.guid === right.guid && String(left.localId) === String(right.localId);
+  const timingPaths = { comboTransition: 'Execution.ComboTransitionTime', actionEnd: 'Execution.Duration' };
+  const timingLabels = { comboTransition: '다음 콤보 전환', actionEnd: '공격 종료' };
+  const timingEnabled = () => state.capabilities?.attackTiming === true;
+  const comboApplicable = item => item?.mode === 'register' ? item.group === 'combo' : targetFor(item)?.group === 'combo';
+  const lastHitEnd = item => Math.max(0, ...windows(item).map(hit => number(hit.end)));
+  function timingValue(item, kind) {
+    const explicit = item?.timeOverrides?.find(value => value.path === timingPaths[kind]);
+    if (explicit) return explicit.value;
+    const target = targetFor(item);
+    if (kind === 'actionEnd') return item?.mode !== 'register' && sameClip(target?.currentClip, item?.clip) ? number(target.duration, duration(item)) : duration(item);
+    return number(target?.timeSettings?.find(value => value.path === timingPaths[kind])?.value);
+  }
+  function timingError(item, kind, value = timingValue(item, kind), proposed = {}) {
+    const end = proposed.actionEnd ?? timingValue(item, 'actionEnd');
+    if (!Number.isFinite(value)) return '시간을 숫자로 입력하세요.';
+    if (kind === 'actionEnd') {
+      if (value <= 0 || value > duration(item) + .00001) return `0초 초과, ${seconds(duration(item))}초 이내로 설정하세요.`;
+      if (value + .00001 < lastHitEnd(item)) return '공격 종료가 마지막 히트 종료보다 빠릅니다.';
+      if (comboApplicable(item) && (proposed.comboTransition ?? timingValue(item, 'comboTransition')) > value + .00001) return '콤보 전환보다 늦거나 같은 시간에 종료해야 합니다.';
+    } else if (value < 0 || value > end + .00001) return '콤보 전환은 0초 이상, 공격 종료 이내로 설정하세요.';
+    return '';
+  }
+  function suggestionError(item, kind, proposed = {}) {
+    const suggestion = item?.timingSuggestions?.[kind];
+    if (!timingEnabled()) return 'Unity 연동을 업데이트하세요.';
+    if (kind === 'comboTransition' && !comboApplicable(item)) return '일반 콤보 공격에서 적용할 수 있습니다.';
+    if (!suggestion || suggestion.time == null || !Number.isFinite(suggestion.time)) return 'AI가 시점을 제안하지 못했습니다.';
+    if (suggestion.uncertain) return '불확실한 제안입니다. 프레임을 보고 직접 설정하세요.';
+    if (kind === 'comboTransition' && suggestion.time + .00001 < lastHitEnd(item)) return '마지막 히트보다 빠른 제안입니다. 직접 검토하세요.';
+    return timingError(item, kind, suggestion.time, proposed);
+  }
+  function suggestedValues(item) {
+    const values = {};
+    for (const kind of Object.keys(timingPaths)) if ((kind !== 'comboTransition' || comboApplicable(item)) && Number.isFinite(item?.timingSuggestions?.[kind]?.time)) values[kind] = item.timingSuggestions[kind].time;
+    return values;
+  }
+  function timingOverrides(item, values) {
+    const paths = Object.keys(values).map(kind => timingPaths[kind]);
+    return [...(item.timeOverrides || []).filter(value => !paths.includes(value.path)), ...Object.entries(values).map(([kind, value]) => ({ path: timingPaths[kind], value }))];
+  }
   const fingerprint = item => JSON.stringify([state.actorId, state.settings?.weaponId, state.settings?.weaponBone, item?.windows, item?.reviewed, item?.sourceGuid, item?.actionPath, item?.mode, item?.group, item?.templatePath, item?.copy, item?.outputFolder, item?.timeOverrides]);
   const option = (value, label, selected, disabled = false) => `<option value="${esc(value)}"${String(value) === String(selected ?? '') ? ' selected' : ''}${disabled ? ' disabled' : ''}>${esc(label)}</option>`;
   const emptyInspector = message => `<div class="inspector-empty"><div class="empty-icon" aria-hidden="true">≋</div><h3>아직 선택한 작업이 없습니다</h3><p>${esc(message)}</p></div>`;
@@ -70,13 +111,14 @@
   function acceptState(next) {
     if (!next || !Array.isArray(next.jobs)) return;
     const previous = job();
+    const previousTarget = targetFor(previous);
     const previousSearchContext = searchContext();
     state = { ...state, ...next };
     if (previousSearchContext !== searchContext()) resetSearch();
     const selected = job();
     if (previous?.pendingSave && selected?.id === previous.id && !selected.pendingSave && selected.status === 'saved') localNotice = { message: 'Unity 저장 결과를 확인했습니다. 저장된 에셋을 확인하세요.', kind: 'success' };
     if (selected?.pendingSave) preview = null;
-    if (previous?.id === selected?.id && targetIdentity(previous) !== targetIdentity(selected)) overrideFields = [];
+    if (previous?.id === selected?.id && (targetIdentity(previous) !== targetIdentity(selected) || previousTarget?.snapshot !== targetFor(selected)?.snapshot)) overrideFields = [];
     if (lastJobId !== selected?.id) {
       stopPlayback();
       currentTime = 0;
@@ -134,10 +176,27 @@
     }
   }
 
+  function renderAiProvider() {
+    const select = $('ai-provider');
+    if (!select) return;
+    const providers = state.ai?.providers || {};
+    const describe = id => {
+      const info = providers[id];
+      if (!info) return AI_ENGINES[id];
+      return `${AI_ENGINES[id]} · ${!info.available ? '미설치' : info.authenticated === false ? '로그인 필요' : '준비됨'}`;
+    };
+    const auto = state.ai?.selection === 'auto' && state.ai?.provider ? `AI 자동 선택 (${AI_ENGINES[state.ai.provider]})` : 'AI 자동 선택';
+    const labels = { auto, codex: describe('codex'), claude: describe('claude') };
+    for (const option of select.options) option.textContent = labels[option.value] || option.value;
+    if (document.activeElement !== select) select.value = state.ai?.selection || 'auto';
+    select.disabled = analysisActive() || searchActive() || Boolean(state.busy);
+  }
   function renderProject() {
     const ready = connectionReady();
     const aiReady = state.ai?.available && state.ai?.authenticated !== false;
-    const aiText = !state.ai?.available ? 'Codex 연결 필요' : state.ai?.authenticated === false ? 'Codex 로그인 필요' : state.ai?.label || 'Codex 준비됨';
+    const engine = AI_ENGINES[state.ai?.provider] || 'AI';
+    const aiText = !state.ai?.available ? state.ai?.label || `${engine} 연결 필요` : state.ai?.authenticated === false ? `${engine} 로그인 필요` : state.ai?.label || `${engine} 준비됨`;
+    renderAiProvider();
     $('status-chips').innerHTML = `<span class="status-chip ${ready ? 'ready' : 'warn'}" title="${esc(state.connection?.message)}"><span class="dot"></span>${ready ? 'Unity 연결됨' : 'Unity 연결 대기'}</span><span class="status-chip ${aiReady ? 'ready' : 'warn'}" title="${esc(state.ai?.error || aiText)}"><span class="dot"></span>${esc(aiText)}</span>`;
     $('select-project').innerHTML = `<span aria-hidden="true">▱</span> ${state.projectPath ? '프로젝트 변경' : '프로젝트 열기'}`;
     const projectName = String(state.projectPath || '').replace(/[\\/]$/, '').split(/[\\/]/).pop();
@@ -215,7 +274,12 @@
     const selected = job();
     const total = duration(selected);
     $('timeline-windows').innerHTML = windows(selected).map((window, index) => `<div class="timeline-window ${window.id === selectedWindowId ? 'selected' : ''} ${window.uncertain ? 'uncertain' : ''}" data-window="${esc(window.id)}" style="left:${total ? clamp(number(window.start) / total * 100, 0, 100) : 0}%;width:${total ? clamp((number(window.end) - number(window.start)) / total * 100, 0, 100) : 0}%" title="${index + 1}타: ${seconds(window.start)}–${seconds(window.end)}초"><div class="timeline-handle start" data-edge="start"></div><span>${index + 1}</span><div class="timeline-handle end" data-edge="end"></div></div>`).join('');
-    $('timeline-hint').textContent = windows(selected).length ? '양쪽 경계를 드래그하여 시간을 조정하세요' : '히트 구간을 추가하거나 AI 분석을 시작하세요';
+    $('timeline-timings').innerHTML = selected && total ? Object.keys(timingPaths).filter(kind => kind !== 'comboTransition' || comboApplicable(selected)).map(kind => {
+      const value = timingValue(selected, kind), suggestion = selected.timingSuggestions?.[kind];
+      const actual = `<button type="button" id="timing-marker-${kind}" class="timing-marker ${kind}" data-timing-marker="${kind}" style="left:${clamp(value / total * 100, 0, 100)}%" title="${timingLabels[kind]} ${seconds(value)}초 · 드래그 또는 방향키로 조정" aria-label="${timingLabels[kind]} ${seconds(value)}초" ${!timingEnabled() || lockedJob(selected) ? 'disabled' : ''}><span>${kind === 'comboTransition' ? '콤보' : '종료'} ${seconds(value)}</span></button>`;
+      return actual + (Number.isFinite(suggestion?.time) && suggestion.time >= 0 && suggestion.time <= total ? `<span class="timing-marker suggested ${kind}${suggestion.uncertain ? ' uncertain' : ''}" data-timing-suggestion="${kind}" style="left:${suggestion.time / total * 100}%" title="AI ${timingLabels[kind]} ${seconds(suggestion.time)}초${suggestion.uncertain ? ' · 확인 필요' : ''}"><span>AI</span></span>` : '');
+    }).join('') : '';
+    $('timeline-hint').textContent = windows(selected).length ? '히트 경계와 콤보·종료 마커를 드래그하세요' : '히트 구간을 추가하거나 AI 분석을 시작하세요';
   }
 
   function nearestFrame(frames, time) {
@@ -257,6 +321,19 @@
     return '';
   }
 
+  function renderTimingFields(selected) {
+    const proposed = suggestedValues(selected);
+    const applicableKinds = Object.keys(timingPaths).filter(kind => kind !== 'comboTransition' || comboApplicable(selected));
+    const canApplyAll = applicableKinds.length > 0 && applicableKinds.every(kind => !suggestionError(selected, kind, proposed));
+    const timingNotice = selected.timingError ? `<div id="timing-analysis-error" class="callout warning" role="status">${esc(selected.timingError)}</div>` : '';
+    return `<section id="attack-timings" class="attack-timings"><div class="section-heading"><h2>애니메이션 전환 시간</h2><button id="apply-all-timing-suggestions" class="text-button" ${!canApplyAll || lockedJob(selected) ? 'disabled' : ''}>AI 제안 모두 적용</button></div><p class="field-note">공격 속도 적용 전 초입니다. 종료 이후 프레임도 끝까지 검토할 수 있습니다.</p>${timingNotice}${!timingEnabled() ? '<div class="callout warning">이 기능을 저장하려면 왼쪽의 Unity 연동 업데이트를 실행하고 Unity 컴파일 후 목록을 새로고침하세요.</div>' : ''}${applicableKinds.map(kind => {
+      const path = timingPaths[kind], value = timingValue(selected, kind), error = timingError(selected, kind);
+      const suggestion = selected.timingSuggestions?.[kind], unavailable = suggestionError(selected, kind);
+      const early = kind === 'comboTransition' && value >= 0 && value < lastHitEnd(selected) - .00001;
+      return `<div class="timing-field"><div class="field"><label for="override-${path}">${timingLabels[kind]} (초)</label><input id="override-${path}" data-time-override="${path}" data-timing-kind="${kind}" type="number" min="${kind === 'actionEnd' ? '.001' : '0'}" max="${kind === 'actionEnd' ? duration(selected) : timingValue(selected, 'actionEnd')}" step="0.001" value="${value}" ${error ? 'aria-invalid="true"' : ''} ${!timingEnabled() || lockedJob(selected) ? 'disabled' : ''}><p class="${error ? 'hit-error' : 'field-note'}">${esc(error || (kind === 'comboTransition' ? '입력이 있으면 이 시간부터 다음 콤보로 전환합니다. 0초는 즉시 전환할 수 있습니다.' : `클립 전체 길이 ${seconds(duration(selected))}초 · ${comboApplicable(selected) ? '종료 후 이동·대기로 복귀합니다.' : '종료 후 공격을 마치거나 다음 단계로 진행합니다.'}`))}</p></div>${early ? '<p class="timing-warning" data-early-combo-warning>마지막 타격이 끝나기 전에 다음 콤보로 넘어가면 남은 타격이 끊길 수 있습니다.</p>' : ''}<div class="timing-proposal"><div><strong>AI 제안 ${Number.isFinite(suggestion?.time) ? seconds(suggestion.time) + '초' : '없음'}</strong>${suggestion?.uncertain ? '<span class="hit-confidence">확인 필요</span>' : ''}<button type="button" class="text-button" data-apply-timing="${kind}" ${unavailable || lockedJob(selected) ? 'disabled' : ''}>제안 적용</button></div><p>${esc(suggestion?.reason || (selected.timingError ? selected.timingError : 'AI 분석 후 전환 시점과 판단 근거를 확인할 수 있습니다.'))}</p>${unavailable && suggestion ? `<p class="field-note">${esc(unavailable)}</p>` : ''}</div></div>`;
+    }).join('')}${!comboApplicable(selected) ? '<p class="field-note">다음 콤보 전환은 일반 콤보 공격을 선택하면 설정할 수 있습니다.</p>' : ''}</section>`;
+  }
+
   function renderHits() {
     const selected = job();
     const hits = windows(selected);
@@ -273,11 +350,12 @@
     if (['uncertain', 'undetermined', 'unresolved'].includes(analysisStatus)) callout += '<div class="callout warning">AI가 동작을 확실하게 판별하지 못했습니다. 프레임과 판단 근거를 직접 검토하세요.</div>';
     if (selected.clip?.compatible === false) callout += `<div class="callout warning">자동 적용 제한: ${esc(selected.clip.reason || '애니메이션 시간과 공격 실행 시간을 안전하게 대응할 수 없습니다.')}</div>`;
     if (selected.analysisSummary || selected.reason || selected.analysisNotes?.length) callout += `<div class="callout">${esc(selected.analysisSummary || selected.reason || selected.analysisNotes.at(-1))}</div>`;
+    callout = renderTimingFields(selected) + callout;
     $('hits-panel').innerHTML = `<div class="inspector-summary"><strong>${hits.length ? `${hits.length}개의 공격 판정 구간` : '판정 구간 없음'}</strong><button id="add-hit" class="text-button" ${busyJob(selected) || !duration(selected) ? 'disabled' : ''}>＋ 구간 추가</button></div>${callout}${hits.length ? hits.map((window, index) => {
       const error = windowError(window, duration(selected));
       const sourceIndex = window.sourceIndex ?? (previousHits[index]?.sourceIndex ?? (index < previousHits.length ? index : -1));
       return `<article class="hit-card ${window.id === selectedWindowId ? 'selected' : ''}" data-hit-card="${esc(window.id)}"><div class="hit-card-header"><div class="hit-name"><span>${index + 1}</span> HIT ${String(index + 1).padStart(2, '0')}${window.uncertain ? '<span class="hit-confidence">확인 필요</span>' : ''}</div><button class="icon-button" data-delete-hit="${esc(window.id)}" title="히트 구간 삭제" aria-label="${index + 1}타 구간 삭제" ${busyJob(selected) ? 'disabled' : ''}>×</button></div><div class="row-fields"><div class="field"><label for="hit-${esc(window.id)}-start">시작 (초)</label><input id="hit-${esc(window.id)}-start" data-hit-input="${esc(window.id)}" data-boundary="start" type="number" min="0" max="${duration(selected)}" step="0.001" value="${seconds(window.start)}" ${busyJob(selected) ? 'disabled' : ''}></div><div class="field"><label for="hit-${esc(window.id)}-end">종료 (초)</label><input id="hit-${esc(window.id)}-end" data-hit-input="${esc(window.id)}" data-boundary="end" type="number" min="0" max="${duration(selected)}" step="0.001" value="${seconds(window.end)}" ${busyJob(selected) ? 'disabled' : ''}></div></div><p class="hit-duration">유지 ${seconds(number(window.end) - number(window.start))} s</p>${error ? `<p class="hit-error">${esc(error)}</p>` : ''}${target ? `<div class="field hit-mapping"><label for="hit-${esc(window.id)}-source">데미지 · 피드백 값 연결</label><select id="hit-${esc(window.id)}-source" data-hit-source="${esc(window.id)}">${option(-1, '새 타격 · 기본 공격 값 상속', sourceIndex)}${previousHits.map((old, i) => option(old.sourceIndex ?? i, `기존 ${i + 1}타 유지 (${seconds(old.start)}–${seconds(old.end)}s)`, sourceIndex)).join('')}</select></div>` : ''}${window.reason ? `<p class="hit-reason">${esc(window.reason)}</p>` : ''}</article>`;
-    }).join('') : '<div class="empty-list">AI 분석을 시작하거나<br>현재 시간에 히트 구간을 추가하세요.</div>'}<div class="review-box"><label class="review-check"><input id="reviewed-check" type="checkbox" ${selected.reviewed ? 'checked' : ''} ${busyJob(selected) ? 'disabled' : ''}><span><strong>히트 구간과 타격 수를 검토했습니다</strong><small>프레임, 판정 경계와 기존 타격의 대응을 확인합니다.</small></span></label></div>`;
+    }).join('') : '<div class="empty-list">AI 분석을 시작하거나<br>현재 시간에 히트 구간을 추가하세요.</div>'}<div class="review-box"><label class="review-check"><input id="reviewed-check" type="checkbox" ${selected.reviewed ? 'checked' : ''} ${busyJob(selected) ? 'disabled' : ''}><span><strong>히트 구간과 전환 시간을 검토했습니다</strong><small>프레임, 판정 경계, 콤보 전환과 공격 종료를 확인합니다.</small></span></label></div>`;
   }
 
   function renderSave() {
@@ -300,7 +378,7 @@
     const clipAssignment = !isNew && changesClip && target.supported !== false
       ? `<div id="clip-assignment-notice" class="callout" style="margin-top:12px">${target.currentClip ? `기존 클립 <strong>${esc(target.currentClip.name)}</strong>을 교체합니다.` : '이 공격 상태에 애니메이션 클립이 없습니다.'}<br>저장하면 <strong>${esc(target.animationName)}</strong> 상태에 분석한 <strong>${esc(selected.clip?.name)}</strong> 클립을 연결하고 히트 구간을 적용합니다. 상태 이름과 전이는 유지합니다.</div>` : '';
     const currentClip = target?.currentClip ? `<p class="field-note" style="margin-top:7px;overflow-wrap:anywhere">현재 클립: ${esc(target.currentClip.name)}<br>${esc(target.currentClip.path)}</p>` : '';
-    const attackDuration = target ? `<p id="attack-duration-change" class="field-note" style="margin-top:8px">공격 길이: ${seconds(target.duration)} s → ${seconds(duration(selected))} s<br>저장할 공격 길이를 분석한 클립에 맞춥니다.</p>` : '';
+    const attackDuration = `<div class="timing-save-summary"><p id="attack-duration-change" class="field-note" style="margin-top:8px">공격 종료: ${target ? seconds(target.duration) + ' s → ' : ''}${seconds(timingValue(selected, 'actionEnd'))} s${comboApplicable(selected) ? `<br>다음 콤보 전환: ${seconds(timingValue(selected, 'comboTransition'))} s` : ''}<br>클립 전체 길이: ${seconds(duration(selected))} s</p><button id="go-timings" class="text-button">전환 시간과 AI 제안 편집 →</button></div>`;
     const savedAssets = selected.savedAssets || [];
     $('save-panel').innerHTML = `${selected.pendingSave ? `<div class="callout warning">이전 저장 요청의 결과를 확인하고 있습니다.${selected.error ? '<br><br>' + esc(selected.error) : '<br>Unity 연결이 복구되면 결과를 자동으로 확인합니다.'}</div>` : ''}<div class="save-mode" role="group" aria-label="저장 방식"><button data-save-mode="update" class="${!isNew ? 'active' : ''}">기존 공격 수정</button><button data-save-mode="register" class="${isNew ? 'active' : ''}">새 공격 등록</button></div><div class="field"><label for="source-select">대상 폼 / ScriptableObject</label><select id="source-select">${option('', sources.length ? '대상 폼을 선택하세요' : '공격 데이터가 없습니다', selected.sourceGuid)}${sources.map(item => option(item.guid, item.label || item.name || item.guid, selected.sourceGuid)).join('')}</select></div>${isNew ? `<div class="field"><label for="group-select">등록할 공격 종류</label><select id="group-select">${option('', '공격 종류 선택', selected.group)}${groups.map(item => option(item.id, `${item.label}${item.supported === false ? ' · 지원 제외' : ''}`, selected.group)).join('')}</select></div><div class="field"><label for="template-select">기존 공격 템플릿</label><select id="template-select">${option('', '밸런스 · 피드백을 복사할 공격 선택', selected.templatePath)}${targetOptions}</select><p class="field-note">템플릿을 복사하고 새 애니메이션과 히트 구간을 연결합니다. 목록형 공격은 단계 추가, 단일 공격은 생성·교체합니다.</p></div>` : `<div class="field"><label for="target-select">수정할 공격 단계</label><select id="target-select">${option('', '공격 단계 선택', selected.actionPath)}${targetOptions}</select></div>`}${target?.animationName ? `<p class="field-note" style="margin-top:8px">현재 상태: ${esc(target.animationName)} · ${target.needsClipAssignment ? '클립 없음' : seconds(target.duration) + ' s'}</p>` : ''}${target?.supported === false || group?.supported === false ? `<div class="callout warning" style="margin-top:12px">${esc(target?.reason || group?.reason || '이 공격은 별도 판정 로직을 사용하므로 자동 적용을 지원하지 않습니다.')}</div>` : ''}${currentClip}${clipAssignment}${attackDuration}${renderOverrideFields(selected)}<hr class="form-separator"><label class="checkbox-field"><input id="copy-check" type="checkbox" ${selected.copy ? 'checked' : ''}> 복사본에 저장</label><p class="field-note" style="margin-top:7px">${selected.copy ? 'ScriptableObject를 복제하고, 변경이 필요한 Animator Controller도 함께 복제합니다.' : '선택한 원본을 수정합니다. Unity Undo와 변경 전 스냅샷을 제공합니다.'}</p>${selected.copy ? `<div class="field"><label for="output-folder">복사본 저장 폴더</label><input id="output-folder" value="${esc(selected.outputFolder || '')}" placeholder="Assets/AutoHitTimer/Generated"><p class="field-note">Unity 프로젝트의 Assets 내부 경로</p></div>` : ''}<div class="callout" style="margin-top:15px;margin-bottom:0">기존 타격의 데미지와 피드백을 유지합니다. 신규 타격은 기본 공격 값을 상속하며, 타수 증가에 따른 피해 변화를 저장 전에 검토합니다.</div>${renderDiff(selected)}<div class="review-box"><label class="review-check"><input id="save-reviewed-check" type="checkbox" ${selected.reviewed ? 'checked' : ''} ${busyJob(selected) ? 'disabled' : ''}><span><strong>저장할 구간과 타격 대응을 확인했습니다</strong><small>타격 수, 값 상속 및 보정한 시간 설정을 함께 검토합니다.</small></span></label></div>${savedAssets.length ? `<hr class="form-separator"><div class="diff-title">저장된 에셋</div>${savedAssets.map(asset => { const path = typeof asset === 'string' ? asset : asset.path; return `<div class="saved-asset"><span>${esc(path || asset.label || '에셋')}</span>${path ? `<button class="text-button" data-reveal-asset="${esc(path)}">열기 ↗</button>` : ''}</div>`; }).join('')}` : ''}`;
   }
@@ -314,6 +392,7 @@
     timeSettingsOpen = context === timeSettingsContext ? $('time-settings')?.open ?? timeSettingsOpen : false;
     timeSettingsContext = context;
     const labels = {
+      'Execution.Duration': '공격 종료',
       'Execution.ComboTransitionTime': '다음 콤보 전환',
       'Execution.Movement.MovementStartTime': '이동 시작',
       'Execution.Movement.MovementEndTime': '이동 종료',
@@ -323,13 +402,13 @@
       'Feedback.Trail.TrailEndTime': '트레일 종료',
       'Feedback.Slash.SlashVFXStartTime': '슬래시 이펙트 시작'
     };
-    const settings = [...new Map(fields.map(item => [item.path, item])).values()].map(item => ({
-      ...item, max: duration(selected), value: existing.find(override => override.path === item.path)?.value ?? item.value ?? ''
+    const settings = [...new Map(fields.map(item => [item.path, item])).values()].filter(item => !Object.values(timingPaths).includes(item.path)).map(item => ({
+      ...item, max: item.active === false ? null : Math.min(duration(selected), timingValue(selected, 'actionEnd'), Number.isFinite(item.max) ? item.max : Infinity), value: existing.find(override => override.path === item.path)?.value ?? item.value ?? ''
     }));
-    const invalid = item => item.value !== '' && (number(item.value) < number(item.min) || number(item.value) > item.max);
-    return '<details id="time-settings" style="margin-top:16px"' + (timeSettingsOpen || settings.some(invalid) ? ' open' : '') + '><summary class="diff-title">공격 시간 설정 (' + settings.length + '개)</summary><p class="field-note">콤보 전환, 이동과 이펙트 시간을 수정할 수 있습니다. 분석한 클립 길이 안에서 설정하세요.</p>' + settings.map(item => {
+    const invalid = item => item.active !== false && item.value !== '' && (number(item.value) < number(item.min) || item.max != null && number(item.value) > item.max);
+    return '<details id="time-settings" style="margin-top:16px"' + (timeSettingsOpen || settings.some(invalid) ? ' open' : '') + '><summary class="diff-title">공격 시간 설정 (' + settings.length + '개)</summary><p class="field-note">이동과 이펙트 시간을 수정합니다. 활성 설정은 공격 종료 이내로 맞추세요.</p>' + settings.map(item => {
       const path = item.path;
-      return '<div class="field"><label for="override-' + esc(path) + '">' + esc(labels[path] || item.label || path) + ' (초)</label><input id="override-' + esc(path) + '" data-time-override="' + esc(path) + '" type="number" min="' + number(item.min) + '" max="' + item.max + '" step="0.001" value="' + esc(item.value) + '"' + (invalid(item) ? ' aria-invalid="true"' : '') + '><p class="' + (invalid(item) ? 'hit-error' : 'field-note') + '">허용 범위 ' + number(item.min) + '–' + seconds(item.max) + '초</p></div>';
+      return '<div class="field"><label for="override-' + esc(path) + '">' + esc(labels[path] || item.label || path) + ' (초)</label><input id="override-' + esc(path) + '" data-time-override="' + esc(path) + '" type="number" min="' + number(item.min) + '"' + (item.max == null ? '' : ' max="' + item.max + '"') + ' step="0.001" value="' + esc(item.value) + '"' + (invalid(item) ? ' aria-invalid="true"' : '') + '><p class="' + (invalid(item) ? 'hit-error' : 'field-note') + '">' + (item.active === false ? '현재 공격에서 비활성인 설정입니다.' : '허용 범위 ' + number(item.min) + '–' + seconds(item.max) + '초') + '</p></div>';
     }).join('') + '</details>';
   }
 
@@ -344,13 +423,16 @@
     const clipAssignment = preview.clipAssignment;
     const affectedAttacks = preview.affectedAttacks || [];
     const durationChange = Number.isFinite(preview.before?.duration) && Number.isFinite(preview.after?.duration)
-      ? '<div id="duration-diff" class="diff-counts">공격 길이 <strong>' + seconds(preview.before.duration) + ' s</strong><span>→</span><strong>' + seconds(preview.after.duration) + ' s</strong></div>' : '';
+      ? '<div id="duration-diff" class="diff-counts">공격 종료 <strong>' + seconds(preview.before.duration) + ' s</strong><span>→</span><strong>' + seconds(preview.after.duration) + ' s</strong></div>' : '';
+    const comboChange = Number.isFinite(preview.before?.comboTransitionTime) && Number.isFinite(preview.after?.comboTransitionTime)
+      ? '<div class="diff-counts">콤보 전환 <strong>' + seconds(preview.before.comboTransitionTime) + ' s</strong><span>→</span><strong>' + seconds(preview.after.comboTransitionTime) + ' s</strong></div>' : '';
     const damage = Number.isFinite(preview.damageBefore) && Number.isFinite(preview.damageAfter)
       ? '<div class="diff-counts">기본 피해 계수 <strong>' + esc(preview.damageBefore) + '</strong><span>→</span><strong>' + esc(preview.damageAfter) + '</strong></div><p class="field-note" style="margin-top:7px">' + esc(preview.damageNote) + '</p>' : '';
     return '<div class="diff-box"><div class="diff-title">' + (preview.canApply ? '변경 내용 검토' : '적용 전 확인 필요') + '</div><p class="diff-summary">' + esc(summary || '확정한 히트 구간과 대상의 변경 내용을 확인하세요.').replace(/\n/g, '<br>') + '</p><div class="diff-counts">타격 수 <strong>' + esc(beforeCount) + '</strong><span>→</span><strong>' + esc(afterCount) + '</strong></div>' + damage +
       (mapping ? '<p class="field-note" style="margin-top:10px">기존 값 유지 ' + esc(mapping.retained ?? mapping.preserved ?? mapping.kept ?? 0) + '개 · 제거 ' + esc(mapping.removed ?? 0) + '개 · 신규 상속 ' + esc(mapping.added ?? 0) + '개</p>' : '') +
       (preview.proposedStateName ? '<div class="diff-detail">새 Animator 상태: ' + esc(preview.proposedStateName) + '</div>' : '') +
-      durationChange +
+      durationChange + comboChange +
+      (preview.warnings?.length ? '<ul class="diff-issues timing-warning" id="timing-diff-warnings">' + preview.warnings.map(warning => '<li>' + esc(typeof warning === 'string' ? warning : warning.message || warning.reason) + '</li>').join('') + '</ul>' : '') +
       (affectedAttacks.length ? '<div id="shared-state-notice" class="callout warning"><strong>같은 Animator 상태를 사용하는 공격</strong><ul>' + affectedAttacks.map(item => '<li>' + esc(item.sourceName) + ' / ' + esc(item.label) + '</li>').join('') + '</ul>이 Controller를 사용하는 해당 공격들의 재생 클립도 바뀝니다. 각 공격의 히트 구간과 시간 설정은 별도로 수정해야 합니다.</div>' : '') +
       (clipAssignment ? '<div id="clip-assignment-diff" class="diff-detail"><strong>' + (clipAssignment.previousClipName ? '기존 클립 교체' : '기존 상태에 클립 연결') + '</strong><br>상태: ' + esc(clipAssignment.stateName) + '<br>' + esc(clipAssignment.previousClipName || '클립 없음') + ' → ' + esc(clipAssignment.clipName) + (clipAssignment.previousClipPath ? '<br>기존: ' + esc(clipAssignment.previousClipPath) : '') + (clipAssignment.clipPath ? '<br>연결: ' + esc(clipAssignment.clipPath) : '') + '<br>' + (selected.copy ? '복제한 Animator Controller에 클립을 연결합니다.' : '원본 Animator Controller에 클립을 연결합니다.') + '</div>' : '') +
       (issues.length ? '<ul class="diff-issues">' + issues.map(issue => '<li>' + esc(typeof issue === 'string' ? issue : issue.message || issue.reason || JSON.stringify(issue)) + '</li>').join('') + '</ul>' : '') +
@@ -400,6 +482,13 @@
     $('previous-frame').disabled = !hasFrames;
     $('next-frame').disabled = !hasFrames;
     $('seek').disabled = !duration(selected);
+    for (const input of document.querySelectorAll('[data-timing-kind]')) input.disabled = locked || lockedJob(selected) || !timingEnabled();
+    for (const marker of document.querySelectorAll('[data-timing-marker]')) marker.disabled = locked || lockedJob(selected) || !timingEnabled();
+    for (const button of document.querySelectorAll('[data-apply-timing]')) button.disabled = locked || lockedJob(selected) || Boolean(suggestionError(selected, button.dataset.applyTiming));
+    if ($('apply-all-timing-suggestions')) {
+      const proposed = suggestedValues(selected), kinds = Object.keys(timingPaths).filter(kind => kind !== 'comboTransition' || comboApplicable(selected));
+      $('apply-all-timing-suggestions').disabled = locked || lockedJob(selected) || !kinds.length || kinds.some(kind => suggestionError(selected, kind, proposed));
+    }
     if ($('preview-change')) $('preview-change').disabled = locked || !connectionReady() || state.busy || !selected?.reviewed || !windows(selected).length || !selected?.sourceGuid || !(selected?.mode === 'register' ? selected.group && selected.templatePath : selected?.actionPath) || windows(selected).some(window => windowError(window, duration(selected)));
     if ($('apply-change')) $('apply-change').disabled = locked || !connectionReady() || state.busy || !selected?.reviewed;
     if ($('install-integration')) $('install-integration').disabled = locked || state.busy || analysisActive() || searchActive();
@@ -600,6 +689,15 @@
     const hitCard = event.target.closest('[data-hit-card]');
     if (hitCard && !event.target.closest('input,select,button')) selectHit(hitCard.dataset.hitCard);
     if (button?.id === 'go-save') switchTab('save');
+    if (button?.id === 'go-timings') { switchTab('hits'); $('attack-timings')?.scrollIntoView({ block: 'start' }); }
+    if (button?.dataset.applyTiming || button?.id === 'apply-all-timing-suggestions') {
+      const selected = job(), proposed = suggestedValues(selected);
+      const kinds = button.dataset.applyTiming ? [button.dataset.applyTiming] : Object.keys(timingPaths).filter(kind => kind !== 'comboTransition' || comboApplicable(selected));
+      const context = button.dataset.applyTiming ? {} : proposed;
+      const error = kinds.map(kind => suggestionError(selected, kind, context)).find(Boolean);
+      if (error) showNotice(error, 'error');
+      else await patchJob({ timeOverrides: timingOverrides(selected, Object.fromEntries(kinds.map(kind => [kind, proposed[kind]]))) });
+    }
     if (button?.dataset.saveMode) await patchJob({ mode: button.dataset.saveMode, reviewed: false });
     if (button?.dataset.revealAsset) await run('에셋 열기 실패', () => api.revealAsset(button.dataset.revealAsset), false);
     if (button?.id === 'preview-change') {
@@ -630,6 +728,7 @@
       renderSearch();
     }
     if (input.id === 'actor-select') { const actorId = input.value; await cancelSearch(''); await run('캐릭터 선택 실패', () => api.updateSettings({ actorId, weaponId: '', weaponBone: '' })); }
+    if (input.id === 'ai-provider') await run('AI 엔진 변경 실패', () => api.setAiProvider(input.value));
     if (input.id === 'weapon-select') await run('무기 선택 실패', () => api.updateSettings({ weaponId: input.value }));
     if (input.id === 'weapon-bone') await run('무기 위치 변경 실패', () => api.updateSettings({ weaponBone: input.value.trim() }));
     if (input.dataset.hitInput) {
@@ -650,6 +749,7 @@
     if (input.id === 'copy-check') await patchJob({ copy: input.checked });
     if (input.id === 'output-folder') await patchJob({ outputFolder: input.value.trim() });
     if (input.dataset.timeOverride) {
+      if (input.dataset.timingKind && (!timingEnabled() || lockedJob(job()))) return;
       if (input.value === '' || !Number.isFinite(Number(input.value))) { showNotice('시간을 숫자로 입력해 주세요.', 'error'); return; }
       await patchJob({ timeOverrides: [...(job()?.timeOverrides || []).filter(item => item.path !== input.dataset.timeOverride), { path: input.dataset.timeOverride, value: Number(input.value) }] });
     }
@@ -658,6 +758,14 @@
   $('timeline').addEventListener('pointerdown', event => {
     const selected = job();
     if (!selected || !duration(selected)) return;
+    const marker = event.target.closest('[data-timing-marker]');
+    if (marker) {
+      if (!timingEnabled() || lockedJob(selected) || marker.disabled) return;
+      event.preventDefault(); stopPlayback();
+      drag = { kind: marker.dataset.timingMarker, value: timingValue(selected, marker.dataset.timingMarker), rect: $('timeline').getBoundingClientRect(), jobId: selected.id };
+      $('timeline').setPointerCapture(event.pointerId);
+      return;
+    }
     const windowElement = event.target.closest('[data-window]');
     const edge = event.target.dataset.edge;
     if (windowElement && edge && !lockedJob(selected)) {
@@ -676,9 +784,17 @@
   });
   $('timeline').addEventListener('pointermove', event => {
     if (!drag || drag.jobId !== job()?.id) return;
-    const hit = drag.next.find(window => window.id === drag.id);
     const total = duration(job());
     const time = Math.round(clamp((event.clientX - drag.rect.left) / drag.rect.width * total, 0, total) * 1000) / 1000;
+    if (drag.kind) {
+      const min = drag.kind === 'actionEnd' ? Math.max(.001, lastHitEnd(job()), comboApplicable(job()) ? timingValue(job(), 'comboTransition') : 0) : 0;
+      const max = drag.kind === 'actionEnd' ? total : Math.min(total, timingValue(job(), 'actionEnd'));
+      drag.value = clamp(time, Math.min(min, max), max);
+      const marker = document.querySelector(`[data-timing-marker="${drag.kind}"]`);
+      if (marker) { marker.style.left = `${drag.value / total * 100}%`; marker.querySelector('span').textContent = `${drag.kind === 'actionEnd' ? '종료' : '콤보'} ${seconds(drag.value)}`; }
+      currentTime = drag.value; updateFrame(); return;
+    }
+    const hit = drag.next.find(window => window.id === drag.id);
     hit[drag.edge] = drag.edge === 'start' ? clamp(time, 0, number(hit.end) - .001) : clamp(time, number(hit.start) + .001, total);
     hit.uncertain = false;
     currentTime = hit[drag.edge];
@@ -690,11 +806,23 @@
     if (!drag) return;
     const completed = drag;
     drag = null;
-    if (completed.jobId === job()?.id) await patchWindows(completed.next);
+    if (completed.jobId === job()?.id) {
+      if (completed.kind) await patchJob({ timeOverrides: timingOverrides(job(), { [completed.kind]: completed.value }) });
+      else await patchWindows(completed.next);
+    }
   };
   $('timeline').addEventListener('pointerup', finishDrag);
   $('timeline').addEventListener('pointercancel', () => { drag = null; renderTimeline(); });
   document.addEventListener('keydown', event => {
+    const marker = event.target.closest('[data-timing-marker]');
+    if (marker && ['ArrowLeft', 'ArrowRight'].includes(event.key) && !marker.disabled) {
+      event.preventDefault();
+      const kind = marker.dataset.timingMarker, selected = job();
+      const min = kind === 'actionEnd' ? Math.max(.001, lastHitEnd(selected), comboApplicable(selected) ? timingValue(selected, 'comboTransition') : 0) : 0;
+      const max = kind === 'actionEnd' ? duration(selected) : Math.min(duration(selected), timingValue(selected, 'actionEnd'));
+      const value = clamp(Math.round((timingValue(selected, kind) + (event.key === 'ArrowRight' ? 1 : -1) / 60) * 1000) / 1000, Math.min(min, max), max);
+      patchJob({ timeOverrides: timingOverrides(selected, { [kind]: value }) }); return;
+    }
     if (event.target.closest('input,select,textarea,button,[contenteditable="true"]')) return;
     if (event.key === 'Enter' && event.target.dataset.job) { run('작업 선택 실패', () => api.selectJob(event.target.dataset.job)); return; }
     if (event.code === 'Space') { event.preventDefault(); togglePlayback(); }

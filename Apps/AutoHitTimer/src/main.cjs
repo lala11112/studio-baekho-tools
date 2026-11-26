@@ -7,9 +7,11 @@ const { Store } = require('./store.cjs');
 const { Controller } = require('./controller.cjs');
 const { contained } = require('./project-client.cjs');
 const { installIntegration } = require('./install.cjs');
+const { AiRouter } = require('./ai.cjs');
 
 app.setName('AutoHitTimer');
-app.setPath('userData', path.join(app.getPath('appData'), 'StudioBaekho', 'AutoHitTimer'));
+const profileDirectory = app.commandLine.getSwitchValue('user-data-dir');
+app.setPath('userData', profileDirectory ? path.resolve(profileDirectory) : path.join(app.getPath('appData'), 'StudioBaekho', 'AutoHitTimer'));
 protocol.registerSchemesAsPrivileged([{ scheme: 'aht-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let window, controller, timer, quitting = false, mediaProject = '';
 const media = new Map();
@@ -22,7 +24,8 @@ function publicState() {
       media.set(token, frame.path); frame.url = `aht-media://frame/${token}.png`; delete frame.path;
     }
     // Previous drafts remain on disk; do not repeatedly transmit their full image manifests.
-    job.versions = (job.versions || []).map(version => ({ savedUtc: version.savedUtc, windows: version.windows, analysisStatus: version.analysisStatus }));
+    job.versions = (job.versions || []).map(version => ({ savedUtc: version.savedUtc, windows: version.windows, analysisStatus: version.analysisStatus,
+      timeOverrides: version.timeOverrides, timingSuggestions: version.timingSuggestions, timingError: version.timingError }));
   }
   return result;
 }
@@ -38,7 +41,7 @@ function kitRoot() { return app.isPackaged ? path.join(path.dirname(app.getPath(
 
 async function start() {
   const store = new Store(app.getPath('userData'));
-  controller = new Controller({ store, install: project => installIntegration(project, kitRoot()) });
+  controller = new Controller({ store, ai: new AiRouter({ provider: store.preferences().aiProvider }), install: project => installIntegration(project, kitRoot()) });
   controller.on('state', publish);
   protocol.handle('aht-media', request => {
     try {
@@ -58,7 +61,7 @@ async function start() {
     if (!selected.canceled) await controller.connectProject(selected.filePaths[0]);
     return publicState();
   });
-  for (const name of ['connectProject', 'installIntegration', 'refreshCatalog', 'searchAnimations', 'cancelAnimationSearch', 'importFiles', 'addJobs', 'selectJob', 'updateJob', 'updateSettings', 'analyzeJobs', 'cancelAnalysis', 'removeJob', 'previewChange', 'applyChange']) {
+  for (const name of ['connectProject', 'installIntegration', 'refreshCatalog', 'searchAnimations', 'cancelAnimationSearch', 'importFiles', 'addJobs', 'selectJob', 'updateJob', 'updateSettings', 'setAiProvider', 'analyzeJobs', 'cancelAnalysis', 'removeJob', 'previewChange', 'applyChange']) {
     handle(name, async (...args) => { const result = await controller[name](...args); return result === controller.state ? publicState() : result; });
   }
   handle('revealAsset', filename => {

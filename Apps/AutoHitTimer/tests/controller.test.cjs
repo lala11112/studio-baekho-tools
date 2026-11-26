@@ -10,12 +10,12 @@ function fixture({ failAI = false, uncertainSave = false, deferPreview = false }
     command: async (command, payload, options) => {
       calls.push({ command, payload });
       if (command === 'actors') return { actors: [{ id: 'actor', label: 'Player' }] };
-      if (command === 'targets') return { sources: [{ guid: 's', label: 'Fire' }], targets: [{ sourceGuid: 's', actionPath: 'Actions.ComboSteps.Array.data[0]', snapshot }], groups: [] };
+      if (command === 'targets') return { capabilities: { attackTiming: true }, sources: [{ guid: 's', label: 'Fire' }], targets: [{ sourceGuid: 's', actionPath: 'Actions.ComboSteps.Array.data[0]', snapshot }], groups: [] };
       if (command === 'saveStatus') return journal;
       if (command === 'capture') { batch++; return { sessionId: 'session', clip, duration: 1, fps: payload.fps, frames: (payload.times || Array.from({ length: 25 }, (_, i) => i / 24)).map((time, i) => ({ id: `b${batch}f${i}`, time, path: '/frame.png' })) }; }
       if (command === 'previewChange') {
         if (deferPreview) await new Promise(resolve => { releasePreview = resolve; });
-        return { changeId: 'change', canApply: true, issues: [] };
+        return { changeId: 'change', canApply: true, issues: [], editableTimeSettings: [{ path: 'Execution.Duration', value: 1 }] };
       }
       if (command === 'apply') {
         requestId = options.id;

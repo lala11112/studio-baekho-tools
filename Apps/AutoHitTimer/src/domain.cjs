@@ -67,11 +67,60 @@ function mergeWindows(windows, duration) {
   }
   return validateWindows(merged, duration);
 }
+function sampleFramesByTime(frames, limit) {
+  if (!Array.isArray(frames) || !Number.isInteger(limit) || limit < 2)
+    throw fault('전체 동작 샘플 수는 2개 이상이어야 합니다.');
+  const sorted = [...new Map(frames.map(frame => {
+    if (!frame || typeof frame.id !== 'string' || !Number.isFinite(frame.time)) throw fault('촬영 프레임이 유효하지 않습니다.');
+    return [frame.time, frame];
+  })).values()].sort((a, b) => a.time - b.time);
+  if (sorted.length <= limit) return sorted;
+  const selected = new Map();
+  let cursor = 0;
+  const first = sorted[0].time, span = sorted.at(-1).time - first;
+  for (let index = 0; index < limit; index++) {
+    const time = first + span * index / (limit - 1);
+    while (cursor < sorted.length - 1 && Math.abs(sorted[cursor + 1].time - time) < Math.abs(sorted[cursor].time - time)) cursor++;
+    selected.set(sorted[cursor].time, sorted[cursor]);
+  }
+  return [...selected.values()];
+}
+function timingBracket(frames, time) {
+  if (!Number.isFinite(time) || !Array.isArray(frames) || !frames.length) throw fault('전환 시점의 확인 범위가 유효하지 않습니다.');
+  const sorted = [...frames].sort((a, b) => a.time - b.time);
+  const before = sorted.filter(frame => frame.time < time - 1e-6).at(-1);
+  const after = sorted.find(frame => frame.time > time + 1e-6);
+  return { start: before?.time ?? sorted[0].time, end: after?.time ?? sorted.at(-1).time };
+}
+function reviewTimingSuggestions(suggestions, clip, windows = [], { checkOrder = true } = {}) {
+  if (!suggestions) return null;
+  const result = { ...suggestions };
+  const lastHitEnd = Math.max(0, ...windows.map(window => window.end));
+  const warn = (marker, message) => {
+    marker.uncertain = true;
+    if (!marker.reason.includes(message)) marker.reason += (marker.reason ? '\n' : '') + message;
+  };
+  for (const key of ['comboTransition', 'actionEnd']) {
+    const value = suggestions[key];
+    if (!value) { result[key] = null; continue; }
+    const marker = result[key] = { ...value, reason: typeof value.reason === 'string' ? value.reason : '', uncertain: value.uncertain === true };
+    if (value.time === null || !Number.isFinite(value.time) || value.time < 0 || !clip || value.time > clip.length + 0.0001 ||
+        (key === 'actionEnd' && value.time <= 0)) warn(marker, '유효한 전환·종료 시점인지 직접 확인해야 합니다.');
+    if (!windows.length) warn(marker, '확인된 타격이 없어 전환·종료 시점을 직접 확인해야 합니다.');
+    if (windows.some(window => window.uncertain)) warn(marker, '불확실한 타격 구간을 먼저 확인해야 합니다.');
+    if (Number.isFinite(value.time) && value.time < lastHitEnd - 0.0001) warn(marker, '마지막 타격을 보존하는 시점인지 직접 확인해야 합니다.');
+  }
+  const combo = result.comboTransition, end = result.actionEnd;
+  if (checkOrder && Number.isFinite(combo?.time) && Number.isFinite(end?.time) && combo.time > end.time + 0.0001) {
+    for (const marker of [combo, end]) warn(marker, '콤보 전환이 공격 종료보다 늦어 두 시점을 함께 확인해야 합니다.');
+  }
+  return result;
+}
 function newJob(clip) {
   clip = validateClip(clip);
   return { id: randomUUID(), clip, status: 'draft', progressText: '', error: '', frames: [], duration: clip.length,
     windows: [], reviewed: false, analysisStatus: '', sourceGuid: '', actionPath: '', mode: 'update', group: 'combo',
-    templatePath: '', copy: true, outputFolder: 'Assets/StudioBaekho/AutoHitTimer/Results', timeOverrides: [],
+    templatePath: '', copy: true, outputFolder: 'Assets/StudioBaekho/AutoHitTimer/Results', timeOverrides: [], timingSuggestions: null, timingError: '',
     savedAssets: [], createdUtc: new Date().toISOString(), versions: [] };
 }
-module.exports = { fault, validateClip, validateWindows, frameChunks, refinementTimes, mergeWindows, newJob };
+module.exports = { fault, validateClip, validateWindows, frameChunks, refinementTimes, mergeWindows, sampleFramesByTime, timingBracket, reviewTimingSuggestions, newJob };

@@ -2,15 +2,15 @@
 const { EventEmitter } = require('node:events');
 const { randomUUID } = require('node:crypto');
 const { ProjectClient } = require('./project-client.cjs');
-const { CodexAnalyzer } = require('./ai.cjs');
-const { fault, newJob, validateWindows, frameChunks, refinementTimes, mergeWindows } = require('./domain.cjs');
+const { AiRouter } = require('./ai.cjs');
+const { fault, newJob, validateWindows, frameChunks, refinementTimes, mergeWindows, sampleFramesByTime, timingBracket, reviewTimingSuggestions } = require('./domain.cjs');
 
 const EDITABLE = new Set(['windows', 'reviewed', 'sourceGuid', 'actionPath', 'mode', 'group', 'templatePath', 'copy', 'outputFolder', 'timeOverrides', 'stateName']);
 class Controller extends EventEmitter {
-  constructor({ store, clientFactory = project => new ProjectClient(project), ai = new CodexAnalyzer(), install } = {}) {
+  constructor({ store, clientFactory = project => new ProjectClient(project), ai = new AiRouter(), install } = {}) {
     super(); this.store = store; this.clientFactory = clientFactory; this.ai = ai; this.install = install;
-    this.state = { projectPath: '', connection: { ready: false, message: 'Unity 프로젝트를 선택하세요.' }, ai: { available: false, authenticated: false, label: 'Codex 확인 전' },
-      actors: [], actorId: '', sources: [], targets: [], groups: [], jobs: [], selectedJobId: '', settings: {}, busy: false, notice: '', search: { busy: false, progressText: '' } };
+    this.state = { projectPath: '', connection: { ready: false, message: 'Unity 프로젝트를 선택하세요.' }, ai: { available: false, authenticated: false, label: 'AI 확인 전', selection: ai.provider || '' },
+      actors: [], actorId: '', sources: [], targets: [], groups: [], capabilities: {}, jobs: [], selectedJobId: '', settings: {}, busy: false, notice: '', search: { busy: false, progressText: '' } };
     this.preview = null; this.previewRevision = 0; this.abortController = null; this.applying = false; this.queuePromise = null;
     this.searchAbortController = null; this.searchPromise = null;
   }
@@ -34,14 +34,16 @@ class Controller extends EventEmitter {
     this.cancelAnimationSearch();
     this.client = client; this.invalidatePreview();
     Object.assign(this.state, { projectPath: client.projectPath, settings: saved.settings || {}, jobs: saved.jobs || [], selectedJobId: saved.selectedJobId || '',
-      actors: [], sources: [], targets: [], groups: [], actorId: saved.settings?.actorId || '', notice: saved.recoveryError || '', connection: client.heartbeat() });
-    this.store.savePreferences({ projectPath: client.projectPath }); this.changed();
+      actors: [], sources: [], targets: [], groups: [], capabilities: {}, actorId: saved.settings?.actorId || '', notice: saved.recoveryError || '', connection: client.heartbeat() });
+    this.store.savePreferences({ ...(this.store.preferences?.() || {}), projectPath: client.projectPath }); this.changed();
     await this.refreshCatalog(); return this.state;
   }
   async refreshCatalog() {
-    if (!this.client) { this.state.ai = await this.ai.status(); return this.changed(false); }
-    this.state.connection = this.client.heartbeat(); this.changed(false);
-    const aiPromise = this.ai.status().then(value => { this.state.ai = value; this.changed(false); });
+    // Ignore a status that finished after the user picked another AI engine.
+    const current = value => !this.ai.provider || !value?.selection || value.selection === this.ai.provider;
+    if (!this.client) { const value = await this.ai.status(); if (current(value)) this.state.ai = value; return this.changed(false); }
+    this.state.connection = this.client.heartbeat(); this.state.capabilities = {}; this.changed(false);
+    const aiPromise = this.ai.status().then(value => { if (current(value)) this.state.ai = value; this.changed(false); });
     try {
       if (this.state.connection.ready) {
         const actorResult = await this.client.command('actors'); this.state.actors = actorResult.actors || [];
@@ -54,6 +56,7 @@ class Controller extends EventEmitter {
         if (this.state.actorId) {
           const result = await this.client.command('targets', { actorId: this.state.actorId, adapterId: 'four-tiger-sword' });
           this.state.sources = result.sources || []; this.state.targets = result.targets || []; this.state.groups = result.groups || [];
+          this.state.capabilities = { attackTiming: result.capabilities?.attackTiming === true };
           for (const job of this.state.jobs) {
             if (job.pendingSave) continue;
             const actionPath = job.mode === 'register' ? job.templatePath : job.actionPath;
@@ -66,7 +69,7 @@ class Controller extends EventEmitter {
             }
             job.expectedSnapshot = target.snapshot;
           }
-        } else { this.state.sources = []; this.state.targets = []; this.state.groups = []; }
+        } else { this.state.sources = []; this.state.targets = []; this.state.groups = []; this.state.capabilities = {}; }
       }
     } catch (error) { this.state.notice = error.message; }
     await aiPromise; return this.changed();
@@ -126,6 +129,18 @@ class Controller extends EventEmitter {
     if (old !== this.contextKey()) { this.cancelAnimationSearch(); this.invalidatePreview(); for (const job of this.state.jobs) job.reviewed = false; }
     this.changed(); return this.refreshCatalog();
   }
+  async setAiProvider(provider) {
+    this.idle();
+    if (this.state.search?.busy) throw fault('자연어 검색이 끝난 뒤 AI 엔진을 변경하세요.', 'BUSY');
+    if (typeof this.ai.setProvider !== 'function') throw fault('AI 엔진을 변경할 수 없습니다.', 'AI_UNAVAILABLE');
+    const selection = this.ai.setProvider(provider);
+    this.store.savePreferences({ ...(this.store.preferences?.() || {}), aiProvider: selection });
+    this.state.ai = { available: false, authenticated: false, label: 'AI 확인 중', selection, providers: this.state.ai?.providers };
+    this.changed(false);
+    const status = await this.ai.status();
+    if (this.ai.provider === selection) this.state.ai = status;
+    return this.changed(false);
+  }
   async installIntegration() {
     this.idle(); if (!this.client) throw fault('먼저 Unity 프로젝트를 선택하세요.');
     const result = await this.install(this.state.projectPath);
@@ -180,7 +195,7 @@ class Controller extends EventEmitter {
     if (mode === 'name') return { clips, mode, searchedCount: clips.length, truncated: false,
       summary: clips.length ? `이름·상태·경로와 일치하는 후보 ${clips.length}개` : '일치하는 애니메이션이 없습니다.' };
     if (!clips.length) return { clips: [], mode, searchedCount: 0, truncated: false, summary: '프로젝트에 검색할 애니메이션이 없습니다.' };
-    if (typeof this.ai.rankAnimations !== 'function') throw fault('Codex 자연어 검색을 사용할 수 없습니다. 이름 검색을 이용하세요.', 'AI_UNAVAILABLE');
+    if (typeof this.ai.rankAnimations !== 'function') throw fault('AI 자연어 검색을 사용할 수 없습니다. 이름 검색을 이용하세요.', 'AI_UNAVAILABLE');
     let candidates = clips, ranked = [], model, pass = 0, narrowed = false;
     for (;;) {
       ranked = [];
@@ -231,12 +246,16 @@ class Controller extends EventEmitter {
     if ('copy' in patch && typeof patch.copy !== 'boolean') throw fault('저장 옵션이 올바르지 않습니다.');
     if ('reviewed' in patch && typeof patch.reviewed !== 'boolean') throw fault('검토 상태가 올바르지 않습니다.');
     for (const key of ['sourceGuid', 'actionPath', 'templatePath', 'outputFolder', 'stateName']) if (key in patch && (typeof patch[key] !== 'string' || patch[key].length > 600)) throw fault('입력 길이를 확인하세요.');
-    if (patch.timeOverrides && (!Array.isArray(patch.timeOverrides) || patch.timeOverrides.length > 64 || patch.timeOverrides.some(item => typeof item.path !== 'string' || !Number.isFinite(item.value)))) throw fault('시간 보정값을 확인하세요.');
+    if ('timeOverrides' in patch && (!Array.isArray(patch.timeOverrides) || patch.timeOverrides.length > 64 ||
+        patch.timeOverrides.some(item => !item || typeof item.path !== 'string' || !Number.isFinite(item.value)) ||
+        new Set(patch.timeOverrides.map(item => item.path)).size !== patch.timeOverrides.length)) throw fault('시간 보정값을 확인하세요.');
+    const targetChanged = ['sourceGuid', 'actionPath', 'mode', 'group', 'templatePath'].some(key => key in patch && patch[key] !== job[key]);
+    if (targetChanged && !('timeOverrides' in patch)) patch = { ...patch, timeOverrides: [] };
     Object.assign(job, patch);
     this.invalidatePreview();
     if (changed) { job.reviewed = false; this.preview = null; if (job.status === 'saved') job.status = 'review'; }
-    const target = this.state.targets.find(value => value.sourceGuid === job.sourceGuid && value.actionPath === job.actionPath);
-    if ('sourceGuid' in patch || 'actionPath' in patch) job.expectedSnapshot = target?.snapshot || '';
+    const target = this.state.targets.find(value => value.sourceGuid === job.sourceGuid && value.actionPath === (job.mode === 'register' ? job.templatePath : job.actionPath));
+    if (targetChanged) job.expectedSnapshot = target?.snapshot || '';
     return this.changed();
   }
   removeJob(id) { this.idle(); this.saveResolved(this.job(id)); this.state.jobs = this.state.jobs.filter(job => job.id !== id); if (this.state.selectedJobId === id) this.state.selectedJobId = this.state.jobs[0]?.id || ''; this.preview = null; return this.changed(); }
@@ -256,10 +275,11 @@ class Controller extends EventEmitter {
       if (signal.aborted) break;
       try {
         if (job.windows.length || job.frames.length) {
-          job.versions.push({ savedUtc: new Date().toISOString(), windows: job.windows, frames: job.frames, analysisStatus: job.analysisStatus, contextKey: job.contextKey });
+          job.versions.push({ savedUtc: new Date().toISOString(), windows: job.windows, frames: job.frames, analysisStatus: job.analysisStatus, contextKey: job.contextKey,
+            timeOverrides: structuredClone(job.timeOverrides || []), timingSuggestions: structuredClone(job.timingSuggestions || null), timingError: job.timingError || '' });
           if (job.versions.length > 5) job.versions.shift();
         }
-        job.status = 'capturing'; job.error = ''; job.reviewed = false; job.progressText = 'Unity에서 두 시점의 동작 촬영'; this.changed();
+        job.status = 'capturing'; job.error = ''; job.timingError = ''; job.timingSuggestions = null; job.reviewed = false; job.progressText = 'Unity에서 두 시점의 동작 촬영'; this.changed();
         const capture = await this.capture(job, 24, null, signal);
         job.contextKey = this.contextKey(); job.status = 'analyzing'; job.windows = []; job.analysisNotes = []; this.changed();
         const chunks = frameChunks(job.frames); const candidates = []; let uncertain = false;
@@ -296,13 +316,76 @@ class Controller extends EventEmitter {
           windows = mergeWindows(refined, job.duration);
         }
         job.windows = windows; job.analysisStatus = uncertain || windows.some(item => item.uncertain) ? 'uncertain' : windows.length ? 'hits' : 'no-hit';
+        let stopQueue = false;
+        try { await this.analyzeTiming(job, signal); }
+        catch (error) {
+          // Completed hit results and explicit timing edits remain usable if this optional pass fails.
+          job.timingError = error.message;
+          for (const marker of ['comboTransition', 'actionEnd']) if (job.timingSuggestions?.[marker])
+            job.timingSuggestions[marker] = { ...job.timingSuggestions[marker], uncertain: true,
+              reason: `${job.timingSuggestions[marker].reason} · 전환 시간 분석이 완료되지 않았습니다.` };
+          stopQueue = signal.aborted || ['CANCELLED', 'AI_USAGE_LIMIT', 'AI_AUTH_REQUIRED', 'UNITY_DISCONNECTED', 'TIMEOUT_UNCERTAIN', 'EDITOR_BUSY', 'EDITOR_RELOAD', 'EDITOR_CLOSED', 'PLAY_MODE', 'EXPIRED'].includes(error.code);
+        }
         job.status = 'review'; job.progressText = windows.length ? `${windows.length}개 타격 후보 · 확인 후 저장` : '타격 후보 없음 · 전체 동작을 확인하세요.';
+        if (signal.aborted) { job.status = 'cancelled'; job.progressText = '분석 취소 · 완료한 히트 결과는 보존했습니다.'; }
         this.changed();
+        if (stopQueue) break;
       } catch (error) {
         job.status = signal.aborted || error.code === 'CANCELLED' ? 'cancelled' : 'failed'; job.error = error.message; job.progressText = ''; this.changed();
         if (signal.aborted || ['AI_USAGE_LIMIT', 'AI_AUTH_REQUIRED', 'UNITY_DISCONNECTED', 'TIMEOUT_UNCERTAIN', 'EDITOR_BUSY', 'EDITOR_RELOAD', 'EDITOR_CLOSED', 'PLAY_MODE', 'EXPIRED'].includes(error.code)) break;
       }
     }
+  }
+  async analyzeTiming(job, signal) {
+    if (typeof this.ai.analyzeTiming !== 'function') throw fault('전환 시간 AI를 사용할 수 없습니다. 시간을 직접 조정하세요.', 'AI_UNAVAILABLE');
+    const globalFrames = sampleFramesByTime(job.frames, 96);
+    job.progressText = 'AI 콤보 전환·공격 종료 분석'; this.changed();
+    const suggestions = reviewTimingSuggestions(await this.ai.analyzeTiming({ clip: job.clip, frames: globalFrames, windows: job.windows }, { signal }), job.clip, job.windows);
+    const publishCandidates = () => {
+      // A crash must never turn a partially refined pair into actionable recommendations.
+      job.timingSuggestions = reviewTimingSuggestions(suggestions, job.clip, job.windows);
+      for (const key of ['comboTransition', 'actionEnd']) if (job.timingSuggestions[key]) {
+        job.timingSuggestions[key].uncertain = true;
+        job.timingSuggestions[key].reason += ' · 전환 시점 확인 중입니다.';
+      }
+      this.changed();
+    };
+    publishCandidates();
+    const contextFrames = sampleFramesByTime(globalFrames, 32);
+    for (const marker of ['comboTransition', 'actionEnd']) {
+      let candidate = suggestions[marker];
+      if (!candidate || candidate.uncertain || !Number.isFinite(candidate.time)) continue;
+      let bracket = timingBracket(globalFrames, candidate.time);
+      // At 120 seconds, one global bracket spans <=153 60fps ticks. A second local pass is sufficient.
+      for (let pass = 0; pass < 2; pass++) {
+        const ticks = [];
+        for (let tick = Math.ceil((bracket.start - 1e-6) * 60); tick <= Math.floor((bracket.end + 1e-6) * 60); tick++)
+          ticks.push(Math.max(0, Math.min(job.duration, tick / 60)));
+        const times = [...new Set([bracket.start, ...ticks, bracket.end])].sort((a, b) => a - b);
+        job.progressText = `AI ${marker === 'comboTransition' ? '콤보 전환' : '공격 종료'} 60fps 확인`; this.changed();
+        await this.capture(job, 60, times, signal, job.sessionId);
+        const dense = job.frames.filter(frame => frame.time >= bracket.start - 1e-6 && frame.time <= bracket.end + 1e-6);
+        const local = sampleFramesByTime(dense, 64);
+        // Use current frame identities: recapturing an existing timestamp replaces its frame ID.
+        const context = contextFrames.map(frame => job.frames.find(current => Math.abs(current.time - frame.time) < 1e-6) || frame);
+        const frames = [...new Map([...context, ...local].map(frame => [frame.id, frame])).values()].sort((a, b) => a.time - b.time);
+        const result = await this.ai.analyzeTiming({ clip: job.clip, frames, windows: job.windows, refinement: true,
+          hint: { marker, ...bracket, time: candidate.time } }, { signal });
+        candidate = result[marker];
+        if (Number.isFinite(candidate?.time) && (candidate.time < bracket.start - 1e-6 || candidate.time > bracket.end + 1e-6))
+          candidate = { ...candidate, uncertain: true, reason: `${candidate.reason} · 후보 범위를 벗어나 직접 확인이 필요합니다.` };
+        suggestions[marker] = candidate; publishCandidates();
+        if (!candidate || candidate.uncertain || !Number.isFinite(candidate.time) || dense.length <= 64) break;
+        bracket = timingBracket(local, candidate.time);
+      }
+    }
+    job.timingSuggestions = reviewTimingSuggestions(suggestions, job.clip, job.windows);
+    for (const marker of ['comboTransition', 'actionEnd']) {
+      const item = job.timingSuggestions[marker];
+      const frame = Number.isFinite(item?.time) && job.frames.find(value => Math.abs(value.time - item.time) < 1e-6);
+      if (frame) item.frameId = frame.id;
+    }
+    this.changed();
   }
   async capture(job, fps, requestedTimes, signal, sessionId) {
     const times = requestedTimes || [...Array.from({ length: Math.ceil(job.clip.length * fps) }, (_, index) => index / fps), job.clip.length];
@@ -340,7 +423,17 @@ class Controller extends EventEmitter {
     if (job.pendingSave) throw fault('이전 저장의 결과를 확인 중입니다. Unity 연결을 복구하세요. 저장 요청은 재전송하지 않습니다.');
     if (!job.reviewed) throw fault('미리보기와 타격 구간을 확인한 뒤 검토 완료를 표시하세요.');
     if (job.contextKey !== this.contextKey()) throw fault('현재 캐릭터·무기로 동작을 다시 촬영하고 확인하세요.');
+    if (!this.state.capabilities.attackTiming) throw fault('콤보 전환·공격 종료 저장을 위해 Unity 연결 모듈을 설치 / 복구한 뒤 목록을 새로고침하세요.', 'INTEGRATION_UPDATE_REQUIRED');
     const windows = validateWindows(job.windows, job.duration, { allowEmpty: false });
+    const target = this.state.targets.find(value => value.sourceGuid === job.sourceGuid && value.actionPath === (job.mode === 'register' ? job.templatePath : job.actionPath));
+    const sameClip = job.mode !== 'register' && target?.currentClip?.guid === job.clip.guid && String(target.currentClip.localId) === String(job.clip.localId);
+    const override = name => job.timeOverrides?.find(item => item.path === name)?.value;
+    const end = override('Execution.Duration') ?? (sameClip ? target.duration : job.duration);
+    const combo = override('Execution.ComboTransitionTime') ?? target?.timeSettings?.find(item => item.path === 'Execution.ComboTransitionTime')?.value;
+    if (!Number.isFinite(end) || end <= 0 || end > job.duration + 0.0001 || windows.some(window => window.end > end + 0.0001))
+      throw fault('공격 종료는 모든 히트 종료 이후이며 클립 길이 이내여야 합니다.', 'INVALID_ATTACK_TIMING');
+    if ((job.mode === 'register' ? job.group : target?.group) === 'combo' && combo != null && (!Number.isFinite(combo) || combo < 0 || combo > end + 0.0001))
+      throw fault('콤보 전환은 0초 이상, 공격 종료 이하여야 합니다.', 'INVALID_ATTACK_TIMING');
     if (options.jobId && options.jobId !== job.id) throw fault('선택한 작업이 변경되었습니다.');
     const input = { ...job, windows, actorId: this.state.actorId, adapterId: 'four-tiger-sword' };
     // Never serialize frames or saved versions into a bridge request.
@@ -350,6 +443,10 @@ class Controller extends EventEmitter {
     const result = await this.client.command('previewChange', payload);
     if (revision !== this.previewRevision || context !== this.contextKey() || this.state.selectedJobId !== job.id || !job.reviewed)
       throw fault('변경 내용을 불러오는 동안 편집 내용이 바뀌었습니다. 다시 확인하세요.', 'STALE_PREVIEW');
+    if (!result.editableTimeSettings?.some(item => item.path === 'Execution.Duration')) {
+      this.state.capabilities = {}; this.invalidatePreview(); this.changed(false);
+      throw fault('Unity 연결 모듈이 공격 종료 편집을 지원하지 않습니다. 설치 / 복구한 뒤 목록을 새로고침하세요.', 'INTEGRATION_UPDATE_REQUIRED');
+    }
     this.preview = result.canApply ? { changeId: result.changeId, jobId: job.id, context, revision } : null;
     return result;
   }

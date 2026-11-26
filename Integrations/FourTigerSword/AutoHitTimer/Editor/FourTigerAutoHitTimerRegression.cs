@@ -19,10 +19,11 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode) throw new InvalidOperationException("편집 모드에서 실행하세요.");
             Mapping();
+            AttackTiming();
             AssetTransactions();
             ExistingStateClipChange(false);
             ExistingStateClipChange(true);
-            Debug.Log("[Auto Hit Timer] Four Tiger adapter regression PASS: mapping, inheritance, time guards, support matrix, stale checks, duplicate apply, copy, registration, empty-state assignment, clip replacement, existing-action time editing, rollback, Undo.");
+            Debug.Log("[Auto Hit Timer] Four Tiger adapter regression PASS: mapping, inheritance, attack end and combo timing, active-time guards, support matrix, stale checks, duplicate apply, copy, registration, empty-state assignment, clip replacement, existing-action time editing, rollback, Undo.");
         }
 
         private static void Mapping()
@@ -67,6 +68,74 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
             finally { UnityEngine.Object.DestroyImmediate(fire); UnityEngine.Object.DestroyImmediate(iron); UnityEngine.Object.DestroyImmediate(water); }
         }
 
+        private static void AttackTiming()
+        {
+            var action = new WeaponActionData { Duration = 0.5f, ComboTransitionTime = 0.4f,
+                HitStartTime = 0.1f, HitDuration = 0.2f };
+            action.Execution.Movement.MovementStartTime = 3;
+            action.Execution.Movement.MovementEndTime = 2;
+            action.Feedback.Trail.TrailStartTime = 3;
+            action.Feedback.Trail.TrailEndTime = 2;
+            action.Feedback.Slash.SlashVFXStartTime = 3;
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count == 0, "inactive defaults above attack end are preserved");
+            var duration = FourTigerHitMapping.TimeSettings(action, 1).OfType<JObject>().Single(t => (string)t["path"] == "Execution.Duration");
+            Assert(Near((float)duration["min"], 0.3f) && Near((float)duration["max"], 1) && (bool)duration["active"],
+                "attack-end metadata bounds encompass hits and clip");
+            Assert(FourTigerHitMapping.TimeSettings(action, 1).OfType<JObject>().Any(t =>
+                (string)t["path"] == "Feedback.Trail.TrailEndTime" && !(bool)t["active"] && t["max"].Type == JTokenType.Null),
+                "inactive time metadata has no execution deadline");
+            foreach (float invalid in new[] { 0f, -0.1f, 1.1f, float.NaN, float.PositiveInfinity, 0.25f })
+            {
+                action.Duration = invalid;
+                Assert(FourTigerHitMapping.InvalidTimes(action, 1).OfType<JObject>().Any(t => (string)t["path"] == "Execution.Duration"),
+                    "invalid or hit-truncating attack end rejected");
+            }
+            action.Duration = 0.5f;
+            action.ComboTransitionTime = -0.00001f;
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count > 0, "negative combo time is rejected without tolerance");
+            action.ComboTransitionTime = 0.6f;
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count > 0, "combo must precede attack end");
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1, "skill").Count == 0, "non-combo action ignores dormant combo threshold");
+            action.ComboTransitionTime = 0.15f;
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count == 0 && FourTigerHitMapping.TimeWarnings(action, "combo").Count == 1,
+                "intentional early combo is permitted with a hit-truncation warning");
+            action.ComboTransitionTime = 0.3f;
+            Assert(FourTigerHitMapping.TimeWarnings(action, "combo").Count == 0, "combo at final hit end needs no warning");
+            action.Duration = 0.3f;
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count == 0, "attack end may coincide with final hit and combo threshold");
+            action.Duration = 0.5f;
+            var noHits = new WeaponActionData { Duration = 0, HitDuration = 0, ComboTransitionTime = 0 };
+            Assert(FourTigerHitMapping.InvalidTimes(noHits, 1).OfType<JObject>().Any(t => (string)t["path"] == "Execution.Duration"),
+                "even an attack with no hits requires a positive duration");
+            action.UseDistanceMovement = true;
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count > 0, "active movement must fit attack end and preserve start-end order");
+            action.UseDistanceMovement = false;
+            action.UseTargetApproach = true;
+            action.ApproachEndTime = 0.8f;
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count > 0, "active legacy target approach fits attack end");
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1, "skill").Count == 0, "target approach is inactive for skill route");
+            action.UseTargetApproach = false;
+            action.RotationEndTime = 0.8f;
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count > 0 && FourTigerHitMapping.InvalidTimes(action, 1, "air").Count == 0,
+                "facing deadline applies only to movement routes");
+            action.RotationEndTime = 0.2f;
+            action.UseCustomTrailTiming = true;
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count > 0, "custom trail times fit attack end");
+            action.DisableTrail = true;
+            Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count == 0, "disabled trail keeps dormant times");
+            var slash = new GameObject("Attack timing regression slash");
+            try
+            {
+                action.Feedback.Slash.SlashVFX = slash;
+                Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count > 0, "active absolute slash starts before attack end");
+                action.Feedback.Slash.SlashVFXStartTime = -1;
+                Assert(FourTigerHitMapping.InvalidTimes(action, 1).Count == 0, "automatic slash timing sentinel is preserved");
+                FourTigerHitMapping.ApplyTimeOverrides(action, new JArray(new JObject { ["path"] = "Execution.Duration", ["value"] = 0.45f }));
+                Assert(Near(action.Duration, 0.45f), "attack end is an editable override");
+            }
+            finally { UnityEngine.Object.DestroyImmediate(slash); }
+        }
+
         private static void AssetTransactions()
         {
             var previousScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
@@ -89,7 +158,7 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 animator.runtimeAnimatorController = controller;
                 var source = ScriptableObject.CreateInstance<FireFormActionDataSO>();
                 source.name = "Regression Fire";
-                source.ComboSteps = new List<WeaponActionData> { new WeaponActionData { AnimationName = "Attack", Duration = 1, Damage = 23, ComboTransitionTime = 0.6f } };
+                source.ComboSteps = new List<WeaponActionData> { new WeaponActionData { AnimationName = "Attack", Duration = 0.9f, Damage = 23, ComboTransitionTime = 0.6f } };
                 source.ComboSteps[0].Feedback.HitStop.OverrideHitStop = true;
                 source.ComboSteps[0].Feedback.HitStop.HitStopDuration = 0.17f;
                 AssetDatabase.CreateAsset(source, folder + "/Form.asset");
@@ -100,7 +169,18 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 var request = new JObject { ["actorId"] = actorId, ["sourceGuid"] = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(source)),
                     ["actionPath"] = "Actions.ComboSteps.Array.data[0]", ["mode"] = "update", ["clip"] = AutoHitTimerAssets.ClipRef(clip),
                     ["windows"] = Windows(0.25f, 0.45f, 0), ["copy"] = false,
-                    ["timeOverrides"] = new JArray(new JObject { ["path"] = "Execution.ComboTransitionTime", ["value"] = 0.8f }) };
+                    ["timeOverrides"] = new JArray(new JObject { ["path"] = "Execution.ComboTransitionTime", ["value"] = 0.8f },
+                        new JObject { ["path"] = "Execution.Duration", ["value"] = 0.85f }) };
+                Assert((bool)adapter.Targets(actorId)["capabilities"]["attackTiming"], "adapter advertises attack-timing capability");
+                var preserveRequest = (JObject)request.DeepClone();
+                preserveRequest["timeOverrides"] = new JArray(new JObject { ["path"] = "Execution.ComboTransitionTime", ["value"] = 0.8f });
+                Assert(Near((float)adapter.PreviewChange(preserveRequest)["after"]["duration"], 0.9f), "same-clip edit preserves authored duration by default");
+                var earlyRequest = (JObject)request.DeepClone();
+                earlyRequest["timeOverrides"] = new JArray(new JObject { ["path"] = "Execution.ComboTransitionTime", ["value"] = 0.3f },
+                    new JObject { ["path"] = "Execution.Duration", ["value"] = 0.85f });
+                var earlyPreview = adapter.PreviewChange(earlyRequest);
+                Assert((bool)earlyPreview["canApply"] && ((JArray)earlyPreview["warnings"]).Count == 1 &&
+                    Near((float)earlyPreview["after"]["comboTransitionTime"], 0.3f), "preview reports editable early combo and warning");
                 var preview = adapter.PreviewChange(request);
                 Assert((bool)preview["canApply"], "existing action preview");
                 Assert(!(bool)preview["controllerChanged"] && preview["clipAssignment"].Type == JTokenType.Null, "same clip edits do not change controller");
@@ -114,7 +194,7 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 preview = adapter.PreviewChange(request);
                 string controllerBefore = File.ReadAllText(AssetDatabase.GetAssetPath(controller));
                 var result = adapter.Apply(new JObject { ["changeId"] = preview["changeId"] });
-                Assert(Near(source.ComboSteps[0].HitStartTime, 0.25f) && Near(source.ComboSteps[0].ComboTransitionTime, 0.8f) &&
+                Assert(Near(source.ComboSteps[0].Duration, 0.85f) && Near(source.ComboSteps[0].HitStartTime, 0.25f) && Near(source.ComboSteps[0].ComboTransitionTime, 0.8f) &&
                     source.ComboSteps[0].Damage == 23 && source.ComboSteps[0].Feedback.HitStop.OverrideHitStop &&
                     Near(source.ComboSteps[0].Feedback.HitStop.HitStopDuration, 0.17f), "existing action edits timing while preserving balance and feedback");
                 Assert(((JArray)result["assets"]).Count == 1 && File.ReadAllText(AssetDatabase.GetAssetPath(controller)) == controllerBefore && state.motion == clip,
@@ -124,7 +204,7 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 var saveStatus = adapter.SaveStatus(new JObject { ["changeId"] = preview["changeId"] });
                 Assert((string)saveStatus["status"] == "complete" && JToken.DeepEquals(result, saveStatus["result"]), "durable completed result can be recovered without mutation");
                 Undo.PerformUndo();
-                Assert(Near(source.ComboSteps[0].HitStartTime, 0.1f) && Near(source.ComboSteps[0].ComboTransitionTime, 0.6f), "Undo restores original hit and execution timing");
+                Assert(Near(source.ComboSteps[0].Duration, 0.9f) && Near(source.ComboSteps[0].HitStartTime, 0.1f) && Near(source.ComboSteps[0].ComboTransitionTime, 0.6f), "Undo restores original hit and execution timing");
                 AssetDatabase.SaveAssetIfDirty(source);
 
                 request["mode"] = "register";
@@ -133,6 +213,9 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 request["stateName"] = "Attack";
                 request["copy"] = true;
                 request["outputFolder"] = folder + "/New/Nested";
+                var defaultRegistration = (JObject)request.DeepClone();
+                defaultRegistration["timeOverrides"] = new JArray(new JObject { ["path"] = "Execution.ComboTransitionTime", ["value"] = 0.8f });
+                Assert(Near((float)adapter.PreviewChange(defaultRegistration)["after"]["duration"], clip.length), "registration initializes duration to clip length");
                 preview = adapter.PreviewChange(request);
                 Assert((bool)preview["canApply"] && (string)preview["proposedStateName"] == "Attack_2", "registration preview creates unique name");
                 Assert((int)preview["hitCountBefore"] == 0, "append preview counts no previous destination hits");
@@ -142,7 +225,7 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 var copiedController = AssetDatabase.LoadAssetAtPath<AnimatorController>((string)assets[1]["path"]);
                 Assert(copiedSource.ComboSteps.Count == 2 && source.ComboSteps.Count == 1, "copy registration preserves original SO");
                 Assert(controller.layers[0].stateMachine.states.Length == 1 && copiedController.layers[0].stateMachine.states.Length == 2, "copy registration preserves original controller");
-                Assert(copiedSource.ComboSteps[1].AnimationName == "Attack_2" && Near(copiedSource.ComboSteps[1].Duration, clip.length), "new action state and duration");
+                Assert(copiedSource.ComboSteps[1].AnimationName == "Attack_2" && Near(copiedSource.ComboSteps[1].Duration, 0.85f), "new action state and explicit duration");
                 Assert(copiedController.layers[0].stateMachine.states.Any(s => s.state.name == "Attack_2" && s.state.motion == clip), "new controller state clip");
                 Assert(JToken.DeepEquals(result, adapter.Apply(new JObject { ["changeId"] = preview["changeId"] })), "duplicate registration does not append again");
 
@@ -259,7 +342,8 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 state.motion = interveningClip;
                 Throws(() => adapter.Apply(new JObject { ["changeId"] = preview["changeId"] }), "occupied-after-preview state rejected");
                 Assert(state.motion == interveningClip && Near(source.ComboSteps[0].HitStartTime, 0.1f), "stale assignment leaves both assets untouched");
-                Assert((bool)adapter.PreviewChange(request)["canApply"], "a fresh review supports an occupied state");
+                Assert((bool)adapter.PreviewChange(request)["canApply"] == !replaceExisting,
+                    "fresh same-clip review preserves authored duration and blocks hits beyond its end");
                 state.motion = originalMotion;
                 preview = adapter.PreviewChange(request);
                 state.tag = "ChangedAfterReview";
@@ -392,13 +476,14 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                     Throws(() => adapter.PreviewChange(forbiddenRequest), "existing-action time overrides cannot edit balance");
 
                     request["timeOverrides"] = new JArray(((JArray)preview["editableTimeSettings"]).Select(t => new JObject {
-                        ["path"] = (string)t["path"], ["value"] = (string)t["path"] == "Execution.ComboTransitionTime" ? 0.4f :
+                        ["path"] = (string)t["path"], ["value"] = (string)t["path"] == "Execution.Duration" ? 0.45f :
+                            (string)t["path"] == "Execution.ComboTransitionTime" ? 0.4f :
                             (string)t["path"] == "Feedback.Slash.SlashVFXStartTime" ? -1f : 0.25f }));
                     preview = adapter.PreviewChange(request);
                     Assert((bool)preview["canApply"] && ((JArray)preview["requiredTimeOverrides"]).Count == 0,
                         "supported time overrides resolve shorter replacement timing errors");
                     adapter.Apply(new JObject { ["changeId"] = preview["changeId"] });
-                    Assert(state.motion == shortClip && Near(source.ComboSteps[0].Duration, 0.5f) && Near(source.ComboSteps[0].HitStartTime, 0.2f) &&
+                    Assert(state.motion == shortClip && Near(source.ComboSteps[0].Duration, 0.45f) && Near(source.ComboSteps[0].HitStartTime, 0.2f) &&
                         Near(source.ComboSteps[0].ComboTransitionTime, 0.4f) && FourTigerHitMapping.InvalidTimes(source.ComboSteps[0], shortClip.length).Count == 0,
                         "shorter replacement persists corrected clip, duration and execution times");
                     Assert(Near(source.ComboSteps[0].Damage, 37) && Near(source.ComboSteps[0].Feedback.HitStop.HitStopDuration, 0.19f),

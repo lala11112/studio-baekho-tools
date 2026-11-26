@@ -207,8 +207,9 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
                 : action.HitDuration > 0 ? action.Damage : 0;
         }
 
+        private const float TimeTolerance = 0.0001f;
         private static readonly string[] TimePaths = {
-            "Execution.ComboTransitionTime", "Execution.Movement.MovementStartTime", "Execution.Movement.MovementEndTime",
+            "Execution.Duration", "Execution.ComboTransitionTime", "Execution.Movement.MovementStartTime", "Execution.Movement.MovementEndTime",
             "Execution.Movement.TargetApproach.ApproachEndTime", "Execution.Movement.TargetApproach.RotationEndTime",
             "Feedback.Trail.TrailStartTime", "Feedback.Trail.TrailEndTime", "Feedback.Slash.SlashVFXStartTime"
         };
@@ -225,39 +226,81 @@ namespace StudioBaekho.AutoHitTimer.FourTigerSword
             }
         }
 
-        public static JArray TimeSettings(WeaponActionData action, float length)
+        public static JArray TimeSettings(WeaponActionData action, float length, string group = "combo")
         {
             var result = new JArray();
             foreach (string path in TimePaths)
             {
                 var owner = TimeOwner(action, path, out var field);
+                bool active = TimeActive(action, path, group);
+                float min = path == "Execution.Duration" ? LastHitEnd(action)
+                    : path == "Feedback.Slash.SlashVFXStartTime" ? -1 : 0;
                 result.Add(new JObject { ["path"] = path, ["label"] = path, ["value"] = (float)field.GetValue(owner),
-                    ["min"] = path == "Feedback.Slash.SlashVFXStartTime" ? -1 : 0, ["max"] = length });
+                    ["min"] = min, ["max"] = !active ? JValue.CreateNull()
+                        : new JValue(path == "Execution.Duration" ? length : action.Duration),
+                    ["exclusiveMin"] = path == "Execution.Duration" && min == 0,
+                    ["active"] = active, ["unit"] = "seconds" });
             }
             return result;
         }
 
-        public static JArray InvalidTimes(WeaponActionData action, float length)
+        public static JArray InvalidTimes(WeaponActionData action, float length, string group = "combo")
         {
             var result = new JArray();
-            foreach (string path in TimePaths)
+            foreach (JObject setting in TimeSettings(action, length, group))
             {
-                var owner = TimeOwner(action, path, out var field);
-                float value = (float)field.GetValue(owner);
-                float min = path == "Feedback.Slash.SlashVFXStartTime" ? -1 : 0;
-                if (float.IsNaN(value) || float.IsInfinity(value) || value < min || value > length)
-                    result.Add(new JObject { ["path"] = path, ["label"] = path, ["value"] = value, ["min"] = min, ["max"] = length });
+                // Dormant template defaults do not become invalid when an attack is shortened.
+                if (!(bool)setting["active"]) continue;
+                float value = (float)setting["value"];
+                float min = (float)setting["min"];
+                float max = (float)setting["max"];
+                float minTolerance = (string)setting["path"] == "Execution.Duration" ? TimeTolerance : 0;
+                if (!Finite(value) || value < min - minTolerance || value > max + TimeTolerance
+                    || ((bool)setting["exclusiveMin"] && value <= min)) result.Add(setting.DeepClone());
             }
             foreach (var pair in new[] { new[] { "Execution.Movement.MovementStartTime", "Execution.Movement.MovementEndTime" },
                          new[] { "Feedback.Trail.TrailStartTime", "Feedback.Trail.TrailEndTime" } })
             {
                 var a = TimeOwner(action, pair[0], out var fa);
                 var b = TimeOwner(action, pair[1], out var fb);
-                if ((float)fa.GetValue(a) > (float)fb.GetValue(b))
+                if (TimeActive(action, pair[0], group) && (float)fa.GetValue(a) > (float)fb.GetValue(b) + TimeTolerance)
                     result.Add(new JObject { ["path"] = pair[1], ["label"] = "종료는 시작보다 빠를 수 없습니다: " + pair[1],
-                        ["value"] = (float)fb.GetValue(b), ["min"] = (float)fa.GetValue(a), ["max"] = length });
+                        ["value"] = (float)fb.GetValue(b), ["min"] = (float)fa.GetValue(a), ["max"] = action.Duration,
+                        ["active"] = true, ["exclusiveMin"] = false, ["unit"] = "seconds" });
             }
             return result;
+        }
+
+        public static JArray TimeWarnings(WeaponActionData action, string group)
+        {
+            var result = new JArray();
+            if (group == "combo" && Finite(action.ComboTransitionTime)
+                && action.ComboTransitionTime < LastHitEnd(action) - TimeTolerance)
+                result.Add("다음 콤보 전환이 마지막 히트 종료보다 빠릅니다. 이 시점에 콤보를 이어가면 남은 히트가 생략될 수 있습니다.");
+            return result;
+        }
+
+        private static float LastHitEnd(WeaponActionData action)
+            => Windows(action).OfType<JObject>().Select(w => (float)w["end"]).DefaultIfEmpty(0).Max();
+
+        private static bool Finite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
+
+        private static bool TimeActive(WeaponActionData action, string path, string group)
+        {
+            switch (path)
+            {
+                case "Execution.Duration": return true;
+                case "Execution.ComboTransitionTime": return group == "combo";
+                case "Execution.Movement.MovementStartTime":
+                case "Execution.Movement.MovementEndTime": return group != "air" && action.UseDistanceMovement;
+                case "Execution.Movement.TargetApproach.ApproachEndTime":
+                    return group == "combo" && !action.UseDistanceMovement && action.UseTargetApproach;
+                case "Execution.Movement.TargetApproach.RotationEndTime": return group != "air";
+                case "Feedback.Trail.TrailStartTime":
+                case "Feedback.Trail.TrailEndTime": return !action.DisableTrail && action.UseCustomTrailTiming;
+                case "Feedback.Slash.SlashVFXStartTime": return action.Feedback.Slash.SlashVFX != null;
+                default: return false;
+            }
         }
 
         private static object TimeOwner(object action, string path, out FieldInfo field)

@@ -4,6 +4,30 @@ const path = require('node:path');
 const { projectRoot, contained } = require('./project-client.cjs');
 const { atomicJson } = require('./store.cjs');
 
+// Retired preview modules must not survive an update by copy. Keep this list
+// explicit so unrelated files in an existing installation remain untouched.
+const retiredPackageFiles = [
+  ...['AutoHitTimerEffectScene', 'AutoHitTimerEffects', 'AutoHitTimerPreviewRendering', 'AutoHitTimerViewport', 'AutoHitTimerViewportPipe']
+    .flatMap(name => [`Editor/${name}.cs`, `Editor/${name}.cs.meta`]),
+  'Editor/URP.meta', 'Editor/URP/AutoHitTimerUrpPreviewRendering.cs', 'Editor/URP/AutoHitTimerUrpPreviewRendering.cs.meta',
+  'Editor/URP/StudioBaekho.AutoHitTimer.Editor.URP.asmdef', 'Editor/URP/StudioBaekho.AutoHitTimer.Editor.URP.asmdef.meta',
+  'Tests/Editor/AutoHitTimerEffectTests.cs', 'Tests/Editor/AutoHitTimerEffectTests.cs.meta'
+];
+const retiredAdapterFiles = ['FourTigerSlashMapping.cs', 'FourTigerSlashMapping.cs.meta'];
+function removeRetiredFiles(directory, files, project) {
+  for (const relative of files) {
+    const target = path.resolve(directory, relative);
+    if (!contained(project, target)) throw new Error('정리 경로가 프로젝트 밖입니다.');
+    let current = target;
+    while (current !== project && contained(project, current)) {
+      try { if (fs.lstatSync(current).isSymbolicLink()) throw new Error('연결된 경로의 파일은 정리할 수 없습니다.'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      current = path.dirname(current);
+    }
+    try { fs.unlinkSync(target); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+}
+
 function copyTree(source, destination, project) {
   if (!contained(project, destination)) throw new Error('설치 경로가 프로젝트 밖입니다.');
   let current = destination;
@@ -26,6 +50,15 @@ function installIntegration(projectPath, kitRoot) {
   copyTree(packageSource, path.join(staging, 'Package'), project);
   copyTree(adapterSource, path.join(staging, 'Adapter'), project);
   copyTree(installerSource, path.join(project, 'Assets', 'StudioBaekho', 'AutoHitTimerBootstrap', 'Editor'), project);
+  const installedAdapter = path.join(project, 'Assets', 'StudioBaekho', 'AutoHitTimer', 'Editor');
+  // Update the already-installed adapter together with the package. Otherwise
+  // its retired interface references could prevent the bootstrap compiling.
+  if (fs.existsSync(path.join(installedAdapter, 'FourTigerSlashMapping.cs'))) {
+    copyTree(adapterSource, installedAdapter, project);
+    removeRetiredFiles(installedAdapter, retiredAdapterFiles, project);
+  }
+  removeRetiredFiles(path.join(staging, 'Adapter'), retiredAdapterFiles, project);
+  removeRetiredFiles(path.join(staging, 'Package'), retiredPackageFiles, project);
   const library = path.join(project, 'Library');
   if (fs.existsSync(library) && !contained(project, fs.realpathSync(library))) throw new Error('프로젝트 밖으로 연결된 Library는 사용할 수 없습니다.');
   atomicJson(path.join(library, 'AutoHitTimerInstall.json'), { schemaVersion: 1, requestedUtc: new Date().toISOString(), adapter: 'four-tiger-sword' });

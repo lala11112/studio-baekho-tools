@@ -29,10 +29,12 @@ const timeSettings = [
   ['Execution.Movement.TargetApproach.RotationEndTime', '타겟 회전 종료', .5],
   ['Feedback.Trail.TrailStartTime', '트레일 시작', .2],
   ['Feedback.Trail.TrailEndTime', '트레일 종료', .8],
-  ['Feedback.Slash.SlashVFXStartTime', '슬래시 이펙트 시작', .3]
+  ['Feedback.Slash.SlashVFXStartTime', '슬래시 이펙트 시작', .3],
+  ['Execution.Duration', '공격 종료 · 이동 복귀', 1.833]
 ].map(([path, label, value]) => ({ path, label, value, min: path === 'Feedback.Slash.SlashVFXStartTime' ? -1 : 0, max: 1.833 }));
 const sourceGuid = 'b'.repeat(32);
-const initialState = { projectPath: '', connection: { ready: false, message: 'Unity 프로젝트를 선택하세요.' }, ai: { available: false, authenticated: false, label: 'Codex 확인 전' }, actors: [], actorId: '', sources: [], targets: [], groups: [], jobs: [], selectedJobId: '', settings: {}, busy: false, search: { busy: false, progressText: '' }, notice: '' };
+const initialState = { projectPath: '', connection: { ready: false, message: 'Unity 프로젝트를 선택하세요.' }, ai: { available: false, authenticated: false, label: 'AI 확인 전' }, actors: [], actorId: '', sources: [], targets: [], groups: [], jobs: [], selectedJobId: '', settings: {}, busy: false, search: { busy: false, progressText: '' }, notice: '' };
+initialState.capabilities = { attackTiming: true };
 let state = structuredClone(initialState);
 let saveCount = 0;
 let requireTimeOverrides = false;
@@ -98,13 +100,14 @@ const handlers = {
     const changedClip = target?.needsClipAssignment || target?.currentClip && (target.currentClip.guid !== selected().clip.guid || target.currentClip.localId !== selected().clip.localId);
     previewAssignment = options.mode === 'update' && changedClip
       ? { stateName: target.animationName, clipName: selected().clip.name, clipPath: selected().clip.path, previousClipName: target.currentClip?.name || null, previousClipPath: target.currentClip?.path || null } : null;
-    const editableTimeSettings = (target?.timeSettings || []).map(item => ({ ...item, max: selected().clip.length }));
+    const actionDuration = options.timeOverrides.find(item => item.path === 'Execution.Duration')?.value ?? (options.mode === 'update' && !changedClip ? target?.duration : selected().clip.length);
+    const editableTimeSettings = (target?.timeSettings || []).map(item => ({ ...item, min: item.path === 'Execution.Movement.MovementStartTime' ? .05 : item.min, max: item.path === 'Execution.Duration' ? selected().clip.length : item.path === 'Execution.Movement.MovementStartTime' ? .18 : actionDuration, value: item.path === 'Execution.Duration' ? actionDuration : item.value }));
     const invalidSettings = editableTimeSettings.filter(item => {
       const value = options.timeOverrides.find(override => override.path === item.path)?.value ?? item.value;
       return value < item.min || value > item.max;
     });
     previewValid = !missing && !invalidSettings.length;
-    return { changeId: 'mock-change', canApply: previewValid, editableTimeSettings, clipAssignment: previewAssignment, controllerChanged: Boolean(previewAssignment) || options.mode === 'register', summary: '모의 변경 검토 · 원본 및 AI 분석은 실행하지 않습니다.', hitCountBefore: 2, hitCountAfter: selected().windows.length, damageBefore: 2, damageAfter: 3, damageNote: '모의 기본 피해 계수 합계', mapping: { retained: 2, removed: 0, added: 0 }, issues: missing ? ['슬래시 이펙트 시간을 보정하세요.'] : [], requiredTimeOverrides: missing ? [{ path: 'Feedback.Slash.SlashVFXStartTime', label: '슬래시 시작', value: 3, min: -1, max: selected().clip.length }] : invalidSettings, before: { animation: target?.animationName, duration: target?.duration }, after: { animation: target?.animationName, duration: selected().clip.length }, proposedStateName: options.mode === 'register' ? 'AHT_Sword_Slash_01' : '' };
+    return { changeId: 'mock-change', canApply: previewValid, editableTimeSettings, clipAssignment: previewAssignment, controllerChanged: Boolean(previewAssignment) || options.mode === 'register', summary: '모의 변경 검토 · 원본 및 AI 분석은 실행하지 않습니다.', hitCountBefore: 2, hitCountAfter: selected().windows.length, damageBefore: 2, damageAfter: 3, damageNote: '모의 기본 피해 계수 합계', mapping: { retained: 2, removed: 0, added: 0 }, issues: missing ? ['슬래시 이펙트 시간을 보정하세요.'] : [], requiredTimeOverrides: missing ? [{ path: 'Feedback.Slash.SlashVFXStartTime', label: '슬래시 시작', value: 3, min: -1, max: selected().clip.length }] : invalidSettings, before: { animation: target?.animationName, duration: target?.duration }, after: { animation: target?.animationName, duration: actionDuration, comboTransitionTime: options.timeOverrides.find(item => item.path === 'Execution.ComboTransitionTime')?.value ?? target?.timeSettings.find(item => item.path === 'Execution.ComboTransitionTime')?.value }, warnings: [options.timeOverrides.find(item => item.path === 'Execution.ComboTransitionTime')?.value < Math.max(...selected().windows.map(hit => hit.end)) ? '마지막 타격 전에 다음 콤보로 전환합니다.' : ''].filter(Boolean), proposedStateName: options.mode === 'register' ? 'AHT_Sword_Slash_01' : '' };
   },
   applyChange: id => {
     assert(previewValid); assert.equal(id, 'mock-change'); saveCount++; selected().status = 'saved';
@@ -114,7 +117,7 @@ const handlers = {
       const target = state.targets.find(item => item.sourceGuid === selected().sourceGuid && item.actionPath === selected().actionPath);
       target.needsClipAssignment = false;
       target.currentClip = structuredClone(selected().clip);
-      target.duration = selected().clip.length;
+      target.duration = selected().timeOverrides.find(item => item.path === 'Execution.Duration')?.value ?? selected().clip.length;
       target.timeSettings = target.timeSettings.map(item => ({ ...item, value: selected().timeOverrides.find(override => override.path === item.path)?.value ?? item.value }));
     }
     publish(); return { assets: selected().savedAssets };
@@ -141,6 +144,107 @@ async function change(id, value) {
 }
 async function screenshot(name) { await new Promise(resolve => setTimeout(resolve, 200)); fs.writeFileSync(path.join(output, name + '.png'), (await window.webContents.capturePage()).toPNG()); }
 
+async function timingSmoke() {
+  const original = structuredClone(state);
+  const item = selected();
+  item.sourceGuid = sourceGuid; item.actionPath = 'Actions[0]';
+  state.targets[0].duration = 1.5;
+  item.timeOverrides = [{ path: 'Execution.ComboTransitionTime', value: 1.4 }, { path: 'Execution.Duration', value: 1.5 }];
+  item.timingSuggestions = {
+    comboTransition: { time: 1.05, frameId: 'f5', reason: '모의 제안: 마지막 베기 후 다음 동작을 잇는 지점입니다.', uncertain: false },
+    actionEnd: { time: 1.25, frameId: 'f6', reason: '모의 제안: 자세가 회복되어 이동으로 돌아갈 수 있습니다.', uncertain: false }
+  };
+  publish();
+  await until('document.querySelectorAll("[data-timing-marker]").length === 2 && document.querySelectorAll("[data-timing-suggestion]").length === 2', 'actual and AI timing markers');
+  assert.equal(await evaluate('document.querySelector("[data-apply-timing=actionEnd]").disabled'), true, 'Applying end alone cannot cut the existing combo time');
+  assert.equal(await evaluate('document.getElementById("apply-all-timing-suggestions").disabled'), false, 'A valid pair can be adopted atomically');
+  await click('apply-all-timing-suggestions');
+  await until('document.getElementById("override-Execution.Duration").value === "1.25"', 'adopt both AI timings');
+  assert.deepEqual(selected().timeOverrides, [{ path: 'Execution.ComboTransitionTime', value: 1.05 }, { path: 'Execution.Duration', value: 1.25 }]);
+  assert.equal(selected().reviewed, false);
+  await evaluate('(() => { const seek = document.getElementById("seek"); seek.value = "1.45"; seek.dispatchEvent(new Event("input", {bubbles:true})); })()');
+  assert.match(await evaluate('document.getElementById("time-readout").textContent'), /1\.450.*1\.500/, 'Review can seek beyond attack end to the full clip end');
+  await evaluate('document.querySelector("[data-timing-marker=comboTransition]").dispatchEvent(new KeyboardEvent("keydown", {key:"ArrowRight", bubbles:true}))');
+  await until('document.getElementById("override-Execution.ComboTransitionTime").value === "1.067"', 'keyboard timing marker adjustment');
+  const pointer = await evaluate('(() => { const marker = document.querySelector("[data-timing-marker=actionEnd]").getBoundingClientRect(), timeline = document.getElementById("timeline").getBoundingClientRect(); return {startX:Math.round(marker.x+marker.width/2), y:Math.round(marker.y+marker.height-7), endX:Math.round(timeline.x+timeline.width*1.35/1.5)}; })()');
+  window.webContents.sendInputEvent({ type: 'mouseMove', x: pointer.startX, y: pointer.y });
+  window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: pointer.startX, y: pointer.y });
+  window.webContents.sendInputEvent({ type: 'mouseMove', button: 'left', x: pointer.endX, y: pointer.y });
+  window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: pointer.endX, y: pointer.y });
+  await until('Math.abs(Number(document.getElementById("override-Execution.Duration").value) - 1.35) < .01', 'pointer drag changes actual attack end');
+  assert.ok(Math.abs(selected().timeOverrides.find(value => value.path === 'Execution.Duration').value - 1.35) < .01);
+  await change('override-Execution.ComboTransitionTime', 0);
+  assert.equal(await evaluate('!!document.querySelector("[data-early-combo-warning]")'), true, 'Zero allows an immediate combo and must warn when hits remain');
+  assert.match(await evaluate('document.getElementById("attack-timings").textContent'), /0초는 즉시 전환/);
+  await change('override-Execution.ComboTransitionTime', .5);
+  assert.equal(await evaluate('!!document.querySelector("[data-early-combo-warning]")'), true, 'Early manual combo timing warns without preventing editing');
+  await click('tab-save');
+  await change('override-Execution.Movement.MovementStartTime', .15);
+  await change('save-reviewed-check', true); await click('preview-change');
+  await until('!!document.getElementById("timing-diff-warnings")', 'manual early combo warning in save diff');
+  assert.match(await evaluate('document.getElementById("timing-diff-warnings").textContent'), /마지막 타격/);
+  assert.equal(await evaluate('document.getElementById("override-Execution.Movement.MovementStartTime").min'), '0.05', 'Preview correction metadata overrides the original catalog limits');
+  assert.equal(await evaluate('document.getElementById("override-Execution.Movement.MovementStartTime").max'), '0.18', 'A stricter preview maximum is preserved within attack end bounds');
+  assert.equal(await evaluate('document.getElementById("override-Execution.Movement.MovementStartTime").value'), '0.15', 'Draft numeric override remains stronger than preview values');
+  await click('tab-hits');
+  await evaluate('document.querySelector("[data-apply-timing=comboTransition]").click()');
+  await until('document.getElementById("override-Execution.ComboTransitionTime").value === "1.05"', 'adopt individual combo proposal');
+  const proposalBeforeEdit = structuredClone(selected().timingSuggestions);
+  await change('override-Execution.Duration', 1.3);
+  assert.deepEqual(selected().timingSuggestions, proposalBeforeEdit, 'Manual edits preserve proposal reasoning');
+  await screenshot('08-mock-animation-timings');
+  selected().timingError = '모의 정밀 분석이 중단되었습니다. 기존 제안과 프레임을 직접 검토하세요.'; publish();
+  await until('!!document.getElementById("timing-analysis-error")', 'timing failure remains visible alongside proposal reasoning');
+  assert.match(await evaluate('document.getElementById("attack-timings").textContent'), /모의 정밀 분석이 중단.*마지막 베기/);
+  selected().timingSuggestions = null; publish();
+  await until('document.querySelectorAll("[data-timing-suggestion]").length === 0', 'missing suggestions after timing failure');
+  assert.match(await evaluate('document.getElementById("timing-analysis-error").textContent'), /모의 정밀 분석이 중단/);
+  selected().timingSuggestions = structuredClone(proposalBeforeEdit); selected().timingError = '';
+  selected().timingSuggestions.comboTransition.uncertain = true;
+  selected().timingSuggestions.actionEnd.time = null; publish();
+  await until('document.querySelector("[data-apply-timing=comboTransition]").disabled && document.querySelector("[data-apply-timing=actionEnd]").disabled', 'uncertain and absent suggestions cannot apply');
+  assert.equal(await evaluate('document.querySelectorAll("[data-timing-suggestion]").length'), 1, 'Null proposal has no invented zero-time marker');
+  assert.equal(await evaluate('document.getElementById("apply-all-timing-suggestions").disabled'), true);
+  selected().timingSuggestions.comboTransition = { time: 1.4, frameId: 'f6', reason: '서로 충돌하는 모의 제안', uncertain: false };
+  selected().timingSuggestions.actionEnd = { time: 1.1, frameId: 'f5', reason: '서로 충돌하는 모의 제안', uncertain: false }; publish();
+  await until('document.getElementById("apply-all-timing-suggestions").disabled', 'conflicting AI pair blocked');
+  state.capabilities.attackTiming = false; publish();
+  await until('document.getElementById("override-Execution.Duration").disabled', 'older integration upgrade guard');
+  assert.equal(await evaluate('document.querySelector("[data-timing-marker=actionEnd]").disabled'), true);
+  assert.match(await evaluate('document.getElementById("attack-timings").textContent'), /Unity 연동 업데이트/);
+  state.capabilities.attackTiming = true; selected().pendingSave = { requestId: 'pending-timing-save' }; publish();
+  await until('document.getElementById("override-Execution.ComboTransitionTime").disabled', 'pending saves lock timing controls');
+  selected().pendingSave = null; state.targets[0].group = 'skill'; publish();
+  await until('!document.querySelector("[data-timing-marker=comboTransition]")', 'noncombo target hides combo marker');
+  assert.equal(await evaluate('!!document.getElementById("override-Execution.ComboTransitionTime")'), false);
+  state.targets[0].timeSettings.find(field => field.path === 'Feedback.Trail.TrailEndTime').active = false;
+  state.targets[0].timeSettings.find(field => field.path === 'Feedback.Trail.TrailEndTime').value = 9;
+  state.targets[0].snapshot = 'mock-inactive-timing-refresh';
+  publish();
+  await until('document.getElementById("override-Feedback.Trail.TrailEndTime").value === "9"', 'inactive timing field fixture');
+  assert.equal(await evaluate('document.getElementById("override-Feedback.Trail.TrailEndTime").hasAttribute("max")'), false, 'Inactive settings do not inherit attack end bounds');
+  assert.equal(await evaluate('document.getElementById("override-Feedback.Trail.TrailEndTime").getAttribute("aria-invalid")'), null);
+  selected().windows = [{ ...selected().windows[0], start: .2, end: .533333 }];
+  selected().duration = 1.666667; selected().clip.length = 1.666667;
+  selected().timeOverrides = [{ path: 'Execution.Duration', value: .533333 }]; publish();
+  await until('document.getElementById("override-Execution.Duration").value === "0.533333"', 'fractional last-hit boundary fixture');
+  const lowerBoundaryUpdates = calls.filter(call => call.name === 'updateJob').length;
+  await evaluate('document.querySelector("[data-timing-marker=actionEnd]").dispatchEvent(new KeyboardEvent("keydown", {key:"ArrowLeft", bubbles:true}))');
+  await new Promise(resolve => setTimeout(resolve, 70));
+  assert.equal(calls.filter(call => call.name === 'updateJob').length, lowerBoundaryUpdates + 1);
+  assert.equal(selected().timeOverrides.find(field => field.path === 'Execution.Duration').value, .533333, 'Keyboard millisecond rounding cannot undercut a fractional last-hit end');
+  selected().timeOverrides = [{ path: 'Execution.Duration', value: 1.666667 }]; publish();
+  await until('document.getElementById("override-Execution.Duration").value === "1.666667"', 'fractional clip-end boundary fixture');
+  const upperBoundaryUpdates = calls.filter(call => call.name === 'updateJob').length;
+  await evaluate('document.querySelector("[data-timing-marker=actionEnd]").dispatchEvent(new KeyboardEvent("keydown", {key:"ArrowRight", bubbles:true}))');
+  await new Promise(resolve => setTimeout(resolve, 70));
+  assert.equal(calls.filter(call => call.name === 'updateJob').length, upperBoundaryUpdates + 1);
+  assert.equal(selected().timeOverrides.find(field => field.path === 'Execution.Duration').value, 1.666667, 'Keyboard millisecond rounding cannot exceed a fractional clip end');
+  state = original; publish();
+  await until('!document.querySelector("[data-timing-marker=comboTransition]") && !document.getElementById("override-Execution.Duration").disabled', 'restore primary fixture');
+  await evaluate('(() => { const seek = document.getElementById("seek"); seek.value = "0"; seek.dispatchEvent(new Event("input", {bubbles:true})); })()');
+}
+
 async function main() {
   window = new BrowserWindow({ width: 1550, height: 980, show: false, webPreferences: { preload: path.resolve(__dirname, '../src/preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, offscreen: true } });
   window.removeMenu();
@@ -154,6 +258,7 @@ async function main() {
   assert.equal(await evaluate('document.getElementById("install-integration").textContent'), 'Unity 연동 업데이트', 'Connected projects can update an older bridge');
   assert.equal(await evaluate('document.querySelectorAll(".hit-card").length'), 2);
   assert.equal(await evaluate('document.getElementById("analyze-selected").disabled'), false);
+  await timingSmoke();
   await screenshot('02-mock-review');
   await click('next-frame');
   assert.match(await evaluate('document.getElementById("time-readout").textContent'), /0\.200/);
@@ -173,12 +278,14 @@ async function main() {
   assert.equal(selected().group, 'combo');
   await change('target-select', 'Actions[0]');
   assert.deepEqual(selected().windows.map(item => item.sourceIndex), [0, 2], 'Preserve sparse HitEvents indices');
-  assert.equal(await evaluate('document.querySelectorAll("[data-time-override]").length'), 8, 'All supported attack timing settings are editable before preview');
+  assert.equal(await evaluate('document.querySelectorAll("[data-time-override]").length'), 9, 'Hit review exposes attack end and combo alongside supported timing settings');
   assert.equal(await evaluate('document.getElementById("override-Execution.ComboTransitionTime").value'), '1.7');
-  assert.equal(await evaluate('document.getElementById("override-Execution.ComboTransitionTime").max'), '1.5', 'Use the selected clip duration rather than the old action duration');
+  assert.equal(await evaluate('document.getElementById("override-Execution.Duration").value'), '1.833', 'Same-clip edits preserve the current attack end until corrected');
+  assert.equal(await evaluate('document.getElementById("override-Execution.Duration").max'), '1.5', 'Attack end cannot exceed clip duration');
   assert.equal(await evaluate('document.getElementById("override-Feedback.Slash.SlashVFXStartTime").min'), '-1');
-  assert.equal(await evaluate('document.getElementById("time-settings").open'), true, 'Out-of-range timings open for correction');
+  assert.equal(await evaluate('document.getElementById("override-Execution.Duration").getAttribute("aria-invalid")'), 'true', 'Invalid attack end is exposed prominently');
   await change('override-Execution.ComboTransitionTime', 1.3);
+  await change('override-Execution.Duration', 1.5);
   assert.equal(await evaluate('document.getElementById("override-Execution.ComboTransitionTime").getAttribute("aria-invalid")'), null);
   await change('save-reviewed-check', true);
   await until('!document.getElementById("preview-change").disabled', 'reviewed preview');
@@ -388,7 +495,8 @@ function runRealMain() {
   app.disableHardwareAcceleration();
   BrowserWindow.prototype.show = function hideTestWindow() {};
   // Startup/recovery verification must not depend on or touch a user's login.
-  require('../src/ai.cjs').CodexAnalyzer.prototype.status = async () => ({ available: false, authenticated: false, label: '시작 테스트 · AI 연결 생략' });
+  const { CodexAnalyzer: StartupCodex, ClaudeCodeAnalyzer: StartupClaude } = require('../src/ai.cjs');
+  for (const Analyzer of [StartupCodex, StartupClaude]) Analyzer.prototype.status = async () => ({ available: false, authenticated: false, label: '시작 테스트 · AI 연결 생략' });
   let recoveryProject;
   const recoveryCommands = [];
   if (recovery) {
@@ -492,7 +600,7 @@ function runRealMedia() {
   const { ProjectClient } = require('../src/project-client.cjs');
   const command = ProjectClient.prototype.command;
   ProjectClient.prototype.command = function recordCommand(name, ...args) { commands.push(name); assert(!['apply', 'capture', 'previewChange', 'import'].includes(name), 'Media review must not change or recapture assets'); return command.call(this, name, ...args); };
-  require('../src/ai.cjs').CodexAnalyzer.prototype.analyze = async () => { throw new Error('AI analysis must not be re-run in media review'); };
+  require('../src/ai.cjs').CliAnalyzer.prototype.analyze = async () => { throw new Error('AI analysis must not be re-run in media review'); };
   const timeout = setTimeout(() => { console.error('Real media startup timed out'); app.exit(1); }, 25000);
   app.on('browser-window-created', (_event, testWindow) => {
     testWindow.webContents.on('console-message', (_consoleEvent, ...args) => { if (args[0]?.level === 'error') errors.push(args[0].message); else if (args[0] === 3) errors.push(args[1]); });
