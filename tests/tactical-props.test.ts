@@ -17,7 +17,7 @@ function room(): GridMap {
   for (const c of [{ x: 4, row: 5 }, { x: 13, row: 5 }, { x: 4, row: 10 }, { x: 13, row: 10 }]) tile(map, c.x, c.row, 'P');
   return map;
 }
-const settings = (seed = 237): GenerationSettings => ({ ...DEFAULT_SETTINGS, width: 18, height: 16, connectionCount: 1, seed,
+const settings = (seed = 237): GenerationSettings => ({ ...DEFAULT_SETTINGS, connectionWidth: 2, width: 18, height: 16, connectionCount: 1, seed,
   designer: { ...DEFAULT_DESIGNER, elevation: false, props: true, decorations: false }, levelDesign: { pattern: 'openArena', characterRadius: .4, dodgeDistance: 3 } });
 const asset = (id: string, category = id, width = 1.2): AssetBinding => ({ id, label: id, role: 'prop', prefabGuid: '1'.repeat(32), prefabPath: `Assets/${id}.prefab`,
   scale: { x: 1, y: 1, z: 1 }, offset: { x: 0, y: 0, z: 0 }, rotationY: 0,
@@ -34,7 +34,14 @@ test('new generation turns mirrored intents into diverse, asymmetric obstacles w
   assert.ok(result.propInstances!.some(p => p.cells.some(c => !occupied.has(`${result.width - 1 - c.x},${c.row}`))));
   const evidence = obstacleTactics(result, s), report = analyzeLevelDesign(result, s);
   assert.equal(evidence.length, 4); assert.deepEqual(report.issues, []);
-  assert.ok(Math.hypot(report.combatCenter!.x - 8.5, report.combatCenter!.row - 7.5) < 2);
+  const center = report.combatCenter!, config = s.levelDesign!;
+  const steps = Math.ceil((config.dodgeDistance + config.characterRadius - result.cellSize / 2) / result.cellSize);
+  assert.equal(report.combatCells.length, steps * 4 + 1);
+  for (const [dx, dr] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
+    assert.ok(report.combatCells.some(c => c.x === center.x + dx * steps && c.row === center.row + dr * steps));
+  }
+  assert.ok(report.combatCells.every(c => result.rows[c.row][c.x] === '.' && result.elevations[c.row][c.x] === result.elevations[center.row][center.x]));
+  assert.ok(report.routes.some(route => route.at(-1)?.x === center.x && route.at(-1)?.row === center.row));
   assert.ok(result.propInstances!.every(p => p.x >= 3 && p.x <= 14 && p.row >= 3 && p.row <= 12));
   assert.ok(new Set(result.propInstances!.map(p => p.x < report.combatCenter!.x ? 'left' : 'right')).size > 1);
   for (const obstacle of evidence) {
@@ -65,7 +72,7 @@ test('safe rooms and legacy catalogs do not acquire battle-specific relocation r
   assert.deepEqual(placeProps(map, settings(), [legacy], undefined, [], { tactical: true }).map, map);
 });
 
-test('a manually marked combat zone overrides the default central fighting area', () => {
+test('a manually marked combat zone overrides the automatic fighting position', () => {
   const map = room(); map.rows = map.rows.map(r => r.replaceAll('P', '.')); map.zones = [{ x: 4, row: 11, kind: 'combat' }];
   assert.deepEqual(analyzeLevelDesign(map, settings()).combatCenter, { x: 4, row: 11 });
 });

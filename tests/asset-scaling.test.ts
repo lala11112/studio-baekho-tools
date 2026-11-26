@@ -8,6 +8,8 @@ const binding = (role: AssetRole): AssetBinding => ({ id: role, role, label: rol
 test('unit tile defaults and cell fit close 2m grid gaps without changing thickness or fixtures', () => {
   assert.deepEqual(defaultAssetScale('floor', 2), { x: 2, y: 1, z: 2 });
   assert.deepEqual(defaultAssetScale('light', 2), { x: 1, y: 1, z: 1 });
+  assert.deepEqual(defaultAssetScale('door', 2), { x: 1, y: 1, z: 1 }, 'a native 4m × 3m doorway keeps its height and thickness');
+  assert.deepEqual(defaultAssetScale('door', 4), { x: 1, y: 1, z: 1 });
   const input = [binding('floor'), binding('ceiling'), binding('stair'), binding('light')], before = structuredClone(input);
   const result = scaleAssets(input, 'tiles', { kind: 'cell', cellSize: 2 });
   for (const item of result.slice(0, 3)) { assert.deepEqual(item.scale, { x: 2, y: .5, z: 2 }); assert.deepEqual(item.offset, before[0].offset); assert.equal(item.rotationY, 90); }

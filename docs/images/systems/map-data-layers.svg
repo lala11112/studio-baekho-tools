@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="590" viewBox="0 0 1120 590" role="img" aria-labelledby="layers-title layers-desc">
+  <title id="layers-title">하나의 맵을 구성하는 데이터 층</title>
+  <desc id="layers-desc">왼쪽은 지형 격자의 개념도, 오른쪽은 지형과 이동, 건축 구조, 실제 배치, 편집과 게임 정보의 네 층이다. 한 셀은 통행 높이 하나를 표현하며 첫 행은 양의 Z 방향이다.</desc>
+  <defs>
+    <pattern id="layers-grid" width="42" height="42" patternUnits="userSpaceOnUse" x="60" y="138"><rect width="42" height="42" fill="#edf3f9"/><path d="M42 0H0V42" fill="none" stroke="#b6c6d9" stroke-width="1"/></pattern>
+    <marker id="layers-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#57677e"/></marker>
+  </defs>
+  <style>text{font-family:'Malgun Gothic',sans-serif;fill:#172b44}.title{font-size:28px;font-weight:700}.label{font-size:22px;font-weight:700}.body{font-size:18px;fill:#57677e}.tile{font-size:23px;font-weight:700;text-anchor:middle}.axis{stroke:#57677e;stroke-width:2;marker-end:url(#layers-arrow);fill:none}</style>
+  <rect width="1120" height="590" rx="20" fill="#f5f7fb"/>
+  <text x="32" y="45" class="title">하나의 맵을 구성하는 데이터 층</text>
+  <text x="32" y="78" class="body">지형 격자에 구조·실측 배치·게임 정보를 연결합니다.</text>
+  <rect x="60" y="138" width="336" height="336" fill="url(#layers-grid)" stroke="#b6c6d9"/>
+  <path d="M81 453V159H207M249 159H375V453H81" stroke="#829bb6" stroke-width="35" fill="none"/>
+  <rect x="207" y="138" width="42" height="42" fill="#c7e8e5"/><text x="228" y="168" class="tile">D</text>
+  <rect x="102" y="222" width="84" height="42" fill="#b6d0e5"/><text x="144" y="252" class="tile">P</text>
+  <rect x="270" y="306" width="84" height="84" fill="#d9e6d4"/><text x="312" y="356" class="tile">+1m</text>
+  <rect x="228" y="348" width="42" height="42" fill="#efdbbb"/><text x="249" y="378" class="tile">R</text>
+  <path d="M232 386L266 352" stroke="#ae6a22" stroke-width="2"/>
+  <text x="60" y="118" class="body">8×8셀의 지형 예시</text>
+  <path d="M60 518H152" class="axis"/><path d="M60 518V483" class="axis"/><text x="164" y="525" class="body">+X</text><text x="25" y="497" class="body">+Z</text>
+  <text x="208" y="511" class="body">첫 행은 +Z 쪽</text><text x="208" y="539" class="body">Y는 바닥 높이</text>
+  <g stroke="#d6dfe9" stroke-width="1.5" fill="white">
+    <rect x="458" y="112" width="630" height="91" rx="13"/><rect x="458" y="218" width="630" height="91" rx="13"/><rect x="458" y="324" width="630" height="91" rx="13"/><rect x="458" y="430" width="630" height="91" rx="13"/>
+  </g>
+  <g fill="#186f78"><rect x="458" y="125" width="5" height="65" rx="2"/><rect x="458" y="231" width="5" height="65" rx="2"/><rect x="458" y="337" width="5" height="65" rx="2"/><rect x="458" y="443" width="5" height="65" rx="2"/></g>
+  <text x="484" y="148" class="label" fill="#172b44">1 · 지형과 이동</text>
+  <text x="484" y="181" class="body">rows · elevations · ramps · bridges · connections</text>
+  <text x="484" y="254" class="label">2 · 건축 구조</text><text x="484" y="287" class="body">ceilings · wallHeights · structureFills · pitBottoms</text>
+  <text x="484" y="360" class="label">3 · 실측 소품과 시설</text><text x="484" y="393" class="body">propInstances · fixtures · 벽 지지면 · 소켓 · 묶음</text>
+  <text x="484" y="466" class="label">4 · 게임과 편집 정보</text><text x="484" y="499" class="body">markers · zones · lockedCells · assetOverrides</text>
+  <text x="458" y="557" class="body">한 X/Z 셀에는 통행 높이 하나 · 다리 아래는 별도 통행층이 아닙니다.</text>
+</svg>

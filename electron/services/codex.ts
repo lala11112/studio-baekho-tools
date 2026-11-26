@@ -1,16 +1,16 @@
-import { lstat, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { appendFile, lstat, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { MAP_JSON_SCHEMA, mapStructureErrors, validateMap, parseBindings } from '../../src/shared/map';
-import { clearGroupedPropHints } from '../../src/shared/grouped-props';
+import { MAP_JSON_SCHEMA, parseBindings } from '../../src/shared/map';
+import { parseImageGenerationContext } from '../../src/shared/spatial-intent';
 import { propCatalogPrompt } from '../../src/shared/props';
-import { analyzeLevelDesign } from '../../src/shared/level-design';
-import { applyGeneratedFeatures, generationConditionIssues } from '../../src/shared/features';
+import { finalizeLayoutText } from './layout-result';
 import { assertResolvedConceptSettings, parseConceptGenerationContext, parseConceptText } from '../../src/shared/concepts';
-import type { CodexModelInfo, CodexStatus, GenerationSettings, GridMap } from '../../src/shared/types';
+import type { AssetBinding, CodexModelInfo, CodexStatus, GenerationProgress, GenerationRegion, GenerationSettings, GenerationStage, GridMap } from '../../src/shared/types';
 import { CodexTransport } from './codex-transport';
 import type { CodexRpc, RpcObject } from './codex-transport';
 import { atomicWrite } from './projects';
-import { conceptPrompt, imagePrompt, layoutPrompt } from './prompts';
+import { conceptPrompt, directLayoutPrompt, imagePrompt, layoutPrompt } from './prompts';
 import { decodePngDataUrl, MAX_IMAGE_BYTES, validateGenerationRegion, validateSettings } from './validation';
 import { discoverCodex, inspectRuntime } from './codex-runtime';
 import type { CodexRuntime } from './codex-runtime';
@@ -23,8 +23,12 @@ export interface CodexOptions {
   discover?: () => Promise<CodexRuntime | null>;
   /** Test/diagnostic override that returns an already initialized transport. */
   connect?: (runtime: CodexRuntime, directory: string) => Promise<CodexRpc>;
+  onProgress?: (progress: GenerationProgress) => void;
 }
-interface ActiveJob { controller: AbortController; threadId?: string; turnId?: string }
+interface ActiveJob {
+  controller: AbortController; id: string; method: 'image' | 'direct'; threadId?: string; turnId?: string;
+  model?: string; reasoningEffort?: string; tokenUsage?: GenerationProgress['tokenUsage'];
+}
 function object(value: unknown): RpcObject { return value && typeof value === 'object' && !Array.isArray(value) ? value as RpcObject : {}; }
 function childOf(root: string, target: string): boolean {
   const relative = path.relative(root, target);
@@ -41,6 +45,9 @@ export class CodexService {
   private disposed = false;
   private active: ActiveJob | null = null;
   private disabledMcpServers: RpcObject = {};
+  private configuredModel?: string;
+  private configuredEffort?: string;
+  private metricWrites: Promise<unknown> = Promise.resolve();
   private selectedExecutable?: string;
   private readonly directory: string;
   private readonly jobsDirectory: string;
@@ -95,7 +102,10 @@ export class CodexService {
       // Disable every inherited MCP server individually: an empty table would deep-merge.
       const configuration = await client.request('config/read', { includeLayers: false, cwd: this.directory });
       this.checkConnection(version);
-      this.disabledMcpServers = Object.fromEntries(Object.keys(object(object(configuration.config).mcp_servers)).map(name => [name, { enabled: false }]));
+      const config = object(configuration.config);
+      this.configuredModel = metricIdentifier(config.model);
+      this.configuredEffort = metricIdentifier(config.model_reasoning_effort);
+      this.disabledMcpServers = Object.fromEntries(Object.keys(object(config.mcp_servers)).map(name => [name, { enabled: false }]));
       client.onClose(() => { if (this.rpc === client) this.rpc = null; });
       this.rpc = client;
       if (this.connectingRpc === client) this.connectingRpc = null;
@@ -117,13 +127,13 @@ export class CodexService {
         state: 'login-required', message: 'Codex의 ChatGPT 로그인이 필요합니다. ChatGPT로 로그인한 뒤 연결을 다시 확인해 주세요.', version: this.runtime!.version, models: [],
       };
       const capabilities = await client.request('modelProvider/capabilities/read', {});
-      if (capabilities.imageGeneration !== true) return { state: 'error', message: '현재 Codex 연결에서 이미지 생성을 지원하지 않습니다. Codex를 업데이트하고 ChatGPT 계정 접근 권한을 확인해 주세요.', version: this.runtime!.version, models: [] };
       const response = await client.request('model/list', { includeHidden: false, limit: 100 });
       const models: CodexModelInfo[] = (Array.isArray(response.data) ? response.data : []).map(object)
-        .filter(model => typeof model.model === 'string' && (!Array.isArray(model.inputModalities) || model.inputModalities.includes('image')))
-        .map(model => ({ id: String(model.model), name: typeof model.displayName === 'string' ? model.displayName : String(model.model), isDefault: model.isDefault === true }));
-      if (!models.length) return { state: 'error', message: '사용 가능한 이미지 입력 모델을 찾지 못했습니다. Codex 계정과 모델 접근 권한을 확인해 주세요.', version: this.runtime!.version, models: [] };
-      return { state: 'ready', message: 'Codex의 ChatGPT 로그인으로 연결되었습니다. 컨셉 작성·이미지 생성·배치 분석은 Codex 사용량에 반영됩니다.', version: this.runtime!.version, models };
+        .filter(model => typeof model.model === 'string')
+        .map(model => ({ id: String(model.model), name: typeof model.displayName === 'string' ? model.displayName : String(model.model), isDefault: model.isDefault === true,
+          ...(Array.isArray(model.inputModalities) ? { inputModalities: model.inputModalities.filter((value): value is 'text' | 'image' => value === 'text' || value === 'image') } : {}) }));
+      if (!models.length) return { state: 'error', message: '사용 가능한 모델을 찾지 못했습니다. Codex 계정과 모델 접근 권한을 확인해 주세요.', version: this.runtime!.version, models: [] };
+      return { state: 'ready', message: 'Codex의 ChatGPT 로그인으로 연결되었습니다. 컨셉 작성·맵 생성은 Codex 사용량에 반영됩니다.', version: this.runtime!.version, models, imageGeneration: capabilities.imageGeneration === true };
     } catch (error) {
       if (client && this.rpc === client) this.resetConnection();
       return { state: 'error', message: error instanceof Error ? error.message : 'Codex 연결을 확인하지 못했습니다.', ...(this.runtime ? { version: this.runtime.version } : {}), models: [] };
@@ -173,31 +183,92 @@ export class CodexService {
     });
   }
 
-  private async runJob<T>(settings: GenerationSettings, operation: (client: CodexRpc, job: ActiveJob, directory: string) => Promise<T>): Promise<T> {
+  private progress(job: ActiveJob, id: string, stage: GenerationStage, state: GenerationProgress['state'], elapsedMs: number): void {
+    // Build a fresh allow-listed record; never spread server notifications or user content into metrics.
+    const event: GenerationProgress = { id, jobId: job.id, method: job.method, stage, state, elapsedMs: Math.max(0, Math.round(elapsedMs)),
+      ...(job.model ? { model: job.model } : {}), ...(job.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
+      ...(job.tokenUsage ? { tokenUsage: { ...job.tokenUsage } } : {}) };
+    this.emitProgress(event);
+  }
+
+  private emitProgress(event: GenerationProgress): void {
+    try { this.options.onProgress?.(structuredClone(event)); } catch { /* Observers cannot break generation. */ }
+    if (event.state !== 'running') {
+      this.metricWrites = this.metricWrites.then(async () => {
+        await mkdir(this.directory, { recursive: true });
+        await appendFile(path.join(this.directory, 'generation-metrics.jsonl'), `${JSON.stringify(event)}\n`, 'utf8');
+      }).catch(() => undefined); // Diagnostics must never mask success, failure or cancellation.
+    }
+  }
+
+  async recordGenerationStage(input: unknown): Promise<void> {
+    const value = object(input), fields = ['id', 'jobId', 'method', 'stage', 'state', 'elapsedMs'];
+    const uuid = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(value);
+    if (Object.keys(value).length !== fields.length || Object.keys(value).some(key => !fields.includes(key)) || !uuid(value.id) || !uuid(value.jobId)
+      || typeof value.method !== 'string' || !['image', 'direct'].includes(value.method) || typeof value.stage !== 'string' || !['placement', 'validation'].includes(value.stage)
+      || typeof value.state !== 'string' || !['completed', 'failed', 'cancelled'].includes(value.state) || typeof value.elapsedMs !== 'number' || !Number.isSafeInteger(value.elapsedMs) || value.elapsedMs < 0) {
+      throw new Error('생성 단계 측정값이 올바르지 않습니다.');
+    }
+    const event: GenerationProgress = { id: value.id, jobId: value.jobId, method: value.method as 'image' | 'direct',
+      stage: value.stage as 'placement' | 'validation', state: value.state as GenerationProgress['state'], elapsedMs: value.elapsedMs };
+    this.emitProgress(event);
+    await this.metricWrites;
+  }
+
+  private async stage<T>(job: ActiveJob, stage: GenerationStage, operation: () => T | Promise<T>): Promise<T> {
+    const id = randomUUID(), started = performance.now();
+    this.progress(job, id, stage, 'running', 0);
+    try {
+      if (job.controller.signal.aborted) throw this.aborted();
+      const result = await operation();
+      if (job.controller.signal.aborted) throw this.aborted();
+      this.progress(job, id, stage, 'completed', performance.now() - started);
+      return result;
+    } catch (error) {
+      this.progress(job, id, stage, job.controller.signal.aborted ? 'cancelled' : 'failed', performance.now() - started);
+      throw error;
+    }
+  }
+
+  private async runJob<T>(settings: GenerationSettings, stage: 'concept' | 'image' | 'extract' | 'layout', operation: (client: CodexRpc, job: ActiveJob, directory: string) => Promise<T>): Promise<T> {
     if (this.active) throw new Error('이미 Codex 생성이 진행 중입니다. 완료하거나 취소한 뒤 다시 시도해 주세요.');
-    const job: ActiveJob = { controller: new AbortController() };
+    const job: ActiveJob = { controller: new AbortController(), id: randomUUID(), method: stage === 'layout' ? 'direct' : stage === 'concept' ? settings.generationMethod ?? 'image' : 'image',
+      model: metricIdentifier(settings.codexModel) ?? this.configuredModel, reasoningEffort: this.configuredEffort };
     this.active = job;
     let directory: string | undefined;
     try {
-      const status = await this.duringJob(this.getStatus(), job);
-      if (job.controller.signal.aborted) throw this.aborted();
-      if (status.state !== 'ready') throw new Error(status.message);
-      if (settings.codexModel && !status.models.some(model => model.id === settings.codexModel)) throw new Error('선택한 모델을 현재 Codex 계정에서 사용할 수 없습니다. 연결 상태를 새로 확인하고 모델을 선택해 주세요.');
-      const client = this.rpc!;
-      directory = await mkdtemp(path.join(this.jobsDirectory, 'map-'));
-      const started = await this.duringJob(client.request('thread/start', {
-        ephemeral: true, cwd: directory, environments: [], sandbox: 'read-only', approvalPolicy: 'never',
-        selectedCapabilityRoots: [],
-        ...(settings.codexModel ? { model: settings.codexModel } : {}),
-        config: { mcp_servers: this.disabledMcpServers },
-        baseInstructions: 'You are a focused map design assistant embedded in Baekho Map Forge. Write a Korean map concept as requested JSON, generate requested PNG images with the native image_generation tool, or interpret the supplied image and return the required JSON map. You have no coding, browsing, terminal, filesystem, app, or delegation task. Work only from the provided settings, map description, catalog and image.',
-        developerInstructions: 'You are the map design engine of Baekho Map Forge. Write concepts without tools, use only the native image generation tool for requested images, and use your own visual reasoning for grid extraction. Explicit generation settings override creative concept details. Do not run commands, read unrelated files, use external apps, browse, spawn agents, or modify any project. Follow the exact output contract. Do not replace failures with sample data.',
-      }), job);
-      const thread = object(started.thread);
-      if (typeof thread.id !== 'string') throw new Error('Codex 작업을 시작하지 못했습니다. CLI를 업데이트해 주세요.');
-      job.threadId = thread.id;
-      if (job.controller.signal.aborted) throw this.aborted();
-      return await operation(client, job, directory);
+      await this.stage(job, 'preparing', async () => {
+        const status = await this.duringJob(this.getStatus(), job);
+        job.model = metricIdentifier(settings.codexModel) ?? this.configuredModel;
+        job.reasoningEffort = this.configuredEffort;
+        if (job.controller.signal.aborted) throw this.aborted();
+        if (status.state !== 'ready') throw new Error(status.message);
+        if (settings.codexModel && !status.models.some(model => model.id === settings.codexModel)) throw new Error('선택한 모델을 현재 Codex 계정에서 사용할 수 없습니다. 연결 상태를 새로 확인하고 모델을 선택해 주세요.');
+        if (stage === 'image' && status.imageGeneration === false) throw new Error('현재 Codex 연결에서 이미지 생성을 지원하지 않습니다. 직접 생성 모드를 사용하거나 Codex의 이미지 생성 지원을 확인해 주세요.');
+        const selected = status.models.find(model => model.id === job.model) ?? (!job.model ? status.models.find(model => model.isDefault) : undefined);
+        if (stage === 'extract' && selected?.inputModalities && !selected.inputModalities.includes('image')) throw new Error('선택한 Codex 모델은 이미지 입력을 지원하지 않습니다. 이미지 입력 모델을 선택하거나 직접 생성 모드를 사용해 주세요.');
+        const client = this.rpc!;
+        directory = await mkdtemp(path.join(this.jobsDirectory, 'map-'));
+        const started = await this.duringJob(client.request('thread/start', {
+          ephemeral: true, cwd: directory, environments: [], sandbox: 'read-only', approvalPolicy: 'never',
+          selectedCapabilityRoots: [],
+          ...(settings.codexModel ? { model: settings.codexModel } : {}),
+          config: { mcp_servers: this.disabledMcpServers },
+          baseInstructions: 'You are a focused map design assistant embedded in Baekho Map Forge. Write a Korean map concept as requested JSON, generate requested PNG images with the native image_generation tool, interpret a supplied image as the required JSON map, or design the required JSON map directly from the supplied settings and brief. You have no coding, browsing, terminal, filesystem, app, or delegation task. Work only from the provided settings, map description, catalog and optional image.',
+          developerInstructions: 'You are the map design engine of Baekho Map Forge. Write concepts and directly requested JSON maps without tools, use only the native image generation tool for requested images, and use your own visual reasoning for grid extraction. Explicit generation settings override creative concept details. Do not run commands, read unrelated files, use external apps, browse, spawn agents, or modify any project. Follow the exact output contract. Do not replace failures with sample data.',
+        }), job);
+        const thread = object(started.thread);
+        if (typeof thread.id !== 'string') throw new Error('Codex 작업을 시작하지 못했습니다. CLI를 업데이트해 주세요.');
+        job.threadId = thread.id;
+        job.model = metricIdentifier(started.model) ?? metricIdentifier(thread.model) ?? job.model;
+        job.reasoningEffort = metricIdentifier(started.reasoningEffort) ?? metricIdentifier(started.effort) ?? metricIdentifier(thread.reasoningEffort) ?? job.reasoningEffort;
+        if (stage === 'extract') {
+          const resolved = status.models.find(model => model.id === job.model);
+          if (resolved?.inputModalities && !resolved.inputModalities.includes('image')) throw new Error('선택한 Codex 모델은 이미지 입력을 지원하지 않습니다. 이미지 입력 모델을 선택하거나 직접 생성 모드를 사용해 주세요.');
+        }
+        if (job.controller.signal.aborted) throw this.aborted();
+      });
+      return await operation(this.rpc!, job, directory!);
     } catch (error) {
       if (job.controller.signal.aborted) throw this.aborted();
       throw error;
@@ -209,6 +280,7 @@ export class CodexService {
         await rm(directory, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 }).catch(() => undefined);
       }
       if (this.active === job) this.active = null;
+      await this.metricWrites;
     }
   }
 
@@ -235,10 +307,12 @@ export class CodexService {
         if (notification.threadId !== job.threadId) return;
         if (job.turnId && typeof notification.turnId === 'string' && notification.turnId !== job.turnId) return;
         try {
+          if (method === 'thread/tokenUsage/updated') job.tokenUsage = metricTokenUsage(notification.tokenUsage) ?? job.tokenUsage;
           if (method === 'item/completed') keep(notification.item);
           if (method === 'turn/completed') {
             const turn = object(notification.turn);
             if (job.turnId && turn.id !== job.turnId) return;
+            job.tokenUsage = metricTokenUsage(turn.tokenUsage) ?? job.tokenUsage;
             if (Array.isArray(turn.items)) turn.items.forEach(keep);
             if (turn.status === 'completed') finish();
             else if (turn.status === 'interrupted') finish(new Error('Codex 생성이 취소되었습니다.'));
@@ -264,7 +338,7 @@ export class CodexService {
       || context.currentMap.cellSize !== settings.cellSize || context.currentMap.maxStepHeight !== settings.maxStepHeight)) {
       throw new Error('컨셉 작성에 참고할 현재 맵이 생성 설정과 다릅니다.');
     }
-    return this.runJob(settings, async (client, job) => {
+    return this.runJob(settings, 'concept', (client, job) => this.stage(job, 'concept', async () => {
       const items = await this.turn(client, job, {
         input: [{ type: 'text', text: conceptPrompt(settings, catalog, context) }],
         outputSchema: { type: 'object', properties: { text: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['text'], additionalProperties: false },
@@ -278,17 +352,18 @@ export class CodexService {
       const fields = object(response);
       if (Object.keys(fields).length !== 1 || !Object.hasOwn(fields, 'text')) throw new Error('Codex 컨셉 응답은 text만 포함해야 합니다. 다시 시도해 주세요.');
       return parseConceptText(fields.text, 'ai');
-    });
+    }));
   }
 
-  async generateImage(input: unknown, regionInput?: unknown, catalogInput?: unknown): Promise<string> {
+  async generateImage(input: unknown, regionInput?: unknown, catalogInput?: unknown, contextInput?: unknown): Promise<string> {
     const settings = validateSettings(input);
     assertResolvedConceptSettings(settings);
     const region=validateGenerationRegion(regionInput,settings);
     const catalog=catalogInput===undefined?undefined:parseBindings(catalogInput);
-    return this.runJob(settings, async (client, job, directory) => {
+    const imageContext = parseImageGenerationContext(contextInput);
+    return this.runJob(settings, 'image', (client, job, directory) => this.stage(job, 'image', async () => {
       const startedAt = Date.now();
-      const items = await this.turn(client, job, { input: [{ type: 'text', text: `Use the native image_generation tool now to generate exactly ONE opaque PNG image. Do not draw with code or return SVG/text as an image. Do not create additional variants.\n\n${imagePrompt(settings,region)}\n${catalog?propCatalogPrompt(catalog):''}` }] });
+      const items = await this.turn(client, job, { input: [{ type: 'text', text: `Use the native image_generation tool now to generate exactly ONE opaque PNG image. Do not draw with code or return SVG/text as an image. Do not create additional variants.\n\n${imagePrompt(settings,region,imageContext)}\n${catalog?propCatalogPrompt(catalog):''}` }] });
       const generated = items.filter(item => item.type === 'imageGeneration');
       const image = generated.find(item => item.status === 'completed' && !item.failure);
       if (!image) {
@@ -311,7 +386,7 @@ export class CodexService {
         }
       }
       throw new Error('Codex의 PNG 이미지 결과를 읽을 수 없습니다. CLI를 업데이트한 뒤 다시 시도해 주세요.');
-    });
+    }));
   }
 
   async extractLayout(input: unknown, imageDataUrl: unknown, regionInput?: unknown, catalogInput?: unknown): Promise<GridMap> {
@@ -320,40 +395,50 @@ export class CodexService {
     const region=validateGenerationRegion(regionInput,settings);
     const catalog=catalogInput===undefined?undefined:parseBindings(catalogInput);
     decodePngDataUrl(imageDataUrl);
-    return this.runJob(settings, async (client, job) => {
-      const items = await this.turn(client, job, {
+    return this.runJob(settings, 'extract', async (client, job) => {
+      const items = await this.stage(job, 'extract', () => this.turn(client, job, {
         input: [{ type: 'text', text: `${layoutPrompt(settings,region)}\n${catalog?propCatalogPrompt(catalog):''}\nDo not use any tools. Inspect the attached image directly and return only the schema-conforming map JSON.` }, { type: 'image', url: imageDataUrl, detail: 'high' }],
         outputSchema: MAP_JSON_SCHEMA,
-      });
-      const messages = items.filter(item => item.type === 'agentMessage' && typeof item.text === 'string');
-      const final = [...messages].reverse().find(item => item.phase === 'final_answer')
-        ?? [...messages].reverse().find(item => item.phase === null || item.phase === undefined);
-      let map: GridMap;
-      try { map = JSON.parse(String(final?.text ?? '')) as GridMap; }
-      catch { throw new Error('Codex가 올바른 배치도 JSON을 반환하지 않았습니다. 설계도는 유지되므로 다시 분석해 주세요.'); }
-      const structureErrors = mapStructureErrors(map);
-      if (structureErrors.length) throw new Error(`Codex 배치도가 검증을 통과하지 못했습니다: ${structureErrors.slice(0, 3).join(' ')} 설계도는 유지되므로 다시 분석해 주세요.`);
-      if (map.width !== settings.width || map.height !== settings.height || map.cellSize !== settings.cellSize || map.maxStepHeight !== settings.maxStepHeight) throw new Error('Codex 배치도 크기 또는 이동 단차가 요청한 설정과 다릅니다. 같은 설계도에서 다시 분석해 주세요.');
-      if (map.connections.length !== settings.connectionCount) throw new Error('Codex 배치도의 연결문 수가 요청한 설정과 다릅니다. 같은 설계도에서 다시 분석해 주세요.');
-      if (map.assetOverrides.length) throw new Error('AI 배치도는 셀 에셋 지정을 포함할 수 없습니다. 에셋은 앱에서 연결해 주세요.');
-      if (map.structureSettings||['ceilings','wallHeights','cliffs','fixtures','markers','lockedCells','zones','pitBottoms','structureFills','propInstances'].some(key => (map as unknown as Record<string,unknown[]>)[key]?.length)) throw new Error('AI 배치도에 허용되지 않는 추가 콘텐츠가 있습니다. 다시 분석해 주세요.');
-      const d=settings.designer;
-      if(d?.propLayout==='grouped'&&(d.props||d.decorations||d.vegetation))map=clearGroupedPropHints(map,region);
-      const errors = validateMap(map, catalog).filter(issue => issue.severity === 'error');
-      if (errors.length) throw new Error(`Codex 배치도가 검증을 통과하지 못했습니다: ${errors.slice(0, 3).map(issue => issue.message).join(' ')} 설계도는 유지되므로 다시 분석해 주세요.`);
-      const geography:GridMap = {
-        version: 4, name: map.name, width: map.width, height: map.height, cellSize: map.cellSize, rows: [...map.rows],
-        elevations: map.elevations.map(row => [...row]), ramps: map.ramps.map(ramp => ({ ...ramp })), maxStepHeight: map.maxStepHeight,
-        connections: map.connections.map(connection => ({ ...connection })), assetOverrides: [], bridges:(map.bridges??[]).map(b=>({...b})),
-      };
-      // The caller merges protected cells first, then applies and checks region-local features.
-      if(region)return geography;
-      const generated = applyGeneratedFeatures(geography, settings,undefined,catalog);
-      const conditionErrors=[...validateMap(generated,catalog),...generationConditionIssues(generated,settings),...(settings.levelDesign?analyzeLevelDesign(generated,settings).issues:[])].filter(issue=>issue.severity==='error');
-      if(conditionErrors.length)throw new Error(`생성 조건을 만족하지 못했습니다: ${conditionErrors.slice(0,3).map(issue=>issue.message).join(' ')} 설계도는 유지됩니다. 다시 분석해 주세요.`);
-      return generated;
+      }));
+      return this.finalizeLayout(items, settings, region, catalog, job);
     });
   }
+
+  async generateLayout(input: unknown, regionInput?: unknown, catalogInput?: unknown, contextInput?: unknown): Promise<GridMap> {
+    const settings = validateSettings(input);
+    assertResolvedConceptSettings(settings);
+    const region = validateGenerationRegion(regionInput, settings);
+    const catalog = catalogInput === undefined ? undefined : parseBindings(catalogInput);
+    const context = parseImageGenerationContext(contextInput);
+    return this.runJob(settings, 'layout', async (client, job) => {
+      const items = await this.stage(job, 'layout', () => this.turn(client, job, {
+        input: [{ type: 'text', text: `${directLayoutPrompt(settings, region, context)}\n${catalog ? propCatalogPrompt(catalog) : ''}\nDo not use any tools. Return only the schema-conforming map JSON.` }],
+        outputSchema: MAP_JSON_SCHEMA,
+      }));
+      return this.finalizeLayout(items, settings, region, catalog, job);
+    });
+  }
+
+  private async finalizeLayout(items: RpcObject[], settings: GenerationSettings, region: GenerationRegion | undefined, catalog: AssetBinding[] | undefined, job: ActiveJob): Promise<GridMap> {
+    const messages = items.filter(item => item.type === 'agentMessage' && typeof item.text === 'string');
+    const final = [...messages].reverse().find(item => item.phase === 'final_answer')
+      ?? [...messages].reverse().find(item => item.phase === null || item.phase === undefined);
+    return finalizeLayoutText(typeof final?.text === 'string' ? final.text : undefined, settings, region, catalog, job.method,
+      (stage, operation) => this.stage(job, stage, operation), 'Codex');
+  }
+}
+
+function metricIdentifier(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(value) ? value : undefined;
+}
+
+function metricTokenUsage(raw: unknown): GenerationProgress['tokenUsage'] | undefined {
+  const usage = object(raw), values = object(usage.total ?? usage.last ?? raw);
+  const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  if (!count(values.inputTokens) || !count(values.outputTokens)) return undefined;
+  return { inputTokens: values.inputTokens, outputTokens: values.outputTokens,
+    ...(count(values.reasoningOutputTokens) ? { reasoningOutputTokens: values.reasoningOutputTokens } : {}),
+    ...(count(values.cachedInputTokens) ? { cachedInputTokens: values.cachedInputTokens } : {}) };
 }
 
 export function validatedLoginUrl(raw: string): string {

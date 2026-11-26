@@ -15,7 +15,7 @@ function room():GridMap {
 }
 const setTile=(map:GridMap,x:number,row:number,tile:string)=>{map.rows[row]=map.rows[row].slice(0,x)+tile+map.rows[row].slice(x+1);};
 function settings(levelDesign=true):GenerationSettings {
-  return {...DEFAULT_SETTINGS,width:20,height:20,connectionCount:1,seed:29,designer:{...DEFAULT_DESIGNER,elevation:false,props:true,propLayout:'balanced',propCoverage:12},...(levelDesign?{levelDesign:{...DEFAULT_LEVEL_DESIGN}}:{})};
+  return {...DEFAULT_SETTINGS,connectionWidth:2,width:20,height:20,connectionCount:1,seed:29,designer:{...DEFAULT_DESIGNER,elevation:false,props:true,propLayout:'balanced',propCoverage:12},...(levelDesign?{levelDesign:{...DEFAULT_LEVEL_DESIGN}}:{})};
 }
 function binding(id:string,size={x:1.2,y:1,z:1.2}):AssetBinding {
   return {id,label:id,role:'prop',prefabGuid:'1'.repeat(32),prefabPath:`Assets/${id}.prefab`,scale:{x:1,y:1,z:1},rotationY:0,offset:{x:0,y:0,z:0},prop:{category:id,tags:[],blocksMovement:true,size,placement:'floor',roomTypes:['battle'],weight:1}};

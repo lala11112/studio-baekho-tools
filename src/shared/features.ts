@@ -7,6 +7,7 @@ import { protectedPropIds } from './prop-groups';
 import { parseWallMountInstance, placeWallMounts, wallMountDependencies, wallMountIssues } from './wall-mounts';
 export type { GenerationRegion } from './types';
 import { connectionAt, connectionCells } from './connections';
+import { placeTeleportMarkers, teleportReservedCells } from './teleport';
 
 export const DIRECTIONS: Record<Direction, readonly [number, number]> = { 0: [0, -1], 90: [1, 0], 180: [0, 1], 270: [-1, 0] };
 export const FIXTURE_ROLES: readonly FixtureRole[] = ['light', 'railing', 'column', 'arch', 'water', 'hazard', 'trap', 'gate', 'switch', 'secretDoor', 'rest', 'merchant', 'altar', 'decoration', 'vegetation'];
@@ -14,6 +15,7 @@ export const ASSET_ROLES: readonly AssetRole[] = ['floor', 'wall', 'door', 'prop
 export const MAX_CEILING_Y = 200;
 export const MAX_WALL_HEIGHT = 300;
 export const DEFAULT_DESIGNER: DesignerSettings = {
+  teleports: false, teleportCount: 1,
   lightPlacement: 'auto',
   merchants: false, altars: false, structureFill: false, pitBottomKind: 'deadzone', gapRole: 'wall',
   preset: 'battle', ceilings: false, elevation: true, props: true, lights: false, enemies: false, rewards: false, events: false,
@@ -43,7 +45,8 @@ const vector = (v: unknown): v is Vec3 => record(v) && keysOnly(v, ['x','y','z']
 
 /** The same strict parser protects IPC requests and saved settings. Missing designer preserves legacy behavior. */
 export function parseGenerationSettings(value: unknown): GenerationSettings {
-  if (!record(value) || !keysOnly(value, ['conceptMode','prompt','width','height','cellSize','elevationStep','maxStepHeight','connectionCount','connectionWidth','connectionHeight','codexModel','designer','roomPreset','sizeMode','seed','sizeResolved','levelDesign'])) throw new Error('settings의 구조가 올바르지 않습니다.');
+  if (!record(value) || !keysOnly(value, ['generationMethod','conceptMode','prompt','width','height','cellSize','elevationStep','maxStepHeight','connectionCount','connectionWidth','connectionHeight','codexModel','designer','roomPreset','sizeMode','seed','sizeResolved','levelDesign'])) throw new Error('settings의 구조가 올바르지 않습니다.');
+  if (value.generationMethod !== undefined && value.generationMethod !== 'image' && value.generationMethod !== 'direct') throw new Error('맵 생성 방식을 확인해 주세요.');
   if (typeof value.prompt !== 'string' || value.prompt.length > 6000) throw new Error('settings 맵 설명은 6,000자 이하로 입력해 주세요.');
   if (value.conceptMode !== undefined && value.conceptMode !== 'ai' && value.conceptMode !== 'manual') throw new Error('컨셉 작성 모드를 확인해 주세요.');
   if (![value.width,value.height].every(n => finite(n) && Number.isInteger(n) && n >= 8 && n <= 40)) throw new Error('settings 가로와 세로는 8~40 사이의 정수여야 합니다.');
@@ -52,7 +55,7 @@ export function parseGenerationSettings(value: unknown): GenerationSettings {
   if (!finite(value.maxStepHeight) || value.maxStepHeight < .05 || value.maxStepHeight > 1) throw new Error('settings 이동 단차는 0.05~1m 사이여야 합니다.');
   if (!finite(value.connectionCount) || !Number.isInteger(value.connectionCount) || value.connectionCount < 1 || value.connectionCount > 16) throw new Error('settings 연결문 수는 1~16 사이의 정수여야 합니다.');
   if (typeof value.codexModel !== 'string' || (value.codexModel !== '' && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(value.codexModel))) throw new Error('settings Codex 모델 ID를 확인해 주세요.');
-  const result: GenerationSettings = { conceptMode: value.conceptMode ?? 'manual', prompt: value.prompt.trim(), width: value.width as number, height: value.height as number, cellSize:value.cellSize, elevationStep:value.elevationStep, maxStepHeight:value.maxStepHeight, connectionCount:value.connectionCount, codexModel:value.codexModel };
+  const result: GenerationSettings = { generationMethod: value.generationMethod ?? 'image', conceptMode: value.conceptMode ?? 'manual', prompt: value.prompt.trim(), width: value.width as number, height: value.height as number, cellSize:value.cellSize, elevationStep:value.elevationStep, maxStepHeight:value.maxStepHeight, connectionCount:value.connectionCount, codexModel:value.codexModel };
   if (value.connectionWidth !== undefined) {
     if (!finite(value.connectionWidth) || value.connectionWidth < .25 || value.connectionWidth > 40) throw new Error('settings 연결문 폭은 0.25~40m 사이여야 합니다.');
     result.connectionWidth = value.connectionWidth;
@@ -75,10 +78,10 @@ export function parseGenerationSettings(value: unknown): GenerationSettings {
     if (!record(d) || !keysOnly(d,[...Object.keys(DEFAULT_DESIGNER),'decorationDensity','vegetationDensity','propLayout','propCoverage','wallMounts'])) throw new Error('settings.designer의 구조가 올바르지 않습니다.');
     if(d.wallMounts!==undefined){
       const w=d.wallMounts;
-      if(!record(w)||!keysOnly(w,['enabled','singles','runs','density','runDensity','placeholderFallback','runOrientation','connectRuns','runHeight','verticalRange'])||w.connectRuns!==undefined&&typeof w.connectRuns!=='boolean'||w.placeholderFallback!==undefined&&typeof w.placeholderFallback!=='boolean'||w.runOrientation!==undefined&&!['horizontal','vertical','both'].includes(w.runOrientation as string)||['enabled','singles','runs'].some(k=>typeof w[k]!=='boolean')||['density','runDensity'].some(k=>!finite(w[k])||!Number.isInteger(w[k])||Number(w[k])<1||Number(w[k])>100))throw new Error('벽 부착물의 토글·배관 방향·밀도(1~100%)를 확인하세요.');
+      if(!record(w)||!keysOnly(w,['enabled','singles','runs','density','runDensity','placeholderFallback','runOrientation','runLayout','connectRuns','runHeight','verticalRange'])||w.runLayout!==undefined&&!['legacy','composed'].includes(w.runLayout as string)||w.connectRuns!==undefined&&typeof w.connectRuns!=='boolean'||w.placeholderFallback!==undefined&&typeof w.placeholderFallback!=='boolean'||w.runOrientation!==undefined&&!['horizontal','vertical','both'].includes(w.runOrientation as string)||['enabled','singles','runs'].some(k=>typeof w[k]!=='boolean')||['density','runDensity'].some(k=>!finite(w[k])||!Number.isInteger(w[k])||Number(w[k])<1||Number(w[k])>100))throw new Error('벽 부착물의 토글·배관 방향·밀도(1~100%)를 확인하세요.');
       if (w.runHeight !== undefined) {
         const h = w.runHeight;
-        if (!record(h) || !keysOnly(h, ['mode','reference','min','max']) || !['fixed','random'].includes(h.mode as string)
+        if (!record(h) || !keysOnly(h, ['mode','reference','min','max']) || !['fixed','random','auto'].includes(h.mode as string)
           || !['floor','top'].includes(h.reference as string) || !finite(h.min) || !finite(h.max)
           || h.min < 0 || h.max > 100 || h.min > h.max || h.mode === 'fixed' && h.min !== h.max)
           throw new Error('가로 배관 높이는 0~100m 범위여야 합니다. 최소≤최대, 지정 높이는 최소=최대로 설정하세요.');
@@ -99,6 +102,7 @@ export function parseGenerationSettings(value: unknown): GenerationSettings {
     if (!['auto','ceiling','wall','both'].includes(merged.lightPlacement as string)) throw new Error('settings.designer.lightPlacement는 auto, ceiling, wall, both 중 하나여야 합니다.');
     for (const key of ['ceilingHeight','wallHeight','cliffDepth','headroom','bridgeHeight'] as const) if (!finite(merged[key]) || merged[key] < .25 || merged[key] > 20) throw new Error(`settings.designer.${key}는 0.25~20m여야 합니다.`);
     for (const key of ['enemyCount','rewardCount','eventCount','bridgeCount','cliffCount','cliffSize','fixtureDensity'] as const) if (!finite(merged[key]) || !Number.isInteger(merged[key]) || merged[key] < 1 || merged[key] > (key === 'fixtureDensity' ? 100 : key === 'bridgeCount' || key === 'cliffCount' ? 8 : key === 'cliffSize' ? 8 : 100)) throw new Error(`settings.designer.${key}의 수량이 범위를 벗어났습니다.`);
+    if (!finite(merged.teleportCount) || !Number.isInteger(merged.teleportCount) || merged.teleportCount < 1 || merged.teleportCount > 64) throw new Error('순간이동 안전 지점 수는 1~64 사이의 정수여야 합니다.');
     for (const key of ['decorationDensity','vegetationDensity'] as const) if (d[key] !== undefined && (!finite(d[key]) || !Number.isInteger(d[key]) || d[key] < 1 || d[key] > 100)) throw new Error(`settings.designer.${key}의 밀도는 1~100 사이의 정수여야 합니다.`);
     if (d.propLayout !== undefined && !['legacy','balanced','grouped'].includes(d.propLayout as string)) throw new Error('소품 구성 방식은 구역별 묶음 구성·자동 균형 구성·기존 개수 유지 중 하나여야 합니다.');
     if (d.propCoverage !== undefined && (!finite(d.propCoverage) || !Number.isInteger(d.propCoverage) || d.propCoverage < 1 || d.propCoverage > 30)) throw new Error('소품 목표 바닥 점유율은 1~30 사이의 정수여야 합니다.');
@@ -146,7 +150,7 @@ export function featureStructureErrors(input: Record<string, unknown>): string[]
     bridges:{keys:['x','row','direction'],check:v=>direction(v.direction),unique:v=>`${v.x},${v.row}`},
     cliffs:{keys:['x','row','direction','depth'],check:v=>direction(v.direction)&&finite(v.depth)&&v.depth>=.25&&v.depth<=20,max:6400,unique:v=>`${v.x},${v.row},${v.direction}`},
     fixtures:{keys:['id','role','x','row','direction','offset','bindingId','anchor','linkedId','wall'],check:v=>safeId(v.id)&&FIXTURE_ROLES.includes(v.role as FixtureRole)&&direction(v.direction)&&vector(v.offset)&&(v.bindingId===undefined||safeId(v.bindingId))&&(v.anchor===undefined||['floor','wall','ceiling'].includes(v.anchor as string))&&(v.linkedId===undefined||safeId(v.linkedId)),max:3200,unique:v=>String(v.id)},
-    markers:{keys:['id','label','kind','contentKey','x','row','direction','offset'],check:v=>safeId(v.id)&&label(v.label)&&['enemy','reward','event'].includes(v.kind as string)&&typeof v.contentKey==='string'&&v.contentKey.length<=120&&!/[\u0000-\u001f\u007f]/.test(v.contentKey)&&direction(v.direction)&&vector(v.offset),unique:v=>String(v.id)},
+    markers:{keys:['id','label','kind','contentKey','x','row','direction','offset','clearance'],check:v=>safeId(v.id)&&label(v.label)&&['enemy','reward','event','teleport'].includes(v.kind as string)&&typeof v.contentKey==='string'&&v.contentKey.length<=120&&!/[\u0000-\u001f\u007f]/.test(v.contentKey)&&direction(v.direction)&&vector(v.offset)&&(v.kind==='teleport'?record(v.clearance)&&keysOnly(v.clearance,['radius','height'])&&finite(v.clearance.radius)&&v.clearance.radius>=.1&&v.clearance.radius<=5&&finite(v.clearance.height)&&v.clearance.height>=.25&&v.clearance.height<=20:v.clearance===undefined),unique:v=>String(v.id)},
     lockedCells:{keys:['x','row'],check:()=>true,unique:v=>`${v.x},${v.row}`},
     zones:{keys:['x','row','kind'],check:v=>['combat','reward','rest'].includes(v.kind as string),unique:v=>`${v.x},${v.row}`},
   };
@@ -220,6 +224,8 @@ function generationProtectedCells(map:GridMap, region?:GenerationRegion, include
     ...(map.fixtures??[]).filter(f=>f.wall).flatMap(wallMountDependencies)];
   const locked=new Set(protectedCells.map(c=>`${c.x},${c.row}`));
   const inside=(c:Cell)=>!region||c.x>=region.x&&c.x<region.x+region.width&&c.row>=region.row&&c.row<region.row+region.height;
+  // An outside/locked destination protects its entire landing footprint across the selection boundary.
+  if(region)protectedCells.push(...teleportReservedCells({...map,markers:map.markers?.filter(m=>m.kind==='teleport'&&(!inside(m)||locked.has(`${m.x},${m.row}`)))}));
   const protectedIds=protectedPropIds({...map,lockedCells:protectedCells},region);
   for(const prop of map.propInstances??[]){
     const crossing=prop.cells.some(inside)&&!prop.cells.every(inside);
@@ -294,13 +300,14 @@ export function reapplyLighting(source:GridMap, settings:GenerationSettings, reg
 }
 
 /** Local deterministic layers; region mode leaves outside/locked cells and their metadata intact. */
-export function applyGeneratedFeatures(source: GridMap, settings: GenerationSettings, region?:GenerationRegion, catalog?:AssetBinding[]): GridMap {
+export function applyGeneratedFeatures(source: GridMap, settings: GenerationSettings, region?:GenerationRegion, catalog?:AssetBinding[], diagnostics?:ValidationIssue[], authoredPlanningLocks?:Cell[]): GridMap {
   const active=generationArea(source,region),map=structuredClone(source);
   if(!settings.designer)return { ...map, version:map.version===5?5:4, ceilings:map.ceilings??[],wallHeights:map.wallHeights??[],bridges:map.bridges??[],cliffs:map.cliffs??[],fixtures:map.fixtures??[],markers:map.markers??[],lockedCells:map.lockedCells??[],zones:map.zones??[] };
   const d=settings.designer;
   // Direct region callers receive the same whole-object protection as the region merge pipeline.
   // Temporary locks also keep local content relocation from moving authored dressing.
   const originalLocks=map.lockedCells;
+  const planningLocks=authoredPlanningLocks??originalLocks??[];
   if(region&&['balanced','grouped'].includes(d.propLayout??''))map.lockedCells=[...new Map(generationProtectedCells(map,region).map(c=>[`${c.x},${c.row}`,{x:c.x,row:c.row}])).values()];
   // Grouped hints are optional: clear them before selecting floors, objectives and routes.
   if(d.propLayout==='grouped'&&(d.props||d.decorations||d.vegetation))map.rows=clearGroupedPropHints(map,region).rows;
@@ -387,7 +394,8 @@ export function applyGeneratedFeatures(source: GridMap, settings: GenerationSett
   if(placementSettings.levelDesign) {
     if(grouped) {
       result=placeLevelDesignContent(result,placementSettings,region);
-      result=placeGroupedProps(result,placementSettings,catalog??[],region).map;
+      const placed = placeGroupedProps(result,placementSettings,catalog??[],region,[],undefined,planningLocks);
+      result = placed.map; diagnostics?.push(...placed.issues);
     } else if(catalog?.some(binding=>binding.prop)) {
       const generatedMarkers=(result.markers??[]).filter(active);
       const movable=(f:MapFixture)=>active(f)&&(f.anchor??'floor')==='floor'&&!['light','railing'].includes(f.role);
@@ -405,8 +413,11 @@ export function applyGeneratedFeatures(source: GridMap, settings: GenerationSett
     if(errors.length)throw new Error(errors.slice(0,3).map(issue=>issue.message).join(' '));
   } else if(catalog?.some(binding=>binding.prop))result=placeProps(result,settings,catalog,region,[],{varyGeneratedDecorations:true,preserveCrossing:true}).map;
   if(region&&(balanced||grouped))result.lockedCells=originalLocks??[];
-  if(d.wallMounts?.enabled)result=placeWallMounts(result,settings,catalog??[],region).map;
-  return result;
+  if(d.wallMounts?.enabled) {
+    const placed = placeWallMounts(result,settings,catalog??[],region);
+    result = placed.map; diagnostics?.push(...placed.issues);
+  }
+  return placeTeleportMarkers(result, settings, catalog, region);
 }
 
 function bridgeGroups(map:GridMap): Bridge[][] {
@@ -480,5 +491,6 @@ export function generationConditionIssues(map:GridMap,settings:GenerationSetting
   if(d.ceilings&&!ceilings)error('천장 켜기 조건에 필요한 천장이 없습니다.');
   if(!d.ceilings&&ceilings)error('천장 끄기 조건과 다른 천장이 생성되었습니다.');
   for(const kind of ['enemy','reward','event'] as const){const enabled=kind==='enemy'?d.enemies:kind==='reward'?d.rewards:d.events,expected=enabled?d[`${kind}Count` as 'enemyCount'|'rewardCount'|'eventCount']:0;if((map.markers?.filter(m=>active(m)&&m.kind===kind).length??0)!==expected)error(`${kind} 마커 수가 요청한 ${expected}개와 다릅니다.`);}
+  if(d.teleports && (map.markers?.filter(m=>m.kind==='teleport').length??0)!==(d.teleportCount??1))error(`순간이동 안전 지점 수가 요청한 ${d.teleportCount??1}개와 다릅니다.`);
   return issues;
 }

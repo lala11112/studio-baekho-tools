@@ -2,6 +2,8 @@ import './style.css';
 import './connections.css';
 import './designer.css';
 import './variants.css';
+import { GenerationMonitor } from './generation-progress';
+import './generation-progress.css';
 import { createVariantGallery } from './variants';
 import { generateVariants, variantSettings, type MapVariant } from './shared/variants';
 import { createDesigner, EXTRA_ROLES } from './designer';
@@ -10,13 +12,15 @@ import { assertManualConcept, conceptMode, conceptForRequest, legacyConcept, par
 import { mergeGeneratedRegion } from './shared/editing';
 import { defaultAssetScale, matchesScaleScope, scaleAssets, type ScaleScope } from './shared/asset-scaling';
 import { buildManifest, createDemoMap, DEFAULT_SETTINGS, FLOOR_THICKNESS_RATIO, MAX_BINDINGS, resolveBinding, validateMap, parseProjectFile, cellHasRole, connectionAt, connectionCells, maximumConnectionWidth, updateConnectionGeometry, addMapConnection } from './shared/map';
-import type { AssetBinding, AssetRole, CodexStatus, GridMap, MapConcept, MapConnection, PrefabAsset, ProjectFile, Tile, UnityBuildStatus, UnityConnectionStatus, ValidationIssue } from './shared/types';
+import type { AiPreferences, AssetBinding, AssetRole, ClaudeStatus, CodexStatus,GenerationProgress, GridMap, MapConcept, MapConnection, PrefabAsset, ProjectFile, Tile, UnityBuildStatus, UnityConnectionStatus, ValidationIssue } from './shared/types';
 import { mountPreview, type PreviewState } from './preview';
 import { applyRoomPreset, resolveGenerationSettings, setCustomRoomSize } from './shared/room-presets';
 import { renderGenerationControls, renderConnectionSizeControls, renderConceptControls, renderConceptResult, updateGenerationControl } from './generation-controls';
 import { renderPropLibraryFields, handlePropField, reclassifyPropBinding } from './prop-library';
-import { suggestPropDefinition, snapshotPropCatalog, preparePropBoundsImport, applyImportedPropBounds, type PropBoundsCatalog, propValidationIssues, getPropCoverageReport, replacePropInstance, insertPropInstance, removePropInstance } from './shared/props';
+import { suggestPropDefinition, snapshotPropCatalog, preparePropBoundsImport, applyImportedPropBounds, type PropBoundsCatalog, propValidationIssues, getPropCoverageReport, replacePropInstance, insertPropInstance, removePropInstance, rotatePropInstance } from './shared/props';
+import { propYaw, propFrontYaw, normalizePropYaw } from './shared/prop-orientation';
 import { getCompositionIssues } from './shared/prop-composition';
+import { compositionGenerationIssues } from './shared/composition-diagnostics';
 import { synchronizeStructures } from './shared/structures';
 import { analyzeLevelDesign } from './shared/level-design';
 import { furnishExistingMap, rearrangeMapProps, type FurnishingResult } from './shared/furnishing';
@@ -25,6 +29,7 @@ import { importUnityAssetCatalogBindings } from './shared/unity-asset-catalog';
 import { removeAssetBindings } from './shared/asset-deletion';
 import { renderWallMountFields, handleWallMountField } from './wall-mount-ui';
 import { wallMountIssues } from './shared/wall-mounts';
+import { teleportIssues } from './shared/teleport';
 import { wallMountGenerationIssues } from './shared/wall-mount-diagnostics';
 
 const api = window.baekho;
@@ -72,6 +77,10 @@ function resetUnityConnection() {
 }
 let codex: CodexStatus = { state: 'missing', message: '설치된 Codex 연결을 확인하고 있습니다.', models: [] };
 let codexChecking = false, codexDialogOpen = false, loginPending = false;
+let aiPrefs: AiPreferences = { analysisProvider: 'codex', claudeModel: '' };
+let claudeStatus: ClaudeStatus = { state: 'missing', message: 'Claude Code 연결을 확인하고 있습니다.' };
+let claudeChecking = false;
+const useClaude = () => aiPrefs.analysisProvider === 'claude' && !!api?.getClaudeStatus;
 let loginDeadline = 0;
 let loginTimer: ReturnType<typeof setTimeout> | undefined;
 let status = '샘플 맵을 둘러보거나 새 AI 설계도를 생성하세요.';
@@ -96,6 +105,31 @@ const escape = (value: unknown) => String(value).replace(/[&<>"']/g, c => ({ '&'
 const snapshot = (): EditSnapshot => structuredClone({ map: project.map, bindings: project.bindings, settings: project.settings, blueprintDataUrl: project.blueprintDataUrl, generationDraft: project.generationDraft, concept: project.concept });
 const disabled = () => busy ? 'disabled' : '';
 let generationCancelled = false;
+const generationMonitor = new GenerationMonitor();
+let generationProgressTimer: ReturnType<typeof setInterval> | undefined;
+let generationProgressJob = '', generationProgressMethod: 'image' | 'direct' = 'image';
+function updateGenerationProgress() {
+  const panel = document.querySelector('#generation-timings');
+  if (panel) panel.innerHTML = generationMonitor.render();
+}
+function beginGenerationProgress(method: 'image' | 'direct') {
+  generationProgressJob = crypto.randomUUID(); generationProgressMethod = method;
+  generationMonitor.begin(method); clearInterval(generationProgressTimer);
+  generationProgressTimer = setInterval(updateGenerationProgress, 500);
+}
+api?.onGenerationProgress?.(event => { generationMonitor.receive(event); updateGenerationProgress(); });
+function measureGenerationStage<T>(stage: 'placement' | 'validation', action: () => T): T {
+  const started = performance.now();
+  const event: GenerationProgress = { id: crypto.randomUUID(), jobId: generationProgressJob, method: generationProgressMethod, stage, state: 'running', elapsedMs: 0 };
+  generationMonitor.receive(event); updateGenerationProgress();
+  try { const result = action(); event.state = 'completed'; return result; }
+  catch (error) { event.state = 'failed'; throw error; }
+  finally {
+    event.elapsedMs = Math.round(performance.now() - started);
+    generationMonitor.receive(event); updateGenerationProgress();
+    void api?.recordGenerationStage?.(event).catch(() => undefined);
+  }
+}
 let recovery: ProjectFile | null = null;
 let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
 const detailState = new Map<string, boolean>();
@@ -108,7 +142,7 @@ const designer = createDesigner({
   select: cell => { selected = { x: cell.x, row: cell.row }; rightTab = 'design'; },
   commit: edit => {
     const before = snapshot();
-    try { edit(); project.map=synchronizeStructures(project.map);const propErrors=[...propValidationIssues(project.map),...wallMountIssues(project.map,project.bindings)].filter(i=>i.severity==='error');if(propErrors.length)throw new Error(propErrors[0].message); project = parseProjectFile(project); history.push(before); if (history.length > 50) history.shift(); future.length = 0; dirty = true; queueRecovery(); render(); }
+    try { edit(); project.map=synchronizeStructures(project.map);const propErrors=[...propValidationIssues(project.map),...wallMountIssues(project.map,project.bindings),...teleportIssues(project.map,project.bindings)].filter(i=>i.severity==='error');if(propErrors.length)throw new Error(propErrors[0].message); project = parseProjectFile(project); history.push(before); if (history.length > 50) history.shift(); future.length = 0; dirty = true; queueRecovery(); render(); }
     catch (e) { Object.assign(project, before); throw e; }
   },
   openComparison: async () => { const result = await requireDesktop().openComparisonProject(); if (result) view = '3d'; return result; },
@@ -145,16 +179,27 @@ function queueRecovery() {
 }
 async function runGeneration(mode: 'all' | 'region' | 'image' | 'extract') {
   if (busy) return;
-  if (codex.state !== 'ready') { openCodexDialog(); return; }
+  const plannedMethod = mode === 'image' || mode === 'extract' ? 'image' : project.settings.generationMethod ?? 'image';
+  if (!aiReadyFor(plannedMethod === 'image' && mode !== 'extract')) { openCodexDialog(); return; }
   const region = mode === 'region' ? designer.selection() : mode === 'extract' ? project.generationDraft?.region ?? null : null;
   if (mode === 'region' && !region) { notify('다시 만들 영역을 먼저 선택하세요.', true); return; }
   if (!region && project.map.lockedCells?.length) { notify('보호한 영역이 있습니다. 선택 영역 재생성을 사용하거나 잠금을 해제하세요.', true); return; }
   generationCancelled = false; attemptConcept = undefined;
+  const method = mode === 'image' || mode === 'extract' ? 'image' : project.settings.generationMethod ?? 'image';
+  if (method === 'image' && mode !== 'extract' && codex.imageGeneration === false) {
+    notify('현재 Codex 연결은 이미지 생성을 지원하지 않습니다. 빠른 생성 방식을 선택하거나 연결 설정을 확인해 주세요.', true); return;
+  }
+  const requestModel = mode === 'extract' ? project.generationDraft?.settings.codexModel ?? project.settings.codexModel : project.settings.codexModel;
+  if (method === 'image' && mode !== 'image' && !useClaude() && lacksImageInput(requestModel)) {
+    notify('선택한 모델은 이미지 입력을 지원하지 않습니다. 이미지 입력 모델을 선택하거나 빠른 생성 방식을 사용해 주세요.', true); return;
+  }
+  beginGenerationProgress(method);
   await task(async () => {
     const draft = mode === 'extract' ? project.generationDraft : undefined;
     let settings = parseGenerationSettings(structuredClone(draft?.settings ?? project.settings));
     if(mode!=='extract'&&!region)settings=resolveGenerationSettings({...settings,sizeResolved:false});
     const preferences = structuredClone(draft?.preferences ?? (draft ? { ...draft.settings, prompt: project.settings.prompt, conceptMode: project.settings.conceptMode } : settings));
+    settings.generationMethod = method;
     const catalog=structuredClone(mode==='extract'&&project.generationDraft?.catalog?project.generationDraft.catalog:snapshotPropCatalog(project.bindings));
     const conceptCatalog = structuredClone(project.bindings);
     if (region && !draft) {
@@ -201,7 +246,7 @@ async function runGeneration(mode: 'all' | 'region' | 'image' | 'extract') {
       if (settings.prompt.length > 6000) throw new Error('현재 맵 정보와 설명이 부분 재생성 한도를 넘습니다. 맵 설명을 줄이거나 영역 복사·높이 도구로 편집해 주세요.');
     }
     let image = mode === 'extract' ? (project.generationDraft?.imageDataUrl ?? project.blueprintDataUrl) : undefined;
-    if (!image) {
+    if (method === 'image' && !image) {
       notify('1/3 · 선택한 조건으로 설계도를 생성하고 있습니다…');
       image = await requireDesktop().generateImage(settings, region ?? undefined,catalog);
       if (generationCancelled) return;
@@ -211,19 +256,25 @@ async function runGeneration(mode: 'all' | 'region' | 'image' | 'extract') {
     }
     if (mode === 'image') { view = 'image'; notify('설계도 초안을 만들었습니다. 배치 만들기로 이어서 진행할 수 있습니다.'); return; }
     if (generationCancelled) return;
-    notify('2/3 · 설계도에서 지형과 연결을 분석하고 있습니다…');
-    const candidate = await requireDesktop().extractLayout(settings, image, region ?? undefined,catalog);
+    notify(method === 'direct' ? '구조 설계 중 · 컨셉과 조건으로 지형과 연결을 직접 만들고 있습니다…' : '2/3 · 설계도에서 지형과 연결을 분석하고 있습니다…');
+    const candidate = method === 'direct'
+      ? await requireDesktop().generateLayout(settings, region ?? undefined, catalog)
+      : await requireDesktop().extractLayout(settings, image!, region ?? undefined,catalog);
     if (generationCancelled) return;
     notify('3/3 · 생성 조건과 이동 경로를 확인하고 있습니다…');
-    const result = region ? mergeGeneratedRegion(project.map, candidate, region, merged => applyGeneratedFeatures(merged, settings, region,catalog), catalog) : candidate;
-    const errors = [...validateMap(result, catalog), ...generationConditionIssues(result, settings, region ?? undefined),...(settings.levelDesign?analyzeLevelDesign(result,settings).issues:[])].filter(i => i.severity === 'error');
-    if (errors.length) throw new Error(errors.slice(0, 3).map(i => i.message).join(' '));
-    const wallIssues = wallMountGenerationIssues(result, settings, catalog, region ?? undefined);
+    const result = region ? measureGenerationStage('placement', () => mergeGeneratedRegion(project.map, candidate, region, merged => applyGeneratedFeatures(merged, settings, region,catalog,undefined,project.map.lockedCells??[]), catalog)) : candidate;
+    measureGenerationStage('validation', () => {
+      const errors = [...validateMap(result, catalog), ...generationConditionIssues(result, settings, region ?? undefined),...(settings.levelDesign?analyzeLevelDesign(result,settings).issues:[])].filter(i => i.severity === 'error');
+      if (errors.length) throw new Error(errors.slice(0, 3).map(i => i.message).join(' '));
+    });
+    const wallIssues = [...wallMountGenerationIssues(result, settings, catalog, region ?? undefined), ...compositionGenerationIssues(result, settings, catalog, region ?? undefined)];
     const wallCount = result.fixtures?.filter(f => f.wall && (!region || f.x >= region.x && f.row >= region.row && f.x < region.x + region.width && f.row < region.row + region.height)).length ?? 0;
     const temporaryWallCount = result.fixtures?.filter(f => f.wall?.placeholder && (!region || f.x >= region.x && f.row >= region.row && f.x < region.x + region.width && f.row < region.row + region.height)).length ?? 0;
     markHistory(); project.map = result;
     wallGenerationReport = { map: result, count: wallCount, temporary: temporaryWallCount, issues: wallIssues };
-    if (!region) {project.blueprintDataUrl = image; project.settings=preferences;}
+    if (method === 'direct') delete project.blueprintDataUrl;
+    else if (!region) project.blueprintDataUrl = image;
+    if (!region) project.settings = preferences;
     if (!region || !project.concept) project.concept=structuredClone(concept);
     delete project.generationDraft;
     attemptConcept = undefined;
@@ -236,7 +287,7 @@ async function runGeneration(mode: 'all' | 'region' | 'image' | 'extract') {
 
 async function runVariantGeneration() {
   if (busy) return;
-  if (codex.state !== 'ready') { openCodexDialog(); return; }
+  if (!aiReadyFor(project.settings.generationMethod !== 'direct')) { openCodexDialog(); return; }
   // Validate the snapshot and requests before replacing an earlier gallery or starting AI work.
   let source: ProjectFile;
   try {
@@ -252,19 +303,27 @@ async function runVariantGeneration() {
     dialog.showModal();
     if (!await answer || busy) return;
   }
+  if (source.settings.generationMethod !== 'direct' && codex.imageGeneration === false) {
+    notify('현재 Codex 연결은 이미지 생성을 지원하지 않습니다. 빠른 생성 방식을 선택해 주세요.', true); return;
+  }
+  if (source.settings.generationMethod !== 'direct' && !useClaude() && lacksImageInput(source.settings.codexModel)) {
+    notify('선택한 모델은 이미지 입력을 지원하지 않습니다. 이미지 입력 모델을 선택하거나 빠른 생성 방식을 사용해 주세요.', true); return;
+  }
   generationCancelled = false; attemptConcept = undefined; savedCandidateIds.clear(); view = 'variants';
+  beginGenerationProgress(source.settings.generationMethod ?? 'image');
   await task(async () => {
     const desktop = requireDesktop();
     candidates = await generateVariants(source, variantCount, {
       generateConcept: (settings,catalog,context) => desktop.generateConcept(settings,catalog,context),
-      generateImage: (settings,catalog) => desktop.generateImage(settings,undefined,catalog),
+      generateImage: (settings,catalog,context) => desktop.generateImage(settings,undefined,catalog,context),
       extractLayout: (settings, image,catalog) => desktop.extractLayout(settings, image,undefined,catalog),
+      generateLayout: (settings,catalog,context) => desktop.generateLayout(settings,undefined,catalog,context),
       isCancelled: () => generationCancelled,
       onUpdate: updated => {
         candidates = updated; gallery.setCandidates(candidates);
         const ready = candidates.filter(candidate => candidate.status === 'ready').length;
-        const current = candidates.find(candidate => candidate.status === 'concept' || candidate.status === 'image' || candidate.status === 'extract');
-        notify(current ? `후보 ${current.index + 1}/${variantCount} · ${current.status === 'concept' ? '컨셉 작성' : current.status === 'image' ? '설계도 생성' : '배치 분석'} 중… · ${ready}개 완성` : `후보 ${ready}/${variantCount}개 완성`);
+        const current = candidates.find(candidate => ['concept','image','extract','layout'].includes(candidate.status));
+        notify(current ? `후보 ${current.index + 1}/${variantCount} · ${current.status === 'concept' ? '컨셉 작성' : current.status === 'image' ? '설계도 생성' : current.status === 'layout' ? '구조 설계' : '배치 분석'} 중… · ${ready}개 완성` : `후보 ${ready}/${variantCount}개 완성`);
         render();
       },
     });
@@ -275,14 +334,57 @@ async function runVariantGeneration() {
   }, `${variantCount}개 맵 후보 생성을 준비합니다…`);
 }
 
-function codexLabel() { return codexChecking ? 'Codex 확인 중…' : codex.state === 'ready' ? 'Codex 연결됨' : 'Codex 연결'; }
+function lacksImageInput(id: string) {
+  const selected = id ? codex.models.find(model => model.id === id) : undefined;
+  return !!selected?.inputModalities && !selected.inputModalities.includes('image');
+}
+/** Codex is needed for image generation and whenever it is the analysis provider; Claude Code only when selected. */
+function aiReadyFor(needsImage: boolean) {
+  const claudeSelected = useClaude();
+  if ((needsImage || !claudeSelected) && codex.state !== 'ready') return false;
+  return !claudeSelected || claudeStatus.state === 'ready';
+}
+function aiReadyAll() { return codex.state === 'ready' && (!useClaude() || claudeStatus.state === 'ready'); }
+function codexLabel() {
+  if (codexChecking || claudeChecking) return 'AI 연결 확인 중…';
+  const name = useClaude() ? 'Codex·Claude' : 'Codex';
+  return aiReadyAll() ? `${name} 연결됨` : `${name} 연결`;
+}
+function renderAiProviderSection() {
+  if (!api?.getClaudeStatus) return '';
+  const claudeOn = aiPrefs.analysisProvider === 'claude';
+  const locked = busy || claudeChecking ? 'disabled' : '';
+  return `<div class="section-line"></div><h3>AI 역할 분담</h3><p class="caption">설계도 이미지 생성은 항상 Codex가 담당합니다. 컨셉 작성·설계도 분석·구조 설계(빠른 생성)를 맡을 AI를 선택하세요.</p>
+    <div class="row"><label><input type="radio" name="analysisProvider" id="analysisProviderCodex" value="codex" ${claudeOn ? '' : 'checked'} ${locked}> Codex</label>
+    <label><input type="radio" name="analysisProvider" id="analysisProviderClaude" value="claude" ${claudeOn ? 'checked' : ''} ${locked}> Claude Code</label></div>
+    ${claudeOn ? `<div class="codex-connection ${claudeStatus.state === 'ready' ? 'connected' : ''}"><strong>${claudeChecking ? '<span class="spinner"></span> 연결 확인 중' : claudeStatus.state === 'ready' ? '✓ Claude Code 연결됨' : 'Claude Code 연결 설정'}</strong><p id="claude-status" role="status">${escape(claudeStatus.message)}</p>${claudeStatus.version ? `<small>${escape(claudeStatus.version)}</small>` : ''}</div>
+    <label class="field"><span>Claude 모델 (선택)</span><input id="claudeModel" maxlength="100" placeholder="Claude Code 기본 모델 사용 (예: opus, sonnet)" value="${escape(aiPrefs.claudeModel)}" ${locked}></label>
+    <p class="caption">Claude Code(claude.exe)가 설치되어 있고 로그인되어 있어야 합니다. 로그인은 터미널에서 claude 실행 후 /login으로 진행합니다.</p>
+    <div class="row codex-actions"><button data-action="claude-select" ${locked}>Claude 실행 파일 선택</button><button data-action="claude-refresh" ${locked}>Claude 새로고침</button></div>` : ''}`;
+}
+async function refreshClaude(selectExecutable = false) {
+  const desktop = requireDesktop();
+  if (claudeChecking || !desktop.getClaudeStatus) return;
+  claudeChecking = true; updateCodexControls();
+  try { claudeStatus = await (selectExecutable && desktop.selectClaudeExecutable ? desktop.selectClaudeExecutable() : desktop.getClaudeStatus()); }
+  catch (error) { claudeStatus = { state: 'error', message: error instanceof Error ? error.message : String(error) }; }
+  finally { claudeChecking = false; updateCodexControls(); }
+}
+async function saveAiPreferences(next: AiPreferences) {
+  const desktop = requireDesktop();
+  if (!desktop.setAiPreferences) return;
+  try { aiPrefs = await desktop.setAiPreferences(next); }
+  catch (error) { notify(error instanceof Error ? error.message : String(error), true); }
+  updateCodexControls(); render();
+  if (aiPrefs.analysisProvider === 'claude' && claudeStatus.state !== 'ready') void refreshClaude();
+}
 function codexModelOptions() { return codex.models.map(model => `<option value="${escape(model.id)}">${escape(model.name)}${model.isDefault ? ' · 기본' : ''}</option>`).join(''); }
 function renderCodexDialog() {
-  return `<h2>Codex 연결</h2><p>이 컴퓨터의 Codex와 ChatGPT 로그인을 사용해 설계도를 생성하고 분석합니다.</p><div class="codex-connection ${codex.state === 'ready' ? 'connected' : ''}"><strong>${codexChecking ? '<span class="spinner"></span> 연결 확인 중' : codex.state === 'ready' ? '✓ ChatGPT 계정 연결됨' : '연결 설정'}</strong><p id="codex-status" role="status">${escape(codex.message)}</p>${codex.version ? `<small>${escape(codex.version)}</small>` : ''}</div>${loginPending ? '<p class="caption">브라우저에서 로그인을 마치면 자동으로 연결 상태를 확인합니다.</p>' : ''}<p class="caption">Codex가 설치되어 있어야 합니다. 자동으로 찾지 못하면 codex.exe를 선택하세요. 생성에는 인터넷 연결이 필요하며, 계정의 Codex 사용 한도가 적용됩니다.</p><div class="row codex-actions"><button data-action="codex-select" ${codexChecking || loginPending ? 'disabled' : ''}>실행 파일 선택</button><button data-action="codex-refresh" ${codexChecking ? 'disabled' : ''}>새로고침</button>${codex.state !== 'ready' ? `<button class="primary" data-action="codex-login" ${codexChecking || loginPending || codex.state === 'missing' ? 'disabled' : ''}>ChatGPT 로그인</button>` : ''}<button data-action="close-codex">닫기</button></div>`;
+  return `<h2>Codex 연결</h2><p>이 컴퓨터의 Codex와 ChatGPT 로그인을 사용해 설계도를 생성하고 분석합니다.</p><div class="codex-connection ${codex.state === 'ready' ? 'connected' : ''}"><strong>${codexChecking ? '<span class="spinner"></span> 연결 확인 중' : codex.state === 'ready' ? '✓ ChatGPT 계정 연결됨' : '연결 설정'}</strong><p id="codex-status" role="status">${escape(codex.message)}</p>${codex.version ? `<small>${escape(codex.version)}</small>` : ''}</div>${loginPending ? '<p class="caption">브라우저에서 로그인을 마치면 자동으로 연결 상태를 확인합니다.</p>' : ''}<p class="caption">Codex가 설치되어 있어야 합니다. 자동으로 찾지 못하면 codex.exe를 선택하세요. 생성에는 인터넷 연결이 필요하며, 계정의 Codex 사용 한도가 적용됩니다.</p><div class="row codex-actions"><button data-action="codex-select" ${codexChecking || loginPending ? 'disabled' : ''}>실행 파일 선택</button><button data-action="codex-refresh" ${codexChecking ? 'disabled' : ''}>새로고침</button>${codex.state !== 'ready' ? `<button class="primary" data-action="codex-login" ${codexChecking || loginPending || codex.state === 'missing' ? 'disabled' : ''}>ChatGPT 로그인</button>` : ''}<button data-action="close-codex">닫기</button></div>${renderAiProviderSection()}`;
 }
 function updateCodexControls() {
   const button = document.querySelector<HTMLButtonElement>('[data-action="codex"]');
-  if (button) button.innerHTML = `<span class="status-dot" style="background:${codex.state === 'ready' ? '#638a58' : '#bb9871'}"></span>${codexLabel()}`;
+  if (button) button.innerHTML = `<span class="status-dot" style="background:${aiReadyAll() ? '#638a58' : '#bb9871'}"></span>${codexLabel()}`;
   const dialog = document.querySelector('#codex-dialog');
   if (dialog) dialog.innerHTML = renderCodexDialog();
   const models = document.querySelector('#codex-models');
@@ -311,12 +413,13 @@ function openCodexDialog() {
   codexDialogOpen = true;
   document.querySelector<HTMLDialogElement>('#codex-dialog')!.showModal();
   void refreshCodex();
+  if (useClaude()) void refreshClaude();
 }
 
 function markHistory() { history.push(snapshot()); if (history.length > 50) history.shift(); future.length = 0; dirty = true; queueRecovery(); }
 function editMap(edit:()=>void) {
   const before=snapshot();
-  try { edit(); project.map=synchronizeStructures(project.map); const errors=[...propValidationIssues(project.map,project.bindings),...wallMountIssues(project.map,project.bindings)].filter(i=>i.severity==='error'); if(errors.length)throw new Error(errors.map(i=>i.message).join(' ')); history.push(before); if(history.length>50)history.shift(); future.length=0;dirty=true;queueRecovery(); }
+  try { edit(); project.map=synchronizeStructures(project.map); const errors=[...propValidationIssues(project.map,project.bindings),...wallMountIssues(project.map,project.bindings),...teleportIssues(project.map,project.bindings)].filter(i=>i.severity==='error'); if(errors.length)throw new Error(errors.map(i=>i.message).join(' ')); history.push(before); if(history.length>50)history.shift(); future.length=0;dirty=true;queueRecovery(); }
   catch(error){Object.assign(project,before);notify(error instanceof Error?error.message:String(error),true);}
   render();
 }
@@ -328,15 +431,22 @@ function notify(message: string, error = false) {
 }
 function requireDesktop() { if (!api) throw new Error('파일과 AI 기능은 데스크톱 앱에서 사용할 수 있습니다. npm run dev로 실행해 주세요.'); return api; }
 function validateBindingEdit(value: ProjectFile): ProjectFile {
-  const checked = parseProjectFile(value), errors = wallMountIssues(checked.map, checked.bindings).filter(issue => issue.severity === 'error');
-  if (errors.length) throw new Error(`${errors[0].message} 기존 벽 부착물은 전용 편집에서 교체하거나 제거한 뒤 에셋의 크기·설치 설정을 바꿔 주세요.`);
+  const checked = parseProjectFile(value), errors = [...wallMountIssues(checked.map, checked.bindings), ...teleportIssues(checked.map, checked.bindings)].filter(issue => issue.severity === 'error');
+  if (errors.length) throw new Error(`${errors[0].message} 기존 배치와 순간이동 지점의 안전 공간을 유지하도록 에셋의 크기·설치 설정을 조정해 주세요.`);
   return checked;
 }
 async function task(action: () => Promise<void>, message: string, cancelable = true) {
   if (busy) return;
   busy = true; taskCancelable = cancelable; status = message; statusError = false; render();
   try { await action(); } catch (error) { notify(error instanceof Error ? error.message : String(error), true); }
-  finally { busy = false; taskCancelable = true; queueRecovery(); render(); }
+  finally {
+    busy = false; taskCancelable = true; queueRecovery(); render();
+    if (generationMonitor.active) {
+      generationMonitor.finish(generationCancelled ? 'cancelled' : statusError ? 'failed' : 'completed');
+      clearInterval(generationProgressTimer);
+      updateGenerationProgress();
+    }
+  }
 }
 const unityStageLabels: Record<UnityBuildStatus['stage'], string> = {
   checking: '연결 확인', preparing: '스크립트 준비', compiling: '컴파일 대기', building: '맵 생성·NavMesh 베이크',
@@ -431,6 +541,8 @@ function bindingCard(binding: AssetBinding) {
     ? '벽등·문 위 조명·천장 조명은 원본 프리팹의 광원과 발광 머티리얼 설정을 사용합니다. 벽 부착물은 부착점의 +Z를 방 안쪽으로 맞추세요.'
     : role === 'floor'
     ? `기본 두께는 셀 간격의 12% (${Number((project.map.cellSize * FLOOR_THICKNESS_RATIO).toFixed(4))}m)이며 두께 배율 Y를 곱합니다. Unity에서 윗면을 셀 높이에 맞춥니다. X/Z는 원본에 적용할 절대 배율입니다.`
+    : role === 'door'
+    ? '새 연결문의 기본 규격은 가로 4m × 높이 3m입니다. 이 규격으로 만든 문 프리팹은 배율 X/Y/Z = 1로 등록하세요. 여러 셀에 걸친 문은 가로를 개구부 폭에 맞추며, 높이와 두께는 등록 배율을 사용합니다.'
     : (role === 'stair' || role === 'slope')
       ? '프리팹 아랫면의 중심을 셀 바닥에 맞춥니다. Y 배율은 지정한 오름폭으로 계산하며 X/Z는 원본에 적용할 절대 배율입니다.'
       : 'Unity에서 아랫면을 셀 높이에 자동으로 맞춥니다. 배율은 원본에 적용할 절대 배율입니다.';
@@ -465,10 +577,10 @@ function renderFurnishing() {
     ${furnishDecorations ? `<label class="field"><span>장식 배치 밀도 (%)</span><input type="number" data-furnish-control="density" min="1" max="100" step="1" value="${d.decorationDensity ?? d.fixtureDensity}" ${disabled()}></label>` : ''}
     <p class="caption">선택한 역할의 에셋 ${chosen.length}종 · 크기 등록 ${measured}종${chosen.length > measured ? ` · 크기 미확정 ${chosen.length - measured}종 제외` : ''}</p>
     <button data-action="furnish-map" class="primary full" ${busy || !measured ? 'disabled' : ''}>현재 맵에 소품·장식 자동 배치</button>
-    <p class="caption">지형·출입문·확정된 기존 배치물을 유지하고 목표까지 추가합니다. 미지정 임시 표시는 실측 배치로 전환합니다. 생성 당시 꺼둔 역할도 여기서 선택할 수 있습니다. 실제 크기와 통행·회피 공간을 검사하며, 공간이 부족하면 가능한 만큼 배치합니다. AI 호출 없이 실행하며 되돌릴 수 있습니다.</p>
+    <p class="caption">지형·출입문·확정된 기존 배치물을 유지하고 목표까지 추가합니다. 구역별 묶음 구성은 목표 점유율보다 중심 장면과 여백을 우선합니다. 미지정 임시 표시는 실측 배치로 전환합니다. 생성 당시 꺼둔 역할도 여기서 선택할 수 있습니다. 실제 크기와 통행·회피 공간을 검사하며, 공간이 부족하면 가능한 만큼 배치합니다. AI 호출 없이 실행하며 되돌릴 수 있습니다.</p>
     <label class="furnishing-choice"><input type="checkbox" data-furnish-control="includeUnknown" ${rearrangeUnknown ? 'checked' : ''} ${disabled()}> 출처 불명 소품도 재정리</label>
     <button data-action="rearrange-props" class="full" ${busy || !measured ? 'disabled' : ''}>자동 소품 재정리</button>
-    <p class="caption">자동 생성한 소품과 장식을 구역별 묶음으로 다시 구성합니다. 수동 배치·잠금·직접 지정한 소품은 보존합니다. 출처 불명 소품은 위 항목을 선택한 경우에만 포함합니다. 다음 생성의 배치 방식은 바꾸지 않으며, 되돌리기 한 번으로 복원할 수 있습니다.</p>
+    <p class="caption">방 전체의 중심 장면·보조 공간·여백을 먼저 정하고 자동 생성한 소품과 장식을 다시 구성합니다. 수동 배치·잠금·직접 지정한 소품은 보존합니다. 출처 불명 소품은 위 항목을 선택한 경우에만 포함합니다. 다음 생성의 배치 방식은 바꾸지 않으며, 되돌리기 한 번으로 복원할 수 있습니다.</p>
     ${report ? `<div data-furnish-result role="status"><p class="caption"><strong>${rearranged ? `묶음 ${rearranged.groupCount}개 · 이동 ${rearranged.movedProps}개 · 보존 ${rearranged.preservedProps}개 · 추가 ${rearranged.addedProps + rearranged.addedDecorations}개 · 제외 ${rearranged.removedProps}개${rearranged.unchanged ? ' · 변경 없음' : ''}` : report.unchanged ? '추가 배치 없음' : `소품 ${report.addedProps}개 · 장식 ${report.addedDecorations}개 추가`}</strong> · 이번 배치에 ${report.usedBindingIds.length}종 사용</p>${report.issues.length ? `<ul>${report.issues.map(issue => `<li>${escape(issue.message)}</li>`).join('')}</ul>` : ''}</div>` : ''}
   </details>`;
 }
@@ -492,7 +604,8 @@ function renderAssets() {
     <section class="asset-adder" aria-label="Unity 표시 프리팹 가져오기"><h3>Unity에서 한 번에 가져오기</h3>
       <button class="full" data-action="import-unity-asset-catalog" ${busy || !projectPath || !api?.importUnityAssetCatalog || unresolvedUnityBuild() ? 'disabled' : ''}>표시된 프리팹 가져오기</button>
       <p class="caption">Unity와 MCP를 켜고, 사용할 프리팹 루트의 Baekho Map Asset에서 등록 여부와 종류를 지정하세요. 바닥·벽·문·계단·소품 등 모든 종류를 함께 가져옵니다. 처음에는 아래 ‘Unity MCP 연결 설정 → 스크립트 준비’를 실행하세요.</p>
-      <p class="caption">다시 가져오면 새 프리팹을 추가하고 크기·벽 연결 정보를 갱신합니다. 앱에서 수정한 종류·배율·배치 조건은 유지합니다.</p>
+      <p class="caption" data-unity-prop-set-help>함께 쓸 소품은 Unity에서 여러 프리팹 선택 → Assets → Baekho → Create Prop Set From Selection으로 세트를 만드세요. 세트에 든 프리팹과 목록을 위 버튼으로 함께 가져옵니다. 세트별 위치·방향은 앱이 정합니다.</p>
+      <p class="caption">다시 가져오면 새 프리팹을 추가하고 크기·벽 연결·Unity 세트 목록을 갱신합니다. 앱에서 직접 지정한 종류·배율·배치 조건은 유지합니다. 기존 맵에 새 목록을 쓰려면 아래 ‘자동 소품 재정리’를 실행하세요.</p>
       ${unityCatalogReport ? `<div role="status" data-unity-catalog-result><p class="caption">최근 가져오기 결과</p><p>${escape(unityCatalogReport.summary)}</p>${unityCatalogReport.warnings.map(warning => `<p class="caption">${escape(warning)}</p>`).join('')}${unityCatalogReport.counts.length ? `<details><summary>종류별 등록 결과</summary><div class="catalog-details"><table class="catalog-counts"><thead><tr><th>종류</th><th>추가</th><th>갱신</th></tr></thead><tbody>${unityCatalogReport.counts.map(count => `<tr><td>${escape(count.label)}</td><td>${count.added}</td><td>${count.updated}</td></tr>`).join('')}</tbody></table></div></details>` : ''}${unityCatalogReport.details.length ? `<details><summary>제외 항목 ${unityCatalogReport.details.length}개</summary><ul class="catalog-details">${unityCatalogReport.details.map(item => `<li><strong>${escape(item.path)}</strong><br>${escape(item.reason)}</li>`).join('')}</ul></details>` : ''}</div>` : ''}
     </section>
     ${renderBulkAssetDeletion()}
@@ -520,6 +633,8 @@ function renderSelectedProp() {
   const choices=measured.map(b=>`<option value="${escape(b.id)}" ${prop?.bindingId===b.id?'selected':''}>${roles.find(r=>r.role===b.role)?.label} · ${escape(b.label)} · ${escape(b.prop!.category)}</option>`).join('');
   if(prop){const binding=project.bindings.find(b=>b.id===prop.bindingId),locked=prop.cells.some(designer.isLocked);
     return `<div class="section-line"></div><h3>선택한 소품</h3><p><strong>${escape(binding?.label??prop.bindingId)}</strong> · ${escape(prop.category)}</p><p class="caption" data-selected-prop-size>측정된 배치 크기 ${prop.size.x.toFixed(2)} × ${prop.size.y.toFixed(2)} × ${prop.size.z.toFixed(2)}m (가로 X · 높이 Y · 깊이 Z) / ${prop.cells.length}셀<br>${roles.find(r=>r.role===(prop.role??binding?.role??'prop'))?.label??'소품'} · ${prop.blocksMovement?'통행 차단':'통행 허용'} · ${prop.anchor==='ceiling'?'천장':prop.anchor==='wall'?'벽':'바닥'} 부착 · ID ${escape(prop.id)}</p>
+      <label class="field"><span>소품 Y 회전 (도)</span><input type="number" step="1" min="-360" max="360" data-prop-instance-yaw="${escape(prop.id)}" value="${Number(normalizePropYaw(propYaw(prop)).toFixed(3))}" ${busy||locked||!binding?.prop?.size||prop.anchor==='wall'?'disabled':''}></label>
+      <p class="caption">에셋 Y 보정에 더하는 개별 회전입니다.${binding ? ` 정면 ${Number(propFrontYaw(prop, binding).toFixed(1))}°.` : ''} 변경하면 점유 영역과 통행을 다시 검사하며, 공간이 부족하면 기존 배치를 유지합니다.</p>
       <label class="field"><span>프리팹 교체 · 전체 점유 영역을 다시 검사</span><select data-prop-instance-binding="${escape(prop.id)}" ${busy||locked?'disabled':''}>${measured.some(b=>b.id===prop.bindingId)?'':`<option value="${escape(prop.bindingId)}" selected>${escape(binding?.label??prop.bindingId)} · 크기 확인 필요</option>`}${choices}</select></label>
       <button data-action="refit-prop-instance" data-id="${escape(prop.id)}" class="secondary full" ${busy||locked||!binding?.prop?.size?'disabled':''}>현재 프리팹 다시 맞추기</button>
       <button data-action="remove-prop-instance" data-id="${escape(prop.id)}" class="danger full" ${busy||locked?'disabled':''}>이 소품 삭제 · 바닥 유지</button>`;
@@ -603,28 +718,32 @@ function render() {
   if (selected && (selected.x >= map.width || selected.row >= map.height)) selected = null;
   root.innerHTML = `
     <header class="topbar"><div class="brand-mark">b</div><div class="brand">BAEKHO<small>WORLD BUILDING TOOLS</small></div><span class="top-divider"></span><span class="top-title">Map Forge <span class="pill">PREVIEW 0.8.0</span></span><span class="spacer"></span>
-      <button data-action="open" ${disabled()}>↗ 프로젝트 열기</button><button data-action="save" ${busy || view === 'variants' ? 'disabled' : ''}>${dirty ? '● ' : ''}저장</button><button data-action="codex" ${disabled()}><span class="status-dot" style="background:${codex.state === 'ready' ? '#638a58' : '#bb9871'}"></span>${codexLabel()}</button>
+      <button data-action="open" ${disabled()}>↗ 프로젝트 열기</button><button data-action="save" ${busy || view === 'variants' ? 'disabled' : ''}>${dirty ? '● ' : ''}저장</button><button data-action="codex" ${disabled()}><span class="status-dot" style="background:${aiReadyAll() ? '#638a58' : '#bb9871'}"></span>${codexLabel()}</button>
     </header>
     ${recovery ? '<div class="recovery-note">이전 작업의 자동 복구 사본이 있습니다.<button data-action="recover">복구</button><button data-action="dismiss-recovery">닫기</button></div>' : ''}${!api ? '<div class="browser-note">브라우저 미리보기입니다. 파일 연결과 AI 생성은 데스크톱 앱에서 사용할 수 있습니다.</div>' : ''}
     <main class="main ${view === 'variants' ? 'variants-mode' : ''}">
       <aside class="left-panel"><p class="eyebrow">01 / CREATE</p><div class="panel-heading"><h2>어떤 공간을 만들까요?</h2><span class="step-num">3D</span></div><p class="panel-intro">서로 이어 붙일 입체 맵을 설계하세요.<br>여러 연결문과 높낮이를 함께 만듭니다.</p>
+        <label class="field"><span>맵 생성 방식</span><select id="generationMethod" ${disabled()}><option value="image" ${project.settings.generationMethod !== 'direct' ? 'selected' : ''}>이미지 기반 · 설계도에서 맵 생성</option><option value="direct" ${project.settings.generationMethod === 'direct' ? 'selected' : ''}>빠른 생성 · 구조 직접 설계</option></select><small>${project.settings.generationMethod === 'direct' ? '이미지 생성·분석 없이 바로 맵을 만듭니다. 모델과 추론 설정은 그대로 사용합니다.' : 'AI 설계도를 만들고 이미지에서 지형과 연결을 분석합니다.'}</small></label>
         ${renderConceptControls(project.settings,busy)}${renderGenerationControls(project.settings,busy)}${designer.renderGeneration()}
         <div class="pair"><label class="field"><span>새 설계 가로 (셀)</span><input id="width" type="number" min="8" max="40" value="${project.settings.width}" ${disabled()}></label><label class="field"><span>새 설계 세로 (셀)</span><input id="height" type="number" min="8" max="40" value="${project.settings.height}" ${disabled()}></label></div>
         <label class="field"><span>새 생성 셀 간격 (m)</span><input id="cellSize" type="number" min="0.25" max="10" step="0.25" value="${project.settings.cellSize}" ${disabled()}><small>다음 생성에 적용 · 현재 맵 크기는 유지</small></label>
         <div class="pair"><label class="field"><span>기본 고저차 (m)</span><input id="elevationStep" type="number" min="0.25" max="10" step="0.25" value="${project.settings.elevationStep}" ${disabled()}></label><label class="field"><span>걸어넘을 단차 (m)</span><input id="maxStepHeight" type="number" min="0.05" max="1" step="0.05" value="${map.maxStepHeight}" ${disabled()}></label></div>
         <label class="field"><span>AI로 만들 연결문 개수</span><input id="connectionCount" type="number" min="1" max="16" value="${project.settings.connectionCount}" ${disabled()}><small>1~16개 · 실제 배치는 연결문 탭에서 추가·삭제</small></label>
         ${renderConnectionSizeControls(project.settings,busy)}
-        <details class="advanced"><summary>Codex 모델 설정</summary><label class="field"><span>Codex 모델 (선택)</span><input id="codexModel" list="codex-models" maxlength="100" placeholder="Codex 기본 모델 사용" value="${escape(project.settings.codexModel)}" ${disabled()}><datalist id="codex-models">${codexModelOptions()}</datalist></label><p class="caption">비워 두면 Codex 기본 모델을 사용합니다. 이미지 생성은 Codex의 내장 도구를 사용합니다.</p></details>
+        <details class="advanced"><summary>Codex 모델 설정</summary><label class="field"><span>Codex 모델 (선택)</span><input id="codexModel" list="codex-models" maxlength="100" placeholder="Codex 기본 모델 사용" value="${escape(project.settings.codexModel)}" ${disabled()}><datalist id="codex-models">${codexModelOptions()}</datalist></label><p class="caption">비워 두면 Codex 기본 모델을 사용합니다. 이미지 생성은 Codex의 내장 도구를 사용합니다.${useClaude() ? ' 컨셉·분석·구조 설계는 Claude Code가 담당하므로 이 모델은 이미지 생성에만 쓰입니다. Claude 모델은 상단 연결 버튼에서 설정합니다.' : ''}</p></details>
         <div class="left-actions"><button class="primary full" data-action="generate" ${disabled()}>${busy ? '<span class="spinner"></span>' : '✦ '}조건으로 맵 생성</button><details class="advanced"><summary>설계도 단계별 작업</summary><button class="full" data-action="generate-image" ${disabled()}>설계도만 생성</button><button class="secondary full" data-action="extract" ${busy || !displayImage ? 'disabled' : ''}>설계도 분석 → 배치 만들기</button></details>${busy && !unityWorking && taskCancelable ? '<button data-action="cancel" class="danger full">요청 취소</button>' : ''}</div>
-        <div class="variant-create"><label class="field"><span>한 번에 비교할 맵 후보</span><select id="variantCount" ${disabled()}>${[2,3,4,5,6,7,8].map(count => `<option value="${count}" ${variantCount === count ? 'selected' : ''}>${count}개</option>`).join('')}</select></label><button class="secondary full" data-action="generate-variants" ${disabled()}>✦ 여러 후보 생성</button><p class="caption">${conceptMode(project.settings)==='ai'?'후보마다 다른 컨셉을 작성한 뒤 설계도와 배치를 생성합니다.':'직접 입력한 컨셉 안에서 방 형태와 배치를 다르게 만듭니다.'} 현재 편집 맵은 유지됩니다.</p></div>
-        <p class="generation-state">Codex가 컨셉 작성·이미지 생성·배치 분석을 진행합니다.<br>직접 입력을 선택하면 컨셉 작성은 생략합니다.</p>
-        <div class="step-list"><span class="${project.blueprintDataUrl ? 'complete' : ''}">① 설계도</span><span>→</span><span class="${!isSample ? 'complete' : ''}">② 배치</span><span>→</span><span>③ 프리팹</span></div>
+        <div class="variant-create"><label class="field"><span>한 번에 비교할 맵 후보</span><select id="variantCount" ${disabled()}>${[2,3,4,5,6,7,8].map(count => `<option value="${count}" ${variantCount === count ? 'selected' : ''}>${count}개</option>`).join('')}</select></label><button class="secondary full" data-action="generate-variants" ${disabled()}>✦ 여러 후보 생성</button><p class="caption">${conceptMode(project.settings)==='ai'?(project.settings.generationMethod==='direct'?'후보마다 다른 컨셉을 작성한 뒤 맵 구조를 직접 설계합니다.':'후보마다 다른 컨셉을 작성한 뒤 설계도와 배치를 생성합니다.'):'직접 입력한 컨셉 안에서 방 형태와 배치를 다르게 만듭니다.'} 현재 편집 맵은 유지됩니다.</p></div>
+        <p class="generation-state">${useClaude()
+          ? (project.settings.generationMethod === 'direct' ? 'Claude Code가 컨셉에 맞춰 지형과 연결을 직접 설계합니다.' : 'Codex가 설계도 이미지를 만들고, Claude Code가 컨셉 작성·배치 분석을 진행합니다.')
+          : (project.settings.generationMethod === 'direct' ? 'Codex가 컨셉에 맞춰 지형과 연결을 직접 설계합니다.' : 'Codex가 컨셉 작성·이미지 생성·배치 분석을 진행합니다.')}<br>직접 입력을 선택하면 컨셉 작성은 생략합니다.</p>
+        <div id="generation-timings">${generationMonitor.render()}</div>
+        <div class="step-list"><span class="${project.blueprintDataUrl ? 'complete' : ''}">① ${project.settings.generationMethod === 'direct' ? '구조 설계' : '설계도'}</span><span>→</span><span class="${!isSample ? 'complete' : ''}">② 배치</span><span>→</span><span>③ 프리팹</span></div>
         <div class="section-line"></div><p class="eyebrow">QUICK START</p><p class="caption" style="margin:10px 0">Codex 연결 전에도 샘플 맵을 편집하고<br>에셋 연결과 내보내기를 확인할 수 있어요.</p><button data-action="demo" class="full" ${disabled()}>샘플 맵 불러오기</button>
       </aside>
       <section class="workspace"><div class="workspace-heading"><div><p class="eyebrow" style="margin-bottom:6px">MAP WORKSPACE</p><h1>작은 설계에서, 하나의 세계로.</h1></div><span class="spacer"></span></div>
         <div class="row ${view === 'variants' ? 'hide' : ''}" style="margin-bottom:8px"><input class="map-name" id="mapName" aria-label="맵 이름" maxlength="80" value="${escape(map.name)}" ${disabled()}><span class="pill">${isSample ? '샘플 · AI 생성 전' : '편집 중'}</span><span class="spacer"></span><small class="num">${map.width} × ${map.height}</small></div>
         <nav class="tabs" aria-label="맵 보기"><button class="tab ${view === '3d' ? 'active' : ''}" data-view="3d">◇ 3D 미리보기</button><button class="tab ${view === 'grid' ? 'active' : ''}" data-view="grid">▦ 배치 편집</button><button class="tab ${view === 'image' ? 'active' : ''}" data-view="image">▧ AI 설계도</button><button class="tab ${view === 'variants' ? 'active' : ''}" data-view="variants">후보 비교${candidates.length ? ` · ${candidates.filter(candidate => candidate.status === 'ready').length}/${candidates.length}` : ''}</button><span class="spacer"></span><button data-action="undo" title="되돌리기 (Ctrl+Z)" ${!history.length || busy || view === 'variants' ? 'disabled' : ''}>↶</button><button data-action="redo" title="다시 실행 (Ctrl+Shift+Z)" ${!future.length || busy || view === 'variants' ? 'disabled' : ''}>↷</button></nav>
-        ${view === 'variants' ? '' : designer.renderToolbar()}<div class="viewport ${view === 'variants' ? 'variants-viewport' : ''}" id="viewport">${view === 'variants' ? gallery.render() : view === '3d' ? '<div class="preview-host" id="preview"></div><span class="view-badge">블록아웃 · Y 높이 · 실제 에셋은 Unity에서 적용</span><span class="view-hint">클릭 선택 · 드래그 회전 · 휠 확대 · 우클릭 이동</span><span class="view-tag">3D HEIGHT EDITOR</span>' : view === 'grid' ? `<span class="view-badge">${editMode==='select'?'셀 선택':editMode==='height'?`Y = ${brushHeight}m 높이 칠하기`:`${tileLabels[brush]} 배치`} · 숫자는 높이(m)</span><div class="orientation"><strong>↑</strong>+ Z</div><div class="map-svg-wrap"><svg class="map-svg" id="map-svg" role="img" aria-label="편집 가능한 맵 격자" viewBox="0 0 ${map.width} ${map.height}" preserveAspectRatio="xMidYMid meet"></svg></div><div class="brush-toolbar" aria-label="배치 도구"><button data-edit-mode="select" class="${editMode==='select'?'selected':''}">선택</button><button data-edit-mode="height" class="${editMode==='height'?'selected':''}">높이</button>${(Object.keys(tileLabels) as Tile[]).map(tile => `<button class="${editMode==='paint' && tile === brush ? 'selected' : ''}" data-brush="${tile}" title="${tileLabels[tile]}" ${disabled()}>${tileLabels[tile]}</button>`).join('')}</div>` : displayImage ? `<img class="blueprint" src="${escape(displayImage)}" alt="AI가 생성한 고저차 있는 입체 맵 설계도"><span class="view-badge">입체 설계도 · 높이와 계단을 포함해 분석</span>` : '<div class="empty-image"><span class="empty-symbol">▧</span><strong>Your next world starts here.</strong><p>왼쪽에서 생성 조건을 고르고<br>AI가 컨셉과 입체 설계도를 만들게 해 주세요.</p><span class="pill">입체 이미지 → 높이·계단 분석 → 에셋 조립</span></div>'}</div>
+        ${view === 'variants' ? '' : designer.renderToolbar()}<div class="viewport ${view === 'variants' ? 'variants-viewport' : ''}" id="viewport">${view === 'variants' ? gallery.render() : view === '3d' ? '<div class="preview-host" id="preview"></div><span class="view-badge">블록아웃 · Y 높이 · 실제 에셋은 Unity에서 적용</span><span class="view-hint">클릭 선택 · 드래그 회전 · 휠 확대 · 우클릭 이동</span><span class="view-tag">3D HEIGHT EDITOR</span>' : view === 'grid' ? `<span class="view-badge">${editMode==='select'?'셀 선택':editMode==='height'?`Y = ${brushHeight}m 높이 칠하기`:`${tileLabels[brush]} 배치`} · 숫자는 높이(m)</span><div class="orientation"><strong>↑</strong>+ Z</div><div class="map-svg-wrap"><svg class="map-svg" id="map-svg" role="img" aria-label="편집 가능한 맵 격자" viewBox="0 0 ${map.width} ${map.height}" preserveAspectRatio="xMidYMid meet"></svg></div><div class="brush-toolbar" aria-label="배치 도구"><button data-edit-mode="select" class="${editMode==='select'?'selected':''}">선택</button><button data-edit-mode="height" class="${editMode==='height'?'selected':''}">높이</button>${(Object.keys(tileLabels) as Tile[]).map(tile => `<button class="${editMode==='paint' && tile === brush ? 'selected' : ''}" data-brush="${tile}" title="${tileLabels[tile]}" ${disabled()}>${tileLabels[tile]}</button>`).join('')}</div>` : displayImage ? `<img class="blueprint" src="${escape(displayImage)}" alt="AI가 생성한 고저차 있는 입체 맵 설계도"><span class="view-badge">입체 설계도 · 높이와 계단을 포함해 분석</span>` : '<div class="empty-image"><span class="empty-symbol">▧</span><strong>설계도 이미지가 없습니다.</strong><p>빠른 생성은 설계도 이미지 없이 맵을 만듭니다.<br>3D 미리보기와 배치 편집에서 결과를 확인하세요.</p><span class="pill">이미지 기반 생성은 왼쪽에서 선택할 수 있습니다</span></div>'}</div>
         ${view === 'variants' ? '' : `<div class="concept-results" aria-live="polite">${renderConceptResult(project.concept,'이 맵에 사용한 컨셉','map')}${attemptConcept ? renderConceptResult(attemptConcept,'이번 생성에 선택한 컨셉','attempt') : renderConceptResult(project.generationDraft?.concept,'설계도 초안에 사용한 컨셉','draft')}</div>`}
         <div class="legend ${view === 'variants' ? 'hide' : ''}">${(['.', '#', 'D', 'P', 'R', 'B'] as Tile[]).map(tile => `<span><i style="background:${colors[tile]}"></i>${tileLabels[tile]}</span>`).join('')}<span><i style="background:#bd9878"></i>장식</span><span><i style="background:#76a86f"></i>식생</span></div>
         <div class="metrics ${view === 'variants' ? 'hide' : ''}"><div class="metric"><span>맵 크기</span><strong class="num">${map.width * map.cellSize} × ${map.height * map.cellSize}<small> m</small></strong></div><div class="metric"><span>높이 범위</span><strong class="num">${low} ~ ${high}<small> m</small></strong></div><div class="metric"><span>통행 면적 / 배치 셀</span><strong class="num">${(walkable*map.cellSize*map.cellSize).toFixed(1)}<small> m² / ${occupied}</small></strong></div></div>
@@ -701,7 +820,7 @@ function bindGridPainting() {
   };
   svg.addEventListener('pointerdown', event => { if (event.button !== 0 || busy) return; painting = true; changed = false; svg.setPointerCapture(event.pointerId); paint(event); });
   svg.addEventListener('pointermove', paint);
-  const finish = () => { if (painting) { painting = false; if (changed&&before) {try{project.map=synchronizeStructures(project.map);const errors=[...propValidationIssues(project.map,project.bindings),...wallMountIssues(project.map,project.bindings)].filter(i=>i.severity==='error');if(errors.length)throw new Error(errors[0].message);history.push(before);if(history.length>50)history.shift();future.length=0;dirty=true;queueRecovery();notify('배치를 수정하고 자동 천장·벽을 갱신했습니다.');}catch(error){Object.assign(project,before);notify(error instanceof Error?error.message:String(error),true);}}render(); } };
+  const finish = () => { if (painting) { painting = false; if (changed&&before) {try{project.map=synchronizeStructures(project.map);const errors=[...propValidationIssues(project.map,project.bindings),...wallMountIssues(project.map,project.bindings),...teleportIssues(project.map,project.bindings)].filter(i=>i.severity==='error');if(errors.length)throw new Error(errors[0].message);history.push(before);if(history.length>50)history.shift();future.length=0;dirty=true;queueRecovery();notify('배치를 수정하고 자동 천장·벽을 갱신했습니다.');}catch(error){Object.assign(project,before);notify(error instanceof Error?error.message:String(error),true);}}render(); } };
   svg.addEventListener('pointerup', finish);
   svg.addEventListener('pointercancel', finish);
 }
@@ -853,6 +972,8 @@ root.addEventListener('click', async event => {
   if (action === 'close-codex') return closeCodexDialog();
   if (action === 'codex-refresh') return refreshCodex();
   if (action === 'codex-select') return refreshCodex(true);
+  if (action === 'claude-refresh') return refreshClaude();
+  if (action === 'claude-select') return refreshClaude(true);
   if (action === 'codex-login') {
     if (loginPending || codexChecking) return;
     loginPending = true; loginDeadline = Date.now() + 10 * 60 * 1000; updateCodexControls();
@@ -906,7 +1027,7 @@ root.addEventListener('click', async event => {
       const count = result.byRole[role];
       return count && (count.added || count.updated) ? [{ label, ...count }] : [];
     });
-    const summary = `신규 등록 ${result.added}개 · 기존 크기 갱신 ${result.updated}개 · 제외 ${result.skipped.length}개.`;
+    const summary = `신규 등록 ${result.added}개 · 기존 크기 갱신 ${result.updated}개 · 제외 ${result.skipped.length}개.${result.catalog.propSets !== undefined ? ` Unity 세트 ${result.propSetCount}개 · 소속 프리팹 ${result.propSetMembers}종.` : ''}`;
     unityCatalogReport = { summary, counts, details: result.skipped, warnings: [...new Set([...response.scan.warnings, ...response.warnings])] };
     notify(summary);
   }, 'Unity에 표시된 프리팹과 크기를 가져옵니다. 최초 실행은 스크립트 준비·컴파일을 기다립니다…', false);
@@ -976,10 +1097,15 @@ root.addEventListener('input', event => {
   const input = event.target as HTMLInputElement;
   if (input.id === 'prompt') { project.settings.prompt = input.value; dirty = true; queueRecovery(); }
   if (input.id === 'codexModel') { project.settings.codexModel = input.value.trim(); dirty = true; queueRecovery(); }
+  if (input.id === 'generationMethod' && (input.value === 'image' || input.value === 'direct')) {
+    project.settings.generationMethod = input.value; dirty = true; queueRecovery(); render();
+  }
 });
 root.addEventListener('change', event => {
   const input = event.target as HTMLInputElement;
   if (busy) return;
+  if (input.name === 'analysisProvider' && (input.value === 'codex' || input.value === 'claude')) { void saveAiPreferences({ ...aiPrefs, analysisProvider: input.value }); return; }
+  if (input.id === 'claudeModel') { void saveAiPreferences({ ...aiPrefs, claudeModel: input.value.trim() }); return; }
   if (input.id === 'unityEndpoint') {
     unityEndpoint = input.value.trim() || DEFAULT_UNITY_ENDPOINT;
     try { localStorage.setItem('baekho.unityEndpoint', unityEndpoint); } catch { /* Connection still works without persisted settings. */ }
@@ -991,6 +1117,17 @@ root.addEventListener('change', event => {
     render(); return;
   }
   if (designer.change(input)) return;
+  if (input.dataset.propInstanceYaw) {
+    try {
+      if (!input.value.trim()) throw new Error('소품 회전각을 입력해 주세요.');
+      const report = project.settings.levelDesign ? analyzeLevelDesign(project.map, project.settings) : undefined;
+      const changed = rotatePropInstance(project.map, input.dataset.propInstanceYaw, Number(input.value), project.settings, project.bindings,
+        report ? [...report.reservedEntryCells, ...report.combatCells] : []);
+      markHistory(); project.map = changed;
+      notify('소품 회전과 전체 점유 영역을 검사했습니다. 이 묶음은 수동 배치로 보존됩니다.');
+    } catch (error) { notify(error instanceof Error ? error.message : String(error), true); }
+    render(); return;
+  }
   if (input.dataset.wallBinding && input.dataset.wallField) {
     try {
       const index = project.bindings.findIndex(binding => binding.id === input.dataset.wallBinding); if (index < 0) return;
@@ -1146,7 +1283,7 @@ root.addEventListener('change', event => {
     const asset=assets.find(a=>a.guid===input.value), binding=project.bindings.find(b=>b.id===input.dataset.binding);
     if(!asset||!binding||binding.prefabGuid===asset.guid)return;
     const changed = structuredClone(binding);
-    if(changed.prop)delete changed.prop.size;
+    if(changed.prop){delete changed.prop.size;delete changed.prop.unitySets;}
     delete changed.bounds; delete changed.wallMount;
     changed.prefabGuid=asset.guid;changed.prefabPath=asset.path;
     const measured = applyImportedPropBounds(changed, importedPropCatalog);
@@ -1180,4 +1317,7 @@ window.addEventListener('keydown', event => {
 });
 window.addEventListener('beforeunload', event => { if (dirty || busy || candidates.some(candidate => candidate.status === 'ready' && !savedCandidateIds.has(candidate.id))) { event.preventDefault(); event.returnValue = ''; } });
 render();
-if (api) { void refreshCodex(); void api.loadRecovery().then(value => { recovery=value; if(value)render(); }).catch(error=>notify(`복구 사본을 읽지 못했습니다: ${String(error)}`,true)); }
+if (api) {
+  void refreshCodex();
+  if (api.getAiPreferences) void api.getAiPreferences().then(value => { aiPrefs = value; updateCodexControls(); render(); if (useClaude()) void refreshClaude(); }).catch(() => undefined);
+void api.loadRecovery().then(value => { recovery=value; if(value)render(); }).catch(error=>notify(`복구 사본을 읽지 못했습니다: ${String(error)}`,true)); }

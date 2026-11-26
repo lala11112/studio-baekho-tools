@@ -16,7 +16,7 @@ export interface VariantGalleryHooks {
 const escape = (value: unknown): string => String(value).replace(/[&<>"']/g,
   character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]!));
 const statusLabels: Record<VariantStatus, string> = {
-  waiting: '대기 중', concept: '컨셉 작성 중', image: '설계도 생성 중', extract: '맵 분석 중', ready: '완료', error: '생성 실패', cancelled: '취소됨',
+  waiting: '대기 중', concept: '컨셉 작성 중', image: '설계도 생성 중', extract: '맵 분석 중', layout: '맵 직접 생성 중', ready: '완료', error: '생성 실패', cancelled: '취소됨',
 };
 const tileColors: Record<Tile, string> = { _: '#edf0e8', '.': '#d6dacb', '#': '#637764', D: '#2b8e86', P: '#bb8663', R: '#b399bd', B: '#b69562' };
 const ready = (candidate: MapVariant): boolean => candidate.status === 'ready' && !!candidate.project;
@@ -98,7 +98,7 @@ export function createVariantGallery(hooks: VariantGalleryHooks) {
     const isReady = ready(candidate), map = candidate.project?.map, image = blueprint(candidate), id = escape(candidate.id);
     return `<article class="variant-card ${activeId === candidate.id ? 'active' : ''} ${selected.has(candidate.id) ? 'chosen' : ''}" data-variant-card="${id}">
       <div class="variant-card-heading"><label class="variant-selection"><input type="checkbox" data-v-action="select" data-id="${id}" ${selected.has(candidate.id) ? 'checked' : ''} ${isReady ? '' : 'disabled'} aria-label="${escape(candidate.label)} 저장 선택"><strong>${escape(candidate.label)}</strong></label><span class="variant-status status-${candidate.status}">${statusLabels[candidate.status]}</span></div>
-      <button class="variant-cover" data-v-action="preview" data-id="${id}" aria-label="${escape(candidate.label)} 상세 미리보기" aria-pressed="${activeId === candidate.id}">${map ? floorPlan(map) : `<span class="variant-placeholder ${candidate.status === 'concept' || candidate.status === 'image' || candidate.status === 'extract' ? 'working' : ''}"><span aria-hidden="true">${candidate.status === 'error' ? '△' : candidate.status === 'cancelled' ? '−' : '▧'}</span><small>${statusLabels[candidate.status]}</small></span>`}${image ? `<img class="variant-blueprint-thumb" src="${escape(image)}" alt="${escape(candidate.label)} AI 설계도">` : ''}</button>
+      <button class="variant-cover" data-v-action="preview" data-id="${id}" aria-label="${escape(candidate.label)} 상세 미리보기" aria-pressed="${activeId === candidate.id}">${map ? floorPlan(map) : `<span class="variant-placeholder ${['concept', 'image', 'extract', 'layout'].includes(candidate.status) ? 'working' : ''}"><span aria-hidden="true">${candidate.status === 'error' ? '△' : candidate.status === 'cancelled' ? '−' : '▧'}</span><small>${statusLabels[candidate.status]}</small></span>`}${image ? `<img class="variant-blueprint-thumb" src="${escape(image)}" alt="${escape(candidate.label)} AI 설계도">` : ''}</button>
       ${map ? `<div class="variant-card-info"><p class="variant-map-name" title="${escape(map.name)}">${escape(map.name)}</p><p class="variant-dimensions">${map.width} × ${map.height}셀 · ${meters(map.width * map.cellSize)} × ${meters(map.height * map.cellSize)}m</p>${stats(map,candidate.project?.settings)}</div>` : `<p class="variant-card-message">${candidate.error ? escape(candidate.error) : candidate.status === 'waiting' ? '차례가 되면 생성합니다.' : candidate.status === 'cancelled' ? '이 후보의 생성이 취소되었습니다.' : '완료되면 실제 맵 배치를 비교할 수 있습니다.'}</p>`}
       ${conceptSummary(candidate)}
       ${candidate.warnings?.length ? `<p class="variant-card-message" data-variant-wall-warning>${escape(candidate.warnings.join(' '))}</p>` : ''}

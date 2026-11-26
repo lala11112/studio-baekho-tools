@@ -84,6 +84,7 @@ try {
   assert.deepEqual(new Set(initial.bindings.map(binding => binding.role)), new Set(ASSET_ROLES));
   assert.equal(initial.bindings.find(binding => binding.role === 'floor').scale.x, fixture.map.cellSize);
   assert.equal(initial.bindings.find(binding => binding.role === 'prop').scale.x, 1);
+  assert.deepEqual(initial.bindings.find(binding => binding.role === 'door').scale, { x: 1, y: 1, z: 1 }, 'authored doorway starts at native scale');
   await page.locator('[data-unity-catalog-result] summary').filter({ hasText: '종류별 등록 결과' }).click();
   assert.match(await page.locator('.catalog-counts tbody tr').first().innerText(), /바닥\s+1\s+0/);
   await page.locator('[data-unity-catalog-result] summary').filter({ hasText: '종류별 등록 결과' }).click();
@@ -94,7 +95,7 @@ try {
   await app.evaluate(({ dialog }, path) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); }, bundlePath);
   await action('export').click(); await idle();
   const bundle = unzipSync(await readFile(bundlePath));
-  for (const file of ['Runtime/BaekhoMapAsset.cs', 'Editor/BaekhoMapAssetEditor.cs', 'Editor/BaekhoAssetCatalog.cs']) {
+  for (const file of ['Runtime/BaekhoMapAsset.cs', 'Editor/BaekhoMapAssetEditor.cs', 'Editor/BaekhoAssetCatalog.cs', 'Runtime/BaekhoPropSet.cs', 'Editor/BaekhoPropSetEditor.cs']) {
     assert.equal(strFromU8(bundle[`Unity/${file}`]), await readFile(resolve('unity-importer', file), 'utf8'), `ZIP ships complete ${file}`);
   }
   assert.ok(!Object.keys(bundle).some(name => /GetAssetCatalogTool|BuildMapTool/.test(name)));
@@ -145,6 +146,40 @@ try {
   assert.equal(await page.locator('.footer.error').count(), 1);
   assert.deepEqual(await save('occupied-size-rejected'), placed);
   observations.push('changed measurement that invalidates an existing placement rolls back entire import');
+
+  await open(input); await connect();
+  const withSets = structuredClone(response);
+  const memberGuids = withSets.catalog.assets.filter(entry => ['prop', 'decoration', 'vegetation'].includes(entry.role)).map(entry => entry.guid);
+  withSets.catalog.propSets = [{ guid: 'a'.repeat(32), path: 'Assets/WorkArea.asset', label: '작업 구역 <img src=x>', usage: 'equipment', arrangement: 'either', prefabGuids: memberGuids }];
+  await setResponse(withSets); await importAssets();
+  assert.match(await page.locator('[data-unity-catalog-result]').innerText(), /Unity 세트 1개 · 소속 프리팹 3종/);
+  const setsImported = await save('sets-imported'), member = setsImported.bindings.find(binding => binding.role === 'prop');
+  assert.equal(member.prop.unitySets[0].guid, 'a'.repeat(32));
+  assert.deepEqual(setsImported.map, fixture.map);
+  const card = page.locator(`[data-asset-card="${member.id}"]`);
+  const expandLibrary = async () => { if (!await card.locator('.prop-library').evaluate(element => element.open)) await card.locator('.prop-library > summary').click(); };
+  await expandLibrary();
+  assert.equal(await card.locator('[data-prop-composition-state="unity"]').count(), 1);
+  assert.equal(await card.locator('[data-prop-field="composition.family"]').count(), 0);
+  assert.equal(await card.locator('[data-unity-prop-sets] img').count(), 0);
+  await card.scrollIntoViewIfNeeded(); await page.screenshot({ path: resolve(output, 'unity-prop-set.png') });
+  await card.locator('[data-prop-field="composition.mode"]').selectOption('manual'); await idle(); await expandLibrary();
+  await card.locator('[data-prop-field="composition.usage"]').selectOption('excluded'); await idle();
+  const overridden = await save('set-manual-override');
+  const renamed = structuredClone(withSets); renamed.catalog.propSets[0].label = '이름 변경';
+  await setResponse(renamed); await importAssets();
+  const renameSaved = await save('set-renamed');
+  assert.equal(renameSaved.bindings.find(binding => binding.id === member.id).prop.unitySets[0].label, '이름 변경');
+  assert.deepEqual(renameSaved.bindings.find(binding => binding.id === member.id).prop.composition, overridden.bindings.find(binding => binding.id === member.id).prop.composition);
+  await expandLibrary(); await card.locator('[data-prop-field="composition.mode"]').selectOption('automatic'); await idle();
+  assert.equal((await save('set-automatic')).bindings.find(binding => binding.id === member.id).prop.composition, undefined);
+  await setResponse({ ...renamed, catalog: { ...renamed.catalog, propSets: [] } }); await importAssets();
+  assert.equal((await save('sets-removed')).bindings.find(binding => binding.id === member.id).prop.unitySets, undefined);
+  await action('undo').click();
+  assert.equal((await save('sets-removal-undone')).bindings.find(binding => binding.id === member.id).prop.unitySets[0].label, '이름 변경');
+  await card.locator(`[data-binding="${member.id}"]`).selectOption(assets[0].guid); await idle();
+  assert.equal((await save('set-member-reassigned')).bindings.find(binding => binding.id === member.id).prop.unitySets, undefined, 'changing prefab identity clears source set membership');
+  observations.push('Unity list import, simplified escaped UI, source refresh, manual override, return to sets, removal, Undo and identity reassignment');
   assert.deepEqual(errors, []);
   const result = { result: 'PASS', roles: ASSET_ROLES.length, observations, errors };
   await writeFile(resolve(output, 'result.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result, null, 2));

@@ -18,8 +18,10 @@ export interface WallMountSettings {
   enabled: boolean; singles: boolean; runs: boolean; density: number; runDensity: number;
   /** Missing preserves horizontal placement in existing projects. */
   runOrientation?: 'horizontal' | 'vertical' | 'both';
+  /** Missing preserves the original independent boundary placement. */
+  runLayout?: 'legacy' | 'composed';
   /** Missing uses each prefab's original mounting height. Fixed requires min === max. */
-  runHeight?: { mode: 'fixed' | 'random'; reference: 'floor' | 'top'; min: number; max: number };
+  runHeight?: { mode: 'fixed' | 'random' | 'auto'; reference: 'floor' | 'top'; min: number; max: number };
   /** Distances above the adjacent floor or below the wall top, including end caps. Missing uses the full available span. */
   verticalRange?: { reference: 'floor' | 'top'; start: number; end: number };
   /** In both mode, join compatible runs through elbows and tees. Missing means true. */
@@ -51,15 +53,21 @@ export interface StructureSettings { ceilingClearance: number; fillDoorTops: boo
 export interface PitBottom extends Cell { kind: 'floor' | 'deadzone'; y: number; thickness: number }
 export interface StructureFill extends Cell { id: string; role: 'wall' | 'cliff'; purpose: 'doorTop' | 'doorSide' | 'heightGap' | 'pitSide'; direction: Direction; position: Vec3; size: Vec3 }
 export type PropUsage = 'equipment' | 'storage' | 'natural' | 'floorDetail' | 'edge' | 'unknown' | 'excluded';
+export type PropBehavior = 'workSurface' | 'seat' | 'floorEquipment' | 'surfaceAccessory' | 'generic';
 export interface PropComposition { usage: PropUsage; family: string; member: 'anchor' | 'companion' | 'either'; arrangement: 'wall' | 'island' | 'either' }
-export interface PropDefinition { category: string; tags: string[]; blocksMovement: boolean; size?: Vec3; placement: 'floor' | 'wall' | 'ceiling'; roomTypes: RoomPurpose[]; weight: number; composition?: PropComposition }
-export interface PropInstance extends Cell { id: string; bindingId: string; role?: 'prop' | 'decoration' | 'vegetation'; direction: Direction; offset: Vec3; cells: Cell[]; size: Vec3; blocksMovement: boolean; category: string; anchor?: 'floor' | 'wall' | 'ceiling'; authored?: boolean; groupId?: string; provenance?: 'generated' | 'manual' }
+/** Unity-authored prefab lists. An explicit app composition takes precedence over these memberships. */
+export interface UnityPropSetMembership { guid: string; label: string; usage: 'equipment' | 'storage' | 'natural'; arrangement: 'wall' | 'island' | 'either' }
+export interface PropDefinition { category: string; tags: string[]; blocksMovement: boolean; size?: Vec3; placement: 'floor' | 'wall' | 'ceiling'; roomTypes: RoomPurpose[]; weight: number; composition?: PropComposition; unitySets?: UnityPropSetMembership[]; behavior?: PropBehavior; /** Native root-local visual front in degrees; absent uses the existing binding calibration. */ frontYaw?: number }
+export interface PropInstance extends Cell { id: string; bindingId: string; role?: 'prop' | 'decoration' | 'vegetation'; direction: Direction; /** Additional instance yaw, independent of cardinal support direction. Missing means zero. */ yawOffset?: number; offset: Vec3; cells: Cell[]; size: Vec3; blocksMovement: boolean; category: string; anchor?: 'floor' | 'wall' | 'ceiling'; authored?: boolean; groupId?: string; provenance?: 'generated' | 'manual' }
 export interface Bridge extends Cell { direction: Direction }
 export interface CliffFace extends Cell { direction: Direction; depth: number }
 export interface MapFixture extends Cell { id: string; role: FixtureRole; direction: Direction; offset: Vec3; bindingId?: string; anchor?: 'floor' | 'wall' | 'ceiling'; linkedId?: string; wall?: WallMountInstance }
-export interface GameplayMarker extends Cell { id: string; label: string; kind: 'enemy' | 'reward' | 'event'; contentKey: string; direction: Direction; offset: Vec3 }
+export interface TeleportClearance { radius: number; height: number }
+export interface GameplayMarker extends Cell { id: string; label: string; kind: 'enemy' | 'reward' | 'event' | 'teleport'; contentKey: string; direction: Direction; offset: Vec3; /** Required only for teleport markers; records the authored player dimensions. */ clearance?: TeleportClearance }
 export interface MapZone extends Cell { kind: 'combat' | 'reward' | 'rest' }
 export interface DesignerSettings {
+  /** Missing in older projects keeps automatic teleport destinations disabled. */
+  teleports?: boolean; teleportCount?: number;
   wallMounts?: WallMountSettings;
   preset: RoomPurpose;
   merchants?: boolean; altars?: boolean; structureFill?: boolean; pitBottomKind?: 'floor' | 'deadzone'; gapRole?: 'wall' | 'cliff';
@@ -109,6 +117,8 @@ export interface GridMap {
   propInstances?: PropInstance[];
 }
 export interface GenerationSettings {
+  /** Missing in legacy projects uses the image-based workflow. */
+  generationMethod?: 'image' | 'direct';
   /** Missing in legacy files means manual. New projects use AI. */
   conceptMode?: 'ai' | 'manual';
   prompt: string;
@@ -192,7 +202,7 @@ export interface ExportManifest {
   height: number;
   cellSize: number;
   placements: Placement[];
-  markers: { id: string; label: string; kind: GameplayMarker['kind']; contentKey: string; position: Vec3; rotation: Vec3 }[];
+  markers: { id: string; label: string; kind: GameplayMarker['kind']; contentKey: string; position: Vec3; rotation: Vec3; clearance?: TeleportClearance }[];
   connections: { id: string; label: string; kind: string; width: number; height: number; position: Vec3; rotation: Vec3 }[];
 }
 export interface ScanResult { projectPath: string; assets: PrefabAsset[]; warnings: string[] }
@@ -215,20 +225,52 @@ export interface UnityBuildStatus {
   navMeshPath?: string;
   error?: string;
 }
-export interface CodexModelInfo { id: string; name: string; isDefault: boolean }
+export type GenerationStage = 'preparing' | 'concept' | 'image' | 'extract' | 'layout' | 'placement' | 'validation';
+export interface GenerationProgress {
+  id: string;
+  jobId: string;
+  method: 'image' | 'direct';
+  stage: GenerationStage;
+  state: 'running' | 'completed' | 'failed' | 'cancelled';
+  elapsedMs: number;
+  model?: string;
+  reasoningEffort?: string;
+  tokenUsage?: { inputTokens: number; outputTokens: number; reasoningOutputTokens?: number; cachedInputTokens?: number };
+}
+export interface CodexModelInfo { id: string; name: string; isDefault: boolean; inputModalities?: string[] }
 export interface CodexStatus {
   state: 'ready' | 'login-required' | 'missing' | 'error';
   message: string;
   version?: string;
   models: CodexModelInfo[];
+  imageGeneration?: boolean;
+}
+/** Which local agent writes concepts and designs/analyzes layouts. Image generation always uses Codex. */
+export type AnalysisProvider = 'codex' | 'claude';
+export interface AiPreferences {
+  analysisProvider: AnalysisProvider;
+  /** Empty string uses Claude Code's default model. */
+  claudeModel: string;
+}
+export interface ClaudeStatus {
+  state: 'ready' | 'login-required' | 'missing' | 'error';
+  message: string;
+  version?: string;
 }
 export interface DesktopAPI {
+  getClaudeStatus?(): Promise<ClaudeStatus>;
+  selectClaudeExecutable?(): Promise<ClaudeStatus>;
+  getAiPreferences?(): Promise<AiPreferences>;
+  setAiPreferences?(preferences: AiPreferences): Promise<AiPreferences>;
   getCodexStatus(): Promise<CodexStatus>;
   startCodexLogin(): Promise<void>;
   selectCodexExecutable(): Promise<CodexStatus>;
   generateConcept(settings: GenerationSettings, catalog?: AssetBinding[], context?: ConceptGenerationContext): Promise<string>;
-  generateImage(settings: GenerationSettings, region?: GenerationRegion, catalog?: AssetBinding[]): Promise<string>;
+  generateImage(settings: GenerationSettings, region?: GenerationRegion, catalog?: AssetBinding[], context?: import('./spatial-intent').ImageGenerationContext): Promise<string>;
   extractLayout(settings: GenerationSettings, imageDataUrl: string, region?: GenerationRegion, catalog?: AssetBinding[]): Promise<GridMap>;
+  generateLayout(settings: GenerationSettings, region?: GenerationRegion, catalog?: AssetBinding[], context?: import('./spatial-intent').ImageGenerationContext): Promise<GridMap>;
+  onGenerationProgress?(listener: (event: GenerationProgress) => void): () => void;
+  recordGenerationStage?(event: GenerationProgress): Promise<void>;
   cancelGeneration(): Promise<void>;
   scanProject(): Promise<ScanResult | null>;
   importPropCatalog?(): Promise<unknown | null>;

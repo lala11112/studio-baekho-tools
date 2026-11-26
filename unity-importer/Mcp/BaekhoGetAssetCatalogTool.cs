@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace StudioBaekho
 {
-    [McpForUnityTool("baekho_get_asset_catalog", Description = "Read all explicitly marked BaekhoMapAsset prefab roots under Assets without changing source prefabs or open scenes.")]
+    [McpForUnityTool("baekho_get_asset_catalog", Description = "Read explicitly marked BaekhoMapAsset prefab roots and enabled BaekhoPropSet prefab lists under Assets without changing source prefabs or open scenes.")]
     public static class BaekhoGetAssetCatalogTool
     {
         public sealed class Parameters
@@ -36,7 +36,7 @@ namespace StudioBaekho
                         throw new IOException("Symbolic links and junctions are not allowed in the Unity project path: " + current);
                 }
                 JObject catalog = JObject.Parse(BaekhoAssetCatalog.CreateJson());
-                return new SuccessResponse("Marked prefab catalog read.", catalog);
+                return new SuccessResponse("Prefab registrations and prop set catalog read.", catalog);
             }
             catch (Exception exception) { return new ErrorResponse(exception.Message); }
         }

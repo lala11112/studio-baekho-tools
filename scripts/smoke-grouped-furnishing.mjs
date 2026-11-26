@@ -91,7 +91,11 @@ try {
   assert.deepEqual(rearranged.project.settings, configured.project.settings, 'one-time rearrangement preserves future generation settings');
   const groups = new Set(rearranged.project.map.propInstances.map(instance => instance.groupId).filter(Boolean));
   assert.ok(groups.size > 0, 'rearrangement creates semantic group metadata');
-  assert.ok(groups.size <= 5, 'small measured props respect the room group limit instead of creating many tiny groups');
+  assert.ok(groups.size > 5, 'small measured props continue toward the coverage target beyond the former five-group room limit');
+  for (const groupId of groups) {
+    const members = rearranged.project.map.propInstances.filter(instance => instance.groupId === groupId);
+    assert.ok(members.length >= 2 && members.length <= 4, 'additional groups keep the compact two-to-four member composition');
+  }
   for (const index of [6, 7, 8]) assert.deepEqual(rearranged.project.map.propInstances.find(instance => instance.id === `scattered-${index}`), configured.project.map.propInstances.find(instance => instance.id === `scattered-${index}`), 'manual, locked and unknown placements survive');
   await page.locator('[data-furnish-result]').scrollIntoViewIfNeeded(); await page.screenshot({ path: resolve(output, 'rearranged-preview.png') });
   await action('undo').click(); assert.deepEqual((await save('undo')).project, configured.project, 'one Undo restores all placements and groups');
@@ -101,7 +105,7 @@ try {
   assert.equal(await field('console', 'family').inputValue(), 'machinery');
   assert.deepEqual((await save('reopened')).project, rearranged.project, 'save/reopen retains grouped provenance and explicit asset metadata');
   await field('console', 'mode').selectOption('automatic'); await expand();
-  assert.equal(await field('console', 'family').inputValue(), 'equipment');
+  assert.equal(await field('console', 'family').inputValue(), 'control-station');
   assert.equal((await save('automatic')).project.bindings.find(binding => binding.id === 'console').prop.composition, undefined);
   await action('undo').click(); await expand(); assert.equal(await field('console', 'family').inputValue(), 'machinery');
   await page.locator('[data-furnish-control="includeUnknown"]').check(); await expand();

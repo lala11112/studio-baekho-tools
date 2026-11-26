@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="580" viewBox="0 0 1120 580" role="img" aria-labelledby="overview-title overview-desc">
+  <title id="overview-title">조건에서 Unity 프리팹까지</title>
+  <desc id="overview-desc">제작 조건을 입력하면 AI가 구조를 설계하고 앱이 로컬 배치와 검증을 수행한다. 제작자가 편집한 맵을 배치 명세로 변환하면 Unity가 프리팹과 NavMesh를 만든다.</desc>
+  <defs><marker id="overview-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#57677e"/></marker></defs>
+  <style>text{font-family:'Malgun Gothic',sans-serif;fill:#172b44}.title{font-size:28px;font-weight:700}.label{font-size:23px;font-weight:700}.body{font-size:18px;fill:#57677e}.number{font-size:18px;font-weight:700;fill:#305dd7}.arrow{fill:none;stroke:#57677e;stroke-width:2.5;marker-end:url(#overview-arrow)}</style>
+  <rect width="1120" height="580" rx="20" fill="#f5f7fb"/>
+  <text x="32" y="45" class="title">조건에서 Unity 프리팹까지</text>
+  <text x="32" y="78" class="body">AI 설계 → 앱의 규칙 기반 배치 → 제작자 편집 → Unity 조립</text>
+  <g fill="white" stroke="#d6dfe9" stroke-width="1.5">
+    <rect x="32" y="110" width="304" height="142" rx="14"/><rect x="408" y="110" width="304" height="142" rx="14"/><rect x="784" y="110" width="304" height="142" rx="14"/>
+    <rect x="784" y="320" width="304" height="142" rx="14"/><rect x="408" y="320" width="304" height="142" rx="14"/><rect x="32" y="320" width="304" height="142" rx="14"/>
+  </g>
+  <text x="54" y="143" class="number">01 · 제작 조건</text><text x="54" y="179" class="label">어떤 방을 만들 것인가</text><text x="54" y="211" class="body">용도 · 규격 · 컨셉 · 생성 기능</text><text x="54" y="236" class="body">시드와 연결문 조건</text>
+  <text x="430" y="143" class="number">02 · AI 구조 설계</text><text x="430" y="179" class="label">방의 지형을 제안</text><text x="430" y="211" class="body">설계도 분석 또는 직접 생성</text><text x="430" y="236" class="body">바닥 · 벽 · 높이 · 계단 · 문</text>
+  <text x="806" y="143" class="number">03 · 로컬 배치와 검사</text><text x="806" y="179" class="label">실측과 이동 규칙 적용</text><text x="806" y="211" class="body">구조 · 소품 · 시설 · 배관</text><text x="806" y="236" class="body">게임 지점과 안전 공간</text>
+  <text x="806" y="353" class="number">04 · 제작자 편집</text><text x="806" y="389" class="label">결과를 확인하고 수정</text><text x="806" y="421" class="body">3D · 격자 · 영역 도구 · Undo</text><text x="806" y="446" class="body">편집 프로젝트로 저장</text>
+  <text x="430" y="353" class="number">05 · 출력 명세</text><text x="430" y="389" class="label">배치를 Unity로 전달</text><text x="430" y="421" class="body">GUID · 위치 · 회전 · 배율</text><text x="430" y="446" class="body">직접 생성 또는 ZIP 내보내기</text>
+  <text x="54" y="353" class="number">06 · Unity 조립</text><text x="54" y="389" class="label">프리팹과 NavMesh 저장</text><text x="54" y="421" class="body">원본 에셋의 인스턴스 사용</text><text x="54" y="446" class="body">게임 동작은 프로젝트에서 연결</text>
+  <path d="M342 181H400" class="arrow"/><path d="M718 181H776" class="arrow"/><path d="M936 260V312" class="arrow"/><path d="M776 391H720" class="arrow"/><path d="M400 391H344" class="arrow"/>
+  <rect x="32" y="488" width="1056" height="62" rx="12" fill="#e8eff8"/>
+  <text x="52" y="514" class="body">화면: TypeScript + Three.js  ·  데스크톱 서비스: Electron  ·  공통 맵 규칙: src/shared</text>
+  <text x="52" y="540" class="body">Unity 에셋 카탈로그는 생성과 배치에 원본 크기·피벗·소품 목록·벽 연결 정보를 제공합니다.</text>
+</svg>

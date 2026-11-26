@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="660" viewBox="0 0 1120 660" role="img" aria-labelledby="placement-title placement-desc">
+  <title id="placement-title">공간 구도와 안전 배치</title>
+  <desc id="placement-desc">작동 원리를 설명하는 개념도. 방 평면에는 문 사이의 보호 동선, 중심 작업 묶음, 보조 저장 묶음과 연속 여백을 표시한다. 오른쪽에는 책상을 향하는 의자 정면과 의자 뒤 사용 공간, 순간이동 착지 반경과 높이를 설명한다.</desc>
+  <defs>
+    <marker id="placement-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 1 L8 5 L0 9" fill="none" stroke="#186f78" stroke-width="2"/></marker>
+    <marker id="placement-blue-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 1 L8 5 L0 9" fill="none" stroke="#305dd7" stroke-width="2"/></marker>
+  </defs>
+  <style>text{font-family:'Malgun Gothic',sans-serif;fill:#172b44;font-size:18px}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.muted{fill:#57677e}.teal{fill:#186f78}.blue{fill:#305dd7}.small{font-size:18px}.strong{font-weight:700}</style>
+  <rect width="1120" height="660" fill="#f5f7fb"/>
+  <text x="28" y="45" class="title">공간 구도와 안전 배치</text>
+  <text x="28" y="77" class="muted">작동 원리를 설명하는 개념도 · 실제 화면이나 특정 맵의 배치가 아닙니다</text>
+  <rect x="24" y="101" width="630" height="527" rx="16" fill="#fff" stroke="#d7dfea"/>
+  <rect x="678" y="101" width="418" height="527" rx="16" fill="#fff" stroke="#d7dfea"/>
+  <text x="48" y="139" class="heading">방 전체의 구도를 먼저 계획</text>
+  <text x="48" y="169" class="muted">실제 벽과 바닥을 따라 장면과 여백을 나눕니다</text>
+  <rect x="68" y="197" width="522" height="332" rx="3" fill="#f8fafc" stroke="#57677e" stroke-width="12"/>
+  <rect x="60" y="365" width="16" height="56" fill="#fff"/>
+  <rect x="582" y="365" width="16" height="56" fill="#fff"/>
+  <rect x="75" y="367" width="508" height="50" rx="24" fill="#e5edff"/>
+  <path d="M95 392 H562" fill="none" stroke="#305dd7" stroke-width="4" stroke-dasharray="10 7" marker-end="url(#placement-blue-arrow)"/>
+  <text x="218" y="356" class="blue strong">문과 문 사이 보호 동선</text>
+  <text x="39" y="449" class="muted">문</text>
+  <text x="600" y="449" class="muted">문</text>
+  <rect x="97" y="220" width="232" height="111" rx="10" fill="#e2f2ef" stroke="#186f78" stroke-width="2"/>
+  <text x="114" y="248" class="teal strong">중심 작업 묶음</text>
+  <rect x="115" y="266" width="108" height="30" rx="4" fill="#186f78"/>
+  <text x="137" y="288" fill="#fff" style="fill:#fff">책상</text>
+  <rect x="152" y="308" width="34" height="12" rx="3" fill="#8bc4bb"/>
+  <path d="M169 307 V299" stroke="#186f78" stroke-width="3" marker-end="url(#placement-arrow)"/>
+  <text x="241" y="293" class="teal">의자</text>
+  <rect x="383" y="220" width="174" height="111" rx="10" fill="#eef1fb" stroke="#305dd7" stroke-width="2"/>
+  <text x="399" y="248" class="blue strong">보조 저장 묶음</text>
+  <rect x="401" y="267" width="45" height="43" rx="3" fill="#9bb2ea"/>
+  <rect x="456" y="276" width="39" height="34" rx="3" fill="#bdccef"/>
+  <rect x="507" y="267" width="32" height="43" rx="3" fill="#9bb2ea"/>
+  <rect x="96" y="448" width="462" height="56" rx="12" fill="#f0f5f7" stroke="#a7bdc5" stroke-dasharray="7 5"/>
+  <text x="186" y="483" class="muted">연속 여백 · 추가 군집을 비워 둠</text>
+  <text x="48" y="568" class="strong">목표 점유율보다 구도와 안전한 통행을 우선</text>
+  <text x="48" y="599" class="muted">잠금 · 수동 배치 · 묶음 전체를 보호합니다</text>
+  <text x="702" y="139" class="heading">기능에 맞는 방향과 사용 공간</text>
+  <rect x="802" y="177" width="145" height="49" rx="6" fill="#186f78"/>
+  <text x="852" y="208" style="fill:#fff">책상</text>
+  <rect x="849" y="265" width="51" height="37" rx="7" fill="#a5d5cc" stroke="#186f78" stroke-width="2"/>
+  <path d="M874 263 V235" fill="none" stroke="#186f78" stroke-width="3" marker-end="url(#placement-arrow)"/>
+  <text x="918" y="271" class="teal">정면</text>
+  <text x="918" y="299">의자</text>
+  <rect x="794" y="318" width="161" height="50" rx="7" fill="#e2f2ef" stroke="#186f78" stroke-dasharray="6 5"/>
+  <text x="809" y="349" class="teal">의자 뒤 사용 공간</text>
+  <text x="702" y="397" class="muted">최종 회전의 실제 크기로 충돌을 검사</text>
+  <line x1="702" y1="417" x2="1072" y2="417" stroke="#d7dfea"/>
+  <text x="702" y="450" class="heading">순간이동 착지 공간</text>
+  <circle cx="781" cy="523" r="42" fill="#e5edff" stroke="#305dd7" stroke-width="2"/>
+  <circle cx="781" cy="523" r="4" fill="#305dd7"/>
+  <path d="M783 523 H819" stroke="#305dd7" stroke-width="2" marker-end="url(#placement-blue-arrow)"/>
+  <text x="743" y="590" class="blue">착지 반경 r</text>
+  <rect x="930" y="483" width="68" height="77" fill="#e5edff"/>
+  <ellipse cx="964" cy="483" rx="34" ry="10" fill="#edf2ff" stroke="#305dd7" stroke-width="2"/>
+  <path d="M930 483 V560 A34 10 0 0 0 998 560 V483" fill="none" stroke="#305dd7" stroke-width="2"/>
+  <line x1="1014" y1="473" x2="1014" y2="570" stroke="#305dd7" stroke-width="2"/>
+  <line x1="1008" y1="473" x2="1020" y2="473" stroke="#305dd7" stroke-width="2"/>
+  <line x1="1008" y1="570" x2="1020" y2="570" stroke="#305dd7" stroke-width="2"/>
+  <text x="1026" y="529" class="blue">h</text>
+  <text x="919" y="590" class="blue">캐릭터 높이</text>
+  <text x="702" y="616" class="muted">바닥 지지 · 머리 여유 · 문까지의 안전 경로</text>
+</svg>

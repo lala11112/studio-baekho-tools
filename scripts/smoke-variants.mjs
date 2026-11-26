@@ -11,7 +11,8 @@ const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJA
 const output = resolve('.local/variants-smoke');
 const userData = resolve('.local/variants-smoke-user', `run-${Date.now()}`);
 await mkdir(output, { recursive: true }); await mkdir(userData, { recursive: true });
-const original = parseProjectFile({ formatVersion: 1, map: createDemoMap(), settings: { ...DEFAULT_SETTINGS, conceptMode: 'manual', prompt: '기둥 사이를 오갈 수 있는 넓은 고대 전투방', designer: { ...DEFAULT_DESIGNER } },
+// This authored demo uses 2m doors; preserve that fixture metric independently of new defaults.
+const original = parseProjectFile({ formatVersion: 1, map: createDemoMap(), settings: { ...DEFAULT_SETTINGS, connectionWidth: 2, conceptMode: 'manual', prompt: '기둥 사이를 오갈 수 있는 넓은 고대 전투방', designer: { ...DEFAULT_DESIGNER } },
   bindings: [{ id: 'floor', label: '바닥', role: 'floor', prefabGuid: '1'.repeat(32), prefabPath: 'Assets/Floor.prefab', scale: { x: 2, y: .6, z: 2 }, offset: { x: .1, y: .2, z: 0 }, rotationY: 90 },
     { id: 'light', label: '천장 형광등', role: 'light', lightAnchor: 'ceiling', prefabGuid: '2'.repeat(32), prefabPath: 'Assets/Light.prefab', scale: { x: 1, y: 1, z: 1 }, offset: { x: 0, y: -.1, z: 0 }, rotationY: 0 }] });
 const maps = Array.from({ length: 3 }, (_, index) => {
@@ -32,18 +33,19 @@ try {
   await app.evaluate(({ app, BrowserWindow, ipcMain, dialog }, fixture) => {
     app.setPath('userData', fixture.userData);
     BrowserWindow.getAllWindows()[0].setBounds({ width: 1400, height: 1000 });
-    globalThis.variantsSmoke = { maps: fixture.maps, png: fixture.png, mode: 'success', index: -1, calls: [], prompts: [] };
+    globalThis.variantsSmoke = { maps: fixture.maps, png: fixture.png, mode: 'success', index: -1, calls: [], prompts: [], contexts: [] };
     for (const channel of ['codex-status', 'generate-image', 'extract-layout', 'cancel-generation']) ipcMain.removeHandler(`baekho:${channel}`);
     ipcMain.handle('baekho:codex-status', () => ({ state: 'ready', message: 'Smoke mock: no paid AI calls', models: [] }));
-    ipcMain.handle('baekho:generate-image', async (_event, settings) => {
+    ipcMain.handle('baekho:generate-image', async (_event, settings, _region, _catalog, context) => {
       const state = globalThis.variantsSmoke, index = ++state.index;
-      state.calls.push(`image${index}`); state.prompts.push(settings.prompt);
+      state.calls.push(`image${index}`); state.prompts.push(settings.prompt); state.contexts.push(structuredClone(context));
       await new Promise(done => setTimeout(done, index === 1 && state.mode !== 'duplicate-failure' ? 1400 : 50));
       return state.png;
     });
-    ipcMain.handle('baekho:extract-layout', async (_event, _settings, image) => {
+    ipcMain.handle('baekho:extract-layout', async (_event, settings, image) => {
       const state = globalThis.variantsSmoke, index = state.index; state.calls.push(`extract${index}`);
       if (image !== state.png) throw new Error('Wrong blueprint passed to extraction');
+      if (settings.prompt !== state.prompts[index] || /SPATIAL DESIGN INTENT|PRECEDING ACTUAL STRUCTURES|BAEKHO MAP VARIANT/.test(settings.prompt)) throw new Error('Extraction received image-only diversity instructions');
       await new Promise(done => setTimeout(done, 30));
       if (state.mode === 'duplicate-failure' && index === 2) throw new Error('SMOKE candidate extraction failure');
       return state.maps[state.mode === 'duplicate-failure' && index === 1 ? 0 : index % state.maps.length];
@@ -55,7 +57,7 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-action="codex"]')?.textContent?.includes('연결됨'));
   const idle = async () => page.waitForFunction(() => !document.querySelector('[data-action="generate-variants"]')?.disabled);
   const callList = () => app.evaluate(() => globalThis.variantsSmoke.calls);
-  const configure = mode => app.evaluate((_electron, mode) => Object.assign(globalThis.variantsSmoke, { mode, index: -1, calls: [], prompts: [] }), mode);
+  const configure = mode => app.evaluate((_electron, mode) => Object.assign(globalThis.variantsSmoke, { mode, index: -1, calls: [], prompts: [], contexts: [] }), mode);
   const cards = () => page.locator('[data-variant-card]');
   const select = index => cards().nth(index).locator('[data-v-action="select"]');
   const vAction = name => page.locator(`[data-v-action="${name}"]`);
@@ -99,7 +101,12 @@ try {
   assert.match(await page.locator('.variant-concept-full').innerText(), new RegExp(original.settings.prompt));
   assert.equal(await select(0).isChecked(), true); assert.equal(await select(1).isChecked(), false); assert.equal(await select(2).isChecked(), false);
   assert.deepEqual(await callList(), ['image0', 'extract0', 'image1', 'extract1', 'image2', 'extract2']);
-  assert.equal(await app.evaluate(() => new Set(globalThis.variantsSmoke.prompts).size), 3);
+  assert.equal(await app.evaluate(() => new Set(globalThis.variantsSmoke.prompts).size), 1);
+  const contexts = await app.evaluate(() => globalThis.variantsSmoke.contexts);
+  assert.deepEqual(contexts.map(c => c.candidateIndex), [0, 1, 2]);
+  assert.ok(contexts.every(c => c.candidateCount === 3));
+  assert.deepEqual(contexts.map(c => c.previousStructures.length), [0, 1, 2]);
+  assert.ok(contexts.slice(1).every(c => c.previousStructures.every(summary => JSON.parse(summary).outline.length === 12)));
   assert.equal(new Set(await page.locator('.variant-floorplan').evaluateAll(items => items.map(item => item.outerHTML))).size, 3);
   assert.deepEqual(await saveCurrent('original-after-generation'), original, 'Generating and previewing candidates must leave the editable project unchanged');
   await page.locator('[data-view="variants"]').click(); await select(2).check();
@@ -170,6 +177,8 @@ try {
   console.log(`variants smoke passed: selected-only native ZIP, project isolation, apply/Undo, cancellation, duplicate/failure exclusion. ${output}`);
 } catch (error) {
   await page?.screenshot({ path: resolve(output, 'failure.png') }).catch(() => {});
+  const state = await app.evaluate(() => { const s = globalThis.variantsSmoke; return { calls: s?.calls, prompts: s?.prompts, contexts: s?.contexts }; }).catch(() => null);
+  await writeFile(resolve(output, 'failure-state.json'), JSON.stringify({ state, errors, text: await page?.locator('body').innerText().catch(() => '') }, null, 2)).catch(() => {});
   throw error;
 } finally {
   await app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.destroy(); }).catch(() => {});

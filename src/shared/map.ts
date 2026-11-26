@@ -10,6 +10,8 @@ import { parsePropDefinition, propStructureErrors, propValidationIssues, propPos
 import { parseMapConcept } from './concepts';
 import { parseLocalBounds, parseWallMountDefinition, wallMountIssues } from './wall-mounts';
 import { wallBaseClosure } from './wall-geometry';
+import { teleportIssues } from './teleport';
+import { propRootYaw } from './prop-orientation';
 export { connectionCells, connectionAt, maximumConnectionWidth, MAX_CONNECTION_WIDTH } from './connections';
 
 const MAP_NAME = /^(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:$|\.))(?![\s\u0085])(?![\s\S]*[\s\u0085.]$)[^<>:"\/\\|?*\u0000-\u001F\u007F]+$/;
@@ -24,6 +26,7 @@ export { FLOOR_THICKNESS_RATIO } from './structures';
 const DIRECTIONS = { 0: [0, -1], 90: [1, 0], 180: [0, 1], 270: [-1, 0] } as const;
 
 export const DEFAULT_SETTINGS: GenerationSettings = {
+  generationMethod: 'image',
   conceptMode: 'ai',
   prompt: '',
   width: 16,
@@ -32,7 +35,7 @@ export const DEFAULT_SETTINGS: GenerationSettings = {
   elevationStep: 2,
   maxStepHeight: 0.4,
   connectionCount: 4,
-  connectionWidth: 2,
+  connectionWidth: 4,
   connectionHeight: 3,
   codexModel: '',
 };
@@ -395,7 +398,7 @@ export function validateMap(input: unknown, bindings?: AssetBinding[]): Validati
     }
   }
   issues.push(...featureValidationIssues(map));
-  issues.push(...structureIssues(map),...propValidationIssues(map,bindings),...wallMountIssues(map,bindings));
+  issues.push(...structureIssues(map),...propValidationIssues(map,bindings),...wallMountIssues(map,bindings),...teleportIssues(map,bindings));
   return issues;
 }
 
@@ -707,8 +710,9 @@ export function buildManifest(map: GridMap, bindings: AssetBinding[]): ExportMan
   for(const bottom of map.pitBottoms??[])addFitted(`pit-${bottom.x}-${bottom.row}`,bottom.kind,bottom.x,bottom.row,{x:(bottom.x-(map.width-1)/2)*map.cellSize,y:bottom.y-bottom.thickness/2,z:((map.height-1)/2-bottom.row)*map.cellSize},{x:map.cellSize,y:bottom.thickness,z:map.cellSize});
   for(const prop of map.propInstances??[]){
     const binding=checkedBindings.find(b=>b.id===prop.bindingId)!;
-    const position=propPosition(map,prop,binding);
-    placements.push({id:`prop-instance-${prop.id}`,role:binding.role,prefabGuid:binding.prefabGuid,position,rotation:{x:0,y:prop.direction+binding.rotationY,z:0},scale:{...binding.scale},surface:'bottom',centerXZ:true});
+    const position=propPosition(map,prop,binding),yaw=propRootYaw(prop,binding);
+    if(![...Object.values(position),yaw].every(isTransformNumber))throw new Error('소품의 최종 배치 좌표 또는 회전이 범위를 벗어났습니다.');
+    placements.push({id:`prop-instance-${prop.id}`,role:binding.role,prefabGuid:binding.prefabGuid,position,rotation:{x:0,y:yaw,z:0},scale:{...binding.scale},surface:'bottom',centerXZ:true});
   }
   for (const fixture of map.fixtures??[]) {
     const binding=resolveFixtureBinding(map, checkedBindings, fixture);
@@ -724,7 +728,7 @@ export function buildManifest(map: GridMap, bindings: AssetBinding[]): ExportMan
   }
   if(placements.length>10000)throw new Error('Unity 내보내기는 최대 10,000개 프리팹 배치를 지원합니다. 장식이나 시설 수를 줄여 주세요.');
   return { schemaVersion: map.version===5?5:4, name: map.name, width: map.width, height: map.height, cellSize: map.cellSize, placements,
-    markers:(map.markers??[]).map(m=>({id:m.id,label:m.label,kind:m.kind,contentKey:m.contentKey,position:fixturePosition(map,m),rotation:{x:0,y:m.direction,z:0}})),
+    markers:(map.markers??[]).map(m=>({id:m.id,label:m.label,kind:m.kind,contentKey:m.contentKey,position:fixturePosition(map,m),rotation:{x:0,y:m.direction,z:0},...(m.clearance?{clearance:{...m.clearance}}:{})})),
     connections: map.connections.map(connection => ({ id: connection.id, label: connection.label, kind: connection.kind,
       width: connection.width, height: connection.height, ...connectionPose(map, connection) })),
   };
@@ -803,7 +807,7 @@ export function parseProjectFile(input: unknown): ProjectFile {
       elevations: map.elevations.map((row) => [...row]), ramps: map.ramps.map((ramp) => ({ ...ramp })), maxStepHeight: map.maxStepHeight,
       connections: map.connections.map(connection => ({ ...connection })), assetOverrides: map.assetOverrides.map(override => ({ ...override })),
       ceilings:(map.ceilings??[]).map(c=>({...c})),wallHeights:(map.wallHeights??[]).map(w=>({...w})),bridges:(map.bridges??[]).map(b=>({...b})),cliffs:(map.cliffs??[]).map(c=>({...c})),
-      fixtures:(map.fixtures??[]).map(f=>structuredClone(f)),markers:(map.markers??[]).map(m=>({...m,offset:{...m.offset}})),lockedCells:(map.lockedCells??[]).map(c=>({...c})),zones:(map.zones??[]).map(z=>({...z})),
+      fixtures:(map.fixtures??[]).map(f=>structuredClone(f)),markers:(map.markers??[]).map(m=>structuredClone(m)),lockedCells:(map.lockedCells??[]).map(c=>({...c})),zones:(map.zones??[]).map(z=>({...z})),
       ...(map.headroom===undefined?{}:{headroom:map.headroom}),
       ...(map.structureSettings?{structureSettings:structuredClone(map.structureSettings)}:{}),
       ...(map.pitBottoms?{pitBottoms:structuredClone(map.pitBottoms)}:{}),

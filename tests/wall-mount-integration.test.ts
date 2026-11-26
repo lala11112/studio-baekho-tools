@@ -16,7 +16,7 @@ function lamp():AssetBinding{
   const b=base('wall_lamp','light',4);b.bounds={center:{x:.7,y:.2,z:.15},size:{x:.6,y:.4,z:.3}};b.wallMount=defaultWallMount(b);return b;
 }
 const catalog=()=>[base('floor','floor',1),base('wall','wall',2),base('door','door',3),lamp()];
-const settings=():GenerationSettings=>({...DEFAULT_SETTINGS,width:8,height:8,connectionCount:1,seed:27,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,structureFill:true,wallMounts:{...DEFAULT_WALL_SETTINGS,enabled:true,runs:false,density:35}}});
+const settings=():GenerationSettings=>({...DEFAULT_SETTINGS,connectionWidth:2,width:8,height:8,connectionCount:1,seed:27,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,structureFill:true,wallMounts:{...DEFAULT_WALL_SETTINGS,enabled:true,runs:false,density:35}}});
 function room():GridMap{return synchronizeStructures({version:5,name:'Wall Integration',width:8,height:8,cellSize:2,maxStepHeight:.4,rows:['####D###',...Array(6).fill('#......#'),'########'],elevations:Array.from({length:8},()=>Array(8).fill(0)),ramps:[],connections:[{id:'entry',label:'Entry',x:4,row:0,direction:0,width:2,height:3,kind:'door'}],assetOverrides:[],structureSettings:{...DEFAULT_STRUCTURE_SETTINGS}});}
 function project():ProjectFile{const bindings=catalog();const placed=placeWallMounts(room(),settings(),bindings);assert.ok(placed.addedSingles>0);return{formatVersion:1,map:placed.map,settings:settings(),bindings};}
 

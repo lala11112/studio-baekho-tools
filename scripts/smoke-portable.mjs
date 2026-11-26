@@ -142,7 +142,7 @@ try {
   await page.locator('#prompt').fill(manualConcept);
   await page.locator('#conceptMode').selectOption('ai');
   assert.equal(await page.locator('#prompt').count(), 0);
-  assert.equal(await page.locator('#connectionWidth').inputValue(), '2', 'Portable connection width defaults to 2m.');
+  assert.equal(await page.locator('#connectionWidth').inputValue(), '4', 'Portable connection width defaults to 4m.');
   assert.equal(await page.locator('#connectionHeight').inputValue(), '3', 'Portable connection height defaults to 3m.');
   await page.locator('#connectionWidth').fill('4.5');
   await page.locator('#connectionWidth').press('Tab');
@@ -166,7 +166,7 @@ try {
   const resources = path.resolve(path.dirname(fileURLToPath(page.url())), '..', '..');
   assert.equal(await readFile(path.join(resources, importer), 'utf8'), importerSource, 'Actual portable extraction must contain the latest NavMesh importer.');
   report.importerMatchesSource = true;
-  report.connectionSizeControls = { defaultWidth: 2, defaultHeight: 3, editedWidth: 4.5, editedHeight: 3.75 };
+  report.connectionSizeControls = { defaultWidth: 4, defaultHeight: 3, editedWidth: 4.5, editedHeight: 3.75 };
   report.conceptControls = { defaultMode: 'ai', generateConceptBridge: true, optionalManualInput: true, manualTextPreserved: true };
   const status = await page.evaluate(async () => {
     const result = await window.baekho.getCodexStatus();

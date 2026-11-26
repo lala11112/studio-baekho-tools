@@ -16,9 +16,9 @@ await access(editor);
 const manifest = JSON.parse(await readFile(resolve(project, 'Packages/manifest.json'), 'utf8'));
 assert.ok(manifest.dependencies['com.coplaydev.unity-mcp'], 'Run npm run test:unity:mcp once to prepare the MCP adapter test dependency.');
 for (const [source, destination] of [
-  ...['BaekhoPropCatalog', 'BaekhoMapAssetEditor', 'BaekhoAssetCatalog'].map(name =>
+  ...['BaekhoPropCatalog', 'BaekhoMapAssetEditor', 'BaekhoAssetCatalog', 'BaekhoPropSetEditor'].map(name =>
     [`unity-importer/Editor/${name}.cs`, `Assets/Editor/${name}.cs`]),
-  ...['BaekhoWallModule', 'BaekhoMapAsset'].map(name =>
+  ...['BaekhoWallModule', 'BaekhoMapAsset', 'BaekhoPropSet'].map(name =>
     [`unity-importer/Runtime/${name}.cs`, `Assets/Baekho/Runtime/${name}.cs`]),
   ['unity-importer/Mcp/BaekhoGetAssetCatalogTool.cs', 'Assets/Editor/BaekhoGetAssetCatalogTool.cs'],
   ['tests/unity/BaekhoAssetCatalogSmoke.cs', 'Assets/Editor/BaekhoAssetCatalogSmoke.cs'],
@@ -46,6 +46,17 @@ const scan = await scanUnityProject(project);
 const result = importUnityAssetCatalogBindings([], catalog, scan.assets, 2);
 assert.equal(result.added, catalog.assets.length);
 assert.equal(result.unmatched, 0);
-assert.equal(importUnityAssetCatalogBindings(result.bindings, catalog, scan.assets, 2).added, 0);
+assert.ok(catalog.propSets?.length >= 3, 'Real Unity exports the three valid test prop sets.');
+assert.equal(result.propSetCount, catalog.propSets.length);
+const setOnly = result.bindings.find(binding => binding.prefabPath.endsWith('/BaekhoAssetCatalogValidation/SetOnly.prefab'));
+const shared = result.bindings.find(binding => binding.prefabPath.endsWith('/BaekhoAssetCatalogValidation/SharedSetOnly.prefab'));
+assert.deepEqual(setOnly?.scale, { x: 1, y: 1, z: 1 });
+assert.equal(setOnly?.prop?.unitySets?.length, 2);
+assert.equal(shared?.prop?.unitySets?.length, 3);
+const repeated = importUnityAssetCatalogBindings(result.bindings, catalog, scan.assets, 2);
+assert.equal(repeated.added, 0);
+assert.deepEqual(repeated.bindings, result.bindings, 'Repeating Unity set import preserves memberships without duplicates.');
+const cleared = importUnityAssetCatalogBindings(result.bindings, { ...catalog, propSets: [] }, scan.assets, 2);
+assert.ok(cleared.bindings.every(binding => !binding.prop?.unitySets), 'Explicit empty Unity sets clears source memberships.');
 console.log(await readFile(resolve(root, '.local/unity-asset-catalog-result.json'), 'utf8'));
-console.log(`Unity → TypeScript catalog contract: ${result.added} prefabs, repeat import adds 0.`);
+console.log(`Unity → TypeScript catalog contract: ${result.added} prefabs, ${result.propSetCount} prop sets, repeat import adds 0.`);

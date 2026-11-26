@@ -6,6 +6,7 @@ import { analyzeLevelDesign, DEFAULT_LEVEL_DESIGN } from '../src/shared/level-de
 import { DEFAULT_SETTINGS, parseProjectFile, validateMap } from '../src/shared/map';
 import { propValidationIssues, propWorldSize } from '../src/shared/props';
 import type { AssetBinding, GenerationSettings, GridMap, PropComposition, PropInstance } from '../src/shared/types';
+import { propYaw } from '../src/shared/prop-orientation';
 
 function room(): GridMap {
   const width = 20, height = 20, rows = Array.from({ length: height }, (_, row) => row === 0 || row === height - 1 ? '#'.repeat(width) : `#${'.'.repeat(width - 2)}#`);
@@ -97,7 +98,7 @@ test('a manual or unselected member protects its entire mixed-role group during 
 test('late compatible companion registration adds complete groups while preserving every existing measured placement', () => {
   const config = settings(), manual = instance('fixed-storage', 3, 10); manual.provenance = 'manual';
   const fixedAsset = asset(); fixedAsset.prop!.weight = 0;
-  const anchor = asset('Console', 'prop', { usage: 'equipment', family: 'workstation', member: 'anchor', arrangement: 'wall' });
+  const anchor = asset('Desk', 'prop', { usage: 'equipment', family: 'workstation', member: 'anchor', arrangement: 'wall' });
   const companion = asset('Chair', 'decoration', { usage: 'equipment', family: 'workstation', member: 'companion', arrangement: 'wall' });
   const source = withInstances([manual]), before = structuredClone(source);
   const noPair = furnishExistingMap(source, config, [fixedAsset, anchor], { props: true, decorations: true });
@@ -136,7 +137,7 @@ test('grouped add and rearrange preserve raised terrain, roofs, gameplay data an
     assert.deepEqual(validateMap(result.map).filter(issue => issue.severity === 'error'), []);
     assert.deepEqual(propValidationIssues(result.map, assets), []);
     assert.deepEqual(analyzeLevelDesign(result.map, config).issues.filter(issue => issue.severity === 'error'), []);
-    for (const prop of result.map.propInstances!) assert.deepEqual(prop.size, propWorldSize(assets.find(binding => binding.id === prop.bindingId)!, prop.direction));
+    for (const prop of result.map.propInstances!) assert.deepEqual(prop.size, propWorldSize(assets.find(binding => binding.id === prop.bindingId)!, propYaw(prop)));
   }
 });
 

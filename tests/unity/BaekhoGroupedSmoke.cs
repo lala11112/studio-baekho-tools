@@ -15,13 +15,17 @@ public static class BaekhoGroupedSmoke
 {
     private const string Folder = "Assets/GroupedValidation";
     private static int assertions;
+    private static int routeSamples;
+    private static float minimumPhysicalClearance;
     [Serializable] private sealed class Catalog { public Entry[] assets; }
     [Serializable] private sealed class Entry { public string id; public string path; public string guid; public Vector3 size; }
     [Serializable] private sealed class Manifest { public Placement[] placements; }
     [Serializable] private sealed class Placement { public string id; public string role; public string prefabGuid; public Vector3 position; public Vector3 rotation; public Vector3 scale; public bool centerXZ; }
-    [Serializable] private sealed class Expected { public int groups; public int moved; public Prop[] props; }
+    [Serializable] private sealed class Expected { public int groups; public int moved; public Prop[] props; public Vector3 combatCenter; public Vector3 entry; public float floorHalfX; public float floorHalfZ; }
     [Serializable] private sealed class Prop { public string id; public string groupId; public Vector3 size; }
-    [Serializable] private sealed class NavigationResult { public int routes; public int groups; public float minimumRouteMetres; public float maximumRouteMetres; public float agentRadius; public float agentHeight; }
+    [Serializable] private sealed class NavigationResult { public int routes; public int groups; public float minimumRouteMetres; public float maximumRouteMetres; public float agentRadius; public float agentHeight; public float voxelSize; public int propGuards; public int quarterMetreSamples; public float minimumPhysicalClearance; public Vector3 combatCenter; }
+    [Serializable] private sealed class RouteFailure { public string label; public Vector3 from; public Vector3 to; public Vector3[] corners; public int segment; public int sample; public Vector3 point; public bool nearSample; public Vector3 nearPoint; public float nearDistance; public bool segmentBlocked; public Vector3 blockedPoint; }
+    [Serializable] private sealed class LowStepResult { public bool baseline; public float stepHeight; public float climb; public float agentRadius; public bool lowCrossed; public bool tallBlocked; public int lowGuards; public int tallGuards; }
 
     private static string Output { get { return Path.GetFullPath("../grouped-unity-validation"); } }
     private static void Guard()
@@ -54,6 +58,7 @@ public static class BaekhoGroupedSmoke
                 Box(console, pivot + new Vector3(0, .35f, 0), new Vector3(1.6f, .7f, 1.2f), blue);
                 Box(console, pivot + new Vector3(0, .9f, -.4f), new Vector3(1.6f, .4f, .4f), steel);
                 Box(console, pivot + new Vector3(0, .9f, -.185f), new Vector3(1.3f, .26f, .02f), screen);
+                BoxCollider interaction = console.AddComponent<BoxCollider>(); interaction.center = Vector3.up; interaction.size = Vector3.one * 100; interaction.isTrigger = true;
                 entries.Add(Save(console, "console"));
                 GameObject generator = Root(preview, "generator");
                 Box(generator, pivot + new Vector3(0, .75f, 0), new Vector3(2, 1.5f, 1.5f), steel);
@@ -83,6 +88,91 @@ public static class BaekhoGroupedSmoke
             File.WriteAllText(Path.Combine(Output, "unity-result.txt"), result); Debug.Log(result); EditorApplication.Exit(0);
         }
         catch (Exception error) { Debug.LogException(error); EditorApplication.Exit(1); }
+    }
+
+    public static void RunLowStepBaseline() { RunLowSteps(true); }
+    public static void RunLowStepGuarded() { RunLowSteps(false); }
+    private static void RunLowSteps(bool baseline)
+    {
+        try
+        {
+            Guard(); Scene active = SceneManager.GetActiveScene(); int roots = active.rootCount, previews = EditorSceneManager.previewSceneCount; bool dirty = active.isDirty;
+            NavMeshBuildSettings agent = NavMesh.GetSettingsByIndex(0);
+            Assert(agent.agentClimb > .05f, "The existing selected agent supports a nonzero low step");
+            float height = agent.agentClimb * .5f;
+            Scene preview = EditorSceneManager.NewPreviewScene(); string floor, low, tall;
+            try
+            {
+                Material material = MaterialAsset("StepValidation", Color.gray);
+                floor = SaveBox(preview, "step-floor", new Vector3(12, .12f, 4), material, Vector3.zero).guid;
+                low = SaveStep(preview, "low-step", new Vector3(2, height, 4), material);
+                tall = SaveStep(preview, "tall-step", new Vector3(2, agent.agentClimb + .6f, 4), material);
+            }
+            finally { EditorSceneManager.ClosePreviewScene(preview); }
+            var result = new LowStepResult { baseline = baseline, stepHeight = height, climb = agent.agentClimb, agentRadius = agent.agentRadius };
+            foreach (bool lowBody in new[] { true, false })
+            {
+                string label = (baseline ? "baseline-" : "guarded-") + (lowBody ? "low" : "tall");
+                string input = Folder + "/" + label + "-step.baekhomap.json";
+                File.WriteAllText(input, "{\"schemaVersion\":5,\"name\":\"" + label + "\",\"width\":6,\"height\":2,\"cellSize\":2,\"markers\":[],\"connections\":[{\"id\":\"entry\",\"label\":\"Entry\",\"kind\":\"door\",\"width\":2,\"height\":3,\"position\":{\"x\":-6,\"y\":0,\"z\":0},\"rotation\":{\"x\":0,\"y\":270,\"z\":0}}],\"placements\":[" +
+                    StepPlacement("floor", "floor", floor, "top") + "," + StepPlacement("prop-instance-step", "prop", lowBody ? low : tall, "bottom") + "]}");
+                string output = BaekhoMapImporter.BuildFromPath(input, true, agent.agentTypeID);
+                GameObject model = PrefabUtility.LoadPrefabContents(output);
+                try
+                {
+                    NavMeshSurface surface = model.GetComponent<NavMeshSurface>(); Assert(surface != null && surface.navMeshData != null, "Focused native step case baked navigation");
+                    Assert(surface.agentTypeID == agent.agentTypeID && Mathf.Abs(surface.GetBuildSettings().agentRadius - agent.agentRadius) < .00001f, "Step compatibility keeps requested agent type and radius");
+                    Transform body = model.transform.Find("prop_prop-instance-step"); var guards = body.GetComponents<NavMeshModifierVolume>();
+                    if (lowBody) result.lowGuards = guards.Length; else result.tallGuards = guards.Length;
+                    if (!baseline)
+                    {
+                        Assert(lowBody ? guards.Length == 0 : guards.Length == 1, "Only a non-stepable solid body receives a generated navigation guard");
+                        foreach (NavMeshModifierVolume volume in guards)
+                        {
+                            Assert(volume.size.x < 5 && volume.size.z < 5, "A 100m interaction trigger never inflates the solid step footprint");
+                            Assert(volume.AffectsAgentType(agent.agentTypeID) && !volume.AffectsAgentType(agent.agentTypeID + 12345), "Step guards affect only the chosen agent type");
+                        }
+                    }
+                    NavMeshDataInstance instance = NavMesh.AddNavMeshData(surface.navMeshData);
+                    try
+                    {
+                        var filter = new NavMeshQueryFilter { agentTypeID = agent.agentTypeID, areaMask = NavMesh.AllAreas }; NavMeshHit start = default(NavMeshHit), finish = default(NavMeshHit);
+                        Assert(NavMesh.SamplePosition(new Vector3(-4, 0, 0), out start, .2f, filter) && NavMesh.SamplePosition(new Vector3(4, 0, 0), out finish, .2f, filter), "Both sides of the native runway are walkable");
+                        var path = new NavMeshPath(); bool complete = NavMesh.CalculatePath(start.position, finish.position, filter, path) && path.status == NavMeshPathStatus.PathComplete;
+                        if (lowBody)
+                        {
+                            result.lowCrossed = complete; Assert(complete, "Native low body remains traversable across a runway with no route around it");
+                            NavMeshHit onStep; Assert(NavMesh.SamplePosition(new Vector3(0, height, 0), out onStep, .12f, filter) && Mathf.Abs(onStep.position.y - height) < .12f, "Crossing uses the actual low body top");
+                        }
+                        else
+                        {
+                            result.tallBlocked = !complete; Assert(!complete, "A solid body above agentClimb still blocks the entire runway");
+                            if (!baseline)
+                            {
+                                NavMeshHit near; Assert(NavMesh.SamplePosition(new Vector3(-1.7f, 0, 0), out near, .15f, filter), "Tall-body approach has native walkable ground");
+                                Bounds bounds = BoundsOf(body.gameObject); Assert(bounds.min.x - near.position.x >= agent.agentRadius - .001f, "Tall-body approach retains full native character clearance");
+                            }
+                        }
+                    }
+                    finally { instance.Remove(); }
+                }
+                finally { PrefabUtility.UnloadPrefabContents(model); }
+            }
+            Assert(active == SceneManager.GetActiveScene() && active.rootCount == roots && active.isDirty == dirty && EditorSceneManager.previewSceneCount == previews, "Focused step checks preserve scene state");
+            File.WriteAllText(Path.Combine(Output, baseline ? "low-step-baseline.json" : "low-step-guarded.json"), JsonUtility.ToJson(result, true));
+            Debug.Log("BAEKHO_LOW_STEP_PASS " + assertions + " assertions; baseline=" + baseline); EditorApplication.Exit(0);
+        }
+        catch (Exception error) { Debug.LogException(error); EditorApplication.Exit(1); }
+    }
+    private static string SaveStep(Scene preview, string name, Vector3 size, Material material)
+    {
+        GameObject root = Root(preview, name); Box(root, Vector3.up * size.y / 2, size, material);
+        BoxCollider interaction = root.AddComponent<BoxCollider>(); interaction.isTrigger = true; interaction.size = Vector3.one * 100;
+        return Save(root, name).guid;
+    }
+    private static string StepPlacement(string id, string role, string guid, string surface)
+    {
+        return "{\"id\":\"" + id + "\",\"role\":\"" + role + "\",\"prefabGuid\":\"" + guid + "\",\"surface\":\"" + surface + "\"," + (role == "prop" ? "\"centerXZ\":true," : "") + "\"position\":{\"x\":0,\"y\":0,\"z\":0},\"rotation\":{\"x\":0,\"y\":0,\"z\":0},\"scale\":{\"x\":1,\"y\":1,\"z\":1}}";
     }
 
     private static void VerifyAndRender(string phase)
@@ -153,16 +243,32 @@ public static class BaekhoGroupedSmoke
         Assert(surface != null && surface.navMeshData != null, "Actual imported after-map has baked AI Navigation data");
         NavMeshBuildSettings settings = surface.GetBuildSettings();
         Assert(settings.agentRadius >= .4f && settings.agentHeight >= 1.7f, "Navigation uses a character-sized agent");
+        Assert(surface.overrideVoxelSize && surface.voxelSize <= settings.agentRadius / 6 + .00001f, "Native navigation uses explicit agent-relative fine voxel resolution");
+        Assert(model.GetComponentsInChildren<NavMeshModifierVolume>().Length >= expected.props.Length, "Every solid measured prop has a conservative native navigation footprint guard");
+        foreach (NavMeshModifierVolume guard in model.GetComponentsInChildren<NavMeshModifierVolume>())
+        {
+            Assert(guard.AffectsAgentType(surface.agentTypeID) && !guard.AffectsAgentType(surface.agentTypeID + 12345), "Generated footprint guards affect only the selected native agent type");
+            Assert(guard.size.x < 5 && guard.size.z < 5, "Huge interaction triggers never inflate a solid prop's navigation guard");
+        }
+        routeSamples = 0; minimumPhysicalClearance = float.PositiveInfinity;
         NavMeshDataInstance instance = NavMesh.AddNavMeshData(surface.navMeshData);
         Assert(instance.valid, "Baked navigation is registered for native Unity path queries");
         try
         {
             var filter = new NavMeshQueryFilter { agentTypeID = surface.agentTypeID, areaMask = NavMesh.AllAreas };
             NavMeshHit entry, center;
-            Assert(NavMesh.SamplePosition(new Vector3(1, 0, 16.5f), out entry, .5f, filter), "Entry approach has a walkable navigation surface");
-            Assert(NavMesh.SamplePosition(Vector3.zero, out center, .5f, filter), "Combat center has a walkable navigation surface");
+            Assert(NavMesh.SamplePosition(expected.entry, out entry, .5f, filter), "Actual entry approach has a walkable navigation surface at " + expected.entry);
+            Assert(NavMesh.SamplePosition(expected.combatCenter, out center, .5f, filter), "Analyzed combat center has a walkable navigation surface at " + expected.combatCenter);
+            var floors = new List<Bounds>(); var obstacles = new List<Bounds>();
+            foreach (Transform child in model.transform) foreach (BoxCollider collider in child.GetComponentsInChildren<BoxCollider>())
+            {
+                if (!collider.enabled || collider.isTrigger) continue;
+                if (child.name.StartsWith("floor_", StringComparison.Ordinal)) floors.Add(ColliderBounds(collider));
+                else if (child.name.StartsWith("prop_", StringComparison.Ordinal) || child.name.StartsWith("wall_", StringComparison.Ordinal)) obstacles.Add(ColliderBounds(collider));
+            }
+            Assert(floors.Count > 0 && obstacles.Count > 0, "Native geometry supplies floor support and character-clearance checks");
             var routes = new List<float>();
-            routes.Add(AssertRoute(entry.position, center.position, filter, "Entry to combat center"));
+            routes.Add(AssertRoute(entry.position, center.position, filter, "Entry to combat center", floors, obstacles, settings));
             var approached = new HashSet<string>();
             foreach (Prop prop in expected.props)
             {
@@ -174,9 +280,9 @@ public static class BaekhoGroupedSmoke
                 {
                     // Only actual floor samples count: avoid wall tops, prop tops and points inside other members.
                     NavMeshHit target;
-                    if (Mathf.Abs(point.x) > 21 || Mathf.Abs(point.z) > 17 || !NavMesh.SamplePosition(point, out target, .25f, filter) || Mathf.Abs(target.position.y) > .1f) continue;
+                    if (Mathf.Abs(point.x) > expected.floorHalfX || Mathf.Abs(point.z) > expected.floorHalfZ || !NavMesh.SamplePosition(point, out target, .25f, filter) || Mathf.Abs(target.position.y) > .1f) continue;
                     if (Vector3.Distance(center.position, target.position) < 3) continue;
-                    routes.Add(AssertRoute(center.position, target.position, filter, "Combat center to usable floor beside " + prop.id));
+                    routes.Add(AssertRoute(center.position, target.position, filter, "Combat center to usable floor beside " + prop.id, floors, obstacles, settings));
                     if (!string.IsNullOrEmpty(prop.groupId)) approached.Add(prop.groupId);
                 }
             }
@@ -185,13 +291,14 @@ public static class BaekhoGroupedSmoke
             float minimum = float.PositiveInfinity, maximum = 0;
             foreach (float length in routes) { minimum = Mathf.Min(minimum, length); maximum = Mathf.Max(maximum, length); }
             File.WriteAllText(Path.Combine(Output, "navigation-result.json"), JsonUtility.ToJson(new NavigationResult { routes = routes.Count, groups = approached.Count,
-                minimumRouteMetres = minimum, maximumRouteMetres = maximum, agentRadius = settings.agentRadius, agentHeight = settings.agentHeight }, true));
+                minimumRouteMetres = minimum, maximumRouteMetres = maximum, agentRadius = settings.agentRadius, agentHeight = settings.agentHeight,
+                voxelSize = surface.voxelSize, propGuards = model.GetComponentsInChildren<NavMeshModifierVolume>().Length, quarterMetreSamples = routeSamples, minimumPhysicalClearance = minimumPhysicalClearance, combatCenter = expected.combatCenter }, true));
             Debug.Log("BAEKHO_GROUPED_NAVIGATION_PASS " + routes.Count + " complete routes across " + approached.Count + " groups");
         }
         finally { instance.Remove(); }
     }
 
-    private static float AssertRoute(Vector3 from, Vector3 to, NavMeshQueryFilter filter, string label)
+    private static float AssertRoute(Vector3 from, Vector3 to, NavMeshQueryFilter filter, string label, List<Bounds> floors, List<Bounds> obstacles, NavMeshBuildSettings settings)
     {
         var path = new NavMeshPath();
         Assert(NavMesh.CalculatePath(from, to, filter, path) && path.status == NavMeshPathStatus.PathComplete, label + " has a complete native NavMesh route");
@@ -205,11 +312,40 @@ public static class BaekhoGroupedSmoke
             for (int sample = 0; sample <= samples; sample++)
             {
                 Vector3 point = Vector3.Lerp(start, end, sample / (float)samples); NavMeshHit floor;
-                Assert(Mathf.Abs(point.y) < .2f && NavMesh.SamplePosition(point, out floor, .075f, filter), label + " every quarter-metre route sample stays on walkable ground");
+                // Path corners use polygon heights; native detail-triangle heights can vary between them.
+                // Keep the original 7.5cm planar tolerance, then independently require real flat floor and body clearance.
+                bool sampled = NavMesh.SamplePosition(point, out floor, settings.agentClimb + .1f, filter);
+                bool planar = sampled && new Vector2(point.x - floor.position.x, point.z - floor.position.z).magnitude <= .075f;
+                bool grounded = floors.Exists(bounds => point.x >= bounds.min.x - .001f && point.x <= bounds.max.x + .001f && point.z >= bounds.min.z - .001f && point.z <= bounds.max.z + .001f && Mathf.Abs(bounds.max.y) < .02f);
+                bool clear = true;
+                routeSamples++;
+                foreach (Bounds obstacle in obstacles)
+                {
+                    if (obstacle.max.y <= .001f || obstacle.min.y >= settings.agentHeight - .001f) continue;
+                    float dx = Mathf.Max(obstacle.min.x - point.x, 0, point.x - obstacle.max.x), dz = Mathf.Max(obstacle.min.z - point.z, 0, point.z - obstacle.max.z);
+                    minimumPhysicalClearance = Mathf.Min(minimumPhysicalClearance, Mathf.Sqrt(dx * dx + dz * dz));
+                    if (dx * dx + dz * dz < (settings.agentRadius - .001f) * (settings.agentRadius - .001f)) { clear = false; break; }
+                }
+                bool valid = Mathf.Abs(point.y) < .2f && planar && grounded && clear && Mathf.Abs(floor.position.y) <= settings.agentClimb + .001f;
+                if (!valid)
+                {
+                    NavMeshHit near, blocked; bool found = NavMesh.SamplePosition(point, out near, 1, filter), hits = NavMesh.Raycast(start, end, out blocked, filter);
+                    var failure = new RouteFailure { label = label, from = from, to = to, corners = path.corners, segment = index, sample = sample, point = point, nearSample = found, nearPoint = near.position, nearDistance = found ? Vector3.Distance(point, near.position) : -1, segmentBlocked = hits, blockedPoint = blocked.position };
+                    string diagnostic = JsonUtility.ToJson(failure, true); File.WriteAllText(Path.Combine(Output, "navigation-failure.json"), diagnostic); Debug.LogError(diagnostic);
+                }
+                Assert(valid, label + " quarter-metre sample " + sample + "/" + samples + " at " + point.ToString("F5") + " has planar route/floor/body clearance " + planar + "/" + grounded + "/" + clear + "; segment " + index + " " + start.ToString("F5") + " -> " + end.ToString("F5"));
             }
             distance += length;
         }
         Assert(distance > 3, label + " spans more than three metres"); return distance;
+    }
+
+    private static Bounds ColliderBounds(BoxCollider collider)
+    {
+        Bounds bounds = new Bounds(collider.transform.TransformPoint(collider.center), Vector3.zero);
+        for (int corner = 0; corner < 8; corner++) bounds.Encapsulate(collider.transform.TransformPoint(collider.center + Vector3.Scale(collider.size * .5f,
+            new Vector3((corner & 1) == 0 ? -1 : 1, (corner & 2) == 0 ? -1 : 1, (corner & 4) == 0 ? -1 : 1))));
+        return bounds;
     }
 
     private static GameObject Root(Scene scene, string name) { var root = new GameObject(name); SceneManager.MoveGameObjectToScene(root, scene); return root; }

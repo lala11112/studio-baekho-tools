@@ -4,6 +4,7 @@ import { handlePropField, reclassifyPropBinding, renderPropLibraryFields } from 
 import { createDemoMap, DEFAULT_SETTINGS } from '../src/shared/map';
 import { resolveFixtureBinding } from '../src/shared/light-bindings';
 import type { AssetBinding, MapFixture, ProjectFile } from '../src/shared/types';
+import { applyPropBoundsCatalog } from '../src/shared/props';
 
 const binding=(id:string,role:AssetBinding['role']='decoration'):AssetBinding=>({
   id,label:id,role,prefabGuid:'1'.repeat(32),prefabPath:`Assets/${id}.prefab`,
@@ -42,4 +43,24 @@ test('vegetation assets expose placement fields, classification and conservative
   assert.match(html,/오목하게 빈 부분도 점유 영역/);
   assert.equal(handlePropField(plant,'weight','3').prop?.weight,3);
   assert.doesNotMatch(renderPropLibraryFields(binding('obstacle','prop')),/data-prop-field="role"/);
+});
+
+test('functional role and native front are editable independently of group settings and survive measurement refresh', () => {
+  const source = binding('Monitor', 'prop'), before = structuredClone(source);
+  const functional = handlePropField(handlePropField(source, 'behavior', 'floorEquipment'), 'frontYaw', '180');
+  assert.equal(functional.prop?.behavior, 'floorEquipment');
+  assert.equal(functional.prop?.frontYaw, 180);
+  assert.deepEqual(source, before);
+  const refreshed = applyPropBoundsCatalog([functional], { version: 1, assets: [{ guid: source.prefabGuid, size: { x: 1, y: 2, z: .3 } }] }).bindings[0];
+  assert.equal(refreshed.prop?.behavior, 'floorEquipment');
+  assert.equal(refreshed.prop?.frontYaw, 180);
+  const html = renderPropLibraryFields(refreshed);
+  assert.match(html, /data-prop-field="behavior"/);
+  assert.match(html, /data-prop-field="frontYaw"/);
+  assert.match(html, /받침이 필요한 탁상 소품/);
+  assert.equal(handlePropField(refreshed, 'behavior', 'automatic').prop?.behavior, undefined);
+  assert.equal(handlePropField(refreshed, 'frontYaw', '').prop?.frontYaw, undefined);
+  assert.throws(() => handlePropField(source, 'behavior', 'flying'));
+  assert.throws(() => handlePropField(source, 'frontYaw', 'not-a-number'));
+  assert.throws(() => handlePropField(source, 'frontYaw', 'Infinity'));
 });

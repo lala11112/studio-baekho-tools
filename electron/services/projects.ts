@@ -92,7 +92,13 @@ export async function prepareExportManifest(value: unknown, scan: ScanResult | n
   return buildManifest(project.map, project.bindings);
 }
 
-export interface AssetCatalogScripts { runtime: string; editor: string; catalog: string }
+export interface AssetCatalogScripts {
+  runtime: string;
+  editor: string;
+  catalog: string;
+  propSetRuntime?: string;
+  propSetEditor?: string;
+}
 
 export async function createExportBundle(value: unknown, scan: ScanResult | null, importer: string, runtimeScript: string, markerScript: string, fixtureScript: string, catalogScript?:string, wallModuleScript?:string, wallGuide?:string, assetCatalogScripts?: AssetCatalogScripts): Promise<Uint8Array> {
   const project = normalizeProject(value);
@@ -105,7 +111,7 @@ export async function createExportBundle(value: unknown, scan: ScanResult | null
 
 1. ZIP 파일의 압축을 풉니다.
 2. 원본 프리팹과 .meta가 있는 Unity 프로젝트를 엽니다. Window > Package Manager > Unity Registry에서 AI Navigation (com.unity.ai.navigation)을 설치합니다.
-3. Unity/Editor 파일을 모두 Assets/Baekho/Editor에 복사합니다: Assets/Baekho/Editor/BaekhoMapImporter.cs, BaekhoPropCatalog.cs, 등록 컴포넌트 Editor 파일. Unity/Runtime 파일은 모두 Assets/Baekho/Runtime에 복사합니다: Assets/Baekho/Runtime/BaekhoMapConnection.cs, BaekhoGameplayMarker.cs, BaekhoMapFixture.cs, BaekhoWallModule.cs, BaekhoMapAsset.cs. 기존 설치는 같은 경로에서 업데이트하고 중복 설치하지 않습니다. 모든 스크립트를 설치한 뒤 Unity 컴파일을 기다립니다.
+3. Unity/Editor 파일을 모두 Assets/Baekho/Editor에 복사합니다: Assets/Baekho/Editor/BaekhoMapImporter.cs, BaekhoPropCatalog.cs, 등록 컴포넌트와 소품 묶음 Editor 파일. Unity/Runtime 파일은 모두 Assets/Baekho/Runtime에 복사합니다: Assets/Baekho/Runtime/BaekhoMapConnection.cs, BaekhoGameplayMarker.cs, BaekhoMapFixture.cs, BaekhoWallModule.cs, BaekhoMapAsset.cs, BaekhoPropSet.cs. 기존 설치는 같은 경로에서 업데이트하고 중복 설치하지 않습니다. 모든 스크립트를 설치한 뒤 Unity 컴파일을 기다립니다.
 4. Map.baekhomap.json을 Assets 아래로 복사합니다.
 5. JSON을 선택하고 Assets > Baekho > Build Prefab을 실행합니다. 맵 조립 후 루트에 NavMeshSurface를 추가하고 자동 베이크합니다.
 6. JSON 파일과 같은 폴더에 새 프리팹과 .NavMesh.asset이 생성됩니다. 기존 프리팹과 베이크 데이터를 덮어쓰지 않습니다. 프리팹이 참조하는 .NavMesh.asset도 함께 보관하세요.
@@ -133,6 +139,7 @@ export async function createExportBundle(value: unknown, scan: ScanResult | null
 - v5 문 위·옆벽, 단차벽, 낭떠러지 벽·하부는 fitSize XYZ 크기로 경계를 맞춥니다. 단차·낭떠러지 벽면의 윗끝은 연결된 바닥의 두께 배율과 Y 보정을 반영한 아랫면에서 끝나며 하단은 유지됩니다. 데드존은 원본 Trigger를 포함한 Collider 경계를 사용하며 실제 동작을 새로 만들지 않습니다.
 - 소품 원본 크기: Unity Project에서 프리팹을 선택하고 Assets > Baekho > Export Prop Bounds Catalog로 JSON을 저장한 뒤 앱 에셋 탭에서 가져옵니다. 종류·태그·통행·배치 조건은 앱에서 수정합니다.
 - 전체 종류 일괄 등록: Assets > Baekho > Add Map Asset Metadata로 선택한 프리팹 루트에 등록 컴포넌트를 추가하고 종류를 지정합니다. Unity와 MCP를 실행한 뒤 앱의 표시된 프리팹 가져오기를 누릅니다. MCP 전용 어댑터는 앱의 스크립트 준비로 설치하며 ZIP에는 포함하지 않습니다. 재가져오기는 앱의 종류·배율·배치 조건을 보존합니다.
+- 소품 묶음: Unity Project에서 함께 쓸 프리팹들을 선택하고 Assets > Baekho > Create Prop Set From Selection을 실행합니다. 생성된 BaekhoPropSet에서 Import Enabled, Label, Usage, Arrangement, Prefabs를 설정하고 저장합니다. 앱의 표시된 프리팹 가져오기로 목록을 읽으며 실제 위치·회전·간격은 앱이 정합니다. 묶음에만 등록한 프리팹도 기본 소품·배율 1로 가져옵니다. 기존 맵에 반영하려면 자동 소품 재정리를 실행하세요. 앱에서 수동 지정한 묶음 설정은 유지합니다.
 - 기존 schemaVersion 1/2/3/4 JSON도 각 버전의 배치 의미로 가져옵니다.
 `;
   const files: Record<string, Uint8Array> = {
@@ -149,9 +156,17 @@ export async function createExportBundle(value: unknown, scan: ScanResult | null
   if (assetCatalogScripts) {
     if (![assetCatalogScripts.runtime, assetCatalogScripts.editor, assetCatalogScripts.catalog, catalogScript, wallModuleScript].every(source => source?.trim()))
       throw new Error('프리팹 등록 스크립트와 크기 측정 스크립트가 모두 필요합니다.');
+    const requiresPropSets = /\bBaekhoPropSet\b/.test(assetCatalogScripts.catalog)
+      || assetCatalogScripts.propSetRuntime !== undefined || assetCatalogScripts.propSetEditor !== undefined;
+    if (requiresPropSets && ![assetCatalogScripts.propSetRuntime, assetCatalogScripts.propSetEditor].every(source => source?.trim()))
+      throw new Error('소품 묶음 Runtime과 Editor 스크립트를 함께 포함해야 합니다.');
     files['Unity/Runtime/BaekhoMapAsset.cs'] = strToU8(assetCatalogScripts.runtime);
     files['Unity/Editor/BaekhoMapAssetEditor.cs'] = strToU8(assetCatalogScripts.editor);
     files['Unity/Editor/BaekhoAssetCatalog.cs'] = strToU8(assetCatalogScripts.catalog);
+    if (requiresPropSets) {
+      files['Unity/Runtime/BaekhoPropSet.cs'] = strToU8(assetCatalogScripts.propSetRuntime!);
+      files['Unity/Editor/BaekhoPropSetEditor.cs'] = strToU8(assetCatalogScripts.propSetEditor!);
+    }
   }
   if (project.blueprintDataUrl) files['blueprint.png'] = decodePngDataUrl(project.blueprintDataUrl);
   return zipSync(files, { level: 6 });

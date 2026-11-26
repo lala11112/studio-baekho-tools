@@ -30,7 +30,8 @@ async function fixture(t: TestContext) {
   await mkdir(path.join(project, 'Assets'), { recursive: true });
   const files = ['Editor/BaekhoMapImporter.cs', 'Editor/BaekhoPropCatalog.cs', 'Runtime/BaekhoMapConnection.cs',
     'Runtime/BaekhoGameplayMarker.cs', 'Runtime/BaekhoMapFixture.cs', 'Runtime/BaekhoWallModule.cs', 'Mcp/BaekhoBuildMapTool.cs',
-    'Runtime/BaekhoMapAsset.cs', 'Editor/BaekhoMapAssetEditor.cs', 'Editor/BaekhoAssetCatalog.cs', 'Mcp/BaekhoGetAssetCatalogTool.cs'];
+    'Runtime/BaekhoMapAsset.cs', 'Editor/BaekhoMapAssetEditor.cs', 'Editor/BaekhoAssetCatalog.cs', 'Mcp/BaekhoGetAssetCatalogTool.cs',
+    'Runtime/BaekhoPropSet.cs', 'Editor/BaekhoPropSetEditor.cs'];
   for (const file of files) {
     await mkdir(path.dirname(path.join(resources, file)), { recursive: true });
     await writeFile(path.join(resources, file), `// bundled ${file}`);

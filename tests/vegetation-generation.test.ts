@@ -12,7 +12,7 @@ function room(): GridMap {
   return {version:5,name:'분리 배치 검증',width:size,height:size,cellSize:2,rows,elevations:Array.from({length:size},()=>Array(size).fill(0)),ramps:[],maxStepHeight:.4,connections:[{id:'north',label:'북쪽',x:8,row:0,direction:0,width:2,height:3,kind:'door'}],assetOverrides:[]};
 }
 function settings(levelDesign=false): GenerationSettings {
-  return {...DEFAULT_SETTINGS,seed:17,designer:{...DEFAULT_DESIGNER,elevation:false,props:false},...(levelDesign?{levelDesign:{...DEFAULT_LEVEL_DESIGN,pattern:'openArena' as const}}:{})};
+  return {...DEFAULT_SETTINGS,connectionWidth:2,seed:17,designer:{...DEFAULT_DESIGNER,elevation:false,props:false},...(levelDesign?{levelDesign:{...DEFAULT_LEVEL_DESIGN,pattern:'openArena' as const}}:{})};
 }
 const dressing=(map:GridMap)=>map.fixtures!.filter(f=>f.role==='decoration'||f.role==='vegetation');
 const distance=(a:Cell,b:Cell)=>Math.hypot(a.x-b.x,a.row-b.row);

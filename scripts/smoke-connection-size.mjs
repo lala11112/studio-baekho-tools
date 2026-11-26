@@ -45,7 +45,7 @@ try {
   }, { directory: userData, candidate });
   await page.reload();
   await page.waitForFunction(() => document.querySelector('[data-action="codex"]')?.textContent?.includes('연결됨'));
-  assert.equal(await page.locator('#connectionWidth').inputValue(), '2');
+  assert.equal(await page.locator('#connectionWidth').inputValue(), '4');
   assert.equal(await page.locator('#connectionHeight').inputValue(), '3');
   const open = async path => {
     await app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, path);

@@ -5,9 +5,9 @@ export type ScaleScope = 'all' | 'tiles' | AssetRole;
 export type ScaleOperation = { kind: 'set' | 'multiply'; axes: Partial<Vec3> } | { kind: 'cell'; cellSize: number };
 export const matchesScaleScope = (role: AssetRole, scope: ScaleScope) => scope === 'all' || (scope === 'tiles' ? TILE_ASSET_ROLES.includes(role) : role === scope);
 
-/** Unit tile prefabs span one grid cell in X/Z. Height-fitting roles retain their own Y convention. */
+/** Unit tiles span one grid cell; doors start at native scale for authored doorway prefabs. */
 export function defaultAssetScale(role: AssetRole, cellSize: number): Vec3 {
-  return TILE_ASSET_ROLES.includes(role) ? { x: cellSize, y: 1, z: cellSize } : { x: 1, y: 1, z: 1 };
+  return role !== 'door' && TILE_ASSET_ROLES.includes(role) ? { x: cellSize, y: 1, z: cellSize } : { x: 1, y: 1, z: 1 };
 }
 
 /** Batch edits are atomic and leave offsets, pivots, identifiers and non-selected roles intact. */

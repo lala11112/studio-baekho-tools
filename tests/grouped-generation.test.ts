@@ -8,6 +8,7 @@ import { buildManifest, DEFAULT_SETTINGS, validateMap } from '../src/shared/map'
 import { protectedPropIds } from '../src/shared/prop-groups';
 import { getPropCoverageReport, propPosition, propValidationIssues, propWorldSize, removePropInstance, replacePropInstance } from '../src/shared/props';
 import type { AssetBinding, GenerationSettings, GridMap, PropComposition, PropInstance } from '../src/shared/types';
+import { propRootYaw, propYaw } from '../src/shared/prop-orientation';
 
 function room(): GridMap {
   const width = 24, height = 20, rows = Array.from({ length: height }, (_, row) => row === 0 || row === height - 1 ? '#'.repeat(width) : `#${'.'.repeat(width - 2)}#`);
@@ -17,7 +18,7 @@ function room(): GridMap {
     connections: [{ id: 'north', label: 'North', x: 12, row: 0, direction: 0, width: 2, height: 3, kind: 'door' }] };
 }
 function settings(): GenerationSettings {
-  return { ...DEFAULT_SETTINGS, width: 24, height: 20, connectionCount: 1, seed: 237,
+  return { ...DEFAULT_SETTINGS, connectionWidth: 2, width: 24, height: 20, connectionCount: 1, seed: 237,
     designer: { ...DEFAULT_DESIGNER, preset: 'battle', elevation: false, props: true, propLayout: 'grouped', propCoverage: 12,
       decorations: true, vegetation: false, decorationDensity: 1 }, levelDesign: { ...DEFAULT_LEVEL_DESIGN, pattern: 'openArena' } };
 }
@@ -29,7 +30,7 @@ function asset(id = 'Crate', role: 'prop' | 'decoration' = 'prop', composition?:
 }
 function catalog(): AssetBinding[] {
   const crate = asset(); crate.rotationY = 90; crate.scale.x = 1.1;
-  return [crate, asset('Console', 'prop', { usage: 'equipment', family: 'station', member: 'anchor', arrangement: 'wall' }),
+  return [crate, asset('Desk', 'prop', { usage: 'equipment', family: 'station', member: 'anchor', arrangement: 'wall' }),
     asset('Chair', 'decoration', { usage: 'equipment', family: 'station', member: 'companion', arrangement: 'wall' })];
 }
 const groups = (map: GridMap) => [...new Set((map.propInstances ?? []).flatMap(prop => prop.groupId ? [prop.groupId] : []))]
@@ -40,12 +41,13 @@ test('generation builds measured mixed-role groups with safe objectives and no i
   const source = room(), config = settings(), assets = catalog(), before = structuredClone(source);
   Object.assign(config.designer!, { enemies: true, enemyCount: 2, rewards: true, rewardCount: 1 });
   const result = applyGeneratedFeatures(source, config, undefined, assets), arranged = groups(result);
-  assert.ok(arranged.length > 0); assert.ok(arranged.length <= 5, '24×20 room uses at most five groups');
+  assert.ok(arranged.length > 5, 'measured furnishing must continue beyond the former five-group room limit');
+  assert.ok(getPropCoverageReport(result, config, assets).actualPercent! > 3, 'small native-size assets must furnish more than a few capped groups');
   assert.ok(arranged.some(members => members.some(prop => prop.role === 'prop') && members.some(prop => prop.role === 'decoration')));
   assert.ok(arranged.every(members => members.length >= 2 && members.length <= 4 && members.every(prop => prop.provenance === 'generated')));
   assert.equal(result.fixtures?.filter(fixture => fixture.role === 'decoration' || fixture.role === 'vegetation').length, 0);
   assert.equal(result.markers?.filter(marker => marker.kind === 'enemy').length, 2); assert.equal(result.markers?.filter(marker => marker.kind === 'reward').length, 1);
-  for (const prop of result.propInstances!) assert.deepEqual(prop.size, propWorldSize(assets.find(binding => binding.id === prop.bindingId)!, prop.direction));
+  for (const prop of result.propInstances!) assert.deepEqual(prop.size, propWorldSize(assets.find(binding => binding.id === prop.bindingId)!, propYaw(prop)));
   assert.deepEqual(propValidationIssues(result, assets), []); assert.deepEqual(validateMap(result).filter(issue => issue.severity === 'error'), []);
   assert.deepEqual(analyzeLevelDesign(result, config).issues.filter(issue => issue.severity === 'error'), []);
   assert.deepEqual(generationConditionIssues(result, config).filter(issue => issue.severity === 'error'), []);
@@ -129,7 +131,7 @@ test('manifest flattens grouped members to ordinary native-scale placements with
   for (const prop of result.propInstances!) {
     const binding = assets.find(item => item.id === prop.bindingId)!, placement = manifest.placements.find(item => item.id === `prop-instance-${prop.id}`)!;
     assert.ok(placement); assert.deepEqual(placement.position, propPosition(result, prop, binding)); assert.deepEqual(placement.scale, binding.scale);
-    assert.equal(placement.rotation.y, prop.direction + binding.rotationY); assert.equal(placement.centerXZ, true);
+    assert.equal(placement.rotation.y, propRootYaw(prop, binding)); assert.equal(placement.centerXZ, true);
     for (const field of ['groupId', 'provenance', 'composition', 'authored']) assert.equal(Object.hasOwn(placement, field), false);
   }
   assert.equal(manifest.placements.filter(placement => placement.centerXZ).length, result.propInstances!.length);
@@ -162,8 +164,11 @@ test('metadata-only regrouping commits once and unselected decoration counts rem
   assert.ok(groups(result.map).length > 0);
   assert.equal(rearrangeMapProps(result.map, config, assets, { props: true, decorations: false }).unchanged, true);
   const decoration = asset('Existing_Decoration', 'decoration'); assets.push(decoration);
-  const decorated = structuredClone(initial), fixed: PropInstance = { id: 'existing-unselected', bindingId: decoration.id, role: 'decoration', x: 2, row: 16, direction: 0,
-    offset: { x: 0, y: 0, z: 0 }, cells: [{ x: 2, row: 16 }], size: propWorldSize(decoration)!, blocksMovement: false, category: decoration.prop!.category, anchor: 'floor', provenance: 'generated' };
+  const free = initial.rows.flatMap((row, r) => [...row].flatMap((tile, x) => tile === '.' ? [{ x, row: r }] : []))
+    .find(cell => cell.row > 2 && !initial.propInstances!.some(prop => prop.cells.some(occupied => occupied.x === cell.x && occupied.row === cell.row)));
+  assert.ok(free, 'the preservation fixture needs an unoccupied floor cell');
+  const decorated = structuredClone(initial), fixed: PropInstance = { id: 'existing-unselected', bindingId: decoration.id, role: 'decoration', ...free, direction: 0,
+    offset: { x: 0, y: 0, z: 0 }, cells: [free], size: propWorldSize(decoration)!, blocksMovement: false, category: decoration.prop!.category, anchor: 'floor', provenance: 'generated' };
   decorated.propInstances!.push(fixed);
   const selected = rearrangeMapProps(decorated, config, assets, { props: true, decorations: false });
   assert.ok(!selected.issues.some(issue => ['furnishing-invalid-map', 'furnishing-failed'].includes(issue.code ?? '')), JSON.stringify(selected.issues));

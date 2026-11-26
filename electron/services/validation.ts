@@ -50,7 +50,7 @@ export function publicProject(project: ProjectFile): ProjectFile {
       bridges:(project.map.bridges??[]).map(b=>({x:b.x,row:b.row,direction:b.direction})),
       cliffs:(project.map.cliffs??[]).map(c=>({x:c.x,row:c.row,direction:c.direction,depth:c.depth})),
       fixtures:(project.map.fixtures??[]).map(f=>({id:f.id,role:f.role,x:f.x,row:f.row,direction:f.direction,offset:{x:f.offset.x,y:f.offset.y,z:f.offset.z},...(f.anchor?{anchor:f.anchor}:{}),...(f.bindingId?{bindingId:f.bindingId}:{}),...(f.linkedId?{linkedId:f.linkedId}:{}),...(f.wall?{wall:structuredClone(f.wall)}:{})})),
-      markers:(project.map.markers??[]).map(m=>({id:m.id,label:m.label,kind:m.kind,contentKey:m.contentKey,x:m.x,row:m.row,direction:m.direction,offset:{x:m.offset.x,y:m.offset.y,z:m.offset.z}})),
+      markers:(project.map.markers??[]).map(m=>({id:m.id,label:m.label,kind:m.kind,contentKey:m.contentKey,x:m.x,row:m.row,direction:m.direction,offset:{x:m.offset.x,y:m.offset.y,z:m.offset.z},...(m.clearance?{clearance:{radius:m.clearance.radius,height:m.clearance.height}}:{})})),
       lockedCells:(project.map.lockedCells??[]).map(c=>({x:c.x,row:c.row})), zones:(project.map.zones??[]).map(z=>({x:z.x,row:z.row,kind:z.kind})),
       ...(project.map.headroom===undefined?{}:{headroom:project.map.headroom}),
       ...(project.map.structureSettings?{structureSettings:structuredClone(project.map.structureSettings)}:{}),

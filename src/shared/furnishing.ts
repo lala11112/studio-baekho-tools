@@ -8,6 +8,8 @@ import { wallMountIssues } from './wall-mounts';
 import { placeGroupedProps } from './grouped-props';
 import { protectedPropIds } from './prop-groups';
 import { resolveFixtureBinding } from './light-bindings';
+import type { RoomCompositionPlan } from './room-composition';
+import { teleportReservedCells, teleportIssues } from './teleport';
 
 export interface FurnishingOptions { props: boolean; decorations: boolean }
 export interface RearrangementOptions extends FurnishingOptions { includeUnknown?: boolean }
@@ -24,6 +26,7 @@ export interface FurnishingResult {
   decorationCount: number;
   convertedPropPlaceholders: number;
   convertedDecorationPlaceholders: number;
+  composition?: RoomCompositionPlan;
 }
 const key = (c: Cell) => `${c.x},${c.row}`;
 const role = (p: PropInstance) => p.role ?? (p.blocksMovement ? 'prop' : 'decoration');
@@ -54,7 +57,7 @@ export function furnishExistingMap(source: GridMap, settings: GenerationSettings
     levelDesign: { ...DEFAULT_LEVEL_DESIGN, ...settings.levelDesign, pattern: 'openArena' } };
   let catalog: AssetBinding[] = [], map = structuredClone(source), target = decorationCount(source);
   let preservedPattern: GenerationSettings | undefined;
-  const safetyErrors = (candidate: GridMap) => [...propValidationIssues(candidate, catalog), ...wallMountIssues(candidate,catalog), ...analyzeLevelDesign(candidate, placementSettings).issues,
+  const safetyErrors = (candidate: GridMap) => [...propValidationIssues(candidate, catalog), ...wallMountIssues(candidate,catalog), ...teleportIssues(candidate,catalog), ...analyzeLevelDesign(candidate, placementSettings).issues,
     ...(preservedPattern ? analyzeLevelDesign(candidate, preservedPattern).issues.map(i => ['raised-approaches', 'flanking-routes'].includes(i.code ?? '') ? { ...i, severity: 'error' as const } : i) : [])].filter(i => i.severity === 'error');
   const finish = (): FurnishingResult => {
     const added = (map.propInstances ?? []).filter(p => !originalIds.has(p.id));
@@ -98,7 +101,7 @@ export function furnishExistingMap(source: GridMap, settings: GenerationSettings
     }
     const fixtureFootprints = measuredFixtureCells(source, catalog);
     const reserved = [...baseline.reservedEntryCells, ...baseline.combatCells, ...baseline.routes.flat(), ...baseline.obstacleChoices.flatMap(c => c.routes.flat()), ...fixtureFootprints,
-      ...(source.fixtures ?? []).filter(f=>!f.wall), ...(source.markers ?? [])];
+      ...(source.fixtures ?? []).filter(f=>!f.wall), ...(source.markers ?? []), ...teleportReservedCells(source)];
     const purpose = placementSettings.designer!.preset, theme = placementSettings.levelDesign?.theme?.trim().toLowerCase();
     const eligible = catalog.filter(b => !b.wallMount&&(options.props && b.role === 'prop' || options.decorations && b.role === 'decoration') && b.prop?.weight && b.prop.roomTypes.includes(purpose)
       && (!theme || !b.prop.tags.length || b.prop.tags.some(tag => tag.toLowerCase() === theme)));
@@ -131,7 +134,7 @@ export function furnishExistingMap(source: GridMap, settings: GenerationSettings
         const pendingIds = new Set(pending.map(f => f.id));
         const report = analyzeLevelDesign(map, placementSettings);
         const protectedCells = new Set([...baseline.reservedEntryCells, ...baseline.combatCells, ...baseline.routes.flat(), ...baseline.obstacleChoices.flatMap(c => c.routes.flat()),
-          ...(source.fixtures ?? []).filter(f => !f.wall&&!pendingIds.has(f.id)), ...fixtureFootprints, ...(source.markers ?? []), ...report.routes.flat(), ...report.obstacleChoices.flatMap(c => c.routes.flat()), ...(source.lockedCells ?? [])].map(key));
+          ...(source.fixtures ?? []).filter(f => !f.wall&&!pendingIds.has(f.id)), ...fixtureFootprints, ...(source.markers ?? []), ...teleportReservedCells(source), ...report.routes.flat(), ...report.obstacleChoices.flatMap(c => c.routes.flat()), ...(source.lockedCells ?? [])].map(key));
         const usedFixtureIds = new Set((source.fixtures ?? []).map(f => f.id));
         let sequence = 0, pendingIndex = 0, decorationFailure = '';
         while (pendingIndex < pending.length || decorationCount(map) < target) {
@@ -183,6 +186,7 @@ function furnishGroupedMap(source: GridMap, settings: GenerationSettings, bindin
   const issues: ValidationIssue[] = [], before = source.propInstances ?? [];
   let catalog: AssetBinding[] = [], result = structuredClone(source), movedProps = 0, removedProps = 0, preservedProps = before.length;
   let added: PropInstance[] = [];
+  let composition: RoomCompositionPlan | undefined;
   let config: GenerationSettings = { ...structuredClone(settings), width: source.width, height: source.height, cellSize: source.cellSize,
     maxStepHeight: source.maxStepHeight, connectionCount: source.connections.length,
     designer: { ...DEFAULT_DESIGNER, ...settings.designer, props: options.props, decorations: options.decorations, vegetation: false, propLayout: 'grouped' },
@@ -196,7 +200,7 @@ function furnishGroupedMap(source: GridMap, settings: GenerationSettings, bindin
       usedBindingIds: [...new Set((result.propInstances ?? []).filter(p => p.provenance === 'generated').map(p => p.bindingId))].sort(),
       coverage: getPropCoverageReport(result, config, catalog), decorationTarget: decorationCount(result), decorationCount: decorationCount(result),
       convertedPropPlaceholders, convertedDecorationPlaceholders: 0, movedProps, removedProps, preservedProps,
-      groupCount: new Set((result.propInstances ?? []).flatMap(p => p.groupId ? [p.groupId] : [])).size };
+      groupCount: new Set((result.propInstances ?? []).flatMap(p => p.groupId ? [p.groupId] : [])).size, ...(composition ? { composition } : {}) };
   };
   if (!options.props && !options.decorations) return finish();
   try {
@@ -234,6 +238,7 @@ function furnishGroupedMap(source: GridMap, settings: GenerationSettings, bindin
     const safe = (map: GridMap) => ![...validateMap(map, catalog), ...analyzeLevelDesign(map, config).issues,
       ...(preservePattern ? analyzeLevelDesign(map, original).issues.map(i => ['raised-approaches','flanking-routes'].includes(i.code ?? '') ? { ...i, severity: 'error' as const } : i) : [])].some(i => i.severity === 'error');
     const placed = placeGroupedProps(candidate, config, catalog, undefined, measuredFixtureCells(candidate, catalog), safe);
+    composition = placed.composition;
     issues.push(...placed.issues);
     if (!safe(placed.map)) {
       issues.push(warning('furnishing-grouped-fit', '묶음 배치 후 기존 동선 조건을 유지할 수 없어 변경을 적용하지 않았습니다.'));
@@ -241,6 +246,10 @@ function furnishGroupedMap(source: GridMap, settings: GenerationSettings, bindin
     }
     const remaining = [...movable], usedIds = new Set(retained.map(p => p.id));
     const generated = (placed.map.propInstances ?? []).filter(p => !protectedIds.has(p.id));
+    if (movable.length && !generated.length) {
+      issues.push(warning('furnishing-rearranged-unavailable', '완성된 대체 군집을 배치할 수 없어 기존 자동 소품과 배치를 보존했습니다. 크기·호환 부품·여백·동선 조건을 확인하세요.'));
+      return finish();
+    }
     for (const p of generated) {
       let index = remaining.findIndex(old => old.id === p.id && old.bindingId === p.bindingId && role(old) === role(p));
       if (index < 0) index = remaining.findIndex(old => old.bindingId === p.bindingId && role(old) === role(p));

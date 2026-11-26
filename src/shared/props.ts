@@ -1,10 +1,14 @@
 import type { AssetBinding, Cell, Direction, GenerationRegion, GenerationSettings, GridMap, PrefabAsset, PropDefinition, PropInstance, RoomPurpose, ValidationIssue, Vec3 } from './types';
 import { analyzeLevelDesign, compileLevelDesign, createObstacleEvaluator, type TacticalObstacle } from './level-design';
 import { parseLocalBounds, parseWallMountDefinition, wallMountIssues } from './wall-mounts';
-import type { LocalBounds, WallMountDefinition } from './types';
+import type { LocalBounds, UnityPropSetMembership, WallMountDefinition } from './types';
 import { placeGroupedProps } from './grouped-props';
 import { effectivePropComposition } from './prop-composition';
 import { markPropGroupAuthored } from './prop-groups';
+import { teleportIssues, teleportReservedCells } from './teleport';
+import { normalizePropYaw, propYaw } from './prop-orientation';
+import { resolveFixtureBinding } from './light-bindings';
+import { fixturePosition } from './features';
 
 const ROOMS: RoomPurpose[] = ['battle', 'boss', 'reward', 'start', 'shop'];
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -19,13 +23,23 @@ const cell = (v: unknown, width: number, height: number): v is Cell => record(v)
 const direction = (v: unknown): v is Direction => [0,90,180,270].includes(v as number);
 const DIRS: Record<Direction, readonly [number,number]> = {0:[0,-1],90:[1,0],180:[0,1],270:[-1,0]};
 
+export function parseUnityPropSetMembership(value: unknown): UnityPropSetMembership {
+  if (!record(value) || !only(value, ['guid', 'label', 'usage', 'arrangement'])
+    || typeof value.guid !== 'string' || !/^[a-fA-F0-9]{32}$/.test(value.guid) || !label(value.label)
+    || !['equipment', 'storage', 'natural'].includes(value.usage as string)
+    || !['wall', 'island', 'either'].includes(value.arrangement as string)) throw new Error('Unity 소품 세트의 GUID·이름·용도·배치 형태를 확인해 주세요.');
+  return { guid: value.guid.toLowerCase(), label: value.label, usage: value.usage, arrangement: value.arrangement } as UnityPropSetMembership;
+}
+
 export function parsePropDefinition(value: unknown): PropDefinition {
-  if (!record(value) || !only(value,['category','tags','blocksMovement','size','placement','roomTypes','weight','composition']) || !label(value.category)
+  if (!record(value) || !only(value,['category','tags','blocksMovement','size','placement','roomTypes','weight','composition','unitySets','behavior','frontYaw']) || !label(value.category)
     || !Array.isArray(value.tags) || value.tags.length > 24 || !value.tags.every(label) || new Set(value.tags).size !== value.tags.length
     || typeof value.blocksMovement !== 'boolean' || (value.size !== undefined && !vec(value.size,true))
     || !['floor','wall','ceiling'].includes(value.placement as string) || !Array.isArray(value.roomTypes) || !value.roomTypes.length
     || !value.roomTypes.every(r=>ROOMS.includes(r)) || new Set(value.roomTypes).size !== value.roomTypes.length
-    || !finite(value.weight) || value.weight < 0 || value.weight > 10000) throw new Error('소품 정의의 종류·태그·크기·배치 위치·방 용도·가중치를 확인해 주세요.');
+    || !finite(value.weight) || value.weight < 0 || value.weight > 10000
+    || value.behavior !== undefined && !['workSurface','seat','floorEquipment','surfaceAccessory','generic'].includes(value.behavior as string)
+    || value.frontYaw !== undefined && (!finite(value.frontYaw) || Math.abs(value.frontYaw) > 1000000)) throw new Error('소품 정의의 종류·태그·크기·배치 위치·방 용도·가중치를 확인해 주세요.');
   if (value.composition !== undefined) {
     const c = value.composition;
     if (!record(c) || !only(c, ['usage','family','member','arrangement'])
@@ -33,13 +47,20 @@ export function parsePropDefinition(value: unknown): PropDefinition {
       || !label(c.family) || !['anchor','companion','either'].includes(c.member as string)
       || !['wall','island','either'].includes(c.arrangement as string)) throw new Error('소품 묶음의 용도·계열·역할·구성 방식을 확인해 주세요.');
   }
-  return structuredClone(value) as unknown as PropDefinition;
+  const result = structuredClone(value) as unknown as PropDefinition;
+  if (value.unitySets !== undefined) {
+    if (!Array.isArray(value.unitySets) || value.unitySets.length > 256) throw new Error('Unity 소품 세트 목록은 최대 256개여야 합니다.');
+    result.unitySets = Array.from(value.unitySets, parseUnityPropSetMembership);
+    if (new Set(result.unitySets.map(set => set.guid)).size !== result.unitySets.length) throw new Error('Unity 소품 세트 GUID가 중복됩니다.');
+  }
+  return result;
 }
 
 export function parsePropInstance(value: unknown, width: number, height: number): PropInstance {
-  if (!record(value) || !only(value,['id','bindingId','x','row','direction','offset','cells','size','blocksMovement','category','anchor','role','authored','groupId','provenance'])
+  if (!record(value) || !only(value,['id','bindingId','x','row','direction','yawOffset','offset','cells','size','blocksMovement','category','anchor','role','authored','groupId','provenance'])
     || !id(value.id) || !id(value.bindingId) || !cell(value,width,height) || !direction(value.direction) || !vec(value.offset)
     || !vec(value.size,true) || typeof value.blocksMovement !== 'boolean' || !label(value.category)
+    || value.yawOffset !== undefined && (!finite(value.yawOffset) || Math.abs(value.yawOffset) > 1000000)
     || (value.anchor !== undefined && !['floor','wall','ceiling'].includes(value.anchor as string))
     || (value.role !== undefined && !['prop','decoration','vegetation'].includes(value.role as string))
     || (value.authored !== undefined && typeof value.authored !== 'boolean')
@@ -144,7 +165,7 @@ export function propCatalogPrompt(bindings: AssetBinding[]): string {
 }
 
 /** Size is a world-space AABB at the saved rotation, not a scale request. */
-export function propWorldSize(binding: AssetBinding, facing: Direction = 0): Vec3 | undefined {
+export function propWorldSize(binding: AssetBinding, facing: number = 0): Vec3 | undefined {
   const size = binding.prop?.size;
   if (!size) return undefined;
   const x=Math.abs(size.x*binding.scale.x),y=Math.abs(size.y*binding.scale.y),z=Math.abs(size.z*binding.scale.z);
@@ -201,7 +222,7 @@ export function propValidationIssues(map: GridMap, bindings?: AssetBinding[]): V
     const xs=p.cells.map(c=>c.x),rs=p.cells.map(c=>c.row);
     const minX=Math.min(...xs),maxX=Math.max(...xs),minR=Math.min(...rs),maxR=Math.max(...rs),centerX=p.x*map.cellSize+p.offset.x+(binding?.offset.x??0),centerR=p.row*map.cellSize-p.offset.z-(binding?.offset.z??0);
     if(p.cells.length!==(maxX-minX+1)*(maxR-minR+1)||centerX-p.size.x/2<(minX-.5)*map.cellSize-1e-6||centerX+p.size.x/2>(maxX+.5)*map.cellSize+1e-6||centerR-p.size.z/2<(minR-.5)*map.cellSize-1e-6||centerR+p.size.z/2>(maxR+.5)*map.cellSize+1e-6)bad.push({x:p.x,row:p.row});
-    const measured=binding&&propWorldSize(binding,p.direction);
+    const measured=binding&&propWorldSize(binding,propYaw(p));
     if(measured&&(['x','y','z'] as const).some(axis=>Math.abs(measured[axis]-p.size[axis])>1e-5))issues.push({severity:'error',code:'prop-scale-changed',message:`소품 ${p.id}의 프리팹 크기·배율·회전이 배치 후 변경되었습니다. 크기를 다시 검증해 배치해 주세요.`,cells:p.cells});
     if(p.anchor==='wall'){const [dx,dr]=DIRS[p.direction];if(y+p.size.y>wallSupportTop(map,p)+1e-6||!p.cells.every(c=>map.rows[c.row+dr]?.[c.x+dx]==='#'||p.cells.some(n=>n.x===c.x+dx&&n.row===c.row+dr)))bad.push({x:p.x,row:p.row});}
     if(bad.length)issues.push({severity:'error',code:'prop-fit',message:`소품 ${p.id}의 점유 영역·높이·천장 여유가 맞지 않습니다.`,cells:bad});
@@ -232,6 +253,8 @@ export interface PropPlacementOptions {
   varyGeneratedDecorations?: boolean;
   /** Internal exact rotation trial. Does not alter binding.rotationY. */
   facing?: Direction;
+  /** Internal exact instance yaw adjustment, used when preserving a manual pose. */
+  yawOffset?: number;
   /** Explicit manual edits convert this role even when its generation toggle is off. */
   onlyRole?: 'prop' | 'decoration' | 'vegetation';
   /** Limit a manual fixture edit to its temporary intention, preserving other attachment layers. */
@@ -342,7 +365,7 @@ function placeBalancedProps(source: GridMap, settings: GenerationSettings, bindi
   map = placeProps(map, propSettings, bindings, region, externalReserved, { preserveCrossing: true }).map;
   const baseline = analyzeLevelDesign(map, settings), recipe = compileLevelDesign(settings);
   const center = baseline.combatCenter ?? baseline.walkableCells[Math.floor(baseline.walkableCells.length / 2)] ?? { x: (map.width - 1) / 2, row: (map.height - 1) / 2 };
-  const reserved = new Map([...externalReserved, ...baseline.reservedEntryCells, ...baseline.combatCells, ...baseline.routes.flat()].map(c => [key(c), c]));
+  const reserved = new Map([...externalReserved, ...teleportReservedCells(map), ...baseline.reservedEntryCells, ...baseline.combatCells, ...baseline.routes.flat()].map(c => [key(c), c]));
   const keepRoute = (cells: Cell[]) => {
     const radius = Math.max(0, Math.ceil(recipe.characterRadius / map.cellSize - .5));
     for (const c of cells) for (let dr = -radius; dr <= radius; dr++) for (let dx = -radius; dx <= radius; dx++) { const n = { x: c.x + dx, row: c.row + dr }; reserved.set(key(n), n); }
@@ -450,7 +473,7 @@ function placeTacticalProps(source: GridMap, settings: GenerationSettings, bindi
   map = placeProps(map, propSettings, bindings, region, externalReserved, { preserveCrossing }).map;
   const baseline = analyzeLevelDesign(map, settings), center = baseline.combatCenter ?? baseline.walkableCells[Math.floor(baseline.walkableCells.length / 2)];
   if (!center) throw new Error('전술 소품을 배치할 이동 가능한 공간이 없습니다.');
-  const issues: ValidationIssue[] = [], reserved = new Map([...externalReserved, ...baseline.reservedEntryCells, ...baseline.combatCells, ...baseline.routes.flat()].map(c => [key(c), c]));
+  const issues: ValidationIssue[] = [], reserved = new Map([...externalReserved, ...teleportReservedCells(map), ...baseline.reservedEntryCells, ...baseline.combatCells, ...baseline.routes.flat()].map(c => [key(c), c]));
   const keepRoute = (cells: Cell[]) => {
     const radius = Math.max(0, Math.ceil(settings.levelDesign!.characterRadius / map.cellSize - .5));
     for (const c of cells) for (let dr = -radius; dr <= radius; dr++) for (let dx = -radius; dx <= radius; dx++) { const n = { x: c.x + dx, row: c.row + dr }; reserved.set(key(n), n); }
@@ -513,6 +536,7 @@ function placeTacticalProps(source: GridMap, settings: GenerationSettings, bindi
 
 /** Convert generated P intentions, decorations and vegetation into fixed, measured instances atomically. */
 export function placeProps(source: GridMap, settings: GenerationSettings, bindings: AssetBinding[], region?: GenerationRegion, reserved: Cell[] = [], options: PropPlacementOptions = {}): {map:GridMap;issues:ValidationIssue[]} {
+  reserved = [...reserved, ...teleportReservedCells(source)];
   if(options.tactical)return placeTacticalProps(source,settings,bindings,region,reserved,options.preserveCrossing);
   const map=structuredClone(source),catalog=floorPropCatalog(bindings),issues:ValidationIssue[]=[];
   if(!catalog.some(b=>b.prop))return {map,issues}; // Opening or regenerating a legacy library never changes its assignment scheme.
@@ -537,7 +561,8 @@ export function placeProps(source: GridMap, settings: GenerationSettings, bindin
       for(const binding of eligible){const def=binding.prop!,facings=facingsByBinding.get(binding.id)!;
       if((origin.x!==intent.x||origin.row!==intent.row)&&def.placement!=='floor')continue;
       for(const facing of facings){
-        const size=propWorldSize(binding,facing)!;
+        const yawOffset=options.yawOffset??0;
+        const size=propWorldSize(binding,facing+yawOffset)!;
         if(size.x>map.width*map.cellSize+1e-6||size.z>map.height*map.cellSize+1e-6)continue;
         const cells=propFootprint(map,origin,size);
         if(cells.some(c=>!inside(c,area)||!inside(c,{x:0,row:0,width:map.width,height:map.height})||locks.has(key(c))||occupied.has(key(c))||reservedKeys.has(key(c))||intendedKeys.has(key(c))&&key(c)!==key(intent)))continue;
@@ -546,7 +571,7 @@ export function placeProps(source: GridMap, settings: GenerationSettings, bindin
           ||(def.placement==='floor'||def.blocksMovement)&&map.markers?.some(m=>m.x===c.x&&m.row===c.row)
           ||map.fixtures?.some(f=>f.id!==intent.fixtureId&&f.x===c.x&&f.row===c.row&&(f.anchor??'floor')===def.placement&&(def.placement!=='wall'||f.direction===facing))))continue;
         const width=Math.max(...cells.map(c=>c.x))-origin.x+1,height=Math.max(...cells.map(c=>c.row))-origin.row+1;
-        const instance:PropInstance={id:`prop_${origin.x}_${origin.row}`,bindingId:binding.id,role:intent.role,x:origin.x,row:origin.row,direction:facing,cells,size,offset:{x:(width-1)*map.cellSize/2,y:0,z:-(height-1)*map.cellSize/2||0},blocksMovement:def.blocksMovement,category:def.category,anchor:def.placement};
+        const instance:PropInstance={id:`prop_${origin.x}_${origin.row}`,bindingId:binding.id,role:intent.role,x:origin.x,row:origin.row,direction:facing,...(yawOffset?{yawOffset}:{}),cells,size,offset:{x:(width-1)*map.cellSize/2,y:0,z:-(height-1)*map.cellSize/2||0},blocksMovement:def.blocksMovement,category:def.category,anchor:def.placement};
         // Non-zero asset offsets may move physical bounds outside the checked footprint. Reserve conservatively.
         if(Math.abs(binding.offset.x)>(width*map.cellSize-size.x)/2+1e-6||Math.abs(binding.offset.z)>(height*map.cellSize-size.z)/2+1e-6)continue;
         if(def.placement==='wall'){
@@ -619,7 +644,7 @@ export function replacePropInstance(source: GridMap, instanceId: string, binding
   map.rows=rows.map(r=>r.join(''));
   const config={...settings,...(settings.designer?{designer:{...settings.designer,props:intentRole==='prop',decorations:intentRole==='decoration',vegetation:intentRole==='vegetation'}}:{})};
   const catalog=bindings.map(b=>b.id===bindingId?{...b,role:intentRole,prop:{...b.prop!,weight:Math.max(1,b.prop!.weight)}}:b);
-  const result=placeProps(map,config,catalog,undefined,reserved,{onlyRole:intentRole as 'prop'|'decoration'|'vegetation',...(intentRole!=='prop'?{onlyFixtureId:tempId}:{})}).map;
+  const result=placeProps(map,config,catalog,undefined,reserved,{onlyRole:intentRole as 'prop'|'decoration'|'vegetation',facing:old.direction,yawOffset:old.yawOffset??0,...(intentRole!=='prop'?{onlyFixtureId:tempId}:{})}).map;
   const inserted=result.propInstances?.find(p=>!source.propInstances?.some(old=>old.id===p.id));
   // The generated ID may match the removed ID, which is desirable and still identifies the replacement.
   const changed=inserted??result.propInstances?.find(p=>p.x===old.x&&p.row===old.row&&p.bindingId===bindingId);
@@ -630,6 +655,70 @@ export function replacePropInstance(source: GridMap, instanceId: string, binding
   const errors=[...propValidationIssues(result,bindings),...wallMountIssues(result,bindings)].filter(i=>i.severity==='error');
   if(errors.length)throw new Error(errors.map(i=>i.message).join(' '));
   return result;
+}
+
+/** Rotate one complete measured object. Failed trials never change the source map. */
+export function rotatePropInstance(source: GridMap, instanceId: string, yaw: number, settings: GenerationSettings, bindings: AssetBinding[], reserved: Cell[] = []): GridMap {
+  const old=source.propInstances?.find(p=>p.id===instanceId),binding=bindings.find(b=>b.id===old?.bindingId);
+  if(!old||!binding?.prop?.size||!Number.isFinite(yaw)||Math.abs(yaw)>1000000)throw new Error('회전할 소품과 유효한 Y 회전 각도를 확인해 주세요.');
+  const locks=new Set((source.lockedCells??[]).map(key));
+  if(old.cells.some(c=>locks.has(key(c))))throw new Error('잠긴 소품은 회전할 수 없습니다.');
+  const size=propWorldSize(binding,normalizePropYaw(yaw))!,cs=source.cellSize;
+  const oldCenterX=old.x*cs+old.offset.x+binding.offset.x,oldCenterR=old.row*cs-old.offset.z-binding.offset.z;
+  const forbidden=new Set([...reserved,...teleportReservedCells(source)].map(key));
+  const oldCells=new Set(old.cells.map(key));
+  for(const override of source.assetOverrides)if(override.role==='prop'&&!oldCells.has(key(override)))forbidden.add(key(override));
+  const others=new Set((source.propInstances??[]).filter(p=>p.id!==old.id).flatMap(p=>p.cells.map(key)));
+  const fixtureVolumes:LocalBounds[]=[];
+  // Reserve complete fixture footprints on the floor and check overhead fixtures in three dimensions.
+  for(const fixture of source.fixtures??[]){
+    if(fixture.wall){fixtureVolumes.push(...fixture.wall.bounds);continue;}
+    const b=resolveFixtureBinding(source,bindings,fixture);
+    if(!b){if((fixture.anchor??'floor')==='floor')forbidden.add(key(fixture));continue;}
+    const angle=(fixture.direction+b.rotationY)*Math.PI/180,cos=Math.cos(angle),sin=Math.sin(angle),native=b.bounds?.size??b.prop?.size;
+    const measured=native?{x:Math.abs(native.x*b.scale.x*cos)+Math.abs(native.z*b.scale.z*sin),y:Math.abs(native.y*b.scale.y),z:Math.abs(native.x*b.scale.x*sin)+Math.abs(native.z*b.scale.z*cos)}:undefined;
+    if(!measured){if((fixture.anchor??'floor')==='floor')forbidden.add(key(fixture));continue;}
+    const anchor=fixturePosition(source,fixture),cx=(b.bounds?.center.x??0)*b.scale.x,cz=(b.bounds?.center.z??0)*b.scale.z;
+    const center={x:anchor.x+b.offset.x+cos*cx+sin*cz,y:anchor.y+b.offset.y+(b.bounds?b.bounds.center.y*b.scale.y:measured.y/2),z:anchor.z+b.offset.z-sin*cx+cos*cz};
+    fixtureVolumes.push({center,size:measured});
+    if((fixture.anchor??'floor')!=='floor')continue;
+    const x=center.x+(source.width-1)*cs/2,row=(source.height-1)*cs/2-center.z;
+    for(let r=Math.floor((row-measured.z/2)/cs+.5+1e-8);r<=Math.ceil((row+measured.z/2)/cs-.5-1e-8);r++)
+      for(let xCell=Math.floor((x-measured.x/2)/cs+.5+1e-8);xCell<=Math.ceil((x+measured.x/2)/cs-.5-1e-8);xCell++)forbidden.add(key({x:xCell,row:r}));
+  }
+  for(const marker of source.markers??[])forbidden.add(key(marker));
+  const candidates:{x:number;row:number;width:number;height:number;cx:number;cr:number}[]=[];
+  const minX=Math.floor((oldCenterX-size.x/2)/cs+.5+1e-8),maxX=Math.ceil((oldCenterX+size.x/2)/cs-.5-1e-8);
+  const minR=Math.floor((oldCenterR-size.z/2)/cs+.5+1e-8),maxR=Math.ceil((oldCenterR+size.z/2)/cs-.5-1e-8);
+  candidates.push({x:minX,row:minR,width:maxX-minX+1,height:maxR-minR+1,cx:oldCenterX,cr:oldCenterR});
+  const width=Math.max(1,Math.ceil(size.x/cs-1e-8)),height=Math.max(1,Math.ceil(size.z/cs-1e-8));
+  const nearestX=Math.round(oldCenterX/cs-(width-1)/2),nearestR=Math.round(oldCenterR/cs-(height-1)/2);
+  const alternatives:typeof candidates=[];
+  for(let dr=-1;dr<=1;dr++)for(let dx=-1;dx<=1;dx++){
+    const x=nearestX+dx,row=nearestR+dr;
+    alternatives.push({x,row,width,height,cx:Math.max((x-.5)*cs+size.x/2,Math.min((x+width-.5)*cs-size.x/2,oldCenterX)),cr:Math.max((row-.5)*cs+size.z/2,Math.min((row+height-.5)*cs-size.z/2,oldCenterR))});
+  }
+  alternatives.sort((a,b)=>(a.cx-oldCenterX)**2+(a.cr-oldCenterR)**2-((b.cx-oldCenterX)**2+(b.cr-oldCenterR)**2)||a.row-b.row||a.x-b.x);
+  candidates.push(...alternatives);
+  let failure='회전한 크기가 들어갈 공간이 없습니다.';
+  for(const candidate of candidates){
+    if(candidate.width*candidate.height>1600)continue;
+    const cells=Array.from({length:candidate.width*candidate.height},(_,i)=>({x:candidate.x+i%candidate.width,row:candidate.row+Math.floor(i/candidate.width)}));
+    if(cells.some(c=>c.x<0||c.row<0||c.x>=source.width||c.row>=source.height||locks.has(key(c))||others.has(key(c))||forbidden.has(key(c))||!'.P'.includes(source.rows[c.row]?.[c.x]??'_')||source.rows[c.row][c.x]==='P'&&!oldCells.has(key(c))||Math.abs(source.elevations[c.row][c.x]-source.elevations[old.row][old.x])>1e-6))continue;
+    const trial=structuredClone(source),rows=trial.rows.map(r=>[...r]);
+    for(const c of old.cells)if(rows[c.row][c.x]==='P')rows[c.row][c.x]='.';
+    const prop=trial.propInstances!.find(p=>p.id===old.id)!;
+    Object.assign(prop,{x:candidate.x,row:candidate.row,size:{...size},cells,yawOffset:normalizePropYaw(yaw)-old.direction,offset:{x:candidate.cx-candidate.x*cs-binding.offset.x,y:old.offset.y,z:candidate.row*cs-candidate.cr-binding.offset.z},authored:true,provenance:'manual'});
+    const position=propPosition(trial,prop,binding);
+    if(fixtureVolumes.some(v=>Math.abs(position.x-v.center.x)<(size.x+v.size.x)/2-1e-6&&Math.abs(position.z-v.center.z)<(size.z+v.size.z)/2-1e-6&&position.y<v.center.y+v.size.y/2-1e-6&&position.y+size.y>v.center.y-v.size.y/2+1e-6)){failure='회전한 소품이 기존 부착물과 겹칩니다.';continue;}
+    for(const c of cells)if(prop.blocksMovement)rows[c.row][c.x]='P';
+    trial.rows=rows.map(r=>r.join(''));markPropGroupAuthored(trial,old.id);
+    const errors=[...propValidationIssues(trial,bindings),...analyzeLevelDesign(trial,settings).issues,...wallMountIssues(trial,bindings),...teleportIssues(trial,bindings)].filter(i=>i.severity==='error');
+    if(errors.length){failure=errors[0].message;continue;}
+    if(!connected(trial)){failure='회전 후 기존 바닥 동선이 나뉩니다.';continue;}
+    return trial;
+  }
+  throw new Error(`소품을 회전할 수 없습니다. ${failure}`);
 }
 
 export function insertPropInstance(source: GridMap, at: Cell, bindingId: string, settings: GenerationSettings, bindings: AssetBinding[], reserved: Cell[] = []): GridMap {

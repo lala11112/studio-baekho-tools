@@ -55,6 +55,7 @@ try {
     assert.ok(pipes.every(fixture => fixture.wall.sockets.every(socket => Math.abs(socket.position.y - expected) < 1e-6)), `all connected pipe sockets share Y ${expected}`);
   };
   await open(input);
+  assert.equal(await control('runLayout').inputValue(), 'legacy', 'older projects retain their original wall layout');
   assert.equal(await control('runHeightMode').inputValue(), 'asset', 'older settings keep the asset height');
   assert.equal(await control('verticalRangeMode').inputValue(), 'full', 'older settings keep the full wall range');
   await choose('runHeightMode', 'fixed'); await choose('runHeightReference', 'floor'); await number('runHeightValue', 1.25);
@@ -99,6 +100,31 @@ try {
   await open(vertical.path); assert.equal(await control('verticalRangeMode').inputValue(), 'custom'); assert.equal(await control('verticalRangeEnd').inputValue(), '2.5');
   await control('verticalRangeMode').scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(output, 'vertical-range.png') });
+
+  await open(input); await choose('runLayout', 'composed'); await choose('runHeightMode', 'auto');
+  await choose('runOrientation', 'both');
+  await control('connectRuns').check(); await expand();
+  await control('singles').uncheck(); await expand();
+  await number('runDensity', 70); await action('place-wall-mounts');
+  const composed = await save('composed-auto');
+  const networks = Map.groupBy(runs(composed.project), fixture => fixture.wall.runId);
+  assert.ok([...networks.values()].some(network => new Set(network.flatMap(fixture => {
+    const sockets = fixture.wall.sockets;
+    return sockets.length === 2 && sockets.every(socket => Math.abs(socket.direction.y) < .001) && Math.abs(sockets[0].position.y - sockets[1].position.y) < 1e-6
+      ? [sockets[0].position.y.toFixed(5)] : [];
+  })).size > 1), 'one composed network continues horizontally at different heights');
+  await action('reapply-wall-runs'); const recomposed = await save('composed-repeat');
+  assert.deepEqual(recomposed.project.map.fixtures, composed.project.map.fixtures, 'repeat reapplication is stable');
+  await open(composed.path);
+  assert.equal(await control('runLayout').inputValue(), 'composed');
+  assert.equal(await control('runHeightMode').inputValue(), 'auto');
+  assert.deepEqual((await save('composed-reopened')).project, composed.project);
+  await choose('runHeightMode', 'fixed'); await number('runHeightValue', 3.5);
+  await action('reapply-wall-runs');
+  const composedFixed = await save('composed-fixed'); assertHorizontalHeight(composedFixed.project, 3.5);
+  await page.locator('[data-action="undo"]').click(); await expand();
+  assert.deepEqual((await save('composed-undo')).project.map.fixtures, composed.project.map.fixtures, 'one Undo restores the complete multi-height networks');
+  await control('runLayout').scrollIntoViewIfNeeded(); await page.screenshot({ path: resolve(output, 'composed-auto.png') });
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ success: true, horizontal: runs(high.project).length, random: runs(random.project).length, vertical: verticalRuns.length, output }));
 } finally { await app.close(); }

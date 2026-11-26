@@ -5,6 +5,7 @@ import { connectionAt, connectionPose, doorRotation, FLOOR_THICKNESS_RATIO, reso
 import { fixturePosition, markerPosition } from './shared/features';
 import type { ModuleTransform, RegionRect } from './shared/editing';
 import { propPosition } from './shared/props';
+import { propFrontYaw, propRootYaw } from './shared/prop-orientation';
 import type { LevelDesignReport } from './shared/level-design';
 import { floorSlabBounds, resolvedStructureFill, resolvedCliffFace } from './shared/structures';
 import { placeholderWallBinding, wallPlaceholderLabel } from './shared/wall-placeholders';
@@ -69,7 +70,8 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
   const selectedUnmeasured = !!options.selected && map.rows[options.selected.row]?.[options.selected.x] === 'P'
     && !explicitPropCells.has(`${options.selected.x}:${options.selected.row}`);
   const selectedWall = map.fixtures?.find(fixture => fixture.id === options.selectedFixture && fixture.wall);
-  const propKey = !selectedWall && (selectedProp || unmeasuredCount) ? document.createElement('div') : null;
+  const selectedTeleport = options.showMarkers !== false ? map.markers?.find(marker => marker.kind === 'teleport' && marker.id === options.selectedMarker) : undefined;
+  const propKey = !selectedWall && !selectedTeleport && (selectedProp || unmeasuredCount) ? document.createElement('div') : null;
   const meters = (value: number) => String(Number(value.toFixed(3)));
   if (propKey) {
     propKey.className = 'preview-prop-key';
@@ -81,7 +83,9 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
       propKey.dataset.previewPropSelection = 'measured';
       line(options.bindings?.find(binding => binding.id === selectedProp.bindingId)?.label ?? selectedProp.bindingId, true);
       line(`측정 크기 · X ${meters(selectedProp.size.x)} × Y ${meters(selectedProp.size.y)} × Z ${meters(selectedProp.size.z)} m`);
-      line('사용자 배율·회전을 반영한 외곽 박스');
+      const binding = options.bindings?.find(item => item.id === selectedProp.bindingId);
+      line('회전한 원본 크기 · 점선은 점유 경계');
+      if (binding) line(`정면 ${meters(propFrontYaw(selectedProp, binding))}° · 화살표 방향`);
     } else if (selectedUnmeasured) {
       const binding = resolveBinding(map, options.bindings ?? [], options.selected!.x, options.selected!.row, 'prop');
       propKey.dataset.previewPropSelection = 'unmeasured';
@@ -95,7 +99,7 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
     }
     host.appendChild(propKey);
   }
-  const wallKey = selectedWall ? document.createElement('div') : null;
+  const wallKey = selectedWall && !selectedTeleport ? document.createElement('div') : null;
   if (wallKey && selectedWall?.wall) {
     const wall = selectedWall.wall, binding = options.bindings?.find(item => item.id === selectedWall.bindingId);
     wallKey.className = 'preview-prop-key'; wallKey.dataset.previewWallSelection = selectedWall.id; wallKey.setAttribute('role', 'status');
@@ -103,6 +107,17 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
     const vertical = wall.sockets.some(socket => Math.abs(socket.direction.y) > .9), horizontal = wall.sockets.some(socket => Math.hypot(socket.direction.x, socket.direction.z) > .9);
     const detail = document.createElement('span'); detail.textContent = `${wall.placeholder ? '임시' : '측정'} 충돌 상자 ${wall.bounds.length}개 · 설치 높이 Y ${meters(wall.position.y)}m${wall.runId ? ' · 연결 구간' : ''}${vertical && horizontal ? ' · 가로·세로 연결' : vertical ? ' · 세로 부품' : ''}`; wallKey.appendChild(detail);
     const note = document.createElement('span'); note.textContent = wall.placeholder ? '배치 확인용 형상 · 선택한 부착물에서 실제 프리팹으로 교체하세요.' : '프리팹 배율·피벗·연결점을 반영한 설치 형상'; wallKey.appendChild(note); host.appendChild(wallKey);
+  }
+  const teleportKey = selectedTeleport ? document.createElement('div') : null;
+  if (teleportKey && selectedTeleport) {
+    teleportKey.className = 'preview-prop-key preview-teleport-key';
+    teleportKey.dataset.previewTeleportSelection = selectedTeleport.id;
+    teleportKey.dataset.teleportRadius = String(selectedTeleport.clearance?.radius ?? .4);
+    teleportKey.setAttribute('role', 'status');
+    const title = document.createElement('strong'); title.textContent = `◎ ${selectedTeleport.label}`; teleportKey.appendChild(title);
+    const detail = document.createElement('span'); detail.textContent = `착지 반경 ${meters(selectedTeleport.clearance?.radius ?? .4)}m · 캐릭터 높이 ${meters(selectedTeleport.clearance?.height ?? 2)}m`; teleportKey.appendChild(detail);
+    const note = document.createElement('span'); note.textContent = '바닥의 원은 캐릭터 착지 영역입니다.'; teleportKey.appendChild(note);
+    host.appendChild(teleportKey);
   }
   const span = Math.max(map.width, map.height) * cell;
   const elevations = map.elevations.flat();
@@ -415,9 +430,27 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
       const color=new THREE.Color().setHSL((hash%360)/360,.28,.52);
       propMaterials.set(prop.category,material(color.getHex()));
     }
-    const mesh=box(position.x,position.y+prop.size.y/2,position.z,prop.size.x,prop.size.y,prop.size.z,
+    const native = binding?.prop?.size;
+    const dimensions = native && binding ? { x: Math.abs(native.x * binding.scale.x), y: Math.abs(native.y * binding.scale.y), z: Math.abs(native.z * binding.scale.z) } : prop.size;
+    const mesh=box(position.x,position.y+dimensions.y/2,position.z,dimensions.x,dimensions.y,dimensions.z,
       selected?palette.selectedConnection:isVegetation?palette.vegetation:propMaterials.get(prop.category)!,prop);
+    if (native && binding) mesh.rotation.y = THREE.MathUtils.degToRad(propRootYaw(prop, binding));
     mesh.name=`prop:${prop.id}`;mesh.userData.propId=prop.id;
+    if (selected) {
+      const edges = new THREE.EdgesGeometry(boxGeometry); geometries.add(edges);
+      const outlineMaterial = new THREE.LineDashedMaterial({ color: 0x8a5a3e, dashSize: .12, gapSize: .08, transparent: true, opacity: .8 }); materials.add(outlineMaterial);
+      const outline = new THREE.LineSegments(edges, outlineMaterial);
+      outline.position.set(position.x, position.y + prop.size.y / 2, position.z);
+      outline.scale.set(prop.size.x, prop.size.y, prop.size.z); outline.computeLineDistances(); parent.add(outline);
+      if (binding) {
+        const angle = THREE.MathUtils.degToRad(propFrontYaw(prop, binding));
+        const origin = new THREE.Vector3(position.x, position.y + prop.size.y + .08, position.z);
+        const length = Math.max(.5, Math.min(2, Math.max(dimensions.x, dimensions.z) * .7));
+        const arrow = new THREE.ArrowHelper(new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle)), origin, length, 0x126d8c, Math.min(.3, length * .25), Math.min(.2, length * .18));
+        arrow.name = `prop-front:${prop.id}`; parent.add(arrow);
+        for (const part of [arrow.line, arrow.cone]) { geometries.add(part.geometry); for (const material of Array.isArray(part.material) ? part.material : [part.material]) materials.add(material); }
+      }
+    }
     if(interactive)for(const c of prop.cells)cellTops.set(`${c.x}:${c.row}`,position.y+prop.size.y);
     // Large catalogs use selection labels to avoid thousands of canvas textures.
     if(selected||(map.propInstances?.length??0)<=40) addIcon(`${roleLabel} · ${prop.category} · ${meters(prop.size.x)} × ${meters(prop.size.y)} × ${meters(prop.size.z)}m`,
@@ -527,8 +560,18 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
   }
   if (options.showMarkers !== false) for (const marker of map.markers ?? []) {
     const position = markerPosition(map, marker);
-    addIcon(marker.id, `${{ enemy: '적', reward: '보상', event: '이벤트' }[marker.kind]} · ${marker.label}`,
-      { ...position, y: position.y + cell * 0.85 }, interactive && options.selectedMarker === marker.id, { markerId: marker.id }, 0.95);
+    const selected = interactive && options.selectedMarker === marker.id;
+    addIcon(marker.kind === 'teleport' ? '◎ 순간이동' : marker.id, `${{ enemy: '적', reward: '보상', event: '이벤트', teleport: '안전 착지' }[marker.kind]} · ${marker.label}`,
+      { ...position, y: position.y + cell * 0.85 }, selected, { markerId: marker.id }, 0.95, marker.kind === 'teleport' ? '#197b81' : undefined);
+    if (marker.kind === 'teleport' && selected) {
+      const radius = marker.clearance?.radius ?? .4;
+      const diskGeometry = new THREE.CircleGeometry(radius, 48); geometries.add(diskGeometry);
+      const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x229ca2, transparent: true, opacity: .25, depthWrite: false, side: THREE.DoubleSide }); materials.add(diskMaterial);
+      const disk = new THREE.Mesh(diskGeometry, diskMaterial); disk.name = `teleport-landing:${marker.id}`; disk.rotation.x = -Math.PI / 2; disk.position.set(position.x, position.y + .015, position.z); disk.userData.markerId = marker.id; parent.add(disk); if (interactive) pickable.push(disk);
+      const ringGeometry = new THREE.RingGeometry(Math.max(0, radius - .025), radius + .025, 48); geometries.add(ringGeometry);
+      const ringMaterial = new THREE.MeshBasicMaterial({ color: 0x197b81, side: THREE.DoubleSide, depthWrite: false }); materials.add(ringMaterial);
+      const ring = new THREE.Mesh(ringGeometry, ringMaterial); ring.name = `teleport-radius:${marker.id}`; ring.rotation.x = -Math.PI / 2; ring.position.copy(disk.position); parent.add(ring);
+    }
   }
   };
   drawMap(map, scene, true,options.bindings);
@@ -741,6 +784,7 @@ export function mountPreview(host: HTMLElement, map: GridMap, options: PreviewOp
       renderer.domElement.remove();
       connectionKey?.remove();
       propKey?.remove();
+      teleportKey?.remove();
       wallKey?.remove();
       designLegend?.remove();
     },

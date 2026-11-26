@@ -1,8 +1,8 @@
 import { defaultAssetScale } from './asset-scaling';
 import { ASSET_ROLES } from './features';
 import { MAX_BINDINGS, parseBindings } from './map';
-import { suggestPropDefinition } from './props';
-import type { AssetBinding, AssetRole, LocalBounds, PrefabAsset, Vec3, WallMountDefinition } from './types';
+import { parseUnityPropSetMembership, suggestPropDefinition } from './props';
+import type { AssetBinding, AssetRole, LocalBounds, PrefabAsset, UnityPropSetMembership, Vec3, WallMountDefinition } from './types';
 
 export interface UnityAssetCatalogEntry {
   guid: string;
@@ -19,11 +19,14 @@ export interface UnityAssetCatalogEntry {
   wallMount?: WallMountDefinition;
 }
 export interface UnityAssetCatalogDiagnostic { path: string; reason: string }
+export interface UnityPropSetCatalogEntry extends UnityPropSetMembership { path: string; prefabGuids: string[] }
 export interface UnityAssetCatalog {
   format: 'baekho-asset-catalog';
   version: 1;
   assets: UnityAssetCatalogEntry[];
   skipped: UnityAssetCatalogDiagnostic[];
+  /** Missing means an older exporter; an explicit empty array removes imported memberships. */
+  propSets?: UnityPropSetCatalogEntry[];
 }
 export interface UnityAssetCatalogImportResult {
   bindings: AssetBinding[];
@@ -33,6 +36,8 @@ export interface UnityAssetCatalogImportResult {
   unmatched: number;
   byRole: Record<AssetRole, { added: number; updated: number }>;
   skipped: UnityAssetCatalogDiagnostic[];
+  propSetCount: number;
+  propSetMembers: number;
 }
 
 const MAX_CATALOG_ENTRIES = 20_000;
@@ -51,7 +56,7 @@ const supportsWallMount = (role: AssetRole) => !['floor', 'wall', 'door', 'prop'
 
 /** A separate, versioned format: legacy prop measurement JSON cannot be mistaken for a registration catalog. */
 export function parseUnityAssetCatalog(value: unknown): UnityAssetCatalog {
-  if (!record(value) || !only(value, ['format', 'version', 'assets', 'skipped']) || value.format !== 'baekho-asset-catalog' || value.version !== 1
+  if (!record(value) || !only(value, ['format', 'version', 'assets', 'skipped', 'propSets']) || value.format !== 'baekho-asset-catalog' || value.version !== 1
     || !Array.isArray(value.assets) || value.assets.length > MAX_CATALOG_ENTRIES || !Array.isArray(value.skipped) || value.skipped.length > MAX_CATALOG_ENTRIES) {
     throw new Error('Unity 프리팹 카탈로그의 형식과 버전(format: baekho-asset-catalog, version: 1)을 확인해 주세요. 항목은 최대 20,000개입니다.');
   }
@@ -85,7 +90,29 @@ export function parseUnityAssetCatalog(value: unknown): UnityAssetCatalog {
     if (!record(entry) || !only(entry, ['path', 'reason']) || !plainText(entry.path, 2000) || !plainText(entry.reason, 2000)) throw new Error('Unity 프리팹 제외 항목의 경로와 이유는 2,000자 이하의 문자열이어야 합니다.');
     return { path: entry.path, reason: entry.reason };
   });
-  return { format: 'baekho-asset-catalog', version: 1, assets, skipped };
+  let propSets: UnityPropSetCatalogEntry[] | undefined;
+  if (value.propSets !== undefined) {
+    if (!Array.isArray(value.propSets) || value.propSets.length > 256) throw new Error('Unity 소품 세트 목록은 최대 256개여야 합니다.');
+    const setGuids = new Set<string>(), setPaths = new Set<string>(), byGuid = new Map(assets.map(asset => [asset.guid, asset]));
+    propSets = Array.from(value.propSets, (entry: unknown, index): UnityPropSetCatalogEntry => {
+      try {
+        if (!record(entry) || !only(entry, ['guid', 'path', 'label', 'usage', 'arrangement', 'prefabGuids'])
+          || !plainText(entry.path, 2000) || !entry.path.startsWith('Assets/') || !/\.asset$/i.test(entry.path)
+          || entry.path.includes('\\') || !entry.path.split('/').every(part => !!part && part !== '.' && part !== '..')
+          || !Array.isArray(entry.prefabGuids) || !entry.prefabGuids.length || entry.prefabGuids.length > 256
+          || !entry.prefabGuids.every(guid => typeof guid === 'string' && GUID.test(guid))) throw new Error('세트 경로와 프리팹 GUID 목록(1~256개)을 확인해 주세요.');
+        const membership = parseUnityPropSetMembership({ guid: entry.guid, label: entry.label, usage: entry.usage, arrangement: entry.arrangement });
+        const prefabGuids = entry.prefabGuids.map(guid => (guid as string).toLowerCase());
+        if (setGuids.has(membership.guid) || setPaths.has(entry.path.toLowerCase()) || new Set(prefabGuids).size !== prefabGuids.length) throw new Error('세트 또는 프리팹 GUID가 중복됩니다.');
+        if (prefabGuids.some(guid => { const asset = byGuid.get(guid); return !asset || !propRole(asset.role) || !!asset.wallMount; })) throw new Error('세트에는 카탈로그에 포함된 바닥용 소품·장식·식생 프리팹만 지정할 수 있습니다.');
+        setGuids.add(membership.guid); setPaths.add(entry.path.toLowerCase());
+        return { ...membership, path: entry.path, prefabGuids };
+      } catch (error) {
+        throw new Error(`Unity 프리팹 카탈로그 propSets[${index}]: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+  }
+  return { format: 'baekho-asset-catalog', version: 1, assets, skipped, ...(propSets !== undefined ? { propSets } : {}) };
 }
 
 /**
@@ -114,6 +141,11 @@ export function importUnityAssetCatalogBindings(bindings: AssetBinding[], value:
     return false;
   });
   const byGuid = new Map(matched.map(entry => [entry.guid, entry]));
+  const propSets = source.propSets?.flatMap(set => {
+    const prefabGuids = set.prefabGuids.filter(guid => byGuid.has(guid));
+    if (prefabGuids.length !== set.prefabGuids.length) skipped.push({ path: set.path, reason: `현재 프로젝트에서 확인되지 않은 세트 멤버 ${set.prefabGuids.length - prefabGuids.length}개를 제외했습니다.` });
+    return prefabGuids.length ? [{ ...set, prefabGuids }] : [];
+  });
   const existingGuids = new Set(bindings.map(binding => binding.prefabGuid.toLowerCase()));
   const additions = matched.filter(entry => !existingGuids.has(entry.guid));
   for (const binding of bindings) {
@@ -161,8 +193,23 @@ export function importUnityAssetCatalogBindings(bindings: AssetBinding[], value:
     return measured(binding, entry);
   });
   const result = [...refreshed, ...added];
+  if (propSets !== undefined) {
+    const memberships = new Map<string, UnityPropSetMembership[]>();
+    for (const set of propSets) for (const guid of set.prefabGuids) {
+      const membership: UnityPropSetMembership = { guid: set.guid, label: set.label, usage: set.usage, arrangement: set.arrangement };
+      memberships.set(guid, [...(memberships.get(guid) ?? []), membership]);
+    }
+    for (const binding of result) {
+      if (!propRole(binding.role) || !binding.prop) continue;
+      const sets = memberships.get(binding.prefabGuid.toLowerCase());
+      // Only Unity-owned memberships refresh; explicit app composition and all placement policy remain intact.
+      if (sets?.length && !binding.wallMount) binding.prop.unitySets = structuredClone(sets);
+      else delete binding.prop.unitySets;
+    }
+  }
   // A preserved installation kind can be incompatible with newly measured sockets; reject the whole edit.
   parseBindings(result);
-  return { bindings: result, catalog: { ...source, assets: structuredClone(matched), skipped: structuredClone(skipped) },
-    added: added.length, updated, unmatched: source.assets.length - matched.length, byRole, skipped };
+  return { bindings: result, catalog: { ...source, assets: structuredClone(matched), skipped: structuredClone(skipped), ...(propSets !== undefined ? { propSets: structuredClone(propSets) } : {}) },
+    added: added.length, updated, unmatched: source.assets.length - matched.length, byRole, skipped,
+    propSetCount: propSets?.length ?? 0, propSetMembers: new Set(propSets?.flatMap(set => set.prefabGuids) ?? []).size };
 }

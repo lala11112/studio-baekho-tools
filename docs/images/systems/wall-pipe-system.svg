@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="660" viewBox="0 0 1120 660" role="img" aria-labelledby="pipe-title pipe-desc">
+  <title id="pipe-title">벽 부착물과 배관 조립</title>
+  <desc id="pipe-desc">작동 원리를 설명하는 개념도. 벽을 따라 주 배관과 T자 분기를 조립하고 엘보로 높이를 바꾸며 문 개구부를 보호한다. 연결점은 위치가 일치하고 방향이 반대여야 하며 실측 부품을 늘이지 않는다.</desc>
+  <defs>
+    <marker id="pipe-teal-arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 1 L7 4.5 L0 8" fill="none" stroke="#186f78" stroke-width="2"/></marker>
+    <marker id="pipe-blue-arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 1 L7 4.5 L0 8" fill="none" stroke="#305dd7" stroke-width="2"/></marker>
+  </defs>
+  <style>text{font-family:'Malgun Gothic',sans-serif;fill:#172b44;font-size:18px}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.muted{fill:#57677e}.teal{fill:#186f78}.blue{fill:#305dd7}.warn{fill:#ae6a22}.strong{font-weight:700}</style>
+  <rect width="1120" height="660" fill="#f5f7fb"/>
+  <text x="28" y="45" class="title">벽 부착물과 배관 조립</text>
+  <text x="28" y="77" class="muted">작동 원리를 설명하는 개념도 · 실제 화면이나 특정 프리팹의 규격이 아닙니다</text>
+  <rect x="24" y="101" width="706" height="527" rx="16" fill="#fff" stroke="#d7dfea"/>
+  <rect x="750" y="101" width="346" height="527" rx="16" fill="#fff" stroke="#d7dfea"/>
+  <text x="48" y="139" class="heading">실측 부품을 벽면에 연결</text>
+  <rect x="49" y="167" width="656" height="352" rx="6" fill="#f0f4f7" stroke="#b7c5d3"/>
+  <path d="M49 255 H705 M49 343 H705 M49 431 H705 M180 167 V255 M440 167 V255 M310 255 V343 M570 255 V343 M180 343 V431 M310 431 V519" stroke="#dde5ed" stroke-width="2"/>
+  <path d="M86 229 H591 Q607 229 607 245 V290 Q607 306 623 306 H674" fill="none" stroke="#186f78" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M253 229 V363" fill="none" stroke="#186f78" stroke-width="14"/>
+  <path d="M86 217 V241 M674 294 V318 M241 363 H265" stroke="#172b44" stroke-width="6"/>
+  <rect x="242" y="218" width="22" height="22" rx="4" fill="#305dd7"/>
+  <circle cx="594" cy="232" r="9" fill="#305dd7"/>
+  <circle cx="612" cy="300" r="9" fill="#305dd7"/>
+  <circle cx="168" cy="229" r="5" fill="#fff" stroke="#186f78" stroke-width="2"/>
+  <circle cx="360" cy="229" r="5" fill="#fff" stroke="#186f78" stroke-width="2"/>
+  <circle cx="480" cy="229" r="5" fill="#fff" stroke="#186f78" stroke-width="2"/>
+  <text x="90" y="200" class="teal strong">긴 주 배관</text>
+  <text x="284" y="286" class="blue strong">T자 분기</text>
+  <path d="M279 278 L260 241" stroke="#305dd7" stroke-width="2" fill="none"/>
+  <text x="102" y="322" class="teal">짧은 세로 분기</text>
+  <text x="227" y="402" class="muted">끝마감</text>
+  <text x="472" y="195" class="blue">엘보로 높이 변경</text>
+  <path d="M589 201 L599 220" stroke="#305dd7" stroke-width="2" fill="none"/>
+  <rect x="429" y="348" width="154" height="171" fill="#fff" stroke="#ae6a22" stroke-width="3" stroke-dasharray="9 6"/>
+  <text x="461" y="407" class="warn strong">문 개구부</text>
+  <text x="452" y="438" class="warn">겹침 금지</text>
+  <text x="449" y="483" class="muted">통행 공간 보호</text>
+  <text x="48" y="558" class="strong">원본 크기와 연결 규격으로 맞춥니다</text>
+  <text x="48" y="590" class="muted">벽 지지 · 설치 높이 · 천장 · 기존 물체와의 충돌을 검사</text>
+  <text x="48" y="617" class="muted">수동 수정 · 잠금 · 참조된 연결망은 자동 재배치에서 보호</text>
+  <text x="774" y="139" class="heading">소켓 연결 조건</text>
+  <text x="774" y="170" class="muted">연결점을 맞추어 조립합니다</text>
+  <rect x="779" y="219" width="129" height="48" rx="5" fill="#dff0ec" stroke="#186f78" stroke-width="2"/>
+  <rect x="932" y="219" width="137" height="48" rx="5" fill="#e6edff" stroke="#305dd7" stroke-width="2"/>
+  <text x="806" y="249" class="teal">부품 A</text>
+  <text x="961" y="249" class="blue">부품 B</text>
+  <circle cx="908" cy="243" r="7" fill="#fff" stroke="#186f78" stroke-width="3"/>
+  <circle cx="932" cy="243" r="7" fill="#fff" stroke="#305dd7" stroke-width="3"/>
+  <path d="M895 291 H924" stroke="#186f78" stroke-width="3" marker-end="url(#pipe-teal-arrow)"/>
+  <path d="M945 314 H916" stroke="#305dd7" stroke-width="3" marker-end="url(#pipe-blue-arrow)"/>
+  <text x="789" y="356" class="strong">위치 일치 + 방향 반대</text>
+  <text x="779" y="390" class="muted">그림은 연결점을 벌려 표시</text>
+  <line x1="774" y1="418" x2="1072" y2="418" stroke="#d7dfea"/>
+  <text x="774" y="454" class="heading">완성 연결망 검사</text>
+  <circle cx="784" cy="486" r="4" fill="#186f78"/><text x="799" y="492">한 소켓에 중복 연결 없음</text>
+  <circle cx="784" cy="522" r="4" fill="#186f78"/><text x="799" y="528">끊어진 구간과 열린 끝 없음</text>
+  <circle cx="784" cy="558" r="4" fill="#186f78"/><text x="799" y="564">부품을 늘이지 않고 조립</text>
+  <text x="774" y="607" class="muted">맞는 부품이 없으면 후보를 생략</text>
+</svg>

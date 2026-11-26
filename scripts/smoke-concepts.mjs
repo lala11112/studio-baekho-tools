@@ -11,7 +11,7 @@ const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJA
 const output = resolve('.local/concepts-smoke');
 const userData = resolve('.local/concepts-smoke-user', `run-${Date.now()}`);
 await mkdir(output, { recursive: true }); await mkdir(userData, { recursive: true });
-const fixture = parseProjectFile({ formatVersion: 1, map: createDemoMap(), settings: { ...DEFAULT_SETTINGS, conceptMode: 'ai', prompt: '' }, bindings: [] });
+const fixture = parseProjectFile({ formatVersion: 1, map: createDemoMap(), settings: { ...DEFAULT_SETTINGS, connectionWidth: 2, conceptMode: 'ai', prompt: '' }, bindings: [] });
 fixture.map.name = '컨셉 검증 원본';
 const fixturePath = resolve(output, 'original.baekho.json'); await writeFile(fixturePath, JSON.stringify(fixture));
 const candidate = structuredClone(fixture.map); candidate.name = 'AI 컨셉 검증 맵';

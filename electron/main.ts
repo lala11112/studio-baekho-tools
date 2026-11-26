@@ -2,8 +2,10 @@ import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 import { readFile, mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
-import type { ScanResult } from '../src/shared/types';
+import type { GenerationProgress, ScanResult } from '../src/shared/types';
 import { CodexService } from './services/codex';
+import { ClaudeCodeService } from './services/claude-code';
+import { AiRouter } from './services/ai-router';
 import { UnityBridgeService } from './services/unity-bridge';
 import { createPageTrustChecker } from './services/page-trust';
 import { scanUnityProject } from './services/unity-project';
@@ -13,6 +15,8 @@ let window: BrowserWindow | null = null;
 let currentScan: ScanResult | null = null;
 let nativeOperation = false;
 let ai: CodexService;
+let claude: ClaudeCodeService;
+let router: AiRouter;
 let unity: UnityBridgeService;
 const productionPage = path.join(__dirname, '../dist/index.html');
 
@@ -70,9 +74,22 @@ function registerHandlers(): void {
     if (result.canceled || !result.filePaths[0]) return ai.getStatus();
     return ai.selectExecutable(result.filePaths[0]);
   }));
-  handle('baekho:generate-concept', (settings, catalog, context) => ai.generateConcept(settings, catalog, context));
-  handle('baekho:generate-image', (settings, region, catalog) => ai.generateImage(settings, region, catalog));
-  handle('baekho:extract-layout', (settings, dataUrl, region, catalog) => ai.extractLayout(settings, dataUrl, region, catalog));
+  handle('baekho:claude-status', () => claude.getStatus());
+  handle('baekho:claude-select', () => nativeAction(async () => {
+    const result = await dialog.showOpenDialog(window!, {
+      title: 'Claude Code 실행 파일 선택', properties: ['openFile'],
+      filters: process.platform === 'win32' ? [{ name: 'Claude Code executable', extensions: ['exe'] }] : [],
+    });
+    if (result.canceled || !result.filePaths[0]) return claude.getStatus();
+    return claude.selectExecutable(result.filePaths[0]);
+  }));
+  handle('baekho:ai-preferences-get', () => router.getPreferences());
+  handle('baekho:ai-preferences-set', value => router.setPreferences(value));
+  handle('baekho:generate-concept', (settings, catalog, context) => router.generateConcept(settings, catalog, context));
+  handle('baekho:generate-image', (settings, region, catalog, context) => router.generateImage(settings, region, catalog, context));
+  handle('baekho:generate-layout', (settings, region, catalog, context) => router.generateLayout(settings, region, catalog, context));
+  handle('baekho:generation-stage', progress => ai.recordGenerationStage(progress));
+  handle('baekho:extract-layout', (settings, dataUrl, region, catalog) => router.extractLayout(settings, dataUrl, region, catalog));
   handle('baekho:import-prop-catalog', () => nativeAction(async () => {
     const result=await dialog.showOpenDialog(window!,{title:'Unity 소품 크기 정보 불러오기',filters:[{name:'Baekho prop catalog',extensions:['json']}],properties:['openFile']});
     if(result.canceled||!result.filePaths[0])return null;
@@ -82,7 +99,7 @@ function registerHandlers(): void {
     try { return JSON.parse(source.replace(/^\uFEFF/, '')); }
     catch { throw new Error('소품 크기 JSON을 읽을 수 없습니다. Unity의 Export Prop Bounds Catalog에서 내보낸 파일을 선택해 주세요.'); }
   }));
-  handle('baekho:cancel-generation', () => ai.cancel());
+  handle('baekho:cancel-generation', () => router.cancel());
   handle('baekho:scan-project', () => nativeAction(async () => {
     const result = await dialog.showOpenDialog(window!, { title: 'Unity 프로젝트 폴더 선택', properties: ['openDirectory'] });
     if (result.canceled || !result.filePaths[0]) return null;
@@ -156,13 +173,15 @@ function registerHandlers(): void {
     const wallModuleScript=await readFile(path.join(app.isPackaged?process.resourcesPath:app.getAppPath(),'unity-importer/Runtime/BaekhoWallModule.cs'),'utf8');
     const wallGuide=await readFile(app.isPackaged?path.join(process.resourcesPath,'unity-importer/WALL_PREFABS.ko.md'):path.join(app.getAppPath(),'docs/wall-mounted-prefabs.md'),'utf8');
     const resourceRoot = path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'unity-importer');
-    const [assetRuntime, assetEditor, assetCatalog] = await Promise.all([
+    const [assetRuntime, assetEditor, assetCatalog, propSetRuntime, propSetEditor] = await Promise.all([
       readFile(path.join(resourceRoot, 'Runtime/BaekhoMapAsset.cs'), 'utf8'),
       readFile(path.join(resourceRoot, 'Editor/BaekhoMapAssetEditor.cs'), 'utf8'),
       readFile(path.join(resourceRoot, 'Editor/BaekhoAssetCatalog.cs'), 'utf8'),
+      readFile(path.join(resourceRoot, 'Runtime/BaekhoPropSet.cs'), 'utf8'),
+      readFile(path.join(resourceRoot, 'Editor/BaekhoPropSetEditor.cs'), 'utf8'),
     ]);
     const bundle = await createExportBundle(value, currentScan, importer, runtimeScript, markerScript, fixtureScript,catalogScript,wallModuleScript,wallGuide,
-      { runtime: assetRuntime, editor: assetEditor, catalog: assetCatalog });
+      { runtime: assetRuntime, editor: assetEditor, catalog: assetCatalog, propSetRuntime, propSetEditor });
     const result = await dialog.showSaveDialog(window!, {
       title: 'Unity 프리팹 제작 번들 내보내기', defaultPath: 'BaekhoMap.zip',
       filters: [{ name: 'Unity import bundle', extensions: ['zip'] }], properties: ['showOverwriteConfirmation'],
@@ -196,13 +215,19 @@ function createWindow(): void {
     if (response === 1) event.preventDefault();
   });
   window.once('ready-to-show', () => window?.show());
-  window.on('closed', () => { ai.cancel(); currentScan = null; window = null; });
+  window.on('closed', () => { router.cancel(); currentScan = null; window = null; });
   if (devUrl) void window.loadURL(devUrl);
   else void window.loadFile(productionPage);
 }
 
-void app.whenReady().then(() => {
-  ai = new CodexService({ dataDirectory: path.join(app.getPath('userData'), 'codex') });
+void app.whenReady().then(async () => {
+  const sendProgress = (progress: GenerationProgress) => {
+    if (window && !window.isDestroyed() && trustedPage(window.webContents.getURL())) window.webContents.send('baekho:generation-progress', progress);
+  };
+  ai = new CodexService({ dataDirectory: path.join(app.getPath('userData'), 'codex'), onProgress: sendProgress });
+  claude = new ClaudeCodeService({ dataDirectory: path.join(app.getPath('userData'), 'claude-code'), onProgress: sendProgress, model: () => router.claudeModel() });
+  router = new AiRouter(ai, claude, app.getPath('userData'));
+  await router.load();
   unity = new UnityBridgeService({
     dataDirectory: path.join(app.getPath('userData'), 'unity'),
     resourceDirectory: path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'unity-importer'),
@@ -213,5 +238,5 @@ void app.whenReady().then(() => {
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on('window-all-closed', () => { ai.cancel(); if (process.platform !== 'darwin') app.quit(); });
-app.on('will-quit', () => { ai?.close(); void unity?.close(); });
+app.on('window-all-closed', () => { router?.cancel(); if (process.platform !== 'darwin') app.quit(); });
+app.on('will-quit', () => { router?.close(); void unity?.close(); });

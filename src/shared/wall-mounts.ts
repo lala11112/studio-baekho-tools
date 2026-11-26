@@ -4,6 +4,8 @@ import { terrainSurfaceY, wallBaseY, wallTopY } from './wall-geometry';
 import type { AssetBinding, Cell, Direction, FixtureRole, GenerationRegion, GenerationSettings, GridMap, LocalBounds, MapConnection, MapFixture, ValidationIssue, Vec3, WallConnector, WallFace, WallMountDefinition, WallMountInstance, WallMountSettings, WallMountSite, WallPlaceholderKind } from './types';
 
 export const DEFAULT_WALL_SETTINGS: WallMountSettings = { enabled: false, singles: true, runs: true, density: 20, runDensity: 40, placeholderFallback: true, runOrientation: 'horizontal' };
+/** New projects opt in; loading an older project never changes its layout policy. */
+export const NEW_WALL_SETTINGS: WallMountSettings = { ...DEFAULT_WALL_SETTINGS, runLayout: 'composed', runOrientation: 'both', connectRuns: true, runHeight: { mode: 'auto', reference: 'floor', min: 1, max: 3 } };
 const EPS = 1e-5, LIMIT = 3200;
 const DIRS: Direction[] = [0, 90, 180, 270];
 const STEPS: Record<Direction, [number, number]> = { 0: [0, -1], 90: [1, 0], 180: [0, 1], 270: [-1, 0] };
@@ -147,6 +149,8 @@ const heightAt = (def: WallMountDefinition, low: number, high: number) => def.he
 function runHeightFamily(family: AssetBinding[], config: WallMountSettings, seed: number, key: string): AssetBinding[] {
   const policy = config.runHeight;
   if (!policy) return family;
+  // Auto also has a useful, deterministic interpretation if the user selects the legacy layout.
+  if (policy.mode === 'auto') return family.map(binding => ({ ...binding, wallMount: { ...binding.wallMount!, heightMode: 'center', height: 0 } }));
   const fraction = hash(`${seed}-run-height-${key}`) / 4294967296;
   const height = policy.mode === 'random' ? policy.min + fraction * (policy.max - policy.min) : policy.min;
   return family.map(binding => ({ ...binding, wallMount: { ...binding.wallMount!, heightMode: policy.reference, height } }));
@@ -557,6 +561,295 @@ function connectRuns(map: GridMap, catalog: AssetBinding[], bindings: AssetBindi
   return result;
 }
 
+/** Socket-space turns work for native off-pivot assets as well as preview geometry. */
+function wallTurns(family: AssetBinding[], side: Side, incoming: Vec3, outgoing: Vec3): Oriented[] {
+  const result: Oriented[] = [];
+  for (const binding of family.filter(b => b.wallMount!.kind === 'elbow')) for (const yaw of DIRS) for (const rotationZ of DIRS) {
+    if (binding.wallMount!.mounts.some(m => !near(norm(transformed(m.direction, binding, yaw, rotationZ)), side.n))) continue;
+    const sockets = worldSockets(binding, { x: 0, y: 0, z: 0 }, yaw, rotationZ);
+    const input = sockets.find(s => near(s.direction, mul(incoming, -1))), output = sockets.find(s => near(s.direction, outgoing));
+    if (input && output) result.push({ binding, yaw, ...(rotationZ ? { rotationZ } : {}), input, output, length: length(sub(output.position, input.position)) });
+  }
+  return result;
+}
+function routeLength(fixtures: MapFixture[]): number {
+  return fixtures.reduce((total, fixture) => { const sockets = fixture.wall!.sockets;
+    if (sockets.length === 3) { const a = sockets[0], b = sockets.find(s => Math.abs(dot(a.direction, s.direction)) < EPS)!;
+      const hub = add(a.position, mul(a.direction, dot(sub(b.position, a.position), a.direction)));
+      return total + sockets.reduce((sum, socket) => sum + length(sub(socket.position, hub)), 0);
+    }
+    if (sockets.length !== 2) return total;
+    const delta = sub(sockets[1].position, sockets[0].position); return total + Math.abs(delta.x) + Math.abs(delta.y) + Math.abs(delta.z);
+  }, 0);
+}
+function sideContains(side: Side, fixture: MapFixture): boolean {
+  return fixture.wall!.bounds.every(box => { const center = dot(sub(box.center, side.start), side.t), radius = (Math.abs(side.t.x) * box.size.x + Math.abs(side.t.z) * box.size.z) / 2; return center - radius >= -EPS && center + radius <= side.length + EPS; });
+}
+/** A capped horizontal spine, optionally stepping to another level exactly once. */
+function composedSideRun(map: GridMap, side: Side, family: AssetBinding[], config: WallMountSettings, ctx: Context, prefix: string, budget: number, seed: number): MapFixture[] | undefined {
+  const travel = side.t, straight = family.filter(b => b.wallMount!.kind === 'straight'), caps = family.filter(b => b.wallMount!.kind === 'endCap');
+  const parts = straight.flatMap(b => oriented(b, side)), starts = caps.flatMap(b => oriented(b, side, mul(travel, -1))), ends = caps.flatMap(b => oriented(b, side));
+  if (!parts.length || !starts.length || !ends.length) return undefined;
+  const sample = parts[0], nativeLength = Math.min(...parts.map(p => p.length));
+  // Two long stretches read as a deliberate service route; tiny isolated scraps do not.
+  if (Math.min(side.length, budget) < nativeLength * 2 + .2) return undefined;
+  const mount = transformed(sample.binding.wallMount!.mounts[0].position, sample.binding, sample.yaw), rail = sub(sample.input.position, mount);
+  const policy = config.runHeight, roomSpan = side.high - side.low;
+  const verticalSigns = hash(`${seed}-${prefix}-rise`) % 2 ? [1, -1] : [-1, 1];
+  const fixedHeight = policy?.reference === 'top' ? side.high - policy.min : side.low + (policy?.min ?? 0);
+  const allowed: [number, number] = policy?.mode === 'fixed' ? [fixedHeight, fixedHeight]
+    : policy?.mode === 'random' ? policy.reference === 'floor' ? [side.low + policy.min, side.low + policy.max] : [side.high - policy.max, side.high - policy.min] : [side.low, side.high];
+  const baseHeights = policy?.mode === 'fixed' ? [policy.reference === 'floor' ? side.low + policy.min : side.high - policy.min]
+    : policy?.mode === 'auto' ? (verticalSigns[0] > 0 ? [.25, .72, .5, .06, .94] : [.72, .25, .5, .94, .06]).map(fraction => side.low + roomSpan * fraction)
+      : policy?.mode === 'random' ? [allowed[0] + (allowed[1] - allowed[0]) * (hash(`${seed}-${prefix}-height`) / 4294967296), allowed[0] + (allowed[1] - allowed[0]) * .2, allowed[0] + (allowed[1] - allowed[0]) * .8]
+        : [heightAt(sample.binding.wallMount!, side.low, side.high)];
+  const stepAllowed = config.runOrientation === 'both' && config.connectRuns !== false && policy?.mode !== 'fixed';
+  // Start near a furnished area where possible, and try other continuous spans around obstructions.
+  const furniture = (map.propInstances ?? []).map(p => dot(sub(point(map, p), side.start), travel)).filter(n => n >= 0 && n <= side.length);
+  const preferred = furniture.length ? furniture.reduce((a, b) => a + b, 0) / furniture.length / side.length : hash(`${seed}-${prefix}-anchor`) / 4294967296;
+  const offsets = [...new Set([Math.max(0, Math.min(1, preferred)), .5, 0, 1, .25, .75])];
+  const safe = (fixtures: MapFixture[]) => !unmatched(fixtures).length && fixtures.every(f => sideContains(side, f) && matchingMounts(family.find(b => b.id === f.bindingId)!, f.wall!.rotationY, side, f.wall!.position, f.wall!.rotationZ) && !fitIssue(map, f, ctx, [...(map.fixtures ?? []), ...fixtures]));
+  const heightFits = (fixtures: MapFixture[]) => fixtures.filter(f => f.wall!.sockets.every(s => Math.abs(s.direction.y) < EPS)).every(f => {
+    const binding = family.find(b => b.id === f.bindingId)!;
+    return binding.wallMount!.mounts.every(m => { const y = add(f.wall!.position, transformed(m.position, binding, f.wall!.rotationY, f.wall!.rotationZ)).y; return y >= allowed[0] - EPS && y <= allowed[1] + EPS; });
+  });
+  for (const stepping of stepAllowed ? [true, false] : [false]) for (const height of baseHeights) for (const fraction of [1, .8, .6]) {
+    const maximum = Math.min(side.length - .24, budget) * fraction;
+    if (maximum < nativeLength * 2) continue;
+    for (const sign of stepping ? verticalSigns : [0]) {
+      const vertical = { x: 0, y: sign, z: 0 }, upward = straight.flatMap(b => oriented(b, side, vertical));
+      const firstTurns = stepping ? wallTurns(family, side, travel, vertical) : [undefined], lastTurns = stepping ? wallTurns(family, side, vertical, travel) : [undefined];
+      for (const firstTurn of firstTurns) for (const lastTurn of lastTurns) {
+        if (stepping && (!firstTurn || !lastTurn || !upward.length)) continue;
+        // Prefer one native vertical segment; another is only attempted if its geometry fits.
+        for (const verticalCount of stepping ? [1, 2] : [0]) {
+          const rise = stepping ? [...upward].sort((a, b) => a.length - b.length || a.binding.id.localeCompare(b.binding.id))[0] : undefined;
+          const middleParts = rise ? Array.from({ length: verticalCount }, () => rise) : [];
+          const turns = firstTurn && lastTurn ? [firstTurn, ...middleParts, lastTurn] : [];
+          let delta = { x: 0, y: 0, z: 0 }; for (const part of turns) delta = add(delta, sub(part.output!.position, part.input.position));
+          if (stepping && (Math.abs(delta.y) < EPS || Math.abs(dot(delta, side.n)) > EPS)) continue;
+          const stepDistance = turns.reduce((sum, part) => { const d = sub(part.output!.position, part.input.position); return sum + Math.abs(d.x) + Math.abs(d.y) + Math.abs(d.z); }, 0);
+          const horizontalBudget = maximum - stepDistance;
+          if (horizontalBudget < nativeLength * 2) continue;
+          const firstDistance = horizontalBudget * (furniture.length ? Math.max(.25, Math.min(.75, preferred)) : .35 + .3 * hash(`${seed}-${prefix}-step`) / 4294967296);
+          const firstHalf = fitLengths(parts, stepping ? firstDistance : horizontalBudget, false); if (!firstHalf?.length) continue;
+          const lastHalf = stepping ? fitLengths(parts, horizontalBudget - firstHalf.reduce((n, part) => n + part.length, 0), false) : [];
+          if (!lastHalf || stepping && !lastHalf.length) continue;
+          const plan = [...firstHalf, ...turns, ...lastHalf], span = plan.reduce((sum, part) => sum + dot(sub(part.output!.position, part.input.position), travel), 0);
+          if (span <= nativeLength || span > side.length - .2 || stepDistance + firstHalf.concat(lastHalf).reduce((sum, part) => sum + part.length, 0) > budget + EPS) continue;
+          for (const offset of offsets) for (const startCap of starts) for (const endCap of ends) {
+            const p = add({ ...side.start, y: height }, add(sub(rail, mul(travel, dot(rail, travel))), mul(travel, .12 + Math.max(0, side.length - span - .24) * offset)));
+            let cursor = p;
+            const fixtures = [moduleAt(map, startCap, cursor, side, `${prefix}-start`)];
+            for (const [index, part] of plan.entries()) { const f = moduleAt(map, part, cursor, side, `${prefix}-${index}`); fixtures.push(f); cursor = add(cursor, sub(part.output!.position, part.input.position)); }
+            fixtures.push(moduleAt(map, endCap, cursor, side, `${prefix}-end`));
+            if (!heightFits(fixtures) || !withinVerticalRange(fixtures.filter(f => f.wall!.sockets.some(s => Math.abs(s.direction.y) > 1 - EPS)), side, config.verticalRange) || !safe(fixtures)) continue;
+            return fixtures;
+          }
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function movedRoute(fixtures: MapFixture[], dy: number, suffix = ''): MapFixture[] {
+  return fixtures.map(f => { const copy = structuredClone(f), delta = { x: 0, y: dy, z: 0 }; copy.id += suffix;
+    copy.wall!.position = add(copy.wall!.position, delta); copy.wall!.bounds.forEach(box => { box.center = add(box.center, delta); }); copy.wall!.sockets.forEach(socket => { socket.position = add(socket.position, delta); }); return copy;
+  });
+}
+function orderedRoute(group: MapFixture[], firstSide: Side): MapFixture[] {
+  const cap = group.filter(f => f.wall!.sockets.length === 1 && f.wall!.support.some(s => s.direction === firstSide.faces[0].support.direction)).sort((a, b) => dot(sub(a.wall!.sockets[0].position, firstSide.start), firstSide.t) - dot(sub(b.wall!.sockets[0].position, firstSide.start), firstSide.t))[0];
+  if (!cap) return [];
+  const ordered = [cap], used = new Set([cap]);
+  while (ordered.length < group.length) { const last = ordered.at(-1)!, next = group.find(f => !used.has(f) && last.wall!.sockets.some(s => f.wall!.sockets.some(t => socketJoin(s, t)))); if (!next) break; used.add(next); ordered.push(next); }
+  return ordered.length === group.length ? ordered : [];
+}
+function routeFits(map: GridMap, group: MapFixture[], sides: Side[], family: AssetBinding[], ctx: Context, config: WallMountSettings): boolean {
+  return !unmatched(group).length && components(group).length === 1 && group.every(f => {
+    const binding = family.find(b => b.id === f.bindingId)!;
+    const mounted = binding.wallMount!.mounts.every(m => sides.some(side => near(norm(transformed(m.direction, binding, f.wall!.rotationY, f.wall!.rotationZ)), side.n) && matchingMounts({ ...binding, wallMount: { ...binding.wallMount!, mounts: [m] } }, f.wall!.rotationY, side, f.wall!.position, f.wall!.rotationZ)));
+    const supportedSide = sides.find(side => f.wall!.support.some(s => side.faces.some(face => fk(face.support) === fk(s))));
+    if (!mounted || fitIssue(map, f, ctx, [...(map.fixtures ?? []), ...group]) || !supportedSide) return false;
+    if (f.wall!.sockets.some(s => Math.abs(s.direction.y) > 1 - EPS) && !withinVerticalRange([f], supportedSide, config.verticalRange)) return false;
+    if (['fixed', 'random'].includes(config.runHeight?.mode ?? '') && f.wall!.sockets.every(s => Math.abs(s.direction.y) < EPS)) {
+      const policy = config.runHeight!, low = policy.reference === 'floor' ? supportedSide.low + policy.min : supportedSide.high - (policy.mode === 'fixed' ? policy.min : policy.max), high = policy.mode === 'fixed' ? low : policy.reference === 'floor' ? supportedSide.low + policy.max : supportedSide.high - policy.min;
+      if (binding.wallMount!.mounts.some(m => { const y = add(f.wall!.position, transformed(m.position, binding, f.wall!.rotationY, f.wall!.rotationZ)).y; return y < low - EPS || y > high + EPS; })) return false;
+    }
+    return true;
+  });
+}
+/** Replace an exact native straight span and lift the entire downstream path, including wall corners. */
+function stepBoundaryRun(map: GridMap, source: MapFixture[], sides: Side[], family: AssetBinding[], config: WallMountSettings, ctx: Context, prefix: string, sign: number, preferred: number): { group: MapFixture[]; index: number } | undefined {
+  const ordered = orderedRoute(source, sides[0]), candidates = ordered.map((f, index) => ({ f, index })).filter(({ f, index }) => index > 1 && index < ordered.length - 3 && fixtureBinding(f, ctx.bindings)?.wallMount?.kind === 'straight');
+  candidates.sort((a, b) => Math.abs(a.index - preferred) - Math.abs(b.index - preferred));
+  for (const { f, index } of candidates) {
+    const side = sides.find(s => f.wall!.support.every(support => s.faces.some(face => fk(face.support) === fk(support)))); if (!side) continue;
+    const input = f.wall!.sockets.find(s => ordered[index - 1].wall!.sockets.some(t => socketJoin(s, t)))!, travel = mul(input.direction, -1), vertical = { x: 0, y: sign, z: 0 };
+    const firstTurns = wallTurns(family, side, travel, vertical), lastTurns = wallTurns(family, side, vertical, travel), verticalParts = family.filter(b => b.wallMount!.kind === 'straight').flatMap(b => oriented(b, side, vertical)).sort((a, b) => a.length - b.length || a.binding.id.localeCompare(b.binding.id));
+    for (const first of firstTurns) for (const last of lastTurns) for (const upright of verticalParts) for (const count of [1, 2]) {
+      const plan = [first, ...Array.from({ length: count }, () => upright), last];
+      let delta = { x: 0, y: 0, z: 0 }; plan.forEach(part => { delta = add(delta, sub(part.output!.position, part.input.position)); });
+      const advance = dot(delta, travel); if (advance <= EPS || Math.abs(dot(delta, side.n)) > EPS || Math.abs(delta.y) < EPS) continue;
+      let endIndex = index, output: WallConnector | undefined;
+      while (endIndex < ordered.length - 1) {
+        const current = ordered[endIndex]; if (fixtureBinding(current, ctx.bindings)?.wallMount?.kind !== 'straight' || !current.wall!.support.every(s => side.faces.some(face => fk(face.support) === fk(s)))) break;
+        output = current.wall!.sockets.find(s => near(s.direction, travel)); if (!output) break;
+        const distance = dot(sub(output.position, input.position), travel); if (distance >= advance - EPS) break; endIndex++;
+      }
+      if (!output) continue;
+      const remainder = dot(sub(output.position, input.position), travel) - advance;
+      const continuation = fitLengths(family.filter(b => b.wallMount!.kind === 'straight').flatMap(b => oriented(b, side, travel)), remainder, true);
+      if (!continuation) continue;
+      plan.push(...continuation);
+      let cursor = input.position; const step: MapFixture[] = [];
+      for (const [partIndex, part] of plan.entries()) { step.push(moduleAt(map, part, cursor, side, `${prefix}-step-${partIndex}`)); cursor = add(cursor, sub(part.output!.position, part.input.position)); }
+      const shift = sub(cursor, output.position); if (Math.abs(shift.x) > EPS || Math.abs(shift.z) > EPS) continue;
+      const group = [...ordered.slice(0, index), ...step, ...movedRoute(ordered.slice(endIndex + 1), shift.y)];
+      if (routeFits(map, group, sides, family, ctx, config)) return { group, index };
+    }
+  }
+  return undefined;
+}
+
+function composedBoundaryRuns(map: GridMap, boundary: Boundary, catalog: AssetBinding[], config: WallMountSettings, ctx: Context, budget: number, seed: number): MapFixture[][] {
+  if (boundary.sides.length < 2 || config.runOrientation === 'vertical') return [];
+  const families = [...new Set(catalog.filter(b => b.wallMount!.kind === 'straight').map(b => b.wallMount!.family))].sort();
+  const startIndices = boundary.sides.map((side, index) => ({ side, index })).sort((a, b) => b.side.length - a.side.length || hash(`${seed}-${fk(a.side.faces[0].support)}`) - hash(`${seed}-${fk(b.side.faces[0].support)}`));
+  for (const { index } of startIndices) for (const familyName of families) {
+    const key = `${familyName}-${fk(boundary.sides[index].faces[0].support)}`, prefix = `wm-run-${hash(`${seed}-composed-boundary-${key}`).toString(36)}`;
+    if (map.fixtures?.some(f => f.wall?.runId?.startsWith(`${prefix}-`))) continue;
+    const available = catalog.filter(b => b.wallMount!.family === familyName && (b.prop?.weight ?? 1) > 0 && hash(`${seed}-${key}-prob-${b.id}`) % 10000 < b.wallMount!.probability * 100);
+    if (!available.some(b => ['innerCorner', 'outerCorner'].includes(b.wallMount!.kind))) continue;
+    const parallel = config.runDensity >= 65 && config.runHeight?.mode !== 'fixed', stepWanted = config.runOrientation === 'both' && config.connectRuns !== false && config.runHeight?.mode !== 'fixed';
+    const pathBudget = budget / (parallel ? 2 : 1) - (stepWanted ? 2 : 0);
+    if (pathBudget < map.cellSize * 4) continue;
+    const selected: Side[] = [];
+    let left = pathBudget;
+    for (let n = 0; n < Math.min(3, boundary.sides.length - (boundary.closed ? 1 : 0)); n++) {
+      const nextIndex = (index + n) % boundary.sides.length; if (!boundary.closed && nextIndex < index) break;
+      const original = boundary.sides[nextIndex], reserve = n === 0 ? Math.min(boundary.sides[(nextIndex + 1) % boundary.sides.length].length, Math.max(map.cellSize * 2, pathBudget * .4)) : 0;
+      const distance = Math.min(original.length, left - reserve); if (distance < map.cellSize * 2) break;
+      const start = n === 0 ? sub(original.end, mul(original.t, distance)) : original.start, end = n === 0 ? original.end : add(original.start, mul(original.t, distance));
+      selected.push({ ...original, start, end, length: distance }); left -= distance;
+      if (distance < original.length && n > 0 || left < map.cellSize * 2) break;
+    }
+    if (selected.length < 2 || selected.some((s, i) => i > 0 && !near(selected[i - 1].end, s.start))) continue;
+    const sign = hash(`${seed}-${prefix}-rise`) % 2 ? 1 : -1, first = selected[0], policy = config.runHeight;
+    const height = policy?.mode === 'fixed' ? policy.reference === 'floor' ? first.low + policy.min : first.high - policy.min : policy?.mode === 'random' ? policy.reference === 'floor' ? first.low + policy.min + (policy.max - policy.min) * (sign > 0 ? .1 : .7) : first.high - policy.max + (policy.max - policy.min) * (sign > 0 ? .1 : .7) : policy?.mode === 'auto' ? first.low + (first.high - first.low) * (sign > 0 ? .22 : .72) : heightAt(available.find(b => b.wallMount!.kind === 'straight')!.wallMount!, first.low, first.high);
+    const family = available.map(b => ({ ...b, wallMount: { ...b.wallMount!, heightMode: 'floor' as const, height: height - first.low } }));
+    const bases = buildBoundaryRuns(map, { sides: selected, closed: false }, family, 100, ctx, prefix, []);
+    let base = bases.sort((a, b) => routeLength(b) - routeLength(a))[0];
+    if (!base || !base.some(f => f.wall!.site === 'corner') || !routeFits(map, base, selected, family, ctx, config)) continue;
+    const order = orderedRoute(base, selected[0]);
+    const equipment = order.map((fixture, position) => ({ position, distance: Math.min(Infinity, ...(map.propInstances ?? []).map(p => Math.hypot(point(map, p).x - fixture.wall!.position.x, point(map, p).z - fixture.wall!.position.z))) })).filter(c => c.position > 2 && c.position < order.length - 3).sort((a, b) => a.distance - b.distance);
+    const cornerIndex = order.findIndex(f => f.wall!.site === 'corner');
+    const preferred = Math.max(3, equipment[0]?.distance <= map.cellSize * 2.5 ? equipment[0].position : cornerIndex > 4 ? cornerIndex - 2 : Math.round(order.length * .4));
+    let stepped = stepWanted ? stepBoundaryRun(map, base, selected, family, config, ctx, prefix, sign, preferred) : undefined;
+    if (stepWanted && !stepped && policy?.mode === 'auto') for (const fraction of sign > 0 ? [.06, .25, .5] : [.94, .72, .5]) {
+      const shifted = movedRoute(base, first.low + (first.high - first.low) * fraction - height);
+      if (!routeFits(map, shifted, selected, family, ctx, config)) continue;
+      const candidate = stepBoundaryRun(map, shifted, selected, family, config, ctx, prefix, sign, preferred);
+      if (candidate) { base = shifted; stepped = candidate; break; }
+    }
+    const main = stepped?.group ?? base; if (routeLength(main) > budget + EPS) continue;
+    main.forEach(f => { f.wall!.runId = `${prefix}-0`; }); const groups = [main];
+    if (parallel) {
+      const straight = main.filter(f => fixtureBinding(f, ctx.bindings)?.wallMount?.kind === 'straight' && f.wall!.sockets.every(s => Math.abs(s.direction.y) < EPS));
+      const spacing = Math.max(.15, ...straight.flatMap(f => f.wall!.bounds.map(box => box.size.y))) + .15;
+      for (const dy of [spacing, -spacing]) {
+        const copyBase = movedRoute(base, dy, '-parallel'), work = { ...map, fixtures: [...(map.fixtures ?? []), ...main] };
+        // Stagger by one measured straight at a shared transition, keeping parallel arms from crossing.
+        const copyStepped = stepped ? stepBoundaryRun(work, copyBase, selected, family, config, ctx, `${prefix}-parallel`, sign, stepped.index - sign) : undefined;
+        const copy = stepped ? copyStepped?.group : copyBase;
+        if (!copy || routeLength(main) + routeLength(copy) > budget + EPS || !routeFits(work, copy, selected, family, ctx, config)) continue;
+        copy.forEach(f => { f.wall!.runId = `${prefix}-1`; }); groups.push(copy); break;
+      }
+    }
+    return groups;
+  }
+  return [];
+}
+
+function placeComposedRuns(map: GridMap, activeFaces: Face[], catalog: AssetBinding[], ctx: Context, config: WallMountSettings, seed: number, region: GenerationRegion | undefined, issues: ValidationIssue[]): MapFixture[][] {
+  const wallBoundaries = boundaries(activeFaces), sides = wallBoundaries.flatMap(boundary => boundary.sides), groups: MapFixture[][] = [];
+  const families = [...new Set(catalog.filter(b => b.wallMount!.kind !== 'single').map(b => b.wallMount!.family))].sort();
+  const existing = (map.fixtures ?? []).filter(f => f.wall?.runId && eligible(map, f, region));
+  // Density is actual assembled length. A small amount of wall always remains undecorated.
+  const target = activeFaces.length * map.cellSize * Math.min(.86, config.runDensity / 100);
+  let remaining = Math.max(0, target - routeLength(existing));
+  const separateRisers = config.runOrientation === 'both' && config.connectRuns === false;
+  const riserReserve = separateRisers ? target * .22 : 0;
+  for (const boundary of wallBoundaries.sort((a, b) => b.sides.reduce((sum, s) => sum + s.length, 0) - a.sides.reduce((sum, s) => sum + s.length, 0))) {
+    const work = { ...map, fixtures: [...(map.fixtures ?? []), ...groups.flat()] };
+    const planned = composedBoundaryRuns(work, boundary, catalog, config, ctx, Math.max(0, remaining - riserReserve), seed);
+    if (planned.flat().some(f => !eligible(map, f, region)) || work.fixtures.length + planned.flat().length > LIMIT) continue;
+    groups.push(...planned); remaining -= routeLength(planned.flat());
+  }
+  const priority = (side: Side) => {
+    const closest = Math.min(Infinity, ...(map.propInstances ?? []).map(p => length(sub(point(map, p), side.faces[Math.floor(side.faces.length / 2)].center))));
+    return side.length + (Number.isFinite(closest) ? map.cellSize * 2 / (1 + closest / map.cellSize) : 0);
+  };
+  sides.sort((a, b) => priority(b) - priority(a) || hash(`${seed}-${fk(a.faces[0].support)}`) - hash(`${seed}-${fk(b.faces[0].support)}`));
+  const familyChoices = (side: Side, riser = false) => {
+    const key = side.faces.map(f => fk(f.support)).join('|'), first = hash(`${seed}-${key}-family`) % families.length;
+    return families.map((_, offset) => {
+      const familyName = families[(first + offset) % families.length], prefix = `wm-run-${hash(`${seed}-composed${riser ? '-riser' : ''}-${familyName}-${key}`).toString(36)}`;
+      return { prefix, runId: `${prefix}-0`, family: catalog.filter(b => b.wallMount!.family === familyName && b.wallMount!.kind !== 'single' && (b.prop?.weight ?? 1) > 0 && hash(`${seed}-${key}-prob-${b.id}`) % 10000 < b.wallMount!.probability * 100) };
+    });
+  };
+  for (const side of sides) {
+    if (remaining <= EPS || !families.length) break;
+    const choices = familyChoices(side);
+    // A completed fallback is the stable choice on subsequent additive calls.
+    if (choices.some(choice => (map.fixtures ?? []).some(f => f.wall?.runId === choice.runId))) continue;
+    const work = { ...map, fixtures: [...(map.fixtures ?? []), ...groups.flat()] };
+    let selected: { group: MapFixture[]; runId: string } | undefined, plainFallback: typeof selected;
+    for (const { family, prefix, runId } of choices) {
+      let group: MapFixture[] | undefined;
+      if (config.runOrientation === 'vertical') {
+        // One intentional riser per long wall section, not one per grid cell.
+        const ordered = [...side.faces].sort((a, b) => Math.abs(dot(sub(a.center, side.start), side.t) - side.length / 2) - Math.abs(dot(sub(b.center, side.start), side.t) - side.length / 2));
+        for (const face of ordered) { const candidate = buildVerticalRun(work, face, family, ctx, prefix, config.verticalRange); if (candidate && routeLength(candidate) <= remaining + EPS) { group = candidate; break; } }
+      } else group = composedSideRun(work, side, family, config, ctx, prefix, Math.max(0, remaining - riserReserve), seed);
+      if (!group || group.some(f => !eligible(map, f, region)) || work.fixtures.length + group.length > LIMIT) continue;
+      if (config.runOrientation === 'both' && config.connectRuns !== false && config.runHeight?.mode !== 'fixed' && !group.some(f => f.wall!.sockets.some(s => Math.abs(s.direction.y) > 1 - EPS))) { plainFallback ??= { group, runId }; continue; }
+      selected = { group, runId }; break;
+    }
+    selected ??= plainFallback; if (!selected) continue;
+    const { group, runId } = selected;
+    group.forEach(f => { f.wall!.runId = runId; }); groups.push(group); remaining -= routeLength(group);
+  }
+  if (separateRisers) for (const side of sides) {
+    if (remaining <= EPS || !families.length) break;
+    const choices = familyChoices(side, true);
+    if (choices.some(choice => (map.fixtures ?? []).some(f => f.wall?.runId === choice.runId))) continue;
+    riserFamily: for (const { family, prefix, runId } of choices) for (const face of side.faces) {
+      const work = { ...map, fixtures: [...(map.fixtures ?? []), ...groups.flat()] }, group = buildVerticalRun(work, face, family, ctx, prefix, config.verticalRange);
+      if (!group || routeLength(group) > remaining + EPS || group.some(f => !eligible(map, f, region)) || work.fixtures.length + group.length > LIMIT) continue;
+      group.forEach(f => { f.wall!.runId = runId; }); groups.push(group); remaining -= routeLength(group); break riserFamily;
+    }
+  }
+  // A short service drop only belongs near actual equipment; there is no per-wall branch quota.
+  if (config.runOrientation === 'both' && config.connectRuns !== false && (map.propInstances?.length ?? 0) > 0 && remaining > EPS) for (let index = 0; index < groups.length; index++) {
+    const group = groups[index], work = { ...map, fixtures: [...(map.fixtures ?? []), ...groups.flat()] };
+    const equipmentDistance = (fixture: MapFixture) => Math.min(...map.propInstances!.map(p => Math.hypot(point(map, p).x - fixture.wall!.position.x, point(map, p).z - fixture.wall!.position.z)));
+    const candidates = group.filter(f => fixtureBinding(f, ctx.bindings)?.wallMount?.kind === 'straight' && f.wall!.sockets.every(s => Math.abs(s.direction.y) < EPS) && equipmentDistance(f) <= map.cellSize * 2.5).sort((a, b) => equipmentDistance(a) - equipmentDistance(b) || a.id.localeCompare(b.id));
+    for (const targetFixture of candidates) {
+      const familyName = fixtureBinding(targetFixture, ctx.bindings)!.wallMount!.family, family = catalog.filter(b => b.wallMount!.family === familyName && (b.prop?.weight ?? 1) > 0);
+      const addition = connectAt(work, targetFixture, targetFixture.wall!.sockets, [targetFixture], family, family.filter(b => b.wallMount!.kind === 'tee' && hash(`${seed}-composed-branch-${targetFixture.id}-${b.id}`) % 10000 < b.wallMount!.probability * 100), ctx, activeFaces, region, config.verticalRange);
+      if (!addition) continue;
+      const changed = [...group.filter(f => !addition.removeIds.has(f.id)), ...addition.fixtures], extra = routeLength(changed) - routeLength(group);
+      if (extra > remaining + EPS || work.fixtures.length - addition.removeIds.size + addition.fixtures.length > LIMIT) continue;
+      groups[index] = changed; remaining -= Math.max(0, extra); break;
+    }
+  }
+  const all = [...existing, ...groups.flat()];
+  if (config.runOrientation === 'both' && config.connectRuns !== false && config.runHeight?.mode !== 'fixed' && groups.length && !all.some(f => f.wall!.sockets.some(s => Math.abs(s.direction.y) > 1 - EPS))) issues.push(warning('높이 전환에 맞는 같은 세트의 엘보·세로 직선·높이 여유가 없어 완성 가능한 수평 경로를 끝마감했습니다.', 'wall-composition-height-fit'));
+  if (remaining > map.cellSize) issues.push(warning('벽면 여백과 긴 경로를 유지하고, 부품 길이·높이·겹침 조건을 만족하는 구간만 배치했습니다.', 'wall-composition-fit'));
+  return groups;
+}
+
 export interface WallPlacementResult { map: GridMap; issues: ValidationIssue[]; addedSingles: number; addedModules: number; runCount: number; unchanged: boolean }
 export function placeWallMounts(source: GridMap, settings: WallMountSettings | GenerationSettings, bindings: AssetBinding[], region?: GenerationRegion): WallPlacementResult {
   const { config, generation } = settingsFor(settings), map = structuredClone(source), issues: ValidationIssue[] = [];
@@ -578,7 +871,13 @@ export function placeWallMounts(source: GridMap, settings: WallMountSettings | G
   const activeFaces = faces.filter(f => !locked.has(ck(f.support)) && !locked.has(ck(f.cell)) && inside(f.support, region) && inside(f.cell, region));
   const existingIds = new Set(map.fixtures.map(f => f.id)), seed = generation?.seed ?? 0;
   const addFixture = (f: MapFixture) => { map.fixtures!.push(f); existingIds.add(f.id); result.unchanged = false; };
-  if (config.runs && config.runDensity > 0 && config.runOrientation !== 'vertical') {
+  if (config.runs && config.runDensity > 0 && config.runLayout === 'composed') {
+    for (const group of placeComposedRuns(map, activeFaces, catalog, ctx, config, seed, region, issues)) {
+      if (group.some(f => existingIds.has(f.id))) continue;
+      group.forEach(addFixture); result.addedModules += group.length; result.runCount++;
+    }
+  }
+  if (config.runs && config.runDensity > 0 && config.runLayout !== 'composed' && config.runOrientation !== 'vertical') {
     const families = [...new Set(catalog.filter(b => b.wallMount!.kind !== 'single').map(b => b.wallMount!.family))];
     for (const [bi, boundary] of boundaries(activeFaces).entries()) {
       if (!families.length) break;
@@ -593,11 +892,11 @@ export function placeWallMounts(source: GridMap, settings: WallMountSettings | G
       }
     }
   }
-  if (config.runs && config.runDensity > 0 && config.runOrientation === 'both' && config.connectRuns !== false) {
+  if (config.runs && config.runDensity > 0 && config.runLayout !== 'composed' && config.runOrientation === 'both' && config.connectRuns !== false) {
     const connected = connectRuns(map, catalog, effectiveBindings, activeFaces, config, ctx, seed, region, issues);
     if (connected.changed) { result.addedModules = Math.max(0, result.addedModules + connected.added - connected.removed); result.unchanged = false; }
   }
-  if (config.runs && config.runDensity > 0 && ['vertical', 'both'].includes(config.runOrientation ?? 'horizontal')) {
+  if (config.runs && config.runDensity > 0 && config.runLayout !== 'composed' && ['vertical', 'both'].includes(config.runOrientation ?? 'horizontal')) {
     const families = [...new Set(catalog.filter(b => b.wallMount!.kind !== 'single').map(b => b.wallMount!.family))];
     const desired = Math.ceil(activeFaces.length * config.runDensity / 100), occupied = new Set(map.fixtures.filter(f => f.wall?.runId && f.wall.sockets.some(s => Math.abs(s.direction.y) > 1 - EPS) && eligible(map, f, region)).flatMap(f => f.wall!.support.map(fk)));
     let count = occupied.size;

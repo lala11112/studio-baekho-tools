@@ -52,7 +52,7 @@ try {
   await page.locator('#prompt').fill(manualConcept);
   await page.locator('#conceptMode').selectOption('ai');
   assert.equal(await page.locator('#prompt').count(), 0);
-  assert.equal(await page.locator('#connectionWidth').inputValue(), '2', 'New connection width defaults to 2m.');
+  assert.equal(await page.locator('#connectionWidth').inputValue(), '4', 'New connection width defaults to 4m.');
   assert.equal(await page.locator('#connectionHeight').inputValue(), '3', 'New connection height defaults to 3m.');
   await page.locator('#connectionWidth').fill('4.5');
   await page.locator('#connectionWidth').press('Tab');

@@ -1,4 +1,5 @@
 import { connectionCells } from './connections';
+import { spatialIntent } from './spatial-intent';
 import type { Cell, Direction, GenerationRegion, GenerationSettings, GridMap, LevelDesignSettings, MapFixture, RoomPurpose, ValidationIssue } from './types';
 
 /** Shared qualitative guidance from docs/level-design-principles.md; numeric recipes remain opt-in. */
@@ -49,7 +50,8 @@ export function compileLevelDesign(settings: GenerationSettings): LevelDesignRec
   return { pattern, label: DESIGN_PATTERN_LABELS[pattern], purpose, characterRadius: config.characterRadius, characterHeight: d?.headroom ?? 2, dodgeDistance: config.dodgeDistance, entryClearance, combatRequired, intent, prompt };
 }
 
-type Graph = Map<string, string[]>;
+export type PlayerMovementGraph = Map<string, string[]>;
+type Graph = PlayerMovementGraph;
 function edgeHeight(map: GridMap, c: Cell, dx: number, dr: number): number | undefined {
   if (!'.DRB'.includes(map.rows[c.row]?.[c.x] ?? '_')) return undefined;
   const height = map.elevations[c.row][c.x];
@@ -71,7 +73,8 @@ function movement(map: GridMap, a: Cell, b: Cell): boolean {
   return ah !== undefined && bh !== undefined && Math.abs(ah - bh) <= map.maxStepHeight + 1e-8;
 }
 
-function graphFor(map: GridMap, recipe: LevelDesignRecipe, extraBlocked = new Set<string>()): Graph {
+/** Height-correct movement and body clearance, independent of combat and dodge requirements. */
+export function playerMovementGraph(map: GridMap, recipe: Pick<LevelDesignRecipe, 'characterRadius' | 'characterHeight'>, extraBlocked = new Set<string>()): PlayerMovementGraph {
   const roofs = new Map((map.ceilings ?? []).map(c => [key(c), c.undersideY]));
   const rises = new Map(map.ramps.map(r => [key(r), r.rise]));
   const blocked = new Set(extraBlocked);
@@ -100,6 +103,8 @@ function graphFor(map: GridMap, recipe: LevelDesignRecipe, extraBlocked = new Se
   for (const k of walkable) { const c = cell(k); graph.set(k, Object.values(directions).map(([dx, dr]) => ({ x: c.x + dx, row: c.row + dr })).filter(n => walkable.has(key(n)) && movement(map, c, n)).map(key)); }
   return graph;
 }
+
+const graphFor = playerMovementGraph;
 
 export interface TacticalObstacle {
   cells: Cell[]; routes: [Cell[], Cell[]]; detourMeters: number; axis: 'eastWest' | 'northSouth';
@@ -257,13 +262,31 @@ export function analyzeLevelDesign(map: GridMap, settings: GenerationSettings): 
   }
   const walkable = [...graph.keys()].map(cell), entryCells = [...entry.values()];
   const combatCandidates = walkable.map(c => ({ c, cells: dodgeCells(map, safeGraph, c, recipe) })).filter(c => c.cells.length && !entry.has(key(c.c)));
-  const preferredCenter = { x: (map.width - 1) / 2, row: (map.height - 1) / 2 };
   const entrySafetyDistance = (recipe.entryClearance + recipe.dodgeDistance) / map.cellSize;
   const combatZones = new Set((map.zones ?? []).filter(zone => zone.kind === 'combat').map(key));
+  // Derive support and the intention's position from usable terrain, never the enclosing grid center.
+  const intent = spatialIntent(settings), xs = walkable.map(c => c.x), rs = walkable.map(c => c.row);
+  const minX = xs.length ? Math.min(...xs) : 0, maxX = xs.length ? Math.max(...xs) : 0;
+  const minRow = rs.length ? Math.min(...rs) : 0, maxRow = rs.length ? Math.max(...rs) : 0;
+  const focus = { x: minX + (maxX - minX) * intent.focus.x, row: minRow + (maxRow - minRow) * intent.focus.row };
+  const clearance = new Map<string, number>(), frontier = [...safeGraph].filter(([, edges]) => edges.length < 4).map(([k]) => k);
+  frontier.forEach(k => clearance.set(k, 0));
+  for (let i = 0; i < frontier.length; i++) for (const next of safeGraph.get(frontier[i]) ?? []) if (!clearance.has(next)) { clearance.set(next, clearance.get(frontier[i])! + 1); frontier.push(next); }
+  const supportRadius = Math.max(2, Math.ceil(recipe.dodgeDistance / map.cellSize) + 1);
+  const combatScores = new Map(combatCandidates.map(candidate => {
+    const c = candidate.c, y = map.elevations[c.row][c.x];
+    let support = 0;
+    for (let dr = -supportRadius; dr <= supportRadius; dr++) for (let dx = -supportRadius; dx <= supportRadius; dx++) {
+      if (safeGraph.has(key({ x: c.x + dx, row: c.row + dr })) && Math.abs(map.elevations[c.row + dr][c.x + dx] - y) <= map.maxStepHeight) support++;
+    }
+    const entrySeparation = starts.length ? Math.min(...starts.map(s => distance(c, s)), entrySafetyDistance) : 0;
+    const localRoom = support / (supportRadius * 2 + 1) ** 2;
+    // Once there is enough broad space, allow different approach/retreat compositions within it.
+    const score = (combatZones.has(key(c)) ? 1000 : 0) + Math.min(clearance.get(key(c)) ?? 0, supportRadius) * .8 + localRoom * 3 + entrySeparation * .25 - distance(c, focus) * .3;
+    return [key(c), score] as const;
+  }));
   combatCandidates.sort((a, b) => {
-    // Once entrance separation is sufficient, prefer the interior rather than the farthest corner.
-    const score = (c: Cell) => (combatZones.has(key(c)) ? 1000 : 0) + Math.min(...starts.map(s => distance(c, s)), entrySafetyDistance) - distance(c, preferredCenter);
-    return score(b.c) - score(a.c) || a.c.row - b.c.row || a.c.x - b.c.x;
+    return combatScores.get(key(b.c))! - combatScores.get(key(a.c))! || a.c.row - b.c.row || a.c.x - b.c.x;
   });
   const combat = recipe.combatRequired ? combatCandidates[0] : undefined;
   if (recipe.combatRequired && !combat) error('dodge-space', `네 방향으로 ${recipe.dodgeDistance}m 회피할 수 있는 평지와 몸체 여유 공간이 없습니다.`, walkable.slice(0, 1));
@@ -306,8 +329,9 @@ export function placeLevelDesignContent(source: GridMap, settings: GenerationSet
   const map = structuredClone(source), locked = new Set((map.lockedCells ?? []).map(key));
   const active = (c: Cell) => !locked.has(key(c)) && (!region || c.x >= region.x && c.x < region.x + region.width && c.row >= region.row && c.row < region.row + region.height);
   const movable = (f: MapFixture) => active(f) && (f.anchor ?? 'floor') === 'floor' && !['light', 'railing'].includes(f.role);
-  const markers = (map.markers ?? []).filter(active), fixtures = (map.fixtures ?? []).filter(movable);
-  map.markers = (map.markers ?? []).filter(m => !active(m)); map.fixtures = (map.fixtures ?? []).filter(f => !movable(f));
+  // Landing points keep their saved pose and clearance when other content is rearranged.
+  const markers = (map.markers ?? []).filter(m => active(m) && m.kind !== 'teleport'), fixtures = (map.fixtures ?? []).filter(movable);
+  map.markers = (map.markers ?? []).filter(m => !active(m) || m.kind === 'teleport'); map.fixtures = (map.fixtures ?? []).filter(f => !movable(f));
   const analysis = analyzeLevelDesign(map, settings);
   const terrainErrors = analysis.issues.filter(i => i.severity==='error'&&!['objective-route', 'locked-switch', 'service-route'].includes(i.code ?? ''));
   if (terrainErrors.length) throw new Error(terrainErrors.slice(0, 3).map(i => i.message).join(' '));
@@ -317,6 +341,14 @@ export function placeLevelDesignContent(source: GridMap, settings: GenerationSet
     for (let dr = -bypassMargin; dr <= bypassMargin; dr++) for (let dx = -bypassMargin; dx <= bypassMargin; dx++) reserved.add(key({ x: c.x + dx, row: c.row + dr }));
   }
   const occupied = new Set([...map.markers, ...map.fixtures.filter(f=>!f.wall), ...(map.propInstances ?? []).flatMap(p => p.cells)].map(key));
+  for (const marker of map.markers.filter(m => m.kind === 'teleport' && m.clearance)) {
+    const radius = marker.clearance!.radius, x = marker.x + marker.offset.x / map.cellSize, row = marker.row - marker.offset.z / map.cellSize;
+    const reach = Math.ceil(radius / map.cellSize + .5);
+    for (let dr = -reach; dr <= reach; dr++) for (let dx = -reach; dx <= reach; dx++) {
+      const c = { x: marker.x + dx, row: marker.row + dr };
+      if (Math.hypot(Math.max(0, Math.abs(c.x - x) - .5), Math.max(0, Math.abs(c.row - row) - .5)) * map.cellSize < radius - 1e-7) occupied.add(key(c));
+    }
+  }
   let graph = graphFor(map, analysis.recipe);
   const start = map.connections[0];
   const accessible = start ? reachable(graph, key(start)) : new Set(graph.keys());

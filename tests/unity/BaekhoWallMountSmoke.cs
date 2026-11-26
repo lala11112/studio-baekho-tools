@@ -7,6 +7,7 @@ using StudioBaekho;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.SceneManagement;
 
 public static class BaekhoWallMountSmoke
@@ -24,7 +25,12 @@ public static class BaekhoWallMountSmoke
     }
     [Serializable] private sealed class Entry { public string guid; public Vector3 size; public LocalBounds bounds; public WallMount wallMount; }
     [Serializable] private sealed class GeneratedCases { public GeneratedCase[] cases; }
-    [Serializable] private sealed class GeneratedCase { public string manifest; public GeometryCheck[] checks; public Vector3[] clearPoints; }
+    [Serializable] private sealed class GeneratedCase { public string manifest; public GeometryCheck[] checks; public Vector3[] clearPoints; public NetworkCheck[] networks; public bool parallel; public string[] obstacles; }
+    [Serializable] private sealed class NetworkCheck { public string[] objectNames; public string startObject; public bool corner; public bool multipleHeights; public int rise; }
+    [Serializable] private sealed class VisualAssets { public VisualAsset[] assets; }
+    [Serializable] private sealed class VisualAsset { public string id; public string guid; public string path; public Vector3 size; }
+    [Serializable] private sealed class VisualCases { public VisualCase[] cases; }
+    [Serializable] private sealed class VisualCase { public string phase; public string manifest; public Vector3 eye; public Vector3 target; public float topSize; }
     [Serializable] private sealed class GeometryCheck
     {
         public string objectName; public bool checkGeometry; public bool checkGeometryRange; public float minY; public float maxY;
@@ -120,6 +126,7 @@ public static class BaekhoWallMountSmoke
 
                 TestPivotImport(guids[0], guids[5], guids[8], guids[9], elbow.bounds, tee.bounds);
                 TestInvalidModules(preview, output);
+                PrepareVisualAssets(preview);
             }
             finally { EditorSceneManager.ClosePreviewScene(preview); }
             Assert(SceneManager.GetActiveScene() == active && active.rootCount == roots && active.isDirty == dirty && EditorSceneManager.previewSceneCount == previews,
@@ -184,6 +191,7 @@ public static class BaekhoWallMountSmoke
                         foreach (Transform child in built.transform)
                             if (child.name.StartsWith("wall_", StringComparison.Ordinal))
                                 Assert(!GeometryBounds(child, true).Contains(point), "wall closure leaves the connection doorway clear: " + scenario.manifest);
+                    ValidateNetworks(built, scenario);
                 }
                 finally { PrefabUtility.UnloadPrefabContents(built); }
             }
@@ -192,6 +200,163 @@ public static class BaekhoWallMountSmoke
             Debug.Log(result); EditorApplication.Exit(0);
         }
         catch (Exception exception) { Debug.LogException(exception); EditorApplication.Exit(1); }
+    }
+
+    private static void ValidateNetworks(GameObject built, GeneratedCase scenario)
+    {
+        var all = new List<BaekhoWallModule>();
+        foreach (NetworkCheck network in scenario.networks ?? new NetworkCheck[0])
+        {
+            var modules = new List<BaekhoWallModule>();
+            foreach (string name in network.objectNames)
+            {
+                Transform child = built.transform.Find(name); Assert(child != null, "composed module exists: " + name);
+                var module = child.GetComponent<BaekhoWallModule>(); Assert(module != null, "composed source module is native: " + name); modules.Add(module); all.Add(module);
+            }
+            var levels = new List<float>(); bool corner = false;
+            foreach (BaekhoWallModule module in modules)
+            {
+                corner |= module.kind == BaekhoWallModule.ModuleKind.InnerCorner || module.kind == BaekhoWallModule.ModuleKind.OuterCorner;
+                bool horizontal = module.sockets.Length == 2;
+                foreach (Transform socket in module.sockets) horizontal &= Mathf.Abs(socket.forward.y) < .001f;
+                if (horizontal && !levels.Exists(y => Mathf.Abs(y - module.sockets[0].position.y) < .001f)) levels.Add(module.sockets[0].position.y);
+                foreach (Transform socket in module.sockets)
+                {
+                    int peers = 0;
+                    foreach (BaekhoWallModule other in modules) if (other != module) foreach (Transform mate in other.sockets)
+                        if (Vector3.Distance(socket.position, mate.position) < .001f && Vector3.Dot(socket.forward, mate.forward) < -.999f) peers++;
+                    Assert(peers == 1, "every imported native socket has exactly one opposed same-network mate: " + module.name);
+                }
+            }
+            Assert(!network.corner || corner, "composed route genuinely crosses a native wall corner");
+            Assert(!network.multipleHeights || levels.Count >= 2, "one imported connected network contains horizontal stretches at different heights");
+            if (network.rise != 0)
+            {
+                var order = new List<BaekhoWallModule>(); var visited = new HashSet<BaekhoWallModule>();
+                BaekhoWallModule current = built.transform.Find(network.startObject).GetComponent<BaekhoWallModule>();
+                while (current != null)
+                {
+                    order.Add(current); visited.Add(current); BaekhoWallModule next = null;
+                    foreach (BaekhoWallModule other in modules) if (!visited.Contains(other)) foreach (Transform socket in current.sockets) foreach (Transform mate in other.sockets)
+                        if (Vector3.Distance(socket.position, mate.position) < .001f && Vector3.Dot(socket.forward, mate.forward) < -.999f) next = other;
+                    current = next;
+                }
+                float first = float.NaN, last = 0;
+                foreach (BaekhoWallModule module in order) if (module.kind == BaekhoWallModule.ModuleKind.Straight && module.sockets.Length == 2 && Mathf.Abs(module.sockets[0].forward.y) < .001f)
+                { if (float.IsNaN(first)) first = module.sockets[0].position.y; last = module.sockets[0].position.y; }
+                Assert(!float.IsNaN(first) && Mathf.Sign(last - first) == network.rise, "actual chain follows its planned rising or descending transition");
+            }
+        }
+        for (int i = 0; i < all.Count; i++) for (int j = i + 1; j < all.Count; j++)
+            foreach (BoxCollider a in all[i].GetComponentsInChildren<BoxCollider>()) foreach (BoxCollider b in all[j].GetComponentsInChildren<BoxCollider>())
+            {
+                Bounds x = BoundsForCollider(a), y = BoundsForCollider(b);
+                bool overlap = Mathf.Abs(x.center.x - y.center.x) < (x.size.x + y.size.x) / 2 - .001f && Mathf.Abs(x.center.y - y.center.y) < (x.size.y + y.size.y) / 2 - .001f && Mathf.Abs(x.center.z - y.center.z) < (x.size.z + y.size.z) / 2 - .001f;
+                Assert(!overlap, "actual native colliders preserve route and parallel clearance: " + all[i].name + " / " + all[j].name);
+            }
+        foreach (string name in scenario.obstacles ?? new string[0])
+        {
+            Transform obstacle = built.transform.Find(name); Assert(obstacle != null, "native route obstacle was imported: " + name);
+            Bounds y = GeometryBounds(obstacle, true);
+            foreach (BaekhoWallModule module in all) foreach (BoxCollider collider in module.GetComponentsInChildren<BoxCollider>())
+            {
+                Bounds x = BoundsForCollider(collider);
+                Assert(!(Mathf.Abs(x.center.x - y.center.x) < (x.size.x + y.size.x) / 2 - .001f && Mathf.Abs(x.center.y - y.center.y) < (x.size.y + y.size.y) / 2 - .001f && Mathf.Abs(x.center.z - y.center.z) < (x.size.z + y.size.z) / 2 - .001f), "native composed route avoids actual equipment collider: " + module.name);
+            }
+        }
+        if (scenario.parallel)
+        {
+            Assert(scenario.networks.Length >= 2, "parallel case contains two connected networks");
+            var first = built.transform.Find(scenario.networks[0].startObject).GetComponent<BaekhoWallModule>();
+            var second = built.transform.Find(scenario.networks[1].startObject).GetComponent<BaekhoWallModule>();
+            float separation = Mathf.Abs(first.sockets[0].position.y - second.sockets[0].position.y);
+            Assert(separation >= .15f, "paired parallel rails keep intentional physical separation at the shared entry");
+        }
+    }
+
+    private static Bounds BoundsForCollider(BoxCollider collider)
+    {
+        Bounds result = new Bounds(collider.transform.TransformPoint(collider.center), Vector3.zero);
+        for (int corner = 0; corner < 8; corner++) result.Encapsulate(collider.transform.TransformPoint(collider.center + Vector3.Scale(collider.size * .5f,
+            new Vector3((corner & 1) == 0 ? -1 : 1, (corner & 2) == 0 ? -1 : 1, (corner & 4) == 0 ? -1 : 1))));
+        return result;
+    }
+
+    private static void PrepareVisualAssets(Scene preview)
+    {
+        string input = Path.GetFullPath("../wall-visual-binding-input.json"); if (!File.Exists(input)) return;
+        var source = JsonUtility.FromJson<VisualAssets>(File.ReadAllText(input));
+        foreach (VisualAsset asset in source.assets)
+        {
+            GameObject root = Root(preview, asset.id); AddBox(root, Vector3.up * asset.size.y / 2, asset.size);
+            foreach (Renderer renderer in root.GetComponentsInChildren<Renderer>()) renderer.sharedMaterial = VisualMaterial(asset.id, asset.id.ToLowerInvariant().Contains("crate") ? new Color(.7f, .35f, .1f) : asset.id.ToLowerInvariant().Contains("console") ? new Color(.08f, .5f, .65f) : new Color(.3f, .38f, .43f));
+            asset.path = Save(root, "Visual-" + asset.id); asset.guid = AssetDatabase.AssetPathToGUID(asset.path);
+        }
+        File.WriteAllText(Path.GetFullPath("../wall-visual-catalog.json"), JsonUtility.ToJson(source));
+    }
+    public static void PrepareVisualComparison()
+    {
+        try
+        {
+            if (!Application.dataPath.Replace('\\', '/').EndsWith("/.local/unity-validation/Assets", StringComparison.Ordinal)) throw new InvalidOperationException("Isolated validation only.");
+            Scene scene = EditorSceneManager.NewPreviewScene(); try { PrepareVisualAssets(scene); } finally { EditorSceneManager.ClosePreviewScene(scene); }
+            Debug.Log("BAEKHO_WALL_VISUAL_PREPARE_PASS"); EditorApplication.Exit(0);
+        }
+        catch (Exception error) { Debug.LogException(error); EditorApplication.Exit(1); }
+    }
+    public static void RunVisualComparison()
+    {
+        try
+        {
+            if (!Application.dataPath.Replace('\\', '/').EndsWith("/.local/unity-validation/Assets", StringComparison.Ordinal)) throw new InvalidOperationException("Isolated validation only.");
+            Assert(SystemInfo.graphicsDeviceType != GraphicsDeviceType.Null, "Native camera validation has a real graphics device");
+            Scene active = SceneManager.GetActiveScene(); int roots = active.rootCount, previews = EditorSceneManager.previewSceneCount; bool dirty = active.isDirty;
+            var cases = JsonUtility.FromJson<VisualCases>(File.ReadAllText(Path.GetFullPath("../wall-visual-expectations.json")));
+            foreach (VisualCase item in cases.cases)
+            {
+                string path = BaekhoMapImporter.BuildFromPath(item.manifest, false); Scene preview = EditorSceneManager.NewPreviewScene();
+                try
+                {
+                    GameObject model = PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(path), preview) as GameObject;
+                    Assert(model != null, "Native visual scene imported");
+                    foreach (Transform child in model.transform)
+                    {
+                        Material material = child.name.StartsWith("wall_", StringComparison.Ordinal) ? VisualMaterial("Wall", new Color(.23f, .29f, .33f)) : child.name.StartsWith("floor_", StringComparison.Ordinal) ? VisualMaterial("Floor", new Color(.48f, .52f, .54f)) : child.GetComponent<BaekhoWallModule>() != null ? VisualMaterial("Pipe", new Color(.82f, .46f, .16f)) : null;
+                        if (material != null) foreach (Renderer renderer in child.GetComponentsInChildren<Renderer>()) renderer.sharedMaterial = material;
+                    }
+                    GameObject sun = Root(preview, "Validation light"); Light light = sun.AddComponent<Light>(); light.type = LightType.Directional; light.intensity = .9f; sun.transform.rotation = Quaternion.Euler(45, -30, 0);
+                    RenderSettings.ambientMode = AmbientMode.Flat; RenderSettings.ambientLight = new Color(.42f, .44f, .48f); RenderSettings.fog = false;
+                    CaptureVisual(preview, item, "top", new Vector3(0, 65, 0), Vector3.zero, true);
+                    CaptureVisual(preview, item, "eye", item.eye, item.target, false);
+                }
+                finally { EditorSceneManager.ClosePreviewScene(preview); }
+            }
+            Assert(active == SceneManager.GetActiveScene() && active.rootCount == roots && active.isDirty == dirty && EditorSceneManager.previewSceneCount == previews, "Native captures preserve active scene and close previews");
+            string result = "BAEKHO_WALL_VISUAL_PASS " + assertions + " assertions; same top and 1.7m entrance camera; synthetic native prefabs; " + SystemInfo.graphicsDeviceType;
+            File.WriteAllText(Path.GetFullPath("../composition-visual/unity-result.txt"), result); Debug.Log(result); EditorApplication.Exit(0);
+        }
+        catch (Exception error) { Debug.LogException(error); EditorApplication.Exit(1); }
+    }
+    private static void CaptureVisual(Scene scene, VisualCase item, string view, Vector3 position, Vector3 targetPoint, bool orthographic)
+    {
+        GameObject cameraRoot = Root(scene, "Camera " + view); Camera camera = cameraRoot.AddComponent<Camera>(); camera.scene = scene;
+        camera.transform.position = position; camera.transform.rotation = orthographic ? Quaternion.Euler(90, 0, 0) : Quaternion.LookRotation(targetPoint - position);
+        camera.orthographic = orthographic; camera.orthographicSize = item.topSize; camera.fieldOfView = 72; camera.nearClipPlane = .05f; camera.farClipPlane = 150; camera.allowHDR = false;
+        camera.backgroundColor = new Color(.12f, .16f, .19f); camera.clearFlags = CameraClearFlags.SolidColor;
+        RenderTexture texture = new RenderTexture(1600, 1100, 24) { antiAliasing = 4 }; RenderTexture previous = RenderTexture.active;
+        var image = new Texture2D(texture.width, texture.height, TextureFormat.RGB24, false);
+        try
+        {
+            camera.targetTexture = texture; camera.Render(); RenderTexture.active = texture; image.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0); image.Apply(); byte[] png = image.EncodeToPNG();
+            Assert(png.Length > 15000, "Native camera output contains scene geometry"); File.WriteAllBytes(Path.GetFullPath("../composition-visual/" + item.phase + "-unity-" + view + ".png"), png);
+        }
+        finally { RenderTexture.active = previous; camera.targetTexture = null; texture.Release(); UnityEngine.Object.DestroyImmediate(texture); UnityEngine.Object.DestroyImmediate(image); UnityEngine.Object.DestroyImmediate(cameraRoot); }
+    }
+    private static Material VisualMaterial(string name, Color color)
+    {
+        string path = Folder + "/Visual-" + name + ".mat"; Material material = AssetDatabase.LoadAssetAtPath<Material>(path);
+        if (material == null) { material = new Material(Shader.Find("Standard")); AssetDatabase.CreateAsset(material, path); }
+        material.color = color; material.SetFloat("_Glossiness", .2f); EditorUtility.SetDirty(material); return material;
     }
 
     private static Bounds GeometryBounds(Transform root, bool colliders)

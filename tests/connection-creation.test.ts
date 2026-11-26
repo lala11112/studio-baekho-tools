@@ -24,7 +24,7 @@ function bindings(): AssetBinding[] {
 }
 
 test('new generation defaults specify door dimensions while old projects keep unspecified fields', () => {
-  assert.equal(DEFAULT_SETTINGS.connectionWidth, 2);
+  assert.equal(DEFAULT_SETTINGS.connectionWidth, 4);
   assert.equal(DEFAULT_SETTINGS.connectionHeight, 3);
   const { connectionWidth: _width, connectionHeight: _height, ...legacy } = DEFAULT_SETTINGS;
   assert.deepEqual(parseGenerationSettings(legacy), legacy);
@@ -96,6 +96,31 @@ test('manual creation builds every requested door cell in all four directions an
     assert.equal(doors.length, 1);
     assert.equal(doors[0].fitWidth, 5.5);
   }
+});
+
+test('new 4 by 3 metre door defaults reserve two cells and fit one native-sized prefab in every direction', () => {
+  for (const direction of [0, 90, 180, 270] as const) {
+    const door = { ...doorway(direction), width: DEFAULT_SETTINGS.connectionWidth!, height: DEFAULT_SETTINGS.connectionHeight! };
+    const map = addMapConnection(room(), door), catalog = bindings(), nativeDoor = catalog.find(binding => binding.role === 'door')!;
+    nativeDoor.bounds = { center: { x: 0, y: 1.5, z: 0 }, size: { x: 4, y: 3, z: .2 } };
+    assert.equal(connectionCells(map, door).length, 2);
+    const manifest = buildManifest(map, catalog), doors = manifest.placements.filter(item => item.role === 'door');
+    assert.equal(doors.length, 1);
+    assert.equal(doors[0].fitWidth, 4);
+    assert.deepEqual(doors[0].scale, { x: 1, y: 1, z: 1 });
+    assert.equal(doors[0].rotation.y, direction);
+    assert.equal(manifest.connections[0].width, 4);
+    assert.equal(manifest.connections[0].height, 3);
+  }
+});
+
+test('saved two metre doors and their generation settings are retained after the new default changes', () => {
+  const map = addMapConnection(room(), { ...doorway(), width: 2, height: 3 });
+  const saved = parseProjectFile({ formatVersion: 1, map, settings: { ...DEFAULT_SETTINGS, connectionWidth: 2, connectionHeight: 3 }, bindings: [] });
+  assert.equal(saved.settings.connectionWidth, 2);
+  assert.equal(saved.settings.connectionHeight, 3);
+  assert.equal(saved.map.connections[0].width, 2);
+  assert.equal(saved.map.connections[0].height, 3);
 });
 
 test('failed creation preserves original map for locks, overlap, invalid size and blocked footprints', () => {

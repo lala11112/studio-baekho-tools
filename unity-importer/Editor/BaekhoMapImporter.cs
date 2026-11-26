@@ -89,6 +89,13 @@ namespace StudioBaekho
             public string contentKey;
             public Coordinates position;
             public Coordinates rotation;
+            public MarkerClearance clearance;
+        }
+
+        [Serializable] private sealed class MarkerClearance
+        {
+            public float radius;
+            public float height;
         }
 
         [MenuItem(MenuPath, true)]
@@ -255,6 +262,11 @@ namespace StudioBaekho
                         metadata.label = item.label;
                         metadata.kind = item.kind;
                         metadata.contentKey = item.contentKey;
+                        if (item.kind == "teleport")
+                        {
+                            metadata.clearanceRadius = item.clearance.radius;
+                            metadata.clearanceHeight = item.clearance.height;
+                        }
                     }
                 }
                 if (bakeNavMesh)
@@ -316,6 +328,10 @@ namespace StudioBaekho
             SetNavigationProperty(surface, "collectObjects", "Children");
             SetNavigationProperty(surface, "useGeometry", NavMeshCollectGeometry.RenderMeshes);
             SetNavigationProperty(surface, "layerMask", (LayerMask)(-1));
+            float voxelSize = Math.Max(.001f, NavMesh.GetSettingsByID(agentTypeID).agentRadius / 6);
+            SetNavigationProperty(surface, "overrideVoxelSize", true);
+            SetNavigationProperty(surface, "voxelSize", voxelSize);
+            AddNavigationPropGuards(root, voxelSize, agentTypeID);
             PropertyInfo dataProperty = NavigationProperty(surfaceType, "navMeshData");
             MethodInfo build = surfaceType.GetMethod("BuildNavMesh", Type.EmptyTypes);
             if (build == null) throw new InvalidOperationException("AI Navigation does not expose NavMeshSurface.BuildNavMesh. Update the package.");
@@ -345,6 +361,41 @@ namespace StudioBaekho
                     data = dataProperty.GetValue(surface, null) as NavMeshData;
                     if (data != null && !EditorUtility.IsPersistent(data)) UnityEngine.Object.DestroyImmediate(data);
                 }
+            }
+        }
+
+        private static void AddNavigationPropGuards(GameObject root, float voxelSize, int agentTypeID)
+        {
+            Type volumeType = Type.GetType("Unity.AI.Navigation.NavMeshModifierVolume, Unity.AI.Navigation");
+            if (volumeType == null) throw new InvalidOperationException("AI Navigation is missing NavMeshModifierVolume. Update the package.");
+            foreach (Transform child in root.transform)
+            {
+                if (child.name.IndexOf("_prop-instance-", StringComparison.Ordinal) < 0) continue;
+                bool solid = false;
+                foreach (Collider collider in child.GetComponentsInChildren<Collider>())
+                    if (collider.enabled && collider.gameObject.activeInHierarchy && !collider.isTrigger) { solid = true; break; }
+                if (!solid) continue;
+                VerticalBounds x = MeasureVerticalBounds(child.gameObject, child.name, 0, false, true);
+                VerticalBounds y = MeasureVerticalBounds(child.gameObject, child.name, 1, false, true);
+                VerticalBounds z = MeasureVerticalBounds(child.gameObject, child.name, 2, false, true);
+                // Preserve native stepping over low solid bodies that the selected agent can climb.
+                if (y.max - y.min <= NavMesh.GetSettingsByID(agentTypeID).agentClimb + .00001f) continue;
+                // Rasterization and contour simplification can cut inside a low prop's capsule clearance.
+                // Guard the measured solid footprint by two voxels while preserving the chosen agent type/radius.
+                float margin = voxelSize * 2;
+                Vector3 low = new Vector3((float)x.min - margin, (float)y.min - margin, (float)z.min - margin);
+                Vector3 high = new Vector3((float)x.max + margin, (float)y.max + margin, (float)z.max + margin);
+                Bounds local = new Bounds(child.InverseTransformPoint((low + high) / 2), Vector3.zero);
+                for (int corner = 0; corner < 8; corner++) local.Encapsulate(child.InverseTransformPoint(new Vector3(
+                    (corner & 1) == 0 ? low.x : high.x, (corner & 2) == 0 ? low.y : high.y, (corner & 4) == 0 ? low.z : high.z)));
+                Component guard = child.gameObject.AddComponent(volumeType);
+                SetNavigationProperty(guard, "center", local.center);
+                SetNavigationProperty(guard, "size", local.size);
+                SetNavigationProperty(guard, "area", 1); // Unity's built-in Not Walkable area.
+                var serialized = new SerializedObject(guard);
+                SerializedProperty agents = serialized.FindProperty("m_AffectedAgents");
+                if (agents == null || !agents.isArray) throw new InvalidOperationException("AI Navigation is missing modifier-volume agent settings. Update the package.");
+                agents.arraySize = 1; agents.GetArrayElementAtIndex(0).intValue = agentTypeID; serialized.ApplyModifiedPropertiesWithoutUndo();
             }
         }
 
@@ -499,8 +550,14 @@ namespace StudioBaekho
                     throw new InvalidDataException("Marker IDs must be unique, 1–100 letters, numbers, '_' or '-'.");
                 if (string.IsNullOrWhiteSpace(item.label) || item.label.Length > 80 || Regex.IsMatch(item.label, @"[\x00-\x1F\x7F]"))
                     throw new InvalidDataException("Marker label must contain 1–80 characters without control characters.");
-                if (item.kind != "enemy" && item.kind != "reward" && item.kind != "event")
-                    throw new InvalidDataException("Marker kind must be enemy, reward or event: " + item.id);
+                if (item.kind != "enemy" && item.kind != "reward" && item.kind != "event" && item.kind != "teleport")
+                    throw new InvalidDataException("Marker kind must be enemy, reward, event or teleport: " + item.id);
+                if (item.kind == "teleport")
+                {
+                    if (item.clearance == null || !Finite(item.clearance.radius) || item.clearance.radius < .1f || item.clearance.radius > 5 ||
+                        !Finite(item.clearance.height) || item.clearance.height < .25f || item.clearance.height > 20)
+                        throw new InvalidDataException("Teleport clearance requires radius 0.1–5m and height 0.25–20m: " + item.id);
+                }
                 if (item.contentKey == null || item.contentKey.Length > 200 || Regex.IsMatch(item.contentKey, @"[\x00-\x1F\x7F]"))
                     throw new InvalidDataException("Marker contentKey must contain at most 200 characters without control characters.");
                 ValidateVector(item.position, item.id + ".position", false);
@@ -697,7 +754,7 @@ namespace StudioBaekho
             // Collider-only blockouts are supported without querying physics-scene caches.
             foreach (Collider collider in instance.GetComponentsInChildren<Collider>())
             {
-                if (!collider.enabled || !collider.gameObject.activeInHierarchy || (!colliderOnly && !unionColliders && collider.isTrigger)) continue;
+                if (!collider.enabled || !collider.gameObject.activeInHierarchy || (!colliderOnly && collider.isTrigger)) continue;
                 BoxCollider box = collider as BoxCollider;
                 MeshCollider mesh = collider as MeshCollider;
                 if (box != null) result.Add(new Bounds(box.center, box.size), box.transform, id);
@@ -769,12 +826,24 @@ namespace StudioBaekho
                 do
                 {
                     if (++count > MaxMarkers) Fail("Too many markers");
+                    string markerKind = null;
+                    bool hasClearance = false;
                     ReadObject(new[] { "id", "label", "kind", "contentKey", "position", "rotation" }, key =>
                     {
                         if (key == "position" || key == "rotation")
                             ReadObject(new[] { "x", "y", "z" }, axis => ReadNumber(false));
+                        else if (key == "clearance")
+                        {
+                            hasClearance = true;
+                            ReadObject(new[] { "radius", "height" }, dimension => ReadNumber(false));
+                        }
+                        else if (key == "kind") markerKind = ReadString();
                         else ReadString();
-                    });
+                    }, new[] { "clearance" });
+                    // JsonUtility creates empty nested objects for omitted fields. Check presence
+                    // in the source shape so old non-teleport markers remain compatible.
+                    if (markerKind == "teleport" && !hasClearance) Fail("Teleport marker requires clearance");
+                    if (markerKind != "teleport" && hasClearance) Fail("Only teleport markers may contain clearance");
                 } while (Take(','));
                 Expect(']');
             }

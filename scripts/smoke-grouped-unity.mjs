@@ -73,6 +73,7 @@ const geography = map => ({ ...map, name: '', rows: map.rows.map(row => row.repl
 assert.deepEqual(geography(after), geography(before), 'the same map geography and source prefabs are used before and after');
 const scan = await scanUnityProject(projectPath);
 const importerScripts = await Promise.all(['Editor/BaekhoMapImporter', 'Runtime/BaekhoMapConnection', 'Runtime/BaekhoGameplayMarker', 'Runtime/BaekhoMapFixture'].map(name => readFile(resolve(root, `unity-importer/${name}.cs`), 'utf8')));
+const { analyzeLevelDesign } = await tsImport('../src/shared/level-design.ts', import.meta.url);
 for (const [phase, map] of [['before', before], ['after', after]]) {
   const project = { formatVersion: 1, map, settings, bindings };
   const bundle = await createExportBundle(project, scan, ...importerScripts);
@@ -82,7 +83,11 @@ for (const [phase, map] of [['before', before], ['after', after]]) {
   assert.equal(manifest.placements.some(placement => 'groupId' in placement || 'provenance' in placement), false, 'Unity remains on individual placement wire format');
   await writeFile(resolve(projectPath, `Assets/GroupedValidation/${phase}.baekhomap.json`), files['Map.baekhomap.json']);
   await writeFile(resolve(output, `${phase}.baekho.json`), JSON.stringify(project));
+  const analysis = analyzeLevelDesign(map, settings); assert.ok(analysis.combatCenter, 'actual level-design analysis supplies a combat center');
+  const world = cell => ({ x: (cell.x - (map.width - 1) / 2) * map.cellSize, y: map.elevations[cell.row][cell.x], z: ((map.height - 1) / 2 - cell.row) * map.cellSize });
+  const door = map.connections[0], entry = world(door), inward = { 0: [0, -1], 90: [-1, 0], 180: [0, 1], 270: [1, 0] }[door.direction]; entry.x += inward[0] * map.cellSize * 1.25; entry.z += inward[1] * map.cellSize * 1.25;
   await writeFile(resolve(output, `${phase}-expected.json`), JSON.stringify({ groups: result.groupCount, moved: result.movedProps,
+    combatCenter: world(analysis.combatCenter), entry, floorHalfX: map.width * map.cellSize / 2 - map.cellSize * 1.5, floorHalfZ: map.height * map.cellSize / 2 - map.cellSize * 1.5,
     props: map.propInstances.map(prop => ({ id: prop.id, groupId: prop.groupId ?? '', size: prop.size })) }));
 }
 await runEditor('BaekhoGroupedSmoke.Run', 'render.log');
@@ -90,6 +95,8 @@ const resultText = await readFile(resolve(output, 'unity-result.txt'), 'utf8');
 const navigation = JSON.parse(await readFile(resolve(output, 'navigation-result.json'), 'utf8'));
 assert.equal(navigation.groups, result.groupCount); assert.ok(navigation.routes >= result.groupCount * 2 + 1);
 assert.ok(navigation.minimumRouteMetres > 3); assert.ok(navigation.agentRadius >= .4); assert.ok(navigation.agentHeight >= 1.7);
+assert.ok(navigation.minimumPhysicalClearance >= navigation.agentRadius - .001, 'every sampled native route preserves the full character radius against real prop and wall colliders');
+assert.ok(navigation.voxelSize <= navigation.agentRadius / 6 + .00001); assert.ok(navigation.propGuards >= after.propInstances.length); assert.ok(navigation.quarterMetreSamples > navigation.routes * 10);
 await writeFile(resolve(output, 'result.json'), JSON.stringify({ result: 'PASS', syntheticPrefabs: true, eyeHeightMetres: 1.7,
   beforeCount: before.propInstances.length, afterCount: after.propInstances.length, groups: result.groupCount, moved: result.movedProps,
   added: result.addedProps, removed: result.removedProps, unity: resultText, navigation,

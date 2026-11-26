@@ -1,11 +1,13 @@
 import { connectionCells, connectionPose, FLOOR_THICKNESS_RATIO, validateMap } from './map';
 import { fixturePosition } from './features';
 import { synchronizeStructures } from './structures';
-import { assertWholeProps, propPosition } from './props';
+import { assertWholeProps, propPosition, propValidationIssues, propWorldSize } from './props';
 import { protectedPropIds } from './prop-groups';
 import type { AssetBinding, Direction, GridMap, MapConnection, MapFixture, PropInstance, ValidationIssue, Vec3, WallMountInstance } from './types';
 import { wallMountDependencies } from './wall-mounts';
 import { wallBaseY } from './wall-geometry';
+import { teleportReservedCells } from './teleport';
+import { propFacingOffset, propFrontYaw, propYaw } from './prop-orientation';
 
 export interface RegionRect { x: number; row: number; width: number; height: number }
 /** A detached map with region-local cell coordinates. */
@@ -16,7 +18,7 @@ export interface ModuleComparison { transform: ModuleTransform; issues: Validati
 
 const layers = ['ramps', 'connections', 'assetOverrides', 'ceilings', 'wallHeights', 'bridges', 'cliffs',
   'fixtures', 'markers', 'lockedCells', 'zones','pitBottoms','structureFills','propInstances'] as const;
-type CellRecord = { x: number; row: number; direction?: number; offset?: Vec3; id?: string; linkedId?: string; cells?: {x:number;row:number}[]; position?:Vec3; size?:Vec3; wall?:WallMountInstance; groupId?: string; authored?: boolean; provenance?: 'generated' | 'manual' };
+type CellRecord = { x: number; row: number; direction?: number; yawOffset?: number; bindingId?: string; offset?: Vec3; id?: string; linkedId?: string; cells?: {x:number;row:number}[]; position?:Vec3; size?:Vec3; wall?:WallMountInstance; groupId?: string; authored?: boolean; provenance?: 'generated' | 'manual' };
 const clone = <T>(value: T): T => structuredClone(value);
 const within = (point: { x: number; row: number }, rect: RegionRect): boolean => point.x >= rect.x && point.row >= rect.row
   && point.x < rect.x + rect.width && point.row < rect.row + rect.height;
@@ -104,6 +106,7 @@ export function mergeGeneratedRegion(original: GridMap, candidate: GridMap, rect
   const protectedCells = new Set([...(original.lockedCells ?? []), ...original.connections.flatMap(connection => connectionCells(original, connection))]
     .map(point => `${point.x}:${point.row}`));
   for(const fixture of original.fixtures??[])if(fixture.wall)for(const c of wallMountDependencies(fixture))protectedCells.add(`${c.x}:${c.row}`);
+  for(const c of teleportReservedCells({...original,markers:original.markers?.filter(m=>m.kind==='teleport'&&(!within(m,rect)||protectedCells.has(`${m.x}:${m.row}`)))}))protectedCells.add(`${c.x}:${c.row}`);
   // Preserve authored assignments and whole objects that straddle the selection or a lock.
   for (const override of original.assetOverrides) if (override.role === 'prop') protectedCells.add(`${override.x}:${override.row}`);
   for (const fixture of original.fixtures ?? []) if (fixture.bindingId && ['decoration','vegetation'].includes(fixture.role)) protectedCells.add(`${fixture.x}:${fixture.row}`);
@@ -184,7 +187,7 @@ function transformOffset(offset: Vec3, transform: RegionTransform): Vec3 {
 
 /** Mirrors first, then rotates clockwise on the grid. Invalid or locked destinations fail atomically. */
 export function pasteRegion(map: GridMap, snapshot: RegionSnapshot, destination: { x: number; row: number },
-  transform: RegionTransform = {}): GridMap {
+  transform: RegionTransform = {}, bindings: AssetBinding[] = []): GridMap {
   if (![0, 1, 2, 3].includes(transform.rotate90 ?? 0)) throw new Error('회전은 90도 단위여야 합니다.');
   if((transform.mirrorX||transform.mirrorZ)&&snapshot.fixtures?.some(f=>f.wall))throw new Error('벽 부착물이 포함된 영역은 대칭 붙여넣기를 지원하지 않습니다. 회전 또는 일반 붙여넣기를 사용하세요.');
   if (Math.abs(map.cellSize - snapshot.cellSize) > 0.000001) throw new Error('셀 크기가 같은 맵에 붙여넣어 주세요.');
@@ -244,7 +247,7 @@ export function pasteRegion(map: GridMap, snapshot: RegionSnapshot, destination:
       if(record.cells){
         next.cells=record.cells.map(c=>{const p=transformPoint(c.x,c.row,snapshot.width,snapshot.height,transform);return{x:p.x+rect.x,row:p.row+rect.row};});
         next.x=Math.min(...next.cells.map(c=>c.x));next.row=Math.min(...next.cells.map(c=>c.row));
-        if(record.offset){const oldCenter={x:((Math.max(...record.cells.map(c=>c.x))+Math.min(...record.cells.map(c=>c.x)))/2-record.x)*map.cellSize,z:-( (Math.max(...record.cells.map(c=>c.row))+Math.min(...record.cells.map(c=>c.row)))/2-record.row)*map.cellSize};const correction=transformOffset({x:record.offset.x-oldCenter.x,y:record.offset.y,z:record.offset.z-oldCenter.z},transform);next.offset={x:(Math.max(...next.cells.map(c=>c.x))-next.x)*map.cellSize/2+correction.x,y:correction.y,z:-(Math.max(...next.cells.map(c=>c.row))-next.row)*map.cellSize/2+correction.z};}
+        if(record.offset){const oldCenter={x:((Math.max(...record.cells.map(c=>c.x))+Math.min(...record.cells.map(c=>c.x)))/2-record.x)*map.cellSize,z:-( (Math.max(...record.cells.map(c=>c.row))+Math.min(...record.cells.map(c=>c.row)))/2-record.row)*map.cellSize};const bindingOffset=layer==='propInstances'?bindings.find(b=>b.id===record.bindingId)?.offset:undefined;const correction=transformOffset({x:record.offset.x-oldCenter.x+(bindingOffset?.x??0),y:record.offset.y,z:record.offset.z-oldCenter.z+(bindingOffset?.z??0)},transform);next.offset={x:(Math.max(...next.cells.map(c=>c.x))-next.x)*map.cellSize/2+correction.x-(bindingOffset?.x??0),y:correction.y,z:-(Math.max(...next.cells.map(c=>c.row))-next.row)*map.cellSize/2+correction.z-(bindingOffset?.z??0)};}
       }
       if(record.size&&turns%2)next.size={x:record.size.z,y:record.size.y,z:record.size.x};
       if(record.position){const p=transformOffset(record.position,transform);next.position={x:p.x+(rect.x+(rect.width-1)/2-(map.width-1)/2)*map.cellSize,y:p.y,z:p.z+((map.height-1)/2-rect.row-(rect.height-1)/2)*map.cellSize};}
@@ -263,6 +266,24 @@ export function pasteRegion(map: GridMap, snapshot: RegionSnapshot, destination:
       if (record.id && (layer === 'connections' || layer === 'fixtures' || layer === 'markers'||layer==='propInstances'||layer==='structureFills')) next.id = ids[layer].get(record.id)!;
       if (record.linkedId && ids.fixtures.has(record.linkedId)) next.linkedId = ids.fixtures.get(record.linkedId);
       if (layer === 'propInstances') {
+        if (!!transform.mirrorX !== !!transform.mirrorZ) {
+          const binding=bindings.find(b=>b.id===record.bindingId);
+          if(binding?.prop?.frontYaw!==undefined){
+            // Reflect the declared visual front. Reflecting only the root reverses a
+            // prefab's sideways native front, which can turn wall equipment toward its wall.
+            let front=propFrontYaw(record as PropInstance,binding);
+            if(transform.mirrorX)front=-front;
+            if(transform.mirrorZ)front=180-front;
+            front+=turns*90;
+            next.yawOffset=normalizedAngle(front+propFacingOffset(binding)-(next.direction??0)+180)-180;
+            next.size=propWorldSize(binding,propYaw(next as PropInstance));
+          } else {
+            // Legacy metadata describes the binding-calibrated front only. Preserve
+            // its established root reflection and measured footprint.
+            const offset=-(record.yawOffset??0)-2*(binding?.rotationY??0);
+            if(record.yawOffset!==undefined||offset!==0)next.yawOffset=offset;
+          }
+        }
         if (record.groupId) next.groupId = groupIds.get(record.groupId)!;
         next.authored = true; next.provenance = 'manual';
       }
@@ -270,7 +291,12 @@ export function pasteRegion(map: GridMap, snapshot: RegionSnapshot, destination:
     });
     Object.assign(result, { [layer]: [...clone(target ?? []).filter(point => !within(point, rect)), ...inserted] });
   }
-  return synchronizeStructures(result);
+  const completed=synchronizeStructures(result);
+  if(bindings.length&&(transform.mirrorX||transform.mirrorZ)){
+    const errors=propValidationIssues(completed,bindings).filter(issue=>issue.severity==='error');
+    if(errors.length)throw new Error(`대칭 붙여넣기 후 소품의 정면·점유 영역을 유지할 수 없습니다: ${errors.slice(0,3).map(issue=>issue.message).join(' / ')}`);
+  }
+  return completed;
 }
 
 const rotate = (point: Vec3, rotationY: number): Vec3 => {

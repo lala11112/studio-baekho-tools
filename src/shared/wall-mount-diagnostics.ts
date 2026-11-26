@@ -61,6 +61,7 @@ export function wallMountGenerationIssues(map: GridMap, settings: GenerationSett
   const temporaryCount = mounted.filter(fixture => fixture.wall!.placeholder).length;
   if (temporaryCount) issues.push(warning('wall-placeholder', `임시 벽 부착물 ${temporaryCount}개가 배치되어 있습니다. 배치를 확인한 뒤 실제 프리팹으로 교체하세요. Unity로 내보내기 전에는 임시 부착물을 교체하거나 제거해야 합니다.`));
   if (config.runs && config.runOrientation === 'both' && config.connectRuns !== false && mounted.some(f => f.wall!.runId)
+    && !(config.runLayout === 'composed' && config.runHeight?.mode === 'fixed')
     && !mounted.some(f => f.wall!.runId && f.wall!.sockets.some(s => Math.abs(s.direction.y) > .99) && f.wall!.sockets.some(s => Math.abs(s.direction.y) < .01))) {
     issues.push(warning('wall-junction-empty', '가로·세로 연결이 켜져 있지만 연결된 엘보·T자 분기가 없습니다. 같은 세트의 연결 부품·연결점 규격·벽의 빈 공간과 잠금 또는 수동 수정된 구간을 확인한 뒤 현재 맵 자동 배치를 실행해 주세요.'));
   }

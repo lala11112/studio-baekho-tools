@@ -4,6 +4,7 @@ import { DEFAULT_DESIGNER } from '../src/shared/features';
 import { DEFAULT_SETTINGS } from '../src/shared/map';
 import { effectivePropComposition, getCompositionIssues, suggestPropComposition } from '../src/shared/prop-composition';
 import type { AssetBinding } from '../src/shared/types';
+import { effectivePropBehavior, suggestPropBehavior } from '../src/shared/prop-behavior';
 
 const asset = (label: string): AssetBinding => ({ id: 'asset', label, role: 'prop', prefabGuid: '1'.repeat(32), prefabPath: `Assets/Props/${label}.prefab`, scale: { x: 1, y: 1, z: 1 }, offset: { x: 0, y: 0, z: 0 }, rotationY: 0 });
 
@@ -52,16 +53,16 @@ test('composition diagnostics are available without generation and leave the cat
   assert.deepEqual(getCompositionIssues(bindings, settings), []);
 });
 
-test('measured size allows large recognized accessories to anchor a set and includes the registered scale', () => {
+test('large dimensions never turn support-dependent accessories or chairs into independent anchors', () => {
   for (const name of ['Monitor', 'Chair', 'Keyboard']) {
     const binding = asset(name);
     binding.prop = { category: '미분류', tags: [], blocksMovement: true, size: { x: .6, y: .6, z: .6 }, placement: 'floor', roomTypes: ['battle'], weight: 1 };
     assert.equal(suggestPropComposition(binding).usage, 'equipment');
     assert.equal(suggestPropComposition(binding).member, 'companion');
     binding.scale.x = 4;
-    assert.equal(suggestPropComposition(binding).member, 'either', 'a large display or chair can become a group anchor');
+    assert.equal(suggestPropComposition(binding).member, 'companion', 'width does not establish floor support or a functional partner');
     binding.scale.x = 1; binding.scale.y = 4;
-    assert.equal(suggestPropComposition(binding).member, 'either', 'height can also qualify a substantial object');
+    assert.equal(suggestPropComposition(binding).member, 'companion', 'height does not establish floor support');
     binding.scale.y = 1; binding.prop.size = { x: 1.2, y: 1, z: 1.2 };
     assert.equal(suggestPropComposition(binding).member, 'companion', 'ordinary existing accessory recommendations remain unchanged');
   }
@@ -76,10 +77,21 @@ test('measured bounds provide the same conservative hint while unknown geometry 
   const binding = asset('Monitor'); binding.bounds = { center: { x: 0, y: .2, z: 0 }, size: { x: .4, y: .4, z: .4 } };
   assert.equal(suggestPropComposition(binding).member, 'companion');
   binding.bounds.size.x = 2.4;
-  assert.equal(suggestPropComposition(binding).member, 'either');
+  assert.equal(suggestPropComposition(binding).member, 'companion');
   const unknown = { ...binding, label: 'SM_A001', prefabPath: 'Assets/SM_A001.prefab' };
   assert.equal(suggestPropComposition(unknown).usage, 'unknown'); assert.equal(suggestPropComposition(unknown).member, 'either');
   binding.prop = { category: '장비', tags: [], blocksMovement: true, size: { x: 3, y: 3, z: 3 }, placement: 'floor', roomTypes: ['battle'], weight: 1,
     composition: { usage: 'equipment', family: 'authored', member: 'companion', arrangement: 'wall' } };
   assert.deepEqual(effectivePropComposition(binding), binding.prop.composition);
+});
+
+test('functional suggestions separate workstations, equipment purposes and unsupported desktop accessories', () => {
+  for (const [name, behavior] of [['Desk', 'workSurface'], ['Table', 'workSurface'], ['Chair', 'seat'], ['Workbench', 'floorEquipment'], ['Monitor', 'surfaceAccessory'], ['Keyboard', 'surfaceAccessory'], ['Computer', 'surfaceAccessory'], ['Crate', 'generic']] as const)
+    assert.equal(suggestPropBehavior(asset(name)), behavior, name);
+  assert.equal(suggestPropComposition(asset('Desk')).family, suggestPropComposition(asset('Chair')).family);
+  assert.notEqual(suggestPropComposition(asset('Console')).family, suggestPropComposition(asset('Generator')).family);
+  assert.notEqual(suggestPropComposition(asset('Generator')).family, suggestPropComposition(asset('Workbench')).family);
+  const display = asset('Monitor'); display.prop = { category: '모니터', tags: [], blocksMovement: true, placement: 'floor', roomTypes: ['battle'], weight: 1, behavior: 'floorEquipment' };
+  assert.equal(effectivePropBehavior(display), 'floorEquipment');
+  assert.equal(suggestPropComposition(display).member, 'either', 'only an explicit floor-equipment choice confirms a freestanding display');
 });

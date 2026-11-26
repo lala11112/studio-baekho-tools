@@ -34,7 +34,9 @@ public static class BaekhoImporterSmoke
         public string contentKey;
         public Vector3 position;
         public Vector3 rotation;
+        public AppMarkerClearance clearance;
     }
+    [Serializable] private sealed class AppMarkerClearance { public float radius; public float height; }
     [Serializable] private sealed class AppConnection
     {
         public string id;
@@ -231,7 +233,9 @@ public static class BaekhoImporterSmoke
                     Assert(child.localPosition == marker.position && child.localScale == Vector3.one &&
                         Quaternion.Angle(child.localRotation, Quaternion.Euler(marker.rotation)) < 0.01f &&
                         metadata.id == marker.id && metadata.label == marker.label && metadata.kind == marker.kind &&
-                        metadata.contentKey == marker.contentKey && child.GetComponents<Component>().Length == 2,
+                        metadata.contentKey == marker.contentKey && child.GetComponents<Component>().Length == 2 &&
+                        metadata.clearanceRadius == (marker.clearance == null ? 0 : marker.clearance.radius) &&
+                        metadata.clearanceHeight == (marker.clearance == null ? 0 : marker.clearance.height),
                         "JS marker metadata and transform preserved without game logic: " + marker.id);
                 }
             }
@@ -243,6 +247,35 @@ public static class BaekhoImporterSmoke
                 " assertions. Surface alignment, height fitting, pivot transforms, metadata and nested source GUIDs preserved. Output: " + output;
             File.WriteAllText(Path.GetFullPath("../unity-app-export-result.txt"), report, new UTF8Encoding(false));
             Debug.Log("BAEKHO_APP_EXPORT_PASS " + report);
+        }
+        catch (Exception exception)
+        {
+            Debug.LogException(exception);
+            EditorApplication.Exit(1);
+        }
+    }
+
+    public static void RunTeleportMarkers()
+    {
+        try
+        {
+            if (!Application.dataPath.Replace('\\', '/').EndsWith("/.local/unity-validation/Assets", StringComparison.Ordinal))
+                throw new InvalidOperationException("Smoke tests may only run in .local/unity-validation.");
+            if (!AssetDatabase.IsValidFolder(Folder)) AssetDatabase.CreateFolder("Assets", "BaekhoValidation");
+            Scene baseline = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+            string floorPath = AssetDatabase.GenerateUniqueAssetPath(Folder + "/TeleportFloor.prefab");
+            var floor = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            PrefabUtility.SaveAsPrefabAsset(floor, floorPath);
+            UnityEngine.Object.DestroyImmediate(floor);
+            EditorSceneManager.SaveScene(baseline, Folder + "/TeleportBaseline.unity");
+            int rootCount = baseline.rootCount, previewCount = EditorSceneManager.previewSceneCount;
+            TestTeleportClearance(Folder + "/teleport-validation.baekhomap.json", AssetDatabase.AssetPathToGUID(floorPath));
+            Assert(!baseline.isDirty && baseline.rootCount == rootCount && EditorSceneManager.previewSceneCount == previewCount,
+                "teleport imports and failures leave the active scene and preview count unchanged");
+            string report = "PASS Unity " + Application.unityVersion + " — " + assertions +
+                " teleport assertions; metadata, floor pose, legacy marker defaults, strict clearance validation and scene isolation.";
+            File.WriteAllText(Path.GetFullPath("../unity-teleport-result.txt"), report, new UTF8Encoding(false));
+            Debug.Log("BAEKHO_TELEPORT_PASS " + report);
         }
         catch (Exception exception)
         {
@@ -653,7 +686,8 @@ public static class BaekhoImporterSmoke
             entries.Add(fixture);
         }
         string marker = Marker("enemy-1", "enemy", "units/guard");
-        string valid = FeatureManifest(string.Join(",", entries), marker + "," + Marker("reward-1", "reward", "") + "," + Marker("event-1", "event", "events/entry"));
+        string teleport = Marker("teleport-1", "teleport", "", "{\"radius\":0.4,\"height\":2}");
+        string valid = FeatureManifest(string.Join(",", entries), marker + "," + Marker("reward-1", "reward", "") + "," + Marker("event-1", "event", "events/entry") + "," + teleport);
         Write(input, valid);
         string output = BaekhoMapImporter.BuildFromPath(input, false);
         GameObject loaded = PrefabUtility.LoadPrefabContents(output);
@@ -696,8 +730,8 @@ public static class BaekhoImporterSmoke
                     fixture.linkedId == (role == "switch" ? "gate" : ""),
                     "fixture role preserves explicit pivot and optional link metadata: " + role);
             }
-            Assert(loaded.GetComponentsInChildren<BaekhoGameplayMarker>().Length == 3, "three marker kinds saved");
-            foreach (string kind in new[] { "enemy", "reward", "event" })
+            Assert(loaded.GetComponentsInChildren<BaekhoGameplayMarker>().Length == 4, "four marker kinds saved");
+            foreach (string kind in new[] { "enemy", "reward", "event", "teleport" })
             {
                 Transform child = loaded.transform.Find("GameplayMarkers/" + kind + "-1");
                 BaekhoGameplayMarker data = child.GetComponent<BaekhoGameplayMarker>();
@@ -705,7 +739,9 @@ public static class BaekhoImporterSmoke
                     Quaternion.Angle(child.localRotation, Quaternion.Euler(0, 90, 0)) < 0.01f &&
                     child.GetComponents<Component>().Length == 2 && data.id == kind + "-1" &&
                     data.label == "게임 표식" && data.kind == kind &&
-                    data.contentKey == (kind == "enemy" ? "units/guard" : kind == "event" ? "events/entry" : ""),
+                    data.contentKey == (kind == "enemy" ? "units/guard" : kind == "event" ? "events/entry" : "") &&
+                    data.clearanceRadius == (kind == "teleport" ? .4f : 0) &&
+                    data.clearanceHeight == (kind == "teleport" ? 2 : 0),
                     "gameplay marker is metadata with raw position and rotation: " + kind);
             }
             Assert(loaded.transform.Find("Connections/east").GetComponent<BaekhoMapConnection>() != null,
@@ -730,6 +766,7 @@ public static class BaekhoImporterSmoke
         Reject(input, FeatureManifest(V4Placement("light", "light", "", 7, "pivot")), "light must reference a prefab");
         Reject(input, FeatureManifest(V4Placement("floor", "floor", guids[0], 0, "top"), marker + "," + marker), "duplicate marker ids");
         Reject(input, valid.Replace("\"kind\":\"enemy\"", "\"kind\":\"spawn\""), "invalid gameplay marker kind");
+        TestTeleportClearance(input, guids[0]);
         Reject(input, valid.Replace("\"linkedId\":\"gate\"", "\"linkedId\":\"missing-gate\""), "fixture link target must exist");
         Reject(input, valid.Replace("\"linkedId\":\"gate\"", "\"linkedId\":\"switch\""), "fixture cannot link to itself");
         Reject(input, valid.Replace("\"linkedId\":\"gate\"", "\"linkedId\":null"), "fixture link must be string");
@@ -741,6 +778,45 @@ public static class BaekhoImporterSmoke
         Reject(input, FeatureManifest(Placement("floor", "floor", guids[0])).Replace(",\"markers\":[]", ""), "v4 requires markers array");
         Assert(!baseline.isDirty && baseline.rootCount == rootCount && EditorSceneManager.previewSceneCount == previewCount,
             "v4 success and failure preserve current scene and close isolated previews");
+    }
+
+    private static void TestTeleportClearance(string input, string floorGuid)
+    {
+        string teleport = Marker("teleport-1", "teleport", "", "{\"radius\":0.4,\"height\":2}");
+        string teleportManifest = FeatureManifest(V4Placement("floor", "floor", floorGuid, 2, "top"), teleport);
+        Write(input, FeatureManifest(V4Placement("floor", "floor", floorGuid, 2, "top"), teleport + "," + Marker("enemy-1", "enemy", "")));
+        string positive = BaekhoMapImporter.BuildFromPath(input, false);
+        GameObject loaded = PrefabUtility.LoadPrefabContents(positive);
+        try
+        {
+            var landing = loaded.transform.Find("GameplayMarkers/teleport-1").GetComponent<BaekhoGameplayMarker>();
+            Assert(landing.kind == "teleport" && landing.clearanceRadius == .4f && landing.clearanceHeight == 2 &&
+                landing.transform.localPosition == new Vector3(3, 2, 1) && landing.transform.localScale == Vector3.one &&
+                Quaternion.Angle(landing.transform.localRotation, Quaternion.Euler(0, 90, 0)) < .01f &&
+                landing.GetComponents<Component>().Length == 2, "teleport floor pose and body clearance survive prefab serialization without game logic");
+            var enemy = loaded.transform.Find("GameplayMarkers/enemy-1").GetComponent<BaekhoGameplayMarker>();
+            Assert(enemy.clearanceRadius == 0 && enemy.clearanceHeight == 0, "legacy markers retain empty clearance defaults");
+        }
+        finally { PrefabUtility.UnloadPrefabContents(loaded); }
+        Reject(input, teleportManifest.Replace(",\"clearance\":{\"radius\":0.4,\"height\":2}", ""), "teleport requires clearance metadata");
+        Reject(input, teleportManifest.Replace("{\"radius\":0.4,\"height\":2}", "null"), "teleport clearance cannot be null");
+        Reject(input, teleportManifest.Replace("\"radius\":0.4", "\"radius\":0.09"), "teleport radius below minimum");
+        Reject(input, teleportManifest.Replace("\"radius\":0.4", "\"radius\":5.01"), "teleport radius above maximum");
+        Reject(input, teleportManifest.Replace("\"height\":2}", "\"height\":0.24}"), "teleport height below minimum");
+        Reject(input, teleportManifest.Replace("\"height\":2}", "\"height\":20.01}"), "teleport height above maximum");
+        Reject(input, teleportManifest.Replace("\"radius\":0.4,", ""), "teleport clearance requires radius");
+        Reject(input, teleportManifest.Replace(",\"height\":2}", "}"), "teleport clearance requires height");
+        Reject(input, teleportManifest.Replace("\"radius\":0.4", "\"radius\":\"0.4\""), "teleport clearance radius is numeric");
+        Reject(input, teleportManifest.Replace("\"radius\":0.4", "\"radius\":0.4,\"radius\":0.4"), "teleport clearance rejects duplicate dimension");
+        Reject(input, teleportManifest.Replace("\"radius\":0.4", "\"radius\":0.4,\"depth\":1"), "teleport clearance rejects unknown dimension");
+        Reject(input, teleportManifest.Replace("\"kind\":\"teleport\"", "\"kind\":\"event\""), "ordinary markers cannot contain teleport clearance");
+        foreach (string clearance in new[] { "{\"radius\":0.1,\"height\":0.25}", "{\"radius\":5,\"height\":20}" })
+        {
+            Write(input, teleportManifest.Replace("{\"radius\":0.4,\"height\":2}", clearance));
+            string boundary = BaekhoMapImporter.BuildFromPath(input, false);
+            Assert(AssetDatabase.LoadAssetAtPath<GameObject>(boundary).GetComponentsInChildren<BaekhoGameplayMarker>().Length == 1,
+                "teleport clearance inclusive bounds accepted: " + clearance);
+        }
     }
 
     private static void TestWideDoors(string input, string[] guids, Scene baseline, int rootCount, int previewCount)
@@ -983,10 +1059,11 @@ public static class BaekhoImporterSmoke
         Assert(rejected, label + " gives instructions to select prefab assets in Project");
     }
 
-    private static string Marker(string id, string kind, string contentKey)
+    private static string Marker(string id, string kind, string contentKey, string clearance = null)
     {
         return "{\"id\":\"" + id + "\",\"label\":\"게임 표식\",\"kind\":\"" + kind + "\",\"contentKey\":\"" + contentKey +
-            "\",\"position\":{\"x\":3,\"y\":2,\"z\":1},\"rotation\":{\"x\":0,\"y\":90,\"z\":0}}";
+            "\",\"position\":{\"x\":3,\"y\":2,\"z\":1},\"rotation\":{\"x\":0,\"y\":90,\"z\":0}" +
+            (clearance == null ? "" : ",\"clearance\":" + clearance) + "}";
     }
 
     private static string V4Placement(string id, string role, string guid, float y, string surface, float scaleY = 1, float fitHeight = 0)

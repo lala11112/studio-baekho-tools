@@ -18,6 +18,7 @@
     "package:win": "node scripts/package-win.mjs",
     "test:designer": "node scripts/smoke-designer.mjs",
     "test:concepts": "node scripts/smoke-concepts.mjs",
+    "test:direct-generation": "node scripts/smoke-direct-generation.mjs",
     "test:connections": "node scripts/smoke-connection-size.mjs",
     "test:prop-catalog": "node scripts/smoke-prop-catalog.mjs",
     "test:asset-catalog": "node scripts/smoke-asset-catalog.mjs",
@@ -29,6 +30,10 @@
     "test:furnishing": "node scripts/smoke-furnishing.mjs",
     "test:grouped-furnishing": "node scripts/smoke-grouped-furnishing.mjs",
     "test:grouped-unity": "node scripts/smoke-grouped-unity.mjs",
+    "test:prop-orientation:unity": "node scripts/smoke-prop-orientation-unity.mjs",
+    "test:unity:low-steps": "node scripts/smoke-unity-low-steps.mjs",
+    "benchmark:grouped-props": "tsx scripts/benchmark-grouped-props.ts",
+    "benchmark:generations": "tsx scripts/benchmark-generation.ts",
     "test:wall-mounts": "node scripts/smoke-wall-mounts.mjs",
     "test:wall-placeholders": "node scripts/smoke-wall-placeholders.mjs",
     "test:wall-bulk-vertical": "node scripts/smoke-wall-bulk-vertical.mjs",
@@ -42,8 +47,12 @@
     "test:v5": "node scripts/smoke-v5.mjs",
     "test:v051": "node scripts/smoke-v051.mjs",
     "test:level-design-ai": "tsx scripts/smoke-level-design-ai.ts",
+    "test:spatial-ai": "tsx scripts/smoke-spatial-ai.ts",
+    "test:spatial-quality": "tsx scripts/report-spatial-quality.ts",
+    "test:composition-visual": "node scripts/smoke-composition-visual.mjs",
     "test:unity-button": "node scripts/smoke-unity-button.mjs",
-    "test:unity:mcp": "node scripts/smoke-unity-mcp.mjs"
+    "test:unity:mcp": "node scripts/smoke-unity-mcp.mjs",
+    "test:teleport": "node scripts/smoke-teleport.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

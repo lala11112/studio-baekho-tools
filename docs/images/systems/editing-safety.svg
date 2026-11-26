@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="560" viewBox="0 0 1120 560" role="img" aria-labelledby="editing-title editing-desc">
+  <title id="editing-title">편집과 재생성의 적용 원리</title>
+  <desc id="editing-desc">원본을 복제하여 수정 후보를 만들고 작업별 보호 대상과 최종 맵을 검사한다. 검증에 성공하면 변경과 Undo 이력을 적용하고 실패하면 원본을 유지한다. 부분 재생성과 자동 재정리에서는 잠긴 영역, 외부 지형과 연결문, 수동 소품과 묶음, 경계를 가로지르는 객체를 작업별 규칙에 따라 보호한다.</desc>
+  <defs>
+    <marker id="editing-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#57677e"/></marker>
+    <marker id="editing-success" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#186f78"/></marker>
+    <marker id="editing-failure" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#ae6a22"/></marker>
+    <style>
+      text { font-family: 'Malgun Gothic', sans-serif; fill: #172b44; font-size: 18px; }
+      .heading { font-size: 28px; font-weight: 700; }
+      .label { font-size: 21px; font-weight: 700; }
+      .muted { fill: #57677e; }
+      .teal { fill: #186f78; }
+      .warning { fill: #ae6a22; }
+      .box { fill: #ffffff; stroke: #cbd5e4; stroke-width: 2; }
+      .flow { fill: none; stroke: #57677e; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#editing-arrow); }
+    </style>
+  </defs>
+  <rect width="1120" height="560" fill="#f5f7fb"/>
+  <text x="48" y="48" class="heading">편집과 재생성의 적용 원리</text>
+  <text x="48" y="79" class="muted">변경 후보를 검사하고 유효한 결과를 원본에 적용한다</text>
+
+  <rect x="48" y="130" width="220" height="90" rx="14" class="box"/>
+  <text x="158" y="165" text-anchor="middle" class="label">원본 복제</text>
+  <text x="158" y="195" text-anchor="middle" class="muted">변경 후보 만들기</text>
+  <path d="M 268 175 H 320" class="flow"/>
+  <rect x="320" y="130" width="220" height="90" rx="14" class="box"/>
+  <text x="430" y="165" text-anchor="middle" class="label">수정</text>
+  <text x="430" y="195" text-anchor="middle" class="muted">지형 · 객체 · 배치</text>
+  <path d="M 540 175 H 592" class="flow"/>
+  <rect x="592" y="130" width="220" height="90" rx="14" class="box"/>
+  <text x="702" y="165" text-anchor="middle" class="label">보호 대상 검사</text>
+  <text x="702" y="195" text-anchor="middle" class="muted">작업별 보존 규칙</text>
+  <path d="M 812 175 H 864" class="flow"/>
+  <rect x="864" y="130" width="208" height="90" rx="14" fill="#eef2ff" stroke="#305dd7" stroke-width="2"/>
+  <text x="968" y="165" text-anchor="middle" class="label">작업별 검증</text>
+  <text x="968" y="195" text-anchor="middle" class="muted">충돌과 관련 규칙</text>
+
+  <path d="M 968 220 V 260 H 288 V 300" fill="none" stroke="#186f78" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#editing-success)"/>
+  <text x="568" y="250" text-anchor="middle" class="teal">검증 성공</text>
+  <path d="M 968 260 V 280 H 832 V 300" fill="none" stroke="#ae6a22" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#editing-failure)"/>
+  <text x="1005" y="273" class="warning">실패</text>
+  <circle cx="968" cy="260" r="4" fill="#57677e"/>
+
+  <rect x="48" y="300" width="480" height="90" rx="14" fill="#eaf6f4" stroke="#186f78" stroke-width="2"/>
+  <text x="288" y="335" text-anchor="middle" class="label teal">변경 적용과 Undo 이력 저장</text>
+  <text x="288" y="365" text-anchor="middle">유효한 편집 결과로 갱신</text>
+  <rect x="592" y="300" width="480" height="90" rx="14" fill="#fff6e9" stroke="#ae6a22" stroke-width="2"/>
+  <text x="832" y="335" text-anchor="middle" class="label warning">원본 유지</text>
+  <text x="832" y="365" text-anchor="middle">실패 이유를 표시하고 변경 중단</text>
+
+  <text x="48" y="433" class="label">부분 재생성과 자동 재정리의 주요 보호 대상</text>
+  <rect x="48" y="454" width="238" height="66" rx="12" class="box"/>
+  <text x="167" y="494" text-anchor="middle">잠긴 셀과 영역</text>
+  <rect x="310" y="454" width="238" height="66" rx="12" class="box"/>
+  <text x="429" y="494" text-anchor="middle">외부 지형과 연결문</text>
+  <rect x="572" y="454" width="238" height="66" rx="12" class="box"/>
+  <text x="691" y="494" text-anchor="middle">수동 소품과 묶음</text>
+  <rect x="834" y="454" width="238" height="66" rx="12" class="box"/>
+  <text x="953" y="494" text-anchor="middle">경계에 걸친 객체</text>
+</svg>

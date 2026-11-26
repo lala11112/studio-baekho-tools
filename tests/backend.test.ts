@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { strFromU8, unzipSync } from 'fflate';
@@ -10,17 +11,18 @@ import type { CodexRpc, RpcObject } from '../electron/services/codex-transport';
 import { atomicWrite, createExportBundle, normalizeProject, readProject, serializeProject } from '../electron/services/projects';
 import { scanUnityProject, verifyBindingProvenance } from '../electron/services/unity-project';
 import { decodePngDataUrl, validateGenerationRegion, validateSettings } from '../electron/services/validation';
-import { conceptPrompt, imagePrompt, layoutPrompt } from '../electron/services/prompts';
+import { conceptPrompt, directLayoutPrompt, imagePrompt, layoutPrompt } from '../electron/services/prompts';
 import { DEFAULT_SETTINGS, validateMap } from '../src/shared/map';
 import { DEFAULT_DESIGNER } from '../src/shared/features';
 import { DEFAULT_LEVEL_DESIGN } from '../src/shared/level-design';
-import type { AssetBinding, AssetRole, GenerationSettings, GridMap, ProjectFile } from '../src/shared/types';
+import type { AssetBinding, AssetRole, GenerationProgress, GenerationSettings, GridMap, ProjectFile } from '../src/shared/types';
 
 const v4Map = (map: GridMap): GridMap => ({ ...map, version: 4, ceilings: [], wallHeights: [], bridges: [], cliffs: [], fixtures: [], markers: [], lockedCells: [], zones: [] });
 
 const PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
 const PNG = `data:image/png;base64,${PNG_BASE64}`;
-const SETTINGS: GenerationSettings = { ...DEFAULT_SETTINGS, conceptMode: 'manual', prompt: '서늘한 석조 전투 공간', width: 8, height: 8, connectionCount: 1 };
+// This fixture keeps its original one-cell (2m) doorway, independently of new-project defaults.
+const SETTINGS: GenerationSettings = { ...DEFAULT_SETTINGS, connectionWidth: 2, conceptMode: 'manual', prompt: '서늘한 석조 전투 공간', width: 8, height: 8, connectionCount: 1 };
 const MAP: GridMap = {
   version: 3, name: 'Test dungeon', width: 8, height: 8, cellSize: SETTINGS.cellSize,
   rows: ['#D######', '#......#', '#......#', '#......#', '#......#', '#......#', '#......#', '########'],
@@ -52,6 +54,10 @@ class FakeCodex implements CodexRpc {
   closeListeners = new Set<() => void>();
   accountType: string | null = 'chatgpt';
   imageGeneration = true;
+  configuration: RpcObject = { mcp_servers: { external: { enabled: true, token: 'must-not-be-forwarded' } } };
+  models: RpcObject[] = [{ model: 'codex-test-model', displayName: 'Test Model', isDefault: true, inputModalities: ['text', 'image'] }];
+  threadMetadata: RpcObject = {};
+  tokenUsage?: RpcObject;
   hang = false;
   items: RpcObject[] = [{ type: 'imageGeneration', id: 'image-1', status: 'completed', result: PNG_BASE64 }];
   turnCount = 0;
@@ -59,16 +65,17 @@ class FakeCodex implements CodexRpc {
   closed = false;
   async request(method: string, params: RpcObject): Promise<RpcObject> {
     this.requests.push({ method, params });
-    if (method === 'config/read') return { config: { mcp_servers: { external: { enabled: true, token: 'must-not-be-forwarded' } } } };
+    if (method === 'config/read') return { config: this.configuration };
     if (method === 'account/read') return { account: this.accountType ? { type: this.accountType } : null, requiresOpenaiAuth: true };
     if (method === 'modelProvider/capabilities/read') return { imageGeneration: this.imageGeneration };
-    if (method === 'model/list') return { data: [{ model: 'codex-test-model', displayName: 'Test Model', isDefault: true, inputModalities: ['text', 'image'] }] };
+    if (method === 'model/list') return { data: this.models };
     if (method === 'account/login/start') return { type: 'chatgpt', authUrl: 'https://auth.openai.com/oauth/authorize?state=opaque' };
-    if (method === 'thread/start') return { thread: { id: `thread-${this.turnCount + 1}` } };
+    if (method === 'thread/start') return { thread: { id: `thread-${this.turnCount + 1}` }, ...this.threadMetadata };
     if (method === 'turn/start') {
       const id = `turn-${++this.turnCount}`;
       this.turnStarted?.();
       if (!this.hang) queueMicrotask(() => {
+        if (this.tokenUsage) for (const listener of this.notifications) listener('thread/tokenUsage/updated', { threadId: params.threadId, turnId: id, tokenUsage: this.tokenUsage });
         for (const item of this.items) for (const listener of this.notifications) listener('item/completed', { threadId: params.threadId, turnId: id, item });
         for (const listener of this.notifications) listener('turn/completed', { threadId: params.threadId, turn: { id, status: 'completed', items: this.items } });
       });
@@ -118,6 +125,26 @@ test('backend rejects malformed or oversized settings and PNG data before any re
   await assert.rejects(client.generateImage({ ...SETTINGS, height: NaN }));
   await assert.rejects(client.extractLayout(SETTINGS, 'data:image/png;base64,aaaa'));
   assert.equal(fake.requests.length, 0);
+});
+
+test('image diversity context reaches the blueprint request and never terrain extraction', async t => {
+  const { client, fake } = await codexFixture(t);
+  for (const context of [{ candidateIndex: 9 }, { candidateCount: 0 }, { previousStructures: ['x'.repeat(2001)] }, { unexpected: 'instruction' }]) {
+    await assert.rejects(client.generateImage(SETTINGS, undefined, undefined, context), /설계도|후보|요약/);
+  }
+  assert.equal(fake.requests.length, 0);
+  const context = { candidateIndex: 1, candidateCount: 3, previousStructures: ['ACTUAL_STRUCTURE_REFERENCE_123'] };
+  await client.generateImage(SETTINGS, undefined, undefined, context);
+  const imageTurn = fake.requests.filter(r => r.method === 'turn/start').at(-1)!;
+  const imageText = String((imageTurn.params.input as RpcObject[])[0].text);
+  assert.match(imageText, /SPATIAL DESIGN INTENT/); assert.match(imageText, /candidate 2\/3/);
+  assert.match(imageText, /ACTUAL_STRUCTURE_REFERENCE_123/);
+  fake.layout(v4Map(MAP));
+  await client.extractLayout(SETTINGS, PNG);
+  const extractionTurn = fake.requests.filter(r => r.method === 'turn/start').at(-1)!;
+  const extractionText = String((extractionTurn.params.input as RpcObject[])[0].text);
+  assert.match(extractionText, /IMAGE FIDELITY/);
+  assert.doesNotMatch(extractionText, /ACTUAL_STRUCTURE_REFERENCE_123|SPATIAL DESIGN INTENT|PRECEDING ACTUAL STRUCTURES/);
 });
 
 test('concept generation accepts an empty saved prompt and uses the same isolated model-aware connection', async t => {
@@ -249,6 +276,159 @@ test('Codex generates native PNG then vision structured JSON using ephemeral iso
   assert.ok(!JSON.stringify(turns).includes('Assets/'));
   assert.ok(!JSON.stringify(turns).includes('must-not-be-forwarded'));
   assert.deepEqual(await readdir(path.join(root, 'codex', 'jobs')), []);
+});
+
+test('direct layout designs text-only geography with the same schema, spatial context and inherited model effort', async t => {
+  const { client, fake } = await codexFixture(t);
+  fake.configuration = { model: 'codex-test-model', model_reasoning_effort: 'ultra' };
+  fake.layout(v4Map(MAP));
+  const context = { candidateIndex: 1, candidateCount: 3, previousStructures: ['PREVIOUS_ACTUAL_ROOM'] };
+  const settings: GenerationSettings = { ...SETTINGS, generationMethod: 'direct', seed: 72 };
+  assert.deepEqual(await client.generateLayout(settings, undefined, undefined, context), v4Map(MAP));
+  const turns = fake.requests.filter(request => request.method === 'turn/start');
+  assert.equal(turns.length, 1);
+  const input = turns[0].params.input as RpcObject[];
+  assert.equal(input.length, 1); assert.equal(input[0].type, 'text');
+  assert.match(String(input[0].text), /SPATIAL DESIGN INTENT \(seed 72, candidate 2\/3\)/);
+  assert.match(String(input[0].text), /PREVIOUS_ACTUAL_ROOM/);
+  assert.doesNotMatch(String(input[0].text), /image|blueprint|axonometric|cutaway|extraction/i);
+  assert.deepEqual((turns[0].params.outputSchema as { properties: { version: unknown } }).properties.version, { type: 'integer', enum: [4] });
+  assert.equal(turns[0].params.effort, undefined);
+  assert.equal(turns[0].params.model, undefined);
+  const thread = fake.requests.find(request => request.method === 'thread/start')!.params;
+  assert.equal(thread.model, undefined); assert.deepEqual(thread.config, { mcp_servers: {} });
+  assert.doesNotMatch(JSON.stringify(thread.config), /effort|ultra/);
+  const decorated = directLayoutPrompt({ ...settings, designer: { ...DEFAULT_DESIGNER, ceilings: true, propLayout: 'balanced' } });
+  assert.doesNotMatch(decorated, /image|blueprint|axonometric|cutaway|extraction/i);
+});
+
+test('direct preflight rejects unresolved concepts, invalid regions and unsupported context before Codex work', async t => {
+  const { client, fake } = await codexFixture(t);
+  await assert.rejects(client.generateLayout({ ...SETTINGS, conceptMode: 'ai', prompt: '' }), /컨셉/);
+  await assert.rejects(client.generateLayout(SETTINGS, { x: 7, row: 7, width: 2, height: 2 }), /영역/);
+  await assert.rejects(client.generateLayout(SETTINGS, undefined, undefined, { candidateIndex: 9 }), /후보/);
+  assert.equal(fake.requests.length, 0);
+});
+
+test('direct and image extraction share geography validation and deterministic local placement', async t => {
+  const { client, fake } = await codexFixture(t);
+  const settings: GenerationSettings = { ...SETTINGS, generationMethod: 'direct', seed: 123,
+    designer: { ...DEFAULT_DESIGNER, elevation: false, props: false, ceilings: true, lights: true, enemies: true, enemyCount: 3 } };
+  fake.layout(v4Map(MAP));
+  const direct = await client.generateLayout(settings);
+  assert.deepEqual(direct, await client.extractLayout(settings, PNG));
+  assert.ok(direct.ceilings?.length); assert.equal(direct.markers?.filter(marker => marker.kind === 'enemy').length, 3);
+  const invalid: [unknown, RegExp][] = [
+    [{ ...MAP, cellSize: 3 }, /크기 또는 이동 단차/],
+    [{ ...MAP, rows: ['#D######', '#.#....#', '###....#', '#......#', '#......#', '#......#', '#......#', '########'] }, /연결되어 있지 않습니다/],
+    [{ ...MAP, assetOverrides: [{ x: 1, row: 1, role: 'floor', bindingId: 'injected' }] }, /셀 에셋/],
+    [{ ...MAP, markers: [{ id: 'injected', label: 'Enemy', kind: 'enemy', contentKey: '', x: 1, row: 1, direction: 0, offset: { x: 0, y: 0, z: 0 } }] }, /허용되지 않는 추가 콘텐츠/],
+  ];
+  for (const [value, expected] of invalid) {
+    fake.layout(value);
+    await assert.rejects(client.generateLayout(SETTINGS), expected);
+  }
+  fake.layout(v4Map(MAP));
+  await assert.rejects(client.generateLayout({ ...SETTINGS, designer: { ...DEFAULT_DESIGNER, elevation: true, props: false } }), /높이 지형/);
+  assert.equal(fake.turnCount, 7, 'Each request makes exactly one turn, including failures.');
+});
+
+test('direct region returns geography before protected merge and defers all local feature placement', async t => {
+  const { client, fake } = await codexFixture(t);
+  fake.layout(v4Map(MAP));
+  const region = { x: 1, row: 1, width: 3, height: 3 };
+  const settings: GenerationSettings = { ...SETTINGS, designer: { ...DEFAULT_DESIGNER, elevation: false, props: false, ceilings: true, lights: true, enemies: true } };
+  const result = await client.generateLayout(settings, region);
+  assert.deepEqual(result.rows, MAP.rows); assert.deepEqual(result.connections, MAP.connections);
+  assert.equal(result.ceilings, undefined); assert.equal(result.fixtures, undefined); assert.equal(result.markers, undefined);
+  const text = String((fake.requests.find(request => request.method === 'turn/start')!.params.input as RpcObject[])[0].text);
+  assert.match(text, /ALL feature toggles and requested counts below apply ONLY to this selected editable region/);
+  assert.match(text, /Preserve every supplied connection field/);
+});
+
+test('text-only Codex can generate concepts and direct layouts without image generation or vision support', async t => {
+  const { client, fake } = await codexFixture(t);
+  fake.imageGeneration = false;
+  fake.models = [{ model: 'text-model', displayName: 'Text', isDefault: true, inputModalities: ['text'] }];
+  const status = await client.getStatus();
+  assert.equal(status.state, 'ready'); assert.deepEqual(status.models[0].inputModalities, ['text']);
+  const settings = { ...SETTINGS, codexModel: 'text-model' };
+  fake.layout({ text: '적에게 접근할 시점과 이탈할 여유를 판단한다.' });
+  assert.match(await client.generateConcept(settings), /접근/);
+  fake.layout(v4Map(MAP));
+  assert.deepEqual(await client.generateLayout(settings), v4Map(MAP));
+  await assert.rejects(client.generateImage(settings), /이미지 생성을 지원하지 않습니다/);
+  await assert.rejects(client.extractLayout(settings, PNG), /이미지 입력을 지원하지 않습니다/);
+  await assert.rejects(client.extractLayout(SETTINGS, PNG), /이미지 입력을 지원하지 않습니다/);
+  assert.equal(fake.turnCount, 2);
+});
+
+test('generation telemetry uses disjoint stage pairs, safe counts and resolved model effort without content', async t => {
+  const root = await fixture(t), fake = new FakeCodex(), events: GenerationProgress[] = [];
+  fake.configuration = { model: 'configured-model', model_reasoning_effort: 'ultra', token: 'PRIVATE_CONFIG_TOKEN' };
+  fake.threadMetadata = { model: 'codex-test-model', reasoningEffort: 'high', prompt: 'PRIVATE_THREAD_PROMPT' };
+  fake.tokenUsage = { total: { inputTokens: 99, outputTokens: 42, reasoningOutputTokens: 30, cachedInputTokens: 12, auth: 'PRIVATE_TOKEN_USAGE' } };
+  fake.layout(v4Map(MAP));
+  const dataDirectory = path.join(root, 'codex');
+  const client = new CodexService({ dataDirectory, discover: async () => ({ executable: 'mock', version: 'test' }), connect: async () => fake,
+    onProgress: event => { events.push(structuredClone(event)); (event as unknown as RpcObject).prompt = 'PRIVATE_CALLBACK_MUTATION'; throw new Error('PRIVATE_CALLBACK_ERROR'); } });
+  t.after(() => client.close());
+  await client.generateLayout({ ...SETTINGS, generationMethod: 'direct', prompt: 'PRIVATE_USER_PROMPT' });
+  assert.deepEqual(events.map(event => `${event.stage}:${event.state}`), [
+    'preparing:running', 'preparing:completed', 'layout:running', 'layout:completed', 'validation:running', 'validation:completed',
+    'placement:running', 'placement:completed', 'validation:running', 'validation:completed',
+  ]);
+  assert.equal(new Set(events.map(event => event.jobId)).size, 1);
+  for (let index = 0; index < events.length; index += 2) {
+    assert.equal(events[index].id, events[index + 1].id);
+    assert.equal(events[index].elapsedMs, 0); assert.ok(events[index + 1].elapsedMs >= 0);
+  }
+  assert.equal(new Set(events.filter(event => event.state === 'completed').map(event => event.id)).size, 5);
+  const layout = events.find(event => event.stage === 'layout' && event.state === 'completed')!;
+  assert.equal(layout.model, 'codex-test-model'); assert.equal(layout.reasoningEffort, 'high');
+  assert.deepEqual(layout.tokenUsage, { inputTokens: 99, outputTokens: 42, reasoningOutputTokens: 30, cachedInputTokens: 12 });
+  const stored = await readFile(path.join(dataDirectory, 'generation-metrics.jsonl'), 'utf8');
+  const records = stored.trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(records.length, 5); assert.ok(records.every(record => record.state !== 'running' && record.method === 'direct'));
+  assert.doesNotMatch(stored, /PRIVATE_|Test dungeon|rows|prefab|Assets\/|imageDataUrl/);
+  for (const request of fake.requests.filter(request => request.method === 'turn/start')) assert.equal(request.params.effort, undefined);
+});
+
+test('direct failure and cancellation are recorded without retries, late results or leaked errors', async t => {
+  const { client, fake, root } = await codexFixture(t);
+  fake.items = [{ type: 'agentMessage', id: 'answer', phase: 'final_answer', text: 'PRIVATE_INVALID_RESPONSE' }];
+  await assert.rejects(client.generateLayout(SETTINGS), /올바른 배치도 JSON/);
+  fake.hang = true;
+  const started = new Promise<void>(resolve => { fake.turnStarted = resolve; });
+  const cancelled = assert.rejects(client.generateLayout(SETTINGS), /취소되었습니다/);
+  await started;
+  await new Promise(resolve => setImmediate(resolve));
+  const lateListeners = [...fake.notifications];
+  client.cancel();
+  for (const listener of lateListeners) listener('turn/completed', { threadId: 'thread-2', turn: { id: 'turn-2', status: 'completed', items: [] } });
+  await cancelled;
+  assert.equal(fake.turnCount, 2); assert.ok(fake.requests.some(request => request.method === 'turn/interrupt'));
+  assert.deepEqual(await readdir(path.join(root, 'codex', 'jobs')), []);
+  const stored = await readFile(path.join(root, 'codex', 'generation-metrics.jsonl'), 'utf8');
+  const records: GenerationProgress[] = stored.trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(records.some(event => event.stage === 'validation' && event.state === 'failed'));
+  assert.ok(records.some(event => event.stage === 'layout' && event.state === 'cancelled'));
+  assert.doesNotMatch(stored, /PRIVATE_|JSON|취소|error|prompt/);
+});
+
+test('renderer timing accepts only terminal placement or validation records and logging failure cannot fail generation', async t => {
+  const { client, fake, root } = await codexFixture(t);
+  const event = { id: randomUUID(), jobId: randomUUID(), method: 'direct', stage: 'validation', state: 'completed', elapsedMs: 12 };
+  for (const invalid of [{ ...event, prompt: 'secret' }, { ...event, model: 'secret' }, { ...event, tokenUsage: { inputTokens: 1, outputTokens: 1 } },
+    { ...event, stage: 'layout' }, { ...event, state: 'running' }, { ...event, elapsedMs: -1 }, { ...event, elapsedMs: NaN }, { ...event, id: 'secret' }]) {
+    await assert.rejects(client.recordGenerationStage(invalid), /측정값/);
+  }
+  await client.recordGenerationStage(event);
+  const metricsPath = path.join(root, 'codex', 'generation-metrics.jsonl');
+  assert.deepEqual(JSON.parse((await readFile(metricsPath, 'utf8')).trim()), event);
+  await rm(metricsPath); await mkdir(metricsPath);
+  fake.layout(v4Map(MAP));
+  assert.deepEqual(await client.generateLayout(SETTINGS), v4Map(MAP));
 });
 
 test('Codex rejects invalid layouts without substituting a sample', async t => {
@@ -420,7 +600,7 @@ test('region requests validate bounds before calling Codex and explicitly scope 
   await assert.rejects(client.extractLayout(settings,PNG,region),/허용되지 않는 추가 콘텐츠/);
 });
 
-test('Codex requires managed ChatGPT login and native image support', async t => {
+test('Codex requires managed ChatGPT login and checks native image support only for images', async t => {
   const { client, fake } = await codexFixture(t);
   fake.accountType = 'apiKey';
   assert.equal((await client.getStatus()).state, 'login-required');
@@ -430,7 +610,9 @@ test('Codex requires managed ChatGPT login and native image support', async t =>
   assert.equal((await client.getStatus()).state, 'login-required');
   fake.accountType = 'chatgpt';
   fake.imageGeneration = false;
-  assert.equal((await client.getStatus()).state, 'error');
+  const textStatus = await client.getStatus();
+  assert.equal(textStatus.state, 'ready');
+  assert.equal(textStatus.imageGeneration, false);
   await assert.rejects(client.generateImage(SETTINGS), /이미지 생성을 지원하지 않습니다/);
   fake.imageGeneration = true;
   await assert.rejects(client.generateImage({ ...SETTINGS, codexModel: 'not-available' }), /모델을 현재 Codex 계정/);
@@ -752,9 +934,34 @@ test('ZIP contains validated manifest, importer, blueprint and instructions, wit
   assert.ok(!Object.keys(assetBundle).some(name => /Mcp|GetAssetCatalogTool/.test(name)), 'Offline ZIP remains independent of Unity MCP.');
   await assert.rejects(createExportBundle(project(), scan, '// importer', '// connection', '// marker', '// fixture', undefined, undefined, undefined,
     { runtime: '// map asset', editor: '// multi edit', catalog: '// asset catalog' }), /모두 필요/);
+  await assert.rejects(createExportBundle(project(), scan, '// importer', '// connection', '// marker', '// fixture', '// bounds', '// wall', undefined,
+    { runtime: '// map asset', editor: '// multi edit', catalog: '// asset catalog', propSetRuntime: '// prop set' }), /Runtime과 Editor/);
+  await assert.rejects(createExportBundle(project(), scan, '// importer', '// connection', '// marker', '// fixture', '// bounds', '// wall', undefined,
+    { runtime: '// map asset', editor: '// multi edit', catalog: 'class Catalog { BaekhoPropSet[] sets; }' }), /Runtime과 Editor/);
   const incomplete = project();
   incomplete.map.connections = [];
   await assert.rejects(createExportBundle(incomplete, scan, '// importer', '// runtime', '// marker fixture', '// fixture metadata'), /맵 오류/);
+});
+
+test('current Unity catalog ZIP includes its actual prop-set dependencies without the MCP adapter', async t => {
+  const root = await fixture(t);
+  const scan = await scanUnityProject(root);
+  const scriptPaths = [
+    'Editor/BaekhoMapImporter.cs', 'Runtime/BaekhoMapConnection.cs', 'Runtime/BaekhoGameplayMarker.cs', 'Runtime/BaekhoMapFixture.cs',
+    'Editor/BaekhoPropCatalog.cs', 'Runtime/BaekhoWallModule.cs', 'Runtime/BaekhoMapAsset.cs', 'Editor/BaekhoMapAssetEditor.cs',
+    'Editor/BaekhoAssetCatalog.cs', 'Runtime/BaekhoPropSet.cs', 'Editor/BaekhoPropSetEditor.cs',
+  ];
+  const sources = await Promise.all(scriptPaths.map(file => readFile(path.resolve('unity-importer', file), 'utf8')));
+  const [importer, connection, marker, fixtureScript, bounds, wall, runtime, editor, catalog, propSetRuntime, propSetEditor] = sources;
+  const files = unzipSync(await createExportBundle(project(), scan, importer, connection, marker, fixtureScript, bounds, wall, undefined,
+    { runtime, editor, catalog, propSetRuntime, propSetEditor }));
+  for (let index = 0; index < scriptPaths.length; index++)
+    assert.equal(strFromU8(files[`Unity/${scriptPaths[index]}`]), sources[index], scriptPaths[index]);
+  assert.ok(!Object.keys(files).some(name => /Mcp|GetAssetCatalogTool/.test(name)));
+  assert.match(strFromU8(files['README.txt']), /Create Prop Set From Selection/);
+  assert.match(strFromU8(files['README.txt']), /자동 소품 재정리/);
+  await assert.rejects(createExportBundle(project(), scan, importer, connection, marker, fixtureScript, bounds, wall, undefined,
+    { runtime, editor, catalog }), /Runtime과 Editor/);
 });
 
 test('v2 export retains real elevations and stair placement rotation with explicit geometry instructions', async t => {
@@ -807,4 +1014,19 @@ test('export requires runtime component and emits selected cell asset transforms
   const manifest=JSON.parse(strFromU8(bundle['Map.baekhomap.json']));
   assert.deepEqual(manifest.placements.find((item:{id:string})=>item.id==='floor-1-1').position,{x:-4,y:2,z:8});
   assert.deepEqual(manifest.connections[0].position,{x:-5,y:0,z:8});
+});
+
+
+test('image extraction and direct generation both finish with validated teleport destinations', async t => {
+  const {client,fake}=await codexFixture(t);
+  const settings={...SETTINGS,seed:42,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,teleports:true,teleportCount:3}};
+  fake.layout(v4Map(MAP));
+  const image=await client.extractLayout(settings,PNG);
+  const direct=await client.generateLayout({...settings,generationMethod:'direct'});
+  assert.deepEqual(image.markers,direct.markers);
+  assert.equal(image.markers?.filter(m=>m.kind==='teleport').length,3);
+  assert.deepEqual(validateMap(direct).filter(i=>i.severity==='error'),[]);
+  await assert.rejects(client.generateLayout({...settings,generationMethod:'direct',designer:{...settings.designer,teleportCount:64}}),/순간이동/);
+  const forged=v4Map(MAP);forged.markers=image.markers;fake.layout(forged);
+  await assert.rejects(client.extractLayout(settings,PNG),/허용되지 않는 추가 콘텐츠/);
 });

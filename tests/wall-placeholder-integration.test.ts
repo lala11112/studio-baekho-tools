@@ -11,7 +11,7 @@ import type { AssetBinding, GenerationSettings, GridMap, ProjectFile } from '../
 import { editWallMount, wallMountIssues } from '../src/shared/wall-mounts';
 import { placeholderWallBinding, WALL_PLACEHOLDER_KINDS } from '../src/shared/wall-placeholders';
 
-const settings = ():GenerationSettings => ({...DEFAULT_SETTINGS,width:8,height:8,connectionCount:1,seed:27,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,structureFill:true,wallMounts:{enabled:true,singles:true,runs:true,density:30,runDensity:100}}});
+const settings = ():GenerationSettings => ({...DEFAULT_SETTINGS,connectionWidth:2,width:8,height:8,connectionCount:1,seed:27,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,structureFill:true,wallMounts:{enabled:true,singles:true,runs:true,density:30,runDensity:100}}});
 function room():GridMap{return synchronizeStructures({version:5,name:'Temporary wall layout',width:8,height:8,cellSize:2,maxStepHeight:.4,rows:['####D###',...Array(6).fill('#......#'),'########'],elevations:Array.from({length:8},()=>Array(8).fill(0)),ramps:[],connections:[{id:'entry',label:'Entry',x:4,row:0,direction:0,width:2,height:3,kind:'door'}],assetOverrides:[],structureSettings:{...DEFAULT_STRUCTURE_SETTINGS}});}
 function project():ProjectFile{return {formatVersion:1,map:applyGeneratedFeatures(room(),settings()),settings:settings(),bindings:[]};}
 const realBindings=():AssetBinding[]=>WALL_PLACEHOLDER_KINDS.map((kind,index)=>{const b=placeholderWallBinding(kind);b.id=`real_${kind}`;b.prefabGuid=(index+1).toString(16).repeat(32);b.prefabPath=`Assets/${kind}.prefab`;b.label=kind;if(b.wallMount!.kind!=='single')b.wallMount!.family='native_pipe';return b;});

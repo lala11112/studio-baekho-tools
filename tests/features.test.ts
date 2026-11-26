@@ -9,7 +9,7 @@ import type { AssetBinding, DesignerSettings, GridMap, ProjectFile } from '../sr
 const PNG='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
 const bindings:AssetBinding[]=ASSET_ROLES.map((role,i)=>({id:role,label:role,role,prefabGuid:(i+1).toString(16).padStart(32,'0'),prefabPath:`Assets/${role}.prefab`,scale:{x:1,y:1,z:1},offset:{x:0,y:0,z:0},rotationY:0}));
 function room():GridMap{return{version:4,name:'Feature room',width:8,height:8,cellSize:2,maxStepHeight:.4,rows:['#D######','#......#','#......#','#......#','#......#','#......#','#......#','########'],elevations:Array.from({length:8},()=>Array(8).fill(0)),ramps:[],connections:[{id:'north',label:'North',x:1,row:0,direction:0,width:2,height:3,kind:'door'}],assetOverrides:[]};}
-function options(changes:Partial<DesignerSettings>={}){return{...DEFAULT_SETTINGS,width:8,height:8,connectionCount:1,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,...changes}};}
+function options(changes:Partial<DesignerSettings>={}){return{...DEFAULT_SETTINGS,connectionWidth:2,width:8,height:8,connectionCount:1,designer:{...DEFAULT_DESIGNER,elevation:false,props:false,...changes}};}
 function project(map=room()):ProjectFile{return{formatVersion:1,map,settings:options(),bindings:[]};}
 function bridgeRoom():GridMap{const m=room();m.rows[2]='#..__..#';m.rows[3]='#..BB..#';m.rows[4]='#..__..#';m.bridges=[{x:3,row:3,direction:90},{x:4,row:3,direction:90}];m.elevations=m.elevations.map(r=>r.map(()=>2));return m;}
 test('v5 completed pit sides satisfy requested cliffs after replacing legacy faces',()=>{

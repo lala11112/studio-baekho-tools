@@ -59,12 +59,15 @@ export function handleWallHeightSetting(settings: WallMountSettings, field: stri
     if (value !== 'floor' && value !== 'top') throw new Error('배관 높이 기준을 확인하세요.');
     return value;
   };
-  if (field === 'runHeightMode') {
+  if (field === 'runLayout') {
+    if (value !== 'legacy' && value !== 'composed') throw new Error('배관 구도 방식을 확인하세요.');
+    next.runLayout = value;
+  } else if (field === 'runHeightMode') {
     if (value === 'asset') delete next.runHeight;
     else if (value === 'fixed') {
       const height = next.runHeight?.min ?? 2;
       next.runHeight = { mode: 'fixed', reference: next.runHeight?.reference ?? 'floor', min: height, max: height };
-    } else if (value === 'random') next.runHeight = { mode: 'random', reference: next.runHeight?.reference ?? 'floor', min: next.runHeight?.min ?? 1, max: Math.max(next.runHeight?.max ?? 3, next.runHeight?.min ?? 1) };
+    } else if (value === 'random' || value === 'auto') next.runHeight = { mode: value, reference: next.runHeight?.reference ?? 'floor', min: next.runHeight?.min ?? 1, max: Math.max(next.runHeight?.max ?? 3, next.runHeight?.min ?? 1) };
     else throw new Error('가로 배관 높이 방식을 확인하세요.');
   } else if (field.startsWith('runHeight')) {
     if (!next.runHeight) throw new Error('먼저 지정 높이 또는 범위 내 무작위를 선택하세요.');
@@ -95,16 +98,17 @@ export function renderWallMountSettings(value: WallMountSettings | undefined, di
   const references = [['floor', '인접 바닥에서 위로'], ['top', '벽 상단에서 아래로']], height = settings.runHeight, vertical = settings.verticalRange;
   return `<details class="feature-group" data-wall-settings="${currentMap ? 'current' : 'generation'}" open><summary>${currentMap ? '현재 맵 · 벽 부착물 추가' : '벽 부착물 자동 배치'}</summary>
     ${check('enabled', '생성 시 벽 부착물 배치')}<div class="tool-buttons">${check('singles', '벽등·문 조명·개별 장식')}${check('runs', '배관·케이블·연속 부품')}</div>
+    ${select('runLayout', '배관·케이블 구도', settings.runLayout ?? 'legacy', [['legacy', '기존 벽면별 배치'], ['composed', '정돈된 산업 설비 · 경로 먼저 설계']])}
     <label class="field"><span>배관·케이블 배치 방향</span><select data-d-control="wall-setting:runOrientation" ${off}>${[['horizontal', '가로 · 벽을 따라 연결'], ['vertical', '세로 · 벽을 타고 상승'], ['both', '가로와 세로 함께']].map(([orientation, text]) => `<option value="${orientation}" ${(settings.runOrientation ?? 'horizontal') === orientation ? 'selected' : ''}>${text}</option>`).join('')}</select></label>
-    ${select('runHeightMode', '가로 배치 높이', height?.mode ?? 'asset', [['asset', '프리팹 기본값'], ['fixed', '지정 높이'], ['random', '범위 내 무작위']])}
-    ${height ? `${select('runHeightReference', '가로 높이 기준', height.reference, references)}${height.mode === 'fixed' ? number('runHeightValue', '부착점 높이·거리', height.min) : `<div class="pair">${number('runHeightMin', '최소 거리', height.min)}${number('runHeightMax', '최대 거리', height.max)}</div>`}<p class="caption">수평으로 연결된 부품은 같은 높이에 배치합니다. 무작위 높이는 생성 시드와 연결 구간에 따라 정하며, 설치할 수 없는 구간은 이유를 표시합니다.</p>` : ''}
+    ${select('runHeightMode', '가로 배치 높이', height?.mode ?? 'asset', [['auto', '자동 · 벽 높이와 장애물에 맞춤'], ['asset', '프리팹 기본값'], ['fixed', '지정 높이'], ['random', '범위 내 무작위']])}
+    ${height && height.mode !== 'auto' ? `${select('runHeightReference', '가로 높이 기준', height.reference, references)}${height.mode === 'fixed' ? number('runHeightValue', '부착점 높이·거리', height.min) : `<div class="pair">${number('runHeightMin', '최소 거리', height.min)}${number('runHeightMax', '최대 거리', height.max)}</div>`}<p class="caption">지정 높이는 정확히 유지합니다. 정돈된 구도의 범위 모드는 부품 길이로 조립 가능한 높이 안에서만 전환합니다. 설치할 수 없는 구간은 이유를 표시합니다.</p>` : height?.mode === 'auto' ? '<p class="caption">벽 높이와 설비·문 주변 여유에 맞춰 높이를 선택합니다. 정돈된 구도에서 가로·세로 연결을 켜면 엘보와 원본 길이의 세로 부품으로 높이가 다른 가로 구간을 연결합니다.</p>' : ''}
     ${select('verticalRangeMode', '세로 배관 높이 범위', vertical ? 'custom' : 'full', [['full', '전체 높이'], ['custom', '지정 범위']])}
     ${vertical ? `${select('verticalRangeReference', '세로 범위 기준', vertical.reference, references)}<div class="pair">${number('verticalRangeStart', '시작 거리', vertical.start)}${number('verticalRangeEnd', '끝 거리', vertical.end)}</div><p class="caption">시작 거리보다 끝 거리를 크게 입력하세요. 벽 상단 기준은 두 거리 사이의 아래쪽 구간입니다. 끝마감을 포함해 범위 안에 배치하며, 원본 부품 길이로 채우고 남는 길이는 여백으로 둡니다.</p>` : ''}
     ${check('connectRuns', '가로·세로 배관 연결 (엘보·T자)')}<p class="caption">‘가로와 세로 함께’에서 같은 세트의 엘보·T자로 연결합니다. 끄면 가로와 세로를 각각 끝마감한 구간으로 배치합니다.</p>
     ${check('placeholderFallback', '프리팹이 없으면 임시 벽 부착물로 배치')}<p class="caption">등록한 프리팹을 우선 사용하고, 없는 종류는 임시 벽등·문 위 조명·패널·환기구·배관으로 배치를 확인합니다. 임시 부착물을 선택하면 실제 프리팹으로 교체할 수 있습니다.</p>
     <div class="pair"><label class="field"><span>개별 목표 점유율 (%)</span><input type="number" data-d-control="wall-setting:density" value="${settings.density}" min="1" max="100" step="1" ${off}></label><label class="field"><span>연속 배치 목표 (%)</span><input type="number" data-d-control="wall-setting:runDensity" value="${settings.runDensity}" min="1" max="100" step="1" ${off}></label></div>
-    <p class="caption">가로는 벽 길이, 세로는 설치 가능한 벽면 수를 기준으로 합니다.</p>
-    ${currentMap ? `<button data-d-action="place-wall-mounts" class="primary full" ${off}>현재 맵에 벽 부착물 자동 배치</button><p class="caption">전체 맵의 사용 가능한 벽과 문에 목표까지 추가합니다. 기존 배치와 잠금을 유지하며, AI 호출 없이 실행하고 되돌릴 수 있습니다.</p><button data-d-action="reapply-wall-runs" class="secondary full" ${off}>현재 높이 설정으로 자동 배관 재배치</button><p class="caption">자동 배관·케이블에 현재 방향·높이·밀도를 적용합니다. 수동 편집·복사·잠금·시설 참조가 있는 연결 구간은 보존하며, 한 번의 되돌리기로 복원합니다.</p><p class="caption">설정 변경만으로 기존 배관이 이동하지 않습니다. 다음 자동 생성에도 넣으려면 위의 ‘생성 시 벽 부착물 배치’를 켜세요.</p>` : '<p class="caption">에셋에서 벽면·문 위·문 옆·모서리와 높이·간격을 지정하세요. 조명은 프리팹의 광원 설정을 유지합니다.</p>'}</details>`;
+    <p class="caption">${settings.runLayout === 'composed' ? '실제로 조립한 경로 길이를 목표로 삼습니다. 긴 주 경로와 설비 주변 가지를 우선하고 벽면 여백을 남깁니다.' : '가로는 벽 길이, 세로는 설치 가능한 벽면 수를 기준으로 합니다.'}</p>
+    ${currentMap ? `<button data-d-action="place-wall-mounts" class="primary full" ${off}>현재 맵에 벽 부착물 자동 배치</button><p class="caption">전체 맵의 사용 가능한 벽과 문에 목표까지 추가합니다. 기존 배치와 잠금을 유지하며, AI 호출 없이 실행하고 되돌릴 수 있습니다.</p><button data-d-action="reapply-wall-runs" class="secondary full" ${off}>현재 설정으로 자동 배관 재배치</button><p class="caption">자동 배관·케이블에 현재 구도·방향·높이·밀도를 적용합니다. 수동 편집·복사·잠금·시설 참조가 있는 연결 구간은 보존하며, 한 번의 되돌리기로 복원합니다.</p><p class="caption">설정 변경만으로 기존 배관이 이동하지 않습니다. 다음 자동 생성에도 넣으려면 위의 ‘생성 시 벽 부착물 배치’를 켜세요.</p>` : '<p class="caption">에셋에서 벽면·문 위·문 옆·모서리와 높이·간격을 지정하세요. 조명은 프리팹의 광원 설정을 유지합니다.</p>'}</details>`;
 }
 
 export function renderWallMountReadiness(settings: GenerationSettings, bindings: AssetBinding[]): string {

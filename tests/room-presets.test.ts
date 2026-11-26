@@ -57,7 +57,7 @@ test('candidate resolution captures separate deterministic seeds without resetti
 });
 
 test('variants share a catalog snapshot across phases and persist resolved sizes/seeds/patterns', async () => {
-  const request = { ...applyRoomPreset(DEFAULT_SETTINGS, 'start'), conceptMode: 'manual' as const, prompt: '안전한 시작방', seed: 12 };
+  const request = { ...applyRoomPreset(DEFAULT_SETTINGS, 'start'), connectionWidth: 2, conceptMode: 'manual' as const, prompt: '안전한 시작방', seed: 12 };
   const makeMap = (s: GenerationSettings, index: number): GridMap => {
     const rows = Array.from({ length: s.height }, (_, row) => row === 0 || row === s.height - 1 ? '#'.repeat(s.width) : `#${'.'.repeat(s.width - 2)}#`);
     rows[0] = rows[0].slice(0, 3) + 'D' + rows[0].slice(4);

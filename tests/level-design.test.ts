@@ -6,7 +6,7 @@ import { analyzeLevelDesign, compileLevelDesign, DEFAULT_LEVEL_DESIGN, LEVEL_DES
 import { conceptPrompt, imagePrompt, layoutPrompt } from '../electron/services/prompts';
 import type { AssetBinding, GenerationSettings, GridMap, GameplayMarker, MapFixture } from '../src/shared/types';
 
-const settings = (): GenerationSettings => ({ ...DEFAULT_SETTINGS, seed: 4, levelDesign: { ...DEFAULT_LEVEL_DESIGN, pattern: 'openArena' }, designer: { ...DEFAULT_DESIGNER, elevation: false } });
+const settings = (): GenerationSettings => ({ ...DEFAULT_SETTINGS, connectionWidth: 2, seed: 4, levelDesign: { ...DEFAULT_LEVEL_DESIGN, pattern: 'openArena' }, designer: { ...DEFAULT_DESIGNER, elevation: false } });
 function room(size = 16): GridMap {
   const rows = Array.from({ length: size }, (_, row) => row === 0 || row === size - 1 ? '#'.repeat(size) : `#${'.'.repeat(size - 2)}#`);
   rows[0] = rows[0].slice(0, size / 2) + 'D' + rows[0].slice(size / 2 + 1);
@@ -91,6 +91,29 @@ test('open arena reports actual traversable area, door approaches, connected rou
   assert.deepEqual(report.issues, []); assert.equal(report.walkableArea, (14 * 14 + 1) * 4);
   assert.ok(report.reservedEntryCells.some(c => c.x === 8 && c.row === 2));
   assert.equal(report.combatCells.length, 9); assert.ok(report.routes[0].length > 3);
+});
+
+test('combat composition follows usable terrain across empty padding and varies reproducibly by intention', () => {
+  const source = room(), s = settings(), before = analyzeLevelDesign(source, s);
+  const padded = structuredClone(source), west = 12;
+  padded.width += west; padded.rows = source.rows.map(row => '_'.repeat(west) + row);
+  padded.elevations = source.elevations.map(row => [...Array(west).fill(0), ...row]);
+  padded.connections = source.connections.map(c => ({ ...c, x: c.x + west }));
+  const after = analyzeLevelDesign(padded, s);
+  assert.deepEqual(after.issues, []);
+  assert.deepEqual(after.combatCenter, { x: before.combatCenter!.x + west, row: before.combatCenter!.row });
+  const choices = Array.from({ length: 12 }, (_, seed) => analyzeLevelDesign(source, { ...s, seed }));
+  assert.ok(new Set(choices.map(report => JSON.stringify(report.combatCenter))).size >= 3);
+  assert.ok(choices.every(report => report.combatCells.length === 9 && !report.issues.some(i => i.severity === 'error')));
+  assert.deepEqual(analyzeLevelDesign(source, s).combatCenter, before.combatCenter);
+});
+
+test('authored combat zones override the spatial preference only when existing clearance checks pass', () => {
+  const map = room(), s = settings(); map.zones = [{ x: 3, row: 10, kind: 'combat' }];
+  const selected = analyzeLevelDesign(map, s); assert.deepEqual(selected.combatCenter, { x: 3, row: 10 });
+  map.fixtures = [fixture('blocked-zone', 3, 10, 'hazard')];
+  const safe = analyzeLevelDesign(map, s); assert.notDeepEqual(safe.combatCenter, { x: 3, row: 10 });
+  assert.equal(safe.combatCells.length, 9);
 });
 
 test('entry enemies, insufficient door width and height, and no dodge space have locations', () => {

@@ -1,0 +1,5 @@
+.generation-timings { margin: 12px 0; }
+.generation-timings dl { margin: 8px 0; font-size: 11px; color: var(--muted); }
+.generation-timings dl > div { display: flex; justify-content: space-between; gap: 6px; padding: 3px 0; }
+.generation-timings dd { margin: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.variant-status.status-layout { background: #f4eedc; color: #8b7041; }
