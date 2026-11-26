@@ -3,7 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {connectUnityMcp,DEFAULT_UNITY_ENDPOINT,type UnityMcpClient} from './unity-mcp';
 import {atomicWrite,hash,projectFile,optionalRead} from './files';
-import {validateBlueprint} from '../../src/shared/blueprint';
+import {normalizeBlueprint} from '../../src/shared/blueprint';
 import type {Connection,EnemyBlueprint,BuildResult} from '../../src/shared/types';
 export class UnityOperationError extends Error {
   readonly definitive=true;
@@ -42,7 +42,7 @@ export class UnityService {
     return unwrap(await client.callTool('execute_custom_tool',{tool_name:'baekho_enemy_forge',parameters:{action,expectedProjectRoot:this.root,payload}},120_000));
   }
   async build(blueprint:EnemyBlueprint,onWaiting:()=>void=()=>undefined):Promise<BuildResult>{
-    validateBlueprint(blueprint);const inputHash=hash(JSON.stringify(blueprint));
+    blueprint=normalizeBlueprint(blueprint);const inputHash=hash(JSON.stringify(blueprint));
     const journal=await projectFile(this.root,'Library/BaekhoEnemyForge/app-build.json',true);
     const prev=JSON.parse(await optionalRead(journal)??'null');
     if(prev?.pending){

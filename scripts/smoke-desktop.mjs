@@ -17,17 +17,21 @@ for (const key of ['ELECTRON_RUN_AS_NODE', 'FORGE_DEV_URL', 'OPENAI_API_KEY', 'C
 const application = await electron.launch({ args: ['.', `--user-data-dir=${userData}`, ...(process.argv.includes('--no-gpu') ? ['--disable-gpu'] : [])], env });
 const errors = [];
 const observations = [];
+const startedAt=Date.now();
+function observe(message){observations.push(message);process.stdout.write(`[desktop +${((Date.now()-startedAt)/1000).toFixed(1)}s] ${message}\n`);}
 const dialogAnswers = [];
 const confirmations = [];
 let page;
 try {
   page = await application.firstWindow();
+  await page.waitForLoadState('load');
   page.setDefaultTimeout(15000);
   page.on('pageerror', error => errors.push(error.message));
   page.on('dialog', async dialog => { const accepted=dialogAnswers.shift()??true;confirmations.push({type:dialog.type(),accepted});if(accepted)await dialog.accept();else await dialog.dismiss(); });
   await application.evaluate(({ BrowserWindow, ipcMain, dialog }) => {
     const window = BrowserWindow.getAllWindows()[0];
     window.setBounds({ width: 1540, height: 1000 });
+    window.show();window.focus();
     const asset = (name, kind, index, extra = {}) => ({ name, kind, guid: index.toString(16).padStart(32, '0'), localId: String(1000 + index), path: `Assets/_Project/Smoke/${name}.${kind === 'AnimationClip' ? 'anim' : kind === 'AudioClip' ? 'wav' : 'fbx'}`, ...extra });
     const alternate = asset('Alternate_Model', 'Model', 1, { rig: 'generic' });
     const drone = asset('Drone_Model', 'Model', 2, { rig: 'generic' });
@@ -47,8 +51,14 @@ try {
         defaults: { animName: 'Combo', attackSpeed: 1, executeRange: 2, weight: 30, isParryable: true, baseDamage: 1, attackDuration: 2, hits: [{ hitStartTime: .2, hitDuration: .1, hitBoxOffset: [0, 0, 1] }], weights: [.3, .7], points: [[0, 0, 1]], flags: [], modes: [10] } },
       { typeId: 'MonsterSelfDestructSO', name: '자폭', category: 'selfDestruct', description: '모의 자폭 공격', previewSupported: true, fields: [...common, number('explosionDelay'), number('explosionRadius')], defaults: { animName: 'SelfDestruct', attackSpeed: 1, executeRange: 2, weight: 0, isParryable: false, explosionDelay: 2, explosionRadius: 3 } },
     ];
-    const blueprint = { version: 1, name: 'Drone', template: asset('Drone', 'GameObject', 7), model: drone, modelTransform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, stats: { maxHp: 1500, baseAtk: 10, criticalChance: .1 }, components: { NavMeshAgent: { m_Speed: 3.5, m_StoppingDistance: .2 }, FanVisionSensor: { _range: 10 } }, animation: { mode: 'clips', controller, states: { Idle: idle, Move: idle, Groggy: idle, Attack: attackClip } }, attacks: [{ id: 'fixture-basic', typeId: definitions[0].typeId, values: structuredClone(definitions[0].defaults) }], selfDestruct: null, hpBarPosition: [0, 3, 0], vfxPosition: [0, 1, 0] };
+    const blueprint = { version: 1, name: 'Drone', template: asset('Drone', 'GameObject', 7), model: drone, modelTransform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, stats: { maxHp: 1500, baseAtk: 10, criticalChance: .1 }, components: { NavMeshAgent: { m_Speed: 3.5, m_StoppingDistance: .2 }, FanVisionSensor: { _range: 10 } }, animation: { mode: 'clips', controller, states: { Idle: idle, Move: idle, Groggy: idle, Attack: attackClip, PhaseDown: idle, PhaseRevive: idle } }, attacks: [{ id: 'fixture-basic', typeId: definitions[0].typeId, values: structuredClone(definitions[0].defaults) }], selfDestruct: null, hpBarPosition: [0, 3, 0], vfxPosition: [0, 1, 0] };
     const state = globalThis.enemyDesktopSmoke = { catalog: { projectRoot: 'C:/Smoke/UnityProject', unityVersion: '6000.3.10f1', assets: [alternate, drone, idle, attackClip, controller, sound], attacks: definitions, statsFields: [number('maxHp'), number('baseAtk'), { ...number('criticalChance'), min: 0, max: 1, percent: true }], componentFields: { NavMeshAgent: [number('m_Speed'), number('m_StoppingDistance')], FanVisionSensor: [number('_range')] }, template: blueprint, warnings: [] }, saved: [], validates: [], builds: [], previews: [], closed: [], opened: 0, openRequests:0, chooseRequests:0, aiCalls: [], conceptCalls:[],analyses:[],animationInfos:[],analysisMode:'normal',holdAnalysis:false,heldAnalysis:false, revealed: [], validationMode: 'valid', buildMode: 'complete', aiMode: 'fail',conceptMode:'fail',holdConcept:false,heldConcept:false, previewMode:'normal',holdNextFrame:false,heldFrame:false,confirmAnswers:[],confirmations:[] };
+    const bossPhase=index=>({phaseId:`phase_${index+1}`,phaseMaxHp:1500,atkMultiplier:1,defMultiplier:1,skillIds:null,pattern:{mode:'weighted',loop:true,steps:[]},shield:null,music:{mode:'keep',clip:null,volume:1,fadeSeconds:.5},note:''});
+    const rewardItem=asset('Boss_Reward_Item','ItemData',8);
+    state.catalog.statsFields.push({path:'elementType',label:'속성',type:'enum',options:[{label:'목',value:0},{label:'화',value:1},{label:'토',value:2},{label:'금',value:3},{label:'수',value:4}]});
+    state.catalog.template.stats.elementType=0;
+    state.bossCatalog={...state.catalog,kind:'boss',attacks:state.catalog.attacks.filter(definition=>definition.category!=='selfDestruct'),template:{...structuredClone(blueprint),version:3,kind:'boss',template:null,name:'ConfiguredBoss',boss:{enableWeakness:false,weaknessElement:0,weakDamageMult:1.5,enableResistance:false,resistElement:0,resistDamageMult:.5,groggyDamageMult:1.5,statusImmunityList:[],initialShield:0,phaseDownSeconds:1,phaseHoldSeconds:.5,phaseReviveSeconds:1.5,phases:[bossPhase(0)],reward:{gold:50,items:[]}}},boss:{immunities:[{id:'Bind',label:'속박'},{id:'Slow',label:'감속'}],items:[rewardItem]}};
+    state.openDocument=null;
     const analysisWaiters=[];
     globalThis.releaseHeldAnalyses=()=>{state.holdAnalysis=false;state.heldAnalysis=false;for(const resolve of analysisWaiters.splice(0))resolve();};
     // Cover native Electron dialogs as well as Playwright's dialog events across runtime versions.
@@ -57,16 +67,16 @@ try {
       connect: () => ({ projectRoot: state.catalog.projectRoot, projectName: 'Desktop Smoke Fixture', unityVersion: '6000.3.10f1', instanceId: 'mock-editor' }),
       'choose-project': () => {state.chooseRequests++;return state.catalog.projectRoot;},
       install: () => { throw new Error('Desktop smoke must not install a Unity bridge.'); },
-      catalog: () => state.catalog,
+      catalog: (_event,kind='normal') => kind==='boss'?state.bossCatalog:state.catalog,
       'assets-search': (_event, query, kinds) => {const assets=state.catalog.assets.filter(a=>(!kinds.length||kinds.includes(a.kind))&&(a.name+' '+a.path).toLowerCase().includes(query.toLowerCase()));return {assets,total:assets.length,truncated:false};},
       'animation-info': (_event, reference) => {state.animationInfos.push(structuredClone(reference));return {parameters:[{name:'MotionX',type:'Float'},{name:'MotionY',type:'Float'},{name:'CanAttack',type:'Bool'}],move:null,warnings:[]};},
       'analyze-model': async (_event, b) => {state.analyses.push(structuredClone(b));if(state.holdAnalysis){state.heldAnalysis=true;await new Promise(resolve=>analysisWaiters.push(resolve));}if(state.analysisMode==='fail')throw new Error('모의 모델 분석 연결 실패');if(state.analysisMode==='empty')return {bounds:null,hpBarPosition:b.hpBarPosition,vfxPosition:b.vfxPosition,warnings:['모의 메시 분석 실패: 기존 위치를 유지합니다.']};const [x,y,z]=b.modelTransform.position,height=2*b.modelTransform.scale[1];return {bounds:{min:[x-.5,y,z-.5],max:[x+.5,y+height,z+.5],center:[x,y+height/2,z],size:[1,height,1]},hpBarPosition:[x,y+height+.25,z],vfxPosition:[x,y+height/2,z],warnings:[]};},
       save: (_event, b) => { state.saved.push(structuredClone(b)); return 'C:/Smoke/Enemy.enemyforge.json'; },
-      open: () => {state.openRequests++;return state.saved.at(-1) ?? null;},
+      open: () => {state.openRequests++;return state.openDocument??state.saved.at(-1)??state.catalog.template;},
       validate: (_event, b) => { state.validates.push(structuredClone(b)); return state.validationMode === 'valid' ? { valid: true, issues: [] } : { valid: false, issues: [{ severity: 'error', path: 'animation', message: '모의 Rig 불일치: 클립을 다시 선택하세요.' }] }; },
-      build: async (_event, b) => { state.builds.push(structuredClone(b)); await new Promise(resolve => setTimeout(resolve, 150)); return state.buildMode === 'complete' ? { requestId: 'mock-build', state: 'completed', prefabPath: 'Assets/Baekho/Generated/Enemies/Drone_New/Drone_New.prefab', assets: [] } : { requestId: 'mock-build-failed', state: 'failed', error: '모의 생성 실패: 결과 에셋은 저장하지 않았습니다.' }; },
+      build: async (_event, b) => { state.builds.push(structuredClone(b)); await new Promise(resolve => setTimeout(resolve, 150)); return state.buildMode === 'complete' ? { requestId: 'mock-build', state: 'completed', prefabPath: b.kind==='boss'?`Assets/_Project/Generated/Bosses/${b.name}/${b.name}.prefab`:'Assets/Baekho/Generated/Enemies/Drone_New/Drone_New.prefab', assets: [] } : { requestId: 'mock-build-failed', state: 'failed', error: '모의 생성 실패: 결과 에셋은 저장하지 않았습니다.' }; },
       'preview-open': () => ({ sessionId: `fixture-preview-${++state.opened}` }),
-      'preview-frame': (_event, request) => { state.previews.push({ sessionId:request.sessionId,sequence: request.sequence, time: request.time, yaw: request.yaw, pitch: request.pitch, zoom: request.zoom, attackId: request.attackId, showHitboxes: request.showHitboxes,state:request.state,moveParameters:request.moveParameters }); if (state.previews.length > 300) state.previews.shift();if(state.previewMode==='expired')throw new Error('모의 미리보기 세션이 만료되었습니다.');if(state.holdNextFrame){state.holdNextFrame=false;state.heldFrame=true;return new Promise((_resolve,reject)=>{globalThis.rejectHeldPreview=()=>{state.heldFrame=false;reject(new Error('모의 이전 세션 프레임 실패'));};});} return { sequence: request.sequence, dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', warning: '모의 데스크톱 응답 · 실제 Unity 모델 렌더링은 별도 검증합니다.' }; },
+      'preview-frame': (_event, request) => { state.previews.push({ sessionId:request.sessionId,sequence: request.sequence, time: request.time, yaw: request.yaw, pitch: request.pitch, zoom: request.zoom, attackId: request.attackId, showHitboxes: request.showHitboxes,kind:request.blueprint.kind,state:request.state,moveParameters:request.moveParameters }); if (state.previews.length > 300) state.previews.shift();if(state.previewMode==='expired')throw new Error('모의 미리보기 세션이 만료되었습니다.');if(state.holdNextFrame){state.holdNextFrame=false;state.heldFrame=true;return new Promise((_resolve,reject)=>{globalThis.rejectHeldPreview=()=>{state.heldFrame=false;reject(new Error('모의 이전 세션 프레임 실패'));};});} return { sequence: request.sequence, dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', warning: '모의 데스크톱 응답 · 실제 Unity 모델 렌더링은 별도 검증합니다.' }; },
       'preview-close': (_event, sessionId) => { state.closed.push(sessionId); return {}; },
       'ai-status': () => ({ state: 'ready', message: '모의 Codex 연결 · 실제 AI 호출 없음', models: [{ id: 'fixture-model', name: 'Fixture Model' }] }),
       'ai-login': () => undefined,
@@ -129,9 +139,36 @@ try {
     assert.match(await page.locator('#inspector-body').innerText(),/모의 메시 분석 실패.*기존 위치/);
     await setMode('analysisMode','normal');const retried=await saveSnapshot();
     assert.equal(retried.vfxPosition[1],initialScale+2);assert.equal(retried.hpBarPosition[1],9);
-    observations.push('Automatic placement retries a transient analysis failure on immediate save and applies fresh transformed coordinates');
-    observations.push('Unavailable geometry preserves manual and previous automatic positions with a visible warning, then retries successfully');
+    observe('Automatic placement retries a transient analysis failure on immediate save and applies fresh transformed coordinates');
+    observe('Unavailable geometry preserves manual and previous automatic positions with a visible warning, then retries successfully');
   };
+
+  const themes = page.getByRole('group', { name: '화면 테마' });
+  const lightTheme = themes.getByRole('radio', { name: '일반 모드' });
+  const darkTheme = themes.getByRole('radio', { name: '야간 모드' });
+  const colorScheme = () => page.locator('html').evaluate(root => getComputedStyle(root).colorScheme);
+  assert.ok(await lightTheme.isChecked());
+  assert.equal(await colorScheme(), 'light');
+
+  await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1100, 740));
+  await page.waitForFunction(() => window.innerWidth <= 1100);
+  assert.ok(await themes.evaluate(group => {
+    const box = group.getBoundingClientRect();
+    const toolbar = document.querySelector('.toolbar').getBoundingClientRect();
+    return toolbar.right <= box.left && box.right <= document.documentElement.clientWidth;
+  }));
+
+  await lightTheme.press('ArrowRight');
+  assert.ok(await darkTheme.isChecked());
+  assert.equal(await colorScheme(), 'dark');
+  await page.reload();
+  assert.ok(await darkTheme.isChecked());
+  assert.equal(await colorScheme(), 'dark');
+  await darkTheme.press('ArrowLeft');
+  assert.ok(await lightTheme.isChecked());
+  assert.equal(await colorScheme(), 'light');
+  await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1540, 1000));
+  observe('Theme control fits the minimum window, defaults to light, switches with the keyboard and restores the selection after reload');
 
   assert.equal(await page.evaluate(() => typeof window.require), 'undefined');
   assert.equal(await page.evaluate(() => typeof window.forge?.previewFrame), 'function');
@@ -139,14 +176,14 @@ try {
   await action('build').click(); await idle();
   assert.match(await page.locator('#issues').innerText(), /모델을 선택|클립을 지정/);
   assert.equal((await snapshot()).builds.length, 0);
-  observations.push('Sandboxed preload and required-setting rejection before project connection');
+  observe('Sandboxed preload and required-setting rejection before project connection');
 
   await action('connect').click(); await idle();
   await page.waitForFunction(() => document.querySelector('#enemy-title')?.textContent === 'Drone_New');
   await page.waitForFunction(() => !document.querySelector('#preview-image')?.hidden);
   assert.match(await page.locator('.project-status').innerText(), /Desktop Smoke Fixture/);
   for (const tab of ['stats', 'movement', 'attacks', 'animation', 'appearance']) { await nav(tab).click(); assert.equal(await nav(tab).getAttribute('class'), 'nav-item active'); }
-  observations.push('Connected catalog and all inspector tabs');
+  observe('Connected catalog and all inspector tabs');
 
   if(placementOnly)await testPlacementRecovery();
   else {
@@ -154,16 +191,23 @@ try {
   await nav('stats').click();
   await editNumber('최대 체력', 2400);
   await editNumber('치명타 확률', 25);
+  const hpField = await fieldInput('최대 체력').elementHandle();
+  await darkTheme.check();
+  assert.equal(await hpField.evaluate(input => input.isConnected && input.value), '2400');
+  assert.equal(await page.locator('#dirty').innerText(), '수정됨');
+  await lightTheme.check();
+  await hpField.dispose();
+  observe('Switching themes preserves the active inspector and unsaved field edits');
   for(const command of ['reset','open','choose-project']){dialogAnswers.push(false);await application.evaluate(()=>globalThis.enemyDesktopSmoke.confirmAnswers.push(false));await action(command).click();await idle();assert.equal(await fieldInput('최대 체력').inputValue(),'2400',JSON.stringify({command,confirmations,fixture:(await snapshot()).confirmations}));assert.equal(await page.locator('#dirty').innerText(),'수정됨');}
-  assert.equal((await snapshot()).openRequests,0);assert.equal((await snapshot()).chooseRequests,0);
-  observations.push('Canceling discard confirmation preserves unsaved edits for reset/open/project change');
+  assert.equal((await snapshot()).openRequests,1);assert.equal((await snapshot()).chooseRequests,0);
+  observe('Canceling discard confirmation preserves unsaved edits for reset/open/project change');
   let saved = await saveSnapshot();
   assert.equal(saved.stats.maxHp, 2400);
   assert.equal(saved.stats.criticalChance, .25);
   await nav('movement').click();
   await editNumber('이동 속도', 6);
   assert.equal((await saveSnapshot()).components.NavMeshAgent.m_Speed, 6);
-  observations.push('Dynamic numeric fields and percentage conversion');
+  observe('Dynamic numeric fields and percentage conversion');
 
   await nav('animation').click();
   await page.getByRole('button',{name:'방향 2D 블렌드 트리로 전환',exact:true}).click();
@@ -189,7 +233,7 @@ try {
   const blended=await saveSnapshot();await action('open').click();await idle();await nav('animation').click();
   assert.equal(await page.locator('[data-move-param="parameterX"]').inputValue(),'MotionX');
   assert.deepEqual((await saveSnapshot()).animation.move,blended.animation.move);
-  observations.push('Legacy Move opt-in, Float parameter choices, direction child add/edit/remove, XY preview requests and Blend Tree save/open round trip');
+  observe('Legacy Move opt-in, Float parameter choices, direction child add/edit/remove, XY preview requests and Blend Tree save/open round trip');
 
   await nav('appearance').click();
   assert.equal(await page.locator('[data-anchor-mode="hpBar"]').inputValue(),'manual');
@@ -203,7 +247,7 @@ try {
   await vectorInputs('크기').nth(1).fill('3');await waitVector('피격 효과',1,3);
   saved=await saveSnapshot();assert.equal(saved.hpBarPosition[1],9);assert.equal(saved.vfxPosition[1],3);
   assert.deepEqual(saved.anchors,{hpBar:'manual',vfx:'auto'});
-  observations.push('Legacy anchors retain manual values; automatic anchors follow transformed geometry and manual edits remain protected');
+  observe('Legacy anchors retain manual values; automatic anchors follow transformed geometry and manual edits remain protected');
 
   let savesBeforePlacement=(await snapshot()).saved.length;
   await setMode('holdAnalysis',true);await vectorInputs('크기').nth(1).fill('4');await action('save').click();
@@ -218,7 +262,7 @@ try {
   await application.evaluate(()=>globalThis.releaseHeldAnalyses());await idle();
   saved=(await snapshot()).saved.at(-1);assert.equal(saved.hpBarPosition[1],8.25);assert.equal(saved.anchors.hpBar,'auto');
   await vectorInputs('체력바').nth(1).fill('9');await saveSnapshot();
-  observations.push('Immediate save waits for pending automatic placement after a scale edit and after toggling auto at unchanged geometry');
+  observe('Immediate save waits for pending automatic placement after a scale edit and after toggling auto at unchanged geometry');
   await testPlacementRecovery();
 
   await nav('attacks').click();
@@ -260,7 +304,7 @@ try {
   await action('add-attack').click();
   assert.match(await page.locator('#status-text').innerText(), /하나만/);
   assert.equal((await saveSnapshot()).selfDestruct.typeId, 'MonsterSelfDestructSO');
-  observations.push('Object, number, vector, boolean and enum arrays plus single self-destruct enforcement');
+  observe('Object, number, vector, boolean and enum arrays plus single self-destruct enforcement');
 
   await page.locator('[data-attack="fixture-basic"]').click();
   await page.getByText('판정 모양', { exact: true }).locator('..').locator('select').selectOption('1');
@@ -269,7 +313,7 @@ try {
   saved = await saveSnapshot();
   assert.equal(saved.attacks[0].values.hitBoxShape, 1);
   assert.equal(saved.attacks[0].values.SwingAudio.Clip.name, 'Attack_Sound');
-  observations.push('Enum and nested object asset editing, including asset choice index zero');
+  observe('Enum and nested object asset editing, including asset choice index zero');
 
   await nav('appearance').click();
   await chooseFirstAsset(page.locator('#inspector-body > .field').filter({ has: page.locator('span', { hasText: /^모델$/ }) }).locator('.asset-input'));
@@ -282,7 +326,7 @@ try {
   await action('build').click(); await idle();
   assert.equal((await snapshot()).builds.length, 0);
   assert.match(await page.locator('#issues').innerText(), /클립/);
-  observations.push('Model switch clears controller and clip mappings and blocks incomplete generation');
+  observe('Model switch clears controller and clip mappings and blocks incomplete generation');
 
   await nav('animation').click();
   for (const state of ['Idle', 'Groggy', 'Attack', 'Combo', 'SelfDestruct']) await mapState(state);
@@ -311,8 +355,8 @@ try {
   await action('play').click();await page.waitForFunction(()=>document.querySelector('[data-action="play"]')?.textContent==='Ⅱ'&&!document.querySelector('#time-label')?.textContent?.startsWith('2.00'));await action('play').click();await page.locator('#preview-loop').check();
   await page.locator('[data-mode="controller"]').click();await page.waitForFunction(()=>document.querySelector('#preview-warning')?.textContent?.includes('컨트롤러 상태·전환·Blend Tree'));
   await page.locator('[data-mode="clips"]').click();
-  observations.push('Clip mapping, timeline seek, playback, orbit, zoom and hitbox-toggle requests');
-  observations.push('Nonrepeating playback stops at the end and restarts; controller sampling limits are explicit');
+  observe('Clip mapping, timeline seek, playback, orbit, zoom and hitbox-toggle requests');
+  observe('Nonrepeating playback stops at the end and restarts; controller sampling limits are explicit');
 
   await nav('ai').click();
   await page.getByText('모의 Codex 연결 · 실제 AI 호출 없음', { exact: true }).waitFor();
@@ -329,12 +373,12 @@ try {
   assert.equal(await page.locator('.attack-row').count(), 4);
   assert.match(await page.locator('#inspector-heading').innerText(), /공격/);
   assert.equal((await snapshot()).aiCalls.at(-1).model, 'fixture-model');
-  observations.push('AI progress/error recovery and successful generated-type catalog refresh without real AI calls');
+  observe('AI progress/error recovery and successful generated-type catalog refresh without real AI calls');
 
   await nav('animation').click(); await mapState('AIGenerated');
   await page.waitForFunction(()=>document.querySelector('#timeline')?.getAttribute('max')==='4.3');
   await page.locator('#timeline').fill('4.2');await page.waitForFunction(()=>document.querySelector('#time-label')?.textContent?.startsWith('4.20'));
-  observations.push('Generated attack preview timeline includes its complete declared 4.3-second lifetime');
+  observe('Generated attack preview timeline includes its complete declared 4.3-second lifetime');
   await nav('ai').click();await setMode('aiMode','existing');await action('ai-generate').click();await idle();
   assert.match(await page.locator('#status-text').innerText(),/기존 공격 설정 적용 완료/);
   assert.equal(await page.locator('.attack-row').count(),5);
@@ -342,7 +386,7 @@ try {
   const configured=await saveSnapshot();assert.equal(configured.attacks.at(-1).values.damage,.75);
   await nav('ai').click();await setMode('aiMode','existing-bomb');await action('ai-generate').click();await idle();
   const configuredBomb=await saveSnapshot();assert.equal(configuredBomb.selfDestruct.id,configured.selfDestruct.id);assert.equal(configuredBomb.selfDestruct.values.explosionRadius,5);assert.equal(await page.locator('.attack-row').count(),5);
-  observations.push('AI existing configurations apply returned values without duplicate types and preserve the single self-destruct slot');
+  observe('AI existing configurations apply returned values without duplicate types and preserve the single self-destruct slot');
   await setMode('validationMode', 'invalid');
   await action('build').click(); await idle();
   assert.equal((await snapshot()).builds.length, 0);
@@ -356,7 +400,7 @@ try {
   assert.match(await page.locator('#status-text').innerText(), /생성 완료.*Drone_New\.prefab/);
   await page.getByRole('button', { name: '생성 폴더 열기 ↗' }).click();
   assert.equal((await snapshot()).revealed.at(-1), 'Assets/Baekho/Generated/Enemies/Drone_New/Drone_New.prefab');
-  observations.push('Unity validation rejection, failed build recovery, completed result and reveal IPC');
+  observe('Unity validation rejection, failed build recovery, completed result and reveal IPC');
 
   saved = await saveSnapshot();
   await nav('stats').click();
@@ -366,7 +410,7 @@ try {
   assert.equal(await fieldInput('최대 체력').inputValue(), '2400');
   assert.equal(saved.attacks.length, 4);
   assert.equal(saved.selfDestruct.typeId, 'MonsterSelfDestructSO');
-  observations.push('Blueprint save/open round trip and edited-data preservation');
+  observe('Blueprint save/open round trip and edited-data preservation');
   await setMode('previewMode','expired');await page.locator('#timeline').fill('0.7');
   await page.waitForFunction(()=>!document.querySelector('#preview-empty')?.hidden&&document.querySelector('#preview-warning')?.textContent?.includes('만료'));
   assert.equal(await page.locator('#preview-image').getAttribute('src'),null);
@@ -381,11 +425,11 @@ try {
   assert.equal(await page.locator('#preview-image').isVisible(),true);
   assert.doesNotMatch(await page.locator('#preview-warning').innerText(),/이전 세션 프레임 실패/);
   await page.locator('#timeline').fill('0.9');await waitState(state=>state.previews.at(-1)?.time===.9);
-  observations.push('Expired preview clears stale pixels; Play reconnects and an old failed frame cannot kill the replacement session');
+  observe('Expired preview clears stale pixels; Play reconnects and an old failed frame cannot kill the replacement session');
   await page.waitForTimeout(200);const beforeHeartbeat=(await snapshot()).previews.at(-1);
   await page.waitForTimeout(15300);
   const afterHeartbeat=(await snapshot()).previews.at(-1);assert.ok(afterHeartbeat.sequence>beforeHeartbeat.sequence);assert.equal(afterHeartbeat.time,beforeHeartbeat.time);
-  observations.push('Idle preview sends a 15-second keepalive frame without changing the selected pose');
+  observe('Idle preview sends a 15-second keepalive frame without changing the selected pose');
 
   const beforeConcept=await saveSnapshot();
   await nav('concept').click();
@@ -397,6 +441,7 @@ try {
   await setMode('conceptMode','complete');await setMode('holdConcept',true);
   await action('ai-concept').click();await waitState(state=>state.heldConcept);
   assert.equal(await action('build').isDisabled(),true);assert.equal(await action('save').isDisabled(),true);assert.equal(await page.locator('#concept-prompt').isDisabled(),true);
+  assert.equal(await page.locator('[data-kind="boss"]').isDisabled(),true);
   assert.equal(await action('ai-cancel').isEnabled(),true);
   await nav('stats').click();assert.equal(await fieldInput('최대 체력').isDisabled(),true);
   await nav('concept').click();assert.equal(await page.locator('#concept-prompt').isDisabled(),true);assert.equal(await action('ai-concept').isDisabled(),true);
@@ -408,8 +453,76 @@ try {
   assert.equal(concept.attacks.length,1);assert.equal(concept.attacks[0].values.damage,2.8);assert.equal(concept.selfDestruct,null);
   assert.equal(concept.name,beforeConcept.name);assert.deepEqual(concept.model,beforeConcept.model);assert.deepEqual(concept.animation.move,beforeConcept.animation.move);assert.deepEqual(concept.hpBarPosition,beforeConcept.hpBarPosition);
   assert.equal((await snapshot()).conceptCalls.at(-1).model,'fixture-model');
-  observations.push('Concept failure preserves the complete draft and prompt; successful concept updates stats, movement, sensing and attacks while preserving identity, animations and manual anchors');
-  observations.push('Concept generation locks editing and build/save commands across inspector tab changes until completion');
+  observe('Concept failure preserves the complete draft and prompt; successful concept updates stats, movement, sensing and attacks while preserving identity, animations and manual anchors');
+  observe('Concept generation locks editing and build/save commands across inspector tab changes until completion');
+
+  await nav('ai').click();await page.locator('#ai-prompt').fill('일반 몬스터 전용 공격 요청');
+  await nav('stats').click();await editNumber('최대 체력',3210);
+  const kindTab=value=>page.locator(`[data-kind="${value}"]`);
+  await kindTab('boss').click();await idle();
+  assert.equal(await page.locator('#enemy-title').innerText(),'Boss_New');
+  assert.equal(await page.locator('.nav-item').count(),9);
+  await nav('attacks').click();assert.equal(await page.locator('#add-attack-type option').filter({hasText:'자폭'}).count(),0);
+  let bossSaved=await saveSnapshot();assert.equal(bossSaved.version,3);assert.equal(bossSaved.kind,'boss');assert.equal(bossSaved.template,null);
+  await nav('phases').click();await page.locator('.phase-card').first().getByText('페이즈 HP',{exact:true}).locator('..').locator('input').fill('8100');
+  await nav('phases').click();await page.getByRole('button',{name:'+ 페이즈 추가',exact:true}).click();
+  assert.equal(await page.locator('.phase-card').count(),2);
+  const phase=page.locator('.phase-card').nth(1);
+  const phaseField=label=>phase.locator('.field').filter({has:page.locator(':scope > span',{hasText:new RegExp(`^${label}$`)})}).first();
+  await phaseField('페이즈 HP').locator('input').fill('500');
+  await phaseField('공격력 배율').locator('input').fill('1.5');
+  await phaseField('페이즈 공격 목록').locator('select').selectOption('selected');
+  await phaseField('공격 패턴').locator('select').selectOption('sequence');
+  await phase.getByRole('button',{name:'+ 공격 단계',exact:true}).click();await phase.getByRole('button',{name:'+ 대기 단계',exact:true}).click();
+  await phase.locator('.sequence-step').nth(1).getByRole('button',{name:'↑',exact:true}).click();
+  await phase.locator('.sequence-step').nth(0).locator('input[type="number"]').fill('.4');
+  await phase.locator('summary').filter({hasText:'보호막·BGM·메모'}).click();
+  await phaseField('페이즈 보호막').locator('select').selectOption('replace');
+  if(!await phase.locator('details').evaluate(element=>element.open))await phase.locator('summary').click();
+  await phaseField('보호막 수치').locator('input').fill('400');
+  // Re-rendered details are collapsed; open before editing the next setting.
+  if(!await phase.locator('details').evaluate(element=>element.open))await phase.locator('summary').click();
+  await phaseField('페이즈 BGM').locator('select').selectOption('play');
+  if(!await phase.locator('details').evaluate(element=>element.open))await phase.locator('summary').click();
+  await chooseFirstAsset(phaseField('BGM 클립').locator('.asset-input'));
+  if(!await phase.locator('details').evaluate(element=>element.open))await phase.locator('summary').click();
+  await phaseField('BGM 음량').locator('input').fill('.6');
+  bossSaved=await saveSnapshot();
+  assert.equal(bossSaved.boss.phases[1].phaseMaxHp,500);assert.equal(bossSaved.boss.phases[1].atkMultiplier,1.5);
+  assert.deepEqual(bossSaved.boss.phases[1].skillIds,['fixture-basic']);assert.equal(bossSaved.boss.phases[1].pattern.steps[0].kind,'wait');assert.equal(bossSaved.boss.phases[1].pattern.steps[0].waitSeconds,.4);assert.equal(bossSaved.boss.phases[1].pattern.steps[1].attackId,'fixture-basic');
+  assert.equal(bossSaved.boss.phases[1].shield,400);assert.equal(bossSaved.boss.phases[1].music.mode,'play');assert.equal(bossSaved.boss.phases[1].music.clip.name,'Attack_Sound');assert.equal(bossSaved.boss.phases[1].music.volume,.6);
+  await nav('attacks').click();await action('remove-attack').click();assert.match(await page.locator('#status-text').innerText(),/페이즈나 패턴에서 사용하는 공격/);assert.equal(await page.locator('.attack-row').count(),1);
+  await nav('boss-combat').click();
+  await page.getByText('약점 속성 사용',{exact:true}).click();
+  await page.getByText('약점 속성',{exact:true}).locator('..').locator('select').selectOption('1');
+  await page.getByText('속박',{exact:true}).locator('input').check();
+  await editNumber('초기 보호막',250);await editNumber('보상 골드',500);
+  await page.locator('#reward-item').selectOption('0');await page.getByRole('button',{name:'+ 아이템 추가',exact:true}).click();
+  bossSaved=await saveSnapshot();assert.equal(bossSaved.boss.enableWeakness,true);assert.equal(bossSaved.boss.weaknessElement,1);assert.deepEqual(bossSaved.boss.statusImmunityList,['Bind']);assert.equal(bossSaved.boss.reward.gold,500);assert.equal(bossSaved.boss.reward.items[0].name,'Boss_Reward_Item');
+  await nav('ai').click();await page.locator('#ai-prompt').fill('보스 전용 공격 요청');
+  await kindTab('normal').click();await idle();assert.equal(await page.locator('#dirty').innerText(),'수정됨');
+  await nav('stats').click();assert.equal(await fieldInput('최대 체력').inputValue(),'3210');
+  await nav('ai').click();assert.equal(await page.locator('#ai-prompt').inputValue(),'일반 몬스터 전용 공격 요청');
+  await kindTab('boss').click();await idle();assert.equal(await page.locator('#ai-prompt').inputValue(),'보스 전용 공격 요청');
+  await nav('stats').click();assert.match(await page.locator('#inspector-body').innerText(),/총 HP: 8600/);await nav('phases').click();await page.locator('.phase-card').first().getByText('페이즈 HP',{exact:true}).locator('..').locator('input').fill('8200');
+  await kindTab('normal').click();await idle();await setMode('openDocument',bossSaved);
+  dialogAnswers.push(false);await application.evaluate(()=>globalThis.enemyDesktopSmoke.confirmAnswers.push(false));await action('open').click();await idle();assert.equal(await kindTab('normal').getAttribute('aria-selected'),'true');
+  await action('open').click();await idle();assert.equal(await kindTab('boss').getAttribute('aria-selected'),'true');await nav('stats').click();assert.match(await page.locator('#inspector-body').innerText(),/총 HP: 8600/);
+  await kindTab('normal').click();await idle();await nav('stats').click();assert.equal(await fieldInput('최대 체력').inputValue(),'3210');
+  await setMode('holdNextFrame',true);await page.locator('#timeline').fill('0.8');await waitState(state=>state.heldFrame);
+  await kindTab('boss').click();await idle();
+  await page.waitForFunction(()=>{const image=document.querySelector('#preview-image');return image instanceof HTMLImageElement&&!image.hidden&&image.complete&&image.naturalWidth>0;});
+  await application.evaluate(()=>globalThis.rejectHeldPreview?.());await waitState(state=>!state.heldFrame);
+  assert.equal(await page.locator('#preview-image').isVisible(),true);assert.doesNotMatch(await page.locator('#preview-warning').innerText(),/이전 세션 프레임 실패/);
+  await nav('phases').click();await page.screenshot({path:path.join(output,'desktop-boss-phases.png'),fullPage:true});
+  await action('build').click();await idle();assert.match(await page.locator('#status-text').innerText(),/생성 완료.*Boss_New/);assert.equal((await snapshot()).builds.at(-1).kind,'boss');
+  observe('Boss phases, skill references, ordered attack/wait steps, shields, BGM, weakness, immunities and rewards survive save and build requests');
+  observe('Normal/boss tabs preserve separate dirty drafts and AI prompts; document open routes to its own tab and asks only about that target; old preview replies cannot affect the replacement');
+  await action('reset').click();await idle();assert.equal((await saveSnapshot()).boss.phases.length,1);
+  await nav('concept').click();await page.locator('#concept-prompt').fill('두 페이즈로 싸우는 보스');await setMode('holdConcept',true);await action('ai-concept').click();await waitState(state=>state.heldConcept);assert.equal(await kindTab('normal').isDisabled(),true);await application.evaluate(()=>globalThis.releaseHeldConcept());await idle();assert.equal((await snapshot()).conceptCalls.at(-1).blueprint.kind,'boss');
+  await kindTab('normal').click();await idle();await nav('stats').click();assert.equal(await fieldInput('최대 체력').inputValue(),'3210');
+  await action('choose-project').click();await idle();assert.equal(await page.locator('#enemy-title').innerText(),'Drone_New');await kindTab('boss').click();await idle();assert.equal(await page.locator('#enemy-title').innerText(),'Boss_New');await nav('stats').click();assert.match(await page.locator('#inspector-body').innerText(),/총 HP: 1500/);assert.equal(await fieldInput('최대 체력').count(),0);
+  observe('Boss reset and AI remain isolated; AI locks both top tabs; changing project resets both workspaces');
   }
   await page.screenshot({ path: path.join(output, screenshotName), fullPage: true });
   assert.deepEqual(errors, []);
@@ -418,8 +531,8 @@ try {
   await writeFile(path.join(output, reportName), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
 } catch (error) {
-  if (page) await page.screenshot({ path: path.join(output, 'desktop-failed.png'), fullPage: true }).catch(() => undefined);
-  await writeFile(path.join(output, reportName), JSON.stringify({ passed: false, error: error.message, errors, observations }, null, 2));
+  if (page) await page.screenshot({ path: path.join(output, 'desktop-failed.png'), fullPage: true,timeout:5000 }).catch(() => undefined);
+  await writeFile(path.join(output, reportName), JSON.stringify({ passed: false, error: error.stack??error.message, errors, observations }, null, 2));
   throw error;
 } finally {
   await application.close();

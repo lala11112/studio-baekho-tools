@@ -123,7 +123,12 @@ namespace StudioBaekho.EnemyForge
                 if (controller == null || controller.layers.Length == 0) Issue(issues, "animation.controller", "상태 레이어가 있는 Animator Controller를 선택하세요.");
                 else
                 {
-                    foreach (var state in controller.layers[0].stateMachine.states) existing.Add(state.state.name);
+                    foreach (var state in controller.layers[0].stateMachine.states)
+                    {
+                        existing.Add(state.state.name);
+                        if (required.Contains(state.state.name) && !(active && state.state.name == "Move") && BaekhoEnemyForgeCatalog.FirstClip(state.state.motion) == null)
+                            Issue(issues, "animation.states." + state.state.name, "컨트롤러의 " + state.state.name + " 상태에 재생할 클립이 없습니다. 클립 모드로 전환해 연결하거나 컨트롤러를 수정하세요.");
+                    }
                     for (int layer = 0; layer < controller.layers.Length; layer++)
                         CollectClips(controller.layers[layer].stateMachine, clips, active && layer == 0);
                 }

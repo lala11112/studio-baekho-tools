@@ -56,10 +56,18 @@ namespace StudioBaekho.EnemyForge
                 string project = RequireProject((string)parameters?["expectedProjectRoot"]);
                 string action = (string)parameters?["action"];
                 var payload = parameters?["payload"] as JObject ?? new JObject();
+                // Build hashes must retain the exact submitted bytes; the builder normalizes
+                // only after hash verification. Read/preview operations can normalize here.
+                if (action == "analyze_model" || action == "preview_open" || action == "preview_frame")
+                {
+                    payload = (JObject)payload.DeepClone();
+                    if (payload["blueprint"] is JObject input) payload["blueprint"] = BaekhoEnemyForgeBoss.Normalize(input);
+                    else if (action == "analyze_model") payload = BaekhoEnemyForgeBoss.Normalize(payload);
+                }
                 object result;
                 switch (action)
                 {
-                    case "catalog": RequireReady(false); result = BaekhoEnemyForgeCatalog.Get(); break;
+                    case "catalog": RequireReady(false); result = BaekhoEnemyForgeCatalog.Get((string)payload["kind"] ?? "normal"); break;
                     case "assets_search": RequireReady(false); result = BaekhoEnemyForgeCatalog.SearchAssets(payload); break;
                     case "analyze_model": RequireReady(true); result = BaekhoEnemyForgeModelAnalysis.Analyze(payload["blueprint"] as JObject ?? payload); break;
                     case "animation_info": RequireReady(false); result = BaekhoEnemyForgeAnimation.Inspect(payload["controller"] as JObject); break;

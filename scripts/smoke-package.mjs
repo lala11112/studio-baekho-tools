@@ -65,6 +65,12 @@ async function inspectRenderer(page,entry){
   assert.equal(sandbox.require,'undefined');assert.equal(sandbox.process,'undefined');
   for(const method of ['connect','catalog','validate','build','previewOpen','previewFrame','previewClose','aiStatus','aiGenerate','aiGenerateConcept','aiCancel','save','open','searchAssets','analyzeModel','animationInfo'])assert.ok(sandbox.api.includes(method),`Missing packaged preload method ${method}`);
   assert.equal(await page.locator('.nav-item').count(),7);
+  assert.equal(await page.locator('.brand .version').innerText(),metadata.version.split('.').slice(0,2).join('.'));
+  assert.equal(await page.locator('[data-kind]').count(),2);
+  await page.locator('[data-kind="boss"]').click();await page.waitForFunction(()=>!document.body.classList.contains('busy'));
+  assert.equal(await page.locator('[data-kind="boss"]').getAttribute('aria-selected'),'true');assert.equal(await page.locator('.nav-item').count(),9);
+  await page.locator('[data-tab="phases"]').click();await page.locator('[data-tab="boss-combat"]').click();
+  await page.locator('[data-kind="normal"]').click();await page.waitForFunction(()=>!document.body.classList.contains('busy'));
   entry.renderer={title:await page.title(),url:page.url(),sandbox,errors};
   if(flags.has('--codex')){
     const status=await page.evaluate(()=>window.forge.aiStatus());
@@ -82,6 +88,28 @@ async function inspectRenderer(page,entry){
       return {projectRoot:catalog.projectRoot,unityVersion:catalog.unityVersion,assets:catalog.assets.length,attacks:catalog.attacks.length,generatedAttacks:catalog.attacks.filter(a=>a.generated).map(a=>({typeId:a.typeId,name:a.name})),valid:result.valid,issues:result.issues,analysis,animation};
     });
     assert.equal(live.valid,true,JSON.stringify(live.issues));assert.ok(live.attacks>=5);assert.ok(live.assets>0);assert.ok(live.analysis.bounds);assert.ok(live.analysis.hpBarPosition[1]>live.analysis.bounds.max[1]);assert.equal(live.animation.move.type,'blend2d');assert.ok(live.animation.move.children.length>=5);entry.unity=live;
+    await page.locator('[data-kind="boss"]').click();await page.waitForFunction(()=>!document.body.classList.contains('busy'),undefined,{timeout:120000});
+    assert.equal(await page.locator('[data-kind="boss"]').getAttribute('aria-selected'),'true');
+    const boss=await page.evaluate(async()=>{
+      const catalog=await window.forge.catalog('boss'),validation=await window.forge.validate(catalog.template);
+      let preview={state:'unavailable',reason:'보스 템플릿에 표시할 모델이 없습니다.'};
+      if(catalog.template.model){
+        const opened=await window.forge.previewOpen(catalog.template);
+        try{
+          const clip=catalog.template.animation.states.Idle??Object.values(catalog.template.animation.states).find(Boolean)??null;
+          const frame=await window.forge.previewFrame({sessionId:opened.sessionId,sequence:1,time:0,yaw:25,pitch:12,zoom:1,clip,blueprint:catalog.template,attackId:null,showHitboxes:true,state:'Idle',moveParameters:[0,0]});
+          preview={state:'rendered',imageReady:typeof frame.dataUrl==='string'&&frame.dataUrl.startsWith('data:image/'),warning:frame.warning??''};
+        }finally{await window.forge.previewClose(opened.sessionId);}
+      }
+      return {kind:catalog.kind,version:catalog.template.version,blueprintKind:catalog.template.kind,phases:catalog.template.boss?.phases.length??0,immunities:catalog.boss?.immunities.length??0,items:catalog.boss?.items.length??0,attacks:catalog.attacks.length,hasSelfDestruct:catalog.attacks.some(attack=>attack.category==='selfDestruct'),valid:validation.valid,issues:validation.issues,warnings:catalog.warnings,preview};
+    });
+    assert.equal(boss.kind,'boss');assert.equal(boss.version,3);assert.equal(boss.blueprintKind,'boss');assert.ok(boss.phases>=1);assert.ok(boss.immunities>=1);assert.ok(boss.items>=1);assert.ok(boss.attacks>=1);assert.equal(boss.hasSelfDestruct,false);
+    const bossErrors=boss.issues.filter(issue=>issue.severity==='error');
+    assert.ok(boss.valid||bossErrors.length>0,'Invalid boss templates must report actionable issues.');
+    assert.ok(bossErrors.every(issue=>issue.path.startsWith('animation')&&issue.message.trim()),JSON.stringify(boss.issues));
+    await page.locator('[data-action="validate"]').first().click();await page.waitForFunction(()=>!document.body.classList.contains('busy'),undefined,{timeout:120000});
+    if(!boss.valid){assert.ok(await page.locator('#issues .issue.error').count()>0);assert.match(await page.locator('#issues').innerText(),/클립|애니메이션|컨트롤러|Avatar|Animator/);}
+    if(boss.preview.state==='rendered')assert.equal(boss.preview.imageReady,true);entry.unity.boss=boss;
   }
   await page.locator('[data-tab="attacks"]').click();await page.locator('[data-tab="animation"]').click();await page.locator('[data-tab="appearance"]').click();
   await page.screenshot({path:path.join(output,`package-${entry.format}.png`),fullPage:true});

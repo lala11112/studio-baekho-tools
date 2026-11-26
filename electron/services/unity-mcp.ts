@@ -46,7 +46,7 @@ export async function connectUnityMcp(endpoint: string): Promise<UnityMcpClient>
     reconnectionOptions: { maxRetries: 0, initialReconnectionDelay: 1000, maxReconnectionDelay: 1000, reconnectionDelayGrowFactor: 1 },
     fetch: (input, init) => fetch(input, { ...init, redirect: 'error' }),
   });
-  const client = new Client({ name: 'baekho-enemy-forge-unity', version: '1.1.0' });
+  const client = new Client({ name: 'baekho-enemy-forge-unity', version: '1.2.0' });
   try { await client.connect(transport, { timeout: 10_000 }); }
   catch (error) { await client.close().catch(() => undefined); throw error; }
   return {

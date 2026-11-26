@@ -5,7 +5,7 @@ test('blueprint rejects unsafe names, wrong versions, duplicate attacks and nonf
   const base=emptyBlueprint();validateBlueprint(base);
   for(const name of ['../Enemy','CON','enemy.',' enemy','x'.repeat(65)])assert.throws(()=>validateBlueprint({...base,name}));
   validateBlueprint({...base,name:'백호 드론_01'});
-  assert.throws(()=>validateBlueprint({...base,version:2}));
+  assert.throws(()=>validateBlueprint({...base,version:4}));
   assert.throws(()=>validateBlueprint({...base,modelTransform:{...base.modelTransform,scale:[1,Infinity,1]}}));
   assert.throws(()=>validateBlueprint({...base,attacks:[{id:'a',typeId:'A',values:{}},{id:'a',typeId:'A',values:{}}]}));
 });

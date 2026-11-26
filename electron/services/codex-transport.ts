@@ -64,7 +64,7 @@ export class CodexTransport implements CodexRpc {
 
   async initialize(): Promise<void> {
     await this.request('initialize', {
-      clientInfo: { name: 'baekho_enemy_forge', title: 'Baekho Enemy Forge', version: '1.1.0' },
+      clientInfo: { name: 'baekho_enemy_forge', title: 'Baekho Enemy Forge', version: '1.2.0' },
       capabilities: { experimentalApi: true },
     });
     this.send({ method: 'initialized' });

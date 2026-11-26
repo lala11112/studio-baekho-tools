@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {AiService} from '../electron/services/ai';
 import {parseConcept} from '../electron/services/ai-concept';
-import {emptyBlueprint} from '../src/shared/blueprint';
+import {emptyBlueprint,defaultBossConfig,defaultBossPhase} from '../src/shared/blueprint';
 import type {AttackDefinition,Catalog,ModelAnalysis} from '../src/shared/types';
 import type {CodexRpc,RpcObject} from '../electron/services/codex-transport';
 import {candidate} from './ai-fixture';
@@ -23,6 +23,29 @@ function catalog():Catalog{
   template.animation.states.Attack={guid:'1'.repeat(32),localId:'1',path:'Assets/attack.anim',name:'Attack'};
   return {projectRoot:'',unityVersion:'6000',assets:[],attacks:[structuredClone(definition)],template,warnings:[],statsFields:[{path:'maxHp',label:'체력',type:'number',min:1},{path:'baseAtk',label:'공격력',type:'number',min:0},{path:'combatRange',label:'진입',type:'number',min:0},{path:'combatExitRange',label:'이탈',type:'number',min:0}],componentFields:{NavMeshAgent:[{path:'m_Speed',label:'속도',type:'number',min:0}],FanVisionSensor:[{path:'_range',label:'감지',type:'number',min:0}]}};
 }
+
+test('boss concept preserves stable phase attack references across generated attack IDs',async()=>{
+  const f=await fixture();
+  try{
+    Object.assign(f.current,{kind:'boss',boss:defaultBossConfig()});Object.assign(f.data.template,{kind:'boss',boss:defaultBossConfig()});f.data.boss={immunities:[],items:[]};
+    const settings=defaultBossConfig();settings.phases.push(defaultBossPhase(1));settings.phases[1].pattern={mode:'sequence',loop:true,steps:[{kind:'attack',attackId:'attack_1',waitSeconds:0},{kind:'wait',attackId:null,waitSeconds:.4},{kind:'attack',attackId:'attack_2',waitSeconds:0}]};settings.phases[1].shield=120;
+    f.rpc.output=(_prompt,turn)=>turn===1?{...concept([{typeId:definition.typeId,valuesJson:'{}',prompt:'베기'},{typeId:'',valuesJson:'{}',prompt:'새로운 돌진'}]),bossJson:JSON.stringify(settings)}:configured();
+    const original=structuredClone(f.current),result=await f.service.generateConcept({prompt:'2페이즈 보스',blueprint:f.current});
+    assert.deepEqual(f.current,original);assert.equal(result.blueprint.kind,'boss');assert.deepEqual(result.blueprint.attacks.map(a=>a.id),['attack_1','attack_2']);assert.equal(result.blueprint.boss!.phases[1].pattern.steps[2].attackId,'attack_2');assert.equal(result.blueprint.boss!.phases[1].shield,120);
+    assert.ok(f.rpc.calls.some(c=>c.method==='turn/start'&&String((c.params.input as any[])[0].text).includes('BOSS CONTRACT')));
+  }finally{await f.close();}
+});
+test('boss concept rejects invented music, missing phase attacks and unknown combat settings before generation',async()=>{
+  const f=await fixture();Object.assign(f.current,{kind:'boss',boss:defaultBossConfig()});Object.assign(f.data.template,{kind:'boss',boss:defaultBossConfig()});
+  try{
+    const settings=defaultBossConfig();settings.phases[0].pattern={mode:'sequence',loop:true,steps:[{kind:'attack',attackId:'missing',waitSeconds:0}]};
+    assert.throws(()=>parseConcept({...concept(),bossJson:JSON.stringify(settings)},f.current,f.data,analysis),/유효한 공격/);
+    settings.phases[0].pattern.steps[0].attackId='attack_1';settings.phases[0].music={mode:'play',clip:{guid:'f'.repeat(32),localId:'8300000',path:'Assets/invented.wav',name:'invented'},volume:1,fadeSeconds:.5};
+    assert.throws(()=>parseConcept({...concept(),bossJson:JSON.stringify(settings)},f.current,f.data,analysis),/없는 BGM/);
+    assert.throws(()=>parseConcept({...concept(),bossJson:'{"teleport":true}'},f.current,f.data,analysis),/허용되지 않은 보스/);
+    assert.equal(f.compiles(),0);
+  }finally{await f.close();}
+});
 class Rpc implements CodexRpc{
   notifications=new Set<(m:string,p:RpcObject)=>void>();closes=new Set<()=>void>();calls:{method:string;params:RpcObject}[]=[];turns=0;threads=0;deferAt=0;rejectUnload=false;
   output:(prompt:string,turn:number)=>unknown=()=>concept();
